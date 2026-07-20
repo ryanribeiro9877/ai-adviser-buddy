@@ -14,16 +14,401 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      ai_recommendations: {
+        Row: {
+          category: string | null
+          company_id: string
+          created_at: string
+          description: string
+          id: string
+          impact: string | null
+          status: Database["public"]["Enums"]["recommendation_status"]
+          title: string
+        }
+        Insert: {
+          category?: string | null
+          company_id: string
+          created_at?: string
+          description: string
+          id?: string
+          impact?: string | null
+          status?: Database["public"]["Enums"]["recommendation_status"]
+          title: string
+        }
+        Update: {
+          category?: string | null
+          company_id?: string
+          created_at?: string
+          description?: string
+          id?: string
+          impact?: string | null
+          status?: Database["public"]["Enums"]["recommendation_status"]
+          title?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_recommendations_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      alerts: {
+        Row: {
+          company_id: string
+          created_at: string
+          description: string | null
+          id: string
+          resolved: boolean
+          severity: Database["public"]["Enums"]["alert_severity"]
+          title: string
+        }
+        Insert: {
+          company_id: string
+          created_at?: string
+          description?: string | null
+          id?: string
+          resolved?: boolean
+          severity?: Database["public"]["Enums"]["alert_severity"]
+          title: string
+        }
+        Update: {
+          company_id?: string
+          created_at?: string
+          description?: string | null
+          id?: string
+          resolved?: boolean
+          severity?: Database["public"]["Enums"]["alert_severity"]
+          title?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "alerts_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      approval_requests: {
+        Row: {
+          action: string
+          company_id: string
+          created_at: string
+          entity_id: string | null
+          entity_type: Database["public"]["Enums"]["approval_entity"]
+          id: string
+          payload: Json
+          requested_by: string
+          review_note: string | null
+          reviewed_at: string | null
+          reviewed_by: string | null
+          status: Database["public"]["Enums"]["approval_status"]
+          summary: string
+        }
+        Insert: {
+          action: string
+          company_id: string
+          created_at?: string
+          entity_id?: string | null
+          entity_type: Database["public"]["Enums"]["approval_entity"]
+          id?: string
+          payload?: Json
+          requested_by: string
+          review_note?: string | null
+          reviewed_at?: string | null
+          reviewed_by?: string | null
+          status?: Database["public"]["Enums"]["approval_status"]
+          summary: string
+        }
+        Update: {
+          action?: string
+          company_id?: string
+          created_at?: string
+          entity_id?: string | null
+          entity_type?: Database["public"]["Enums"]["approval_entity"]
+          id?: string
+          payload?: Json
+          requested_by?: string
+          review_note?: string | null
+          reviewed_at?: string | null
+          reviewed_by?: string | null
+          status?: Database["public"]["Enums"]["approval_status"]
+          summary?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "approval_requests_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      audit_log: {
+        Row: {
+          action: string
+          company_id: string | null
+          created_at: string
+          details: Json
+          id: string
+          target_id: string | null
+          target_type: string | null
+          user_id: string | null
+        }
+        Insert: {
+          action: string
+          company_id?: string | null
+          created_at?: string
+          details?: Json
+          id?: string
+          target_id?: string | null
+          target_type?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          action?: string
+          company_id?: string | null
+          created_at?: string
+          details?: Json
+          id?: string
+          target_id?: string | null
+          target_type?: string | null
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "audit_log_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      campaigns: {
+        Row: {
+          clicks: number
+          company_id: string
+          created_at: string
+          daily_budget: number
+          frequency: number
+          id: string
+          impressions: number
+          leads: number
+          name: string
+          objective: string | null
+          provider: Database["public"]["Enums"]["integration_provider"]
+          reach: number
+          revenue: number
+          sales: number
+          spend: number
+          status: string
+        }
+        Insert: {
+          clicks?: number
+          company_id: string
+          created_at?: string
+          daily_budget?: number
+          frequency?: number
+          id?: string
+          impressions?: number
+          leads?: number
+          name: string
+          objective?: string | null
+          provider: Database["public"]["Enums"]["integration_provider"]
+          reach?: number
+          revenue?: number
+          sales?: number
+          spend?: number
+          status?: string
+        }
+        Update: {
+          clicks?: number
+          company_id?: string
+          created_at?: string
+          daily_budget?: number
+          frequency?: number
+          id?: string
+          impressions?: number
+          leads?: number
+          name?: string
+          objective?: string | null
+          provider?: Database["public"]["Enums"]["integration_provider"]
+          reach?: number
+          revenue?: number
+          sales?: number
+          spend?: number
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "campaigns_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      companies: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          id: string
+          industry: string | null
+          name: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          industry?: string | null
+          name: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          industry?: string | null
+          name?: string
+        }
+        Relationships: []
+      }
+      company_members: {
+        Row: {
+          company_id: string
+          created_at: string
+          id: string
+          user_id: string
+        }
+        Insert: {
+          company_id: string
+          created_at?: string
+          id?: string
+          user_id: string
+        }
+        Update: {
+          company_id?: string
+          created_at?: string
+          id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "company_members_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      integrations: {
+        Row: {
+          account_name: string
+          company_id: string
+          connected_at: string
+          external_id: string | null
+          id: string
+          provider: Database["public"]["Enums"]["integration_provider"]
+          status: string
+        }
+        Insert: {
+          account_name: string
+          company_id: string
+          connected_at?: string
+          external_id?: string | null
+          id?: string
+          provider: Database["public"]["Enums"]["integration_provider"]
+          status?: string
+        }
+        Update: {
+          account_name?: string
+          company_id?: string
+          connected_at?: string
+          external_id?: string | null
+          id?: string
+          provider?: Database["public"]["Enums"]["integration_provider"]
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "integrations_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          email: string
+          full_name: string | null
+          id: string
+        }
+        Insert: {
+          created_at?: string
+          email: string
+          full_name?: string | null
+          id: string
+        }
+        Update: {
+          created_at?: string
+          email?: string
+          full_name?: string | null
+          id?: string
+        }
+        Relationships: []
+      }
+      user_roles: {
+        Row: {
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
+      is_company_member: {
+        Args: { _company_id: string; _user_id: string }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      alert_severity: "low" | "medium" | "high" | "critical"
+      app_role: "admin" | "viewer"
+      approval_entity: "campaign" | "budget" | "ad" | "audience" | "config"
+      approval_status: "pending" | "approved" | "rejected"
+      integration_provider: "meta_ads" | "google_ads" | "ga4" | "gsc" | "gtm"
+      recommendation_status: "new" | "accepted" | "dismissed"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +535,13 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      alert_severity: ["low", "medium", "high", "critical"],
+      app_role: ["admin", "viewer"],
+      approval_entity: ["campaign", "budget", "ad", "audience", "config"],
+      approval_status: ["pending", "approved", "rejected"],
+      integration_provider: ["meta_ads", "google_ads", "ga4", "gsc", "gtm"],
+      recommendation_status: ["new", "accepted", "dismissed"],
+    },
   },
 } as const
