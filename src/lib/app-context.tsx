@@ -7,7 +7,7 @@ export type AppRole = "admin" | "viewer";
 export type Company = { id: string; name: string; industry: string | null };
 
 type Ctx = {
-  user: User | null;
+  user: User;
   role: AppRole;
   isAdmin: boolean;
   companies: Company[];
