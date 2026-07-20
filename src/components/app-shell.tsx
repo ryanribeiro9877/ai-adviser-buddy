@@ -136,13 +136,13 @@ export function AppShell() {
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="sm" className="gap-2">
                   <div className="h-7 w-7 rounded-full bg-accent flex items-center justify-center text-xs font-semibold">
-                    {user.email?.[0]?.toUpperCase()}
+                    {user?.email?.[0]?.toUpperCase() ?? "?"}
                   </div>
-                  <span className="hidden md:inline text-sm">{user.email}</span>
+                  <span className="hidden md:inline text-sm">{user?.email}</span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                <DropdownMenuLabel>{user.email}</DropdownMenuLabel>
+                <DropdownMenuLabel>{user?.email}</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={signOut}>
                   <LogOut className="h-4 w-4 mr-2" /> Sair

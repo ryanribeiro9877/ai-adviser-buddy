@@ -101,6 +101,6 @@ export async function logAudit(params: {
     action: params.action,
     target_type: params.targetType ?? null,
     target_id: params.targetId ?? null,
-    details: params.details ?? {},
+    details: (params.details ?? {}) as never,
   });
 }
