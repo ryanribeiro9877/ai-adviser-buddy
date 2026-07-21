@@ -201,8 +201,8 @@ function Dashboard() {
                 />
                 <XAxis dataKey="label" stroke="var(--color-muted-foreground)" fontSize={11} />
                 <YAxis
-                  stroke="var(--color-muted-foreground)"
-                  fontSize={11}
+                  stroke="var(--color-border)"
+                  tick={{ fill: "var(--color-foreground)", fontSize: 11 }}
                   tickFormatter={(v: number) => fmtBRL(v)}
                   width={90}
                 />
