@@ -214,6 +214,8 @@ function Dashboard() {
                     border: "1px solid var(--color-border)",
                     borderRadius: 8,
                   }}
+                  labelStyle={{ color: "var(--color-foreground)" }}
+                  itemStyle={{ color: "var(--color-foreground)" }}
                 />
                 <Bar dataKey="spend" radius={[6, 6, 0, 0]}>
                   {spendByTipo.map((d) => (
