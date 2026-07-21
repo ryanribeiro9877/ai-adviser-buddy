@@ -15,7 +15,7 @@ export const Route = createFileRoute("/_authenticated/recomendacoes")({
 });
 
 function Recomendacoes() {
-  const { selectedCompany, isAdmin } = useApp();
+  const { selectedCompany } = useApp();
   const q = useQuery({
     queryKey: ["reco", selectedCompany?.id],
     enabled: !!selectedCompany,
@@ -24,18 +24,6 @@ function Recomendacoes() {
       return data ?? [];
     },
   });
-
-  const seed = async () => {
-    if (!selectedCompany || !isAdmin) return;
-    const rows = [
-      { title: "Escalar Lookalike 1% em +30%", description: "ROAS 4.2x e frequência ainda saudável (2.1).", impact: "alto", category: "escala" },
-      { title: "Pausar criativo 'Vídeo curto — Tutorial'", description: "CPA 3x acima da média há 5 dias.", impact: "médio", category: "otimização" },
-      { title: "Realocar 20% do orçamento de Awareness para Conversão", description: "Awareness com CPM baixo mas conversão fraca.", impact: "alto", category: "orçamento" },
-      { title: "Criar variação de anúncio com prova social", description: "Formatos com depoimento tiveram 2.1x mais CTR.", impact: "médio", category: "criativo" },
-    ];
-    await supabase.from("ai_recommendations").insert(rows.map((r) => ({ ...r, company_id: selectedCompany.id })));
-    await q.refetch();
-  };
 
   const update = async (id: string, status: "accepted" | "dismissed") => {
     await supabase.from("ai_recommendations").update({ status }).eq("id", id);
@@ -54,7 +42,6 @@ function Recomendacoes() {
           <h1 className="text-2xl font-semibold flex items-center gap-2"><Sparkles className="h-6 w-6 text-primary" />Recomendações da IA</h1>
           <p className="text-sm text-muted-foreground">Aceitar uma recomendação cria automaticamente uma solicitação de aprovação.</p>
         </div>
-        {isAdmin && items.length === 0 && <Button variant="outline" onClick={seed}>Gerar recomendações de exemplo</Button>}
       </div>
       <div className="grid md:grid-cols-2 gap-3">
         {items.map((r) => (

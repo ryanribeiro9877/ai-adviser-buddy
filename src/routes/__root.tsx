@@ -74,7 +74,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       {
         name: "description",
         content:
-          "Plataforma para gestão de tráfego pago multi-empresa com Meta Ads, Google Ads, GA4, GSC e GTM, fila de aprovações e recomendações de IA.",
+          "Plataforma para gestão de tráfego pago multi-empresa com Meta Ads, GA4, GSC e GTM, fila de aprovações e recomendações de IA.",
       },
       { property: "og:title", content: "Gestor de Tráfego IA" },
       {

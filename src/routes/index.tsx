@@ -45,7 +45,7 @@ function Landing() {
           Toda sua mídia paga sob <span className="text-primary">um único painel</span>.
         </h1>
         <p className="mt-6 text-lg text-muted-foreground max-w-2xl mx-auto">
-          Multi-empresa. Meta Ads, Google Ads, GA4, Search Console e Tag Manager conectados. Fila de aprovações,
+          Multi-empresa. Meta Ads, GA4, Search Console e Tag Manager conectados. Fila de aprovações,
           auditoria completa e recomendações de IA para escalar campanhas com segurança.
         </p>
         <div className="mt-8 flex gap-3 justify-center">
@@ -55,8 +55,8 @@ function Landing() {
 
       <section className="max-w-6xl mx-auto px-6 pb-24 grid md:grid-cols-4 gap-4">
         {[
-          { icon: BarChart3, title: "Dashboard executivo", text: "ROAS, CPA, CPL, frequência e taxa de conversão em tempo real." },
-          { icon: Workflow, title: "Multi-plataforma", text: "Conecte Meta, Google Ads, GA4, GSC e GTM por empresa." },
+          { icon: BarChart3, title: "Dashboard executivo", text: "Investimento, leads, CPL e conversas por WhatsApp em tempo real." },
+          { icon: Workflow, title: "Multi-plataforma", text: "Conecte Meta Ads, GA4, GSC e GTM por empresa." },
           { icon: CheckSquare, title: "Fila de aprovação", text: "Nada muda em campanhas, orçamentos ou anúncios sem confirmação." },
           { icon: Sparkles, title: "IA guiada", text: "Recomendações práticas para pausar, escalar ou reajustar verba." },
         ].map((f) => (

@@ -4,10 +4,13 @@ import { EmptyCompany } from "@/components/metric-card";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { generateMetrics, fmtBRL, fmtInt, fmtPct, fmtDec } from "@/lib/mock-metrics";
+import { TypeBadge } from "@/components/type-badge";
+import { useCampaignBreakdown } from "@/hooks/use-breakdown";
+import { fmtBRL, fmtInt, fmtPct, fmtDec, type CampaignRow } from "@/lib/breakdown";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Pause, Play, TrendingUp, ShieldAlert } from "lucide-react";
@@ -24,41 +27,44 @@ export const Route = createFileRoute("/_authenticated/campanhas")({
   head: () => ({ meta: [{ title: "Campanhas" }] }),
 });
 
-function seedCampaigns(companyId: string) {
-  const providers: Array<"meta_ads" | "google_ads"> = ["meta_ads", "google_ads"];
-  const names = ["Black Friday", "Remarketing Site", "Lookalike Compradores", "Search Marca", "Awareness Vídeo", "Prospecção Interesses"];
-  return names.map((n, i) => {
-    const m = generateMetrics(`${companyId}-${n}`);
-    return {
-      id: `${companyId}-${i}`,
-      name: n,
-      provider: providers[i % providers.length],
-      status: i === 2 ? "paused" : "active",
-      objective: i % 2 === 0 ? "Conversões" : "Tráfego",
-      budget: 200 + i * 150,
-      ...m,
-    };
-  });
+// CTR = clicks / impressions * 100 (protege impressions = 0)
+function ctr(c: CampaignRow): string {
+  return c.impressions > 0 ? fmtPct((c.clicks / c.impressions) * 100) : "—";
+}
+
+// Status "active"/"paused" (Meta) -> rótulo pt-BR
+function statusLabel(s: string): string {
+  const k = s.toLowerCase();
+  if (k === "active") return "Ativa";
+  if (k === "paused") return "Pausada";
+  if (k === "archived") return "Arquivada";
+  return s || "—";
 }
 
 function Campanhas() {
   const { selectedCompany, isAdmin, user } = useApp();
   const [reqOpen, setReqOpen] = useState<string | null>(null);
-  if (!selectedCompany) return <EmptyCompany />;
-  const rows = seedCampaigns(selectedCompany.id);
 
-  const requestChange = async (campaign: typeof rows[number], action: string, form: FormData) => {
-    const summary = `${action === "pause" ? "Pausar" : action === "activate" ? "Ativar" : "Ajustar orçamento"} — ${campaign.name}`;
+  const campaignsQ = useCampaignBreakdown(selectedCompany?.id ?? null);
+  const rows = campaignsQ.data ?? [];
+  // Só mostra colunas de receita quando existe venda de verdade (e-commerce).
+  const hasRevenue = rows.some((c) => c.sales > 0 || c.revenue > 0);
+
+  const requestChange = async (campaign: CampaignRow, action: string, form: FormData) => {
+    if (!selectedCompany) return;
+    const summary = `${action === "pause" ? "Pausar" : action === "activate" ? "Ativar" : "Ajustar orçamento"} — ${campaign.campanha}`;
+    const budgetRaw = form.get("budget");
     const { error } = await supabase.from("approval_requests").insert({
       company_id: selectedCompany.id,
       requested_by: user.id,
       entity_type: "campaign",
-      entity_id: null,
+      entity_id: campaign.campaign_id || null,
       action,
       summary,
       payload: {
-        campaign_name: campaign.name,
-        new_budget: Number(form.get("budget") || campaign.budget),
+        campaign_id: campaign.campaign_id,
+        campaign_name: campaign.campanha,
+        new_budget: budgetRaw ? Number(budgetRaw) : null,
         note: String(form.get("note") || ""),
       } as never,
     });
@@ -67,11 +73,14 @@ function Campanhas() {
       companyId: selectedCompany.id,
       action: "approval.request",
       targetType: "campaign",
+      targetId: campaign.campaign_id,
       details: { summary },
     });
     toast.success("Solicitação enviada para aprovação");
     setReqOpen(null);
   };
+
+  if (!selectedCompany) return <EmptyCompany />;
 
   return (
     <div className="space-y-4">
@@ -79,88 +88,128 @@ function Campanhas() {
         <div>
           <h1 className="text-2xl font-semibold">Campanhas</h1>
           <p className="text-sm text-muted-foreground">
-            Alterações precisam ser aprovadas por um administrador — <span className="inline-flex items-center gap-1"><ShieldAlert className="h-3.5 w-3.5" />leitura por padrão</span>.
+            {selectedCompany.name} · alterações precisam ser aprovadas por um administrador —{" "}
+            <span className="inline-flex items-center gap-1">
+              <ShieldAlert className="h-3.5 w-3.5" />leitura por padrão
+            </span>.
           </p>
         </div>
       </div>
-      <Card>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Campanha</TableHead>
-              <TableHead>Plataforma</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Investimento</TableHead>
-              <TableHead className="text-right">CTR</TableHead>
-              <TableHead className="text-right">CPA</TableHead>
-              <TableHead className="text-right">ROAS</TableHead>
-              <TableHead className="text-right">Ações</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((c) => (
-              <TableRow key={c.id}>
-                <TableCell className="font-medium">
-                  {c.name}
-                  <div className="text-xs text-muted-foreground">{c.objective}</div>
-                </TableCell>
-                <TableCell>{c.provider === "meta_ads" ? "Meta Ads" : "Google Ads"}</TableCell>
-                <TableCell>
-                  <Badge variant={c.status === "active" ? "default" : "secondary"}>{c.status === "active" ? "Ativa" : "Pausada"}</Badge>
-                </TableCell>
-                <TableCell className="text-right tabular-nums">{fmtBRL(c.investment)}</TableCell>
-                <TableCell className="text-right tabular-nums">{fmtPct(c.ctr)}</TableCell>
-                <TableCell className="text-right tabular-nums">{fmtBRL(c.cpa)}</TableCell>
-                <TableCell className="text-right tabular-nums">{fmtDec(c.roas)}x</TableCell>
-                <TableCell className="text-right">
-                  <Dialog open={reqOpen === c.id} onOpenChange={(o) => setReqOpen(o ? c.id : null)}>
-                    <DialogTrigger asChild>
-                      <Button size="sm" variant="outline">
-                        {c.status === "active" ? <Pause className="h-3.5 w-3.5 mr-1" /> : <Play className="h-3.5 w-3.5 mr-1" />}
-                        Solicitar mudança
-                      </Button>
-                    </DialogTrigger>
-                    <DialogContent>
-                      <DialogHeader><DialogTitle>Solicitar alteração — {c.name}</DialogTitle></DialogHeader>
-                      <form
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          const form = new FormData(e.currentTarget);
-                          const action = String(form.get("action") || "pause");
-                          requestChange(c, action, form);
-                        }}
-                        className="space-y-3"
-                      >
-                        <div>
-                          <Label>Ação</Label>
-                          <select name="action" className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm">
-                            <option value={c.status === "active" ? "pause" : "activate"}>{c.status === "active" ? "Pausar campanha" : "Ativar campanha"}</option>
-                            <option value="update_budget">Ajustar orçamento diário</option>
-                          </select>
-                        </div>
-                        <div>
-                          <Label>Novo orçamento diário (R$)</Label>
-                          <Input name="budget" type="number" min="0" defaultValue={c.budget} />
-                        </div>
-                        <div>
-                          <Label>Justificativa</Label>
-                          <Textarea name="note" placeholder="Explique o motivo…" required />
-                        </div>
-                        <DialogFooter>
-                          <Button type="submit"><TrendingUp className="h-4 w-4 mr-2" />Enviar para aprovação</Button>
-                        </DialogFooter>
-                        {!isAdmin && (
-                          <p className="text-xs text-muted-foreground">Você é visualizador. Um administrador precisará aprovar antes que a mudança ocorra.</p>
-                        )}
-                      </form>
-                    </DialogContent>
-                  </Dialog>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </Card>
+
+      {campaignsQ.isLoading ? (
+        <Skeleton className="h-64 rounded-xl" />
+      ) : (
+        <Card className="p-0 overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h2 className="font-semibold">Todas as campanhas</h2>
+            <span className="text-xs text-muted-foreground">{rows.length} campanha(s)</span>
+          </div>
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Campanha</TableHead>
+                  <TableHead>Conta</TableHead>
+                  <TableHead>Tipo</TableHead>
+                  <TableHead>Plataforma</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Investimento</TableHead>
+                  <TableHead className="text-right">CTR</TableHead>
+                  <TableHead className="text-right">Leads</TableHead>
+                  <TableHead className="text-right">CPL</TableHead>
+                  {hasRevenue && <TableHead className="text-right">ROAS</TableHead>}
+                  <TableHead className="text-right">Ações</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.length === 0 && (
+                  <TableRow>
+                    <TableCell
+                      colSpan={hasRevenue ? 11 : 10}
+                      className="text-center text-sm text-muted-foreground py-10"
+                    >
+                      Nenhuma campanha para esta empresa.
+                    </TableCell>
+                  </TableRow>
+                )}
+                {rows.map((c) => {
+                  const isActive = c.status.toLowerCase() === "active";
+                  return (
+                    <TableRow key={c.campaign_id}>
+                      <TableCell className="font-medium max-w-[260px] truncate">{c.campanha}</TableCell>
+                      <TableCell className="max-w-[160px] truncate text-sm text-muted-foreground">
+                        {c.account_name}
+                      </TableCell>
+                      <TableCell><TypeBadge tipo={c.tipo} /></TableCell>
+                      <TableCell className="text-sm">Meta Ads</TableCell>
+                      <TableCell>
+                        <Badge variant={isActive ? "default" : "secondary"}>{statusLabel(c.status)}</Badge>
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{fmtBRL(c.spend)}</TableCell>
+                      <TableCell className="text-right tabular-nums">{ctr(c)}</TableCell>
+                      <TableCell className="text-right tabular-nums">{fmtInt(c.leads)}</TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {c.leads > 0 ? fmtBRL(c.cpl ?? c.spend / c.leads) : "—"}
+                      </TableCell>
+                      {hasRevenue && (
+                        <TableCell className="text-right tabular-nums">
+                          {c.revenue > 0
+                            ? `${fmtDec(c.revenue / Math.max(c.spend, 1))}x`
+                            : "—"}
+                        </TableCell>
+                      )}
+                      <TableCell className="text-right">
+                        <Dialog open={reqOpen === c.campaign_id} onOpenChange={(o) => setReqOpen(o ? c.campaign_id : null)}>
+                          <DialogTrigger asChild>
+                            <Button size="sm" variant="outline">
+                              {isActive ? <Pause className="h-3.5 w-3.5 mr-1" /> : <Play className="h-3.5 w-3.5 mr-1" />}
+                              Solicitar mudança
+                            </Button>
+                          </DialogTrigger>
+                          <DialogContent>
+                            <DialogHeader><DialogTitle>Solicitar alteração — {c.campanha}</DialogTitle></DialogHeader>
+                            <form
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                const form = new FormData(e.currentTarget);
+                                const action = String(form.get("action") || "pause");
+                                requestChange(c, action, form);
+                              }}
+                              className="space-y-3"
+                            >
+                              <div>
+                                <Label>Ação</Label>
+                                <select name="action" className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm">
+                                  <option value={isActive ? "pause" : "activate"}>{isActive ? "Pausar campanha" : "Ativar campanha"}</option>
+                                  <option value="update_budget">Ajustar orçamento diário</option>
+                                </select>
+                              </div>
+                              <div>
+                                <Label>Novo orçamento diário (R$)</Label>
+                                <Input name="budget" type="number" min="0" step="0.01" placeholder="Opcional" />
+                              </div>
+                              <div>
+                                <Label>Justificativa</Label>
+                                <Textarea name="note" placeholder="Explique o motivo…" required />
+                              </div>
+                              <DialogFooter>
+                                <Button type="submit"><TrendingUp className="h-4 w-4 mr-2" />Enviar para aprovação</Button>
+                              </DialogFooter>
+                              {!isAdmin && (
+                                <p className="text-xs text-muted-foreground">Você é visualizador. Um administrador precisará aprovar antes que a mudança ocorra.</p>
+                              )}
+                            </form>
+                          </DialogContent>
+                        </Dialog>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        </Card>
+      )}
     </div>
   );
 }

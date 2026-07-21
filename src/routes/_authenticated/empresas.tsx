@@ -21,7 +21,6 @@ export const Route = createFileRoute("/_authenticated/empresas")({
 
 const PROVIDERS = [
   { id: "meta_ads", label: "Meta Ads" },
-  { id: "google_ads", label: "Google Ads" },
   { id: "ga4", label: "Google Analytics 4" },
   { id: "gsc", label: "Search Console" },
   { id: "gtm", label: "Tag Manager" },
@@ -61,16 +60,17 @@ function EmpresasPage() {
 
   const connect = async (provider: string) => {
     if (!selectedCompanyId) return;
+    const label = PROVIDERS.find((p) => p.id === provider)?.label ?? provider;
     const { error } = await supabase.from("integrations").insert({
       company_id: selectedCompanyId,
       provider: provider as never,
-      account_name: `Conta ${provider.toUpperCase()} (mock)`,
-      external_id: `mock-${Date.now()}`,
+      account_name: label,
+      external_id: null,
     });
     if (error) return toast.error(error.message);
     await logAudit({ companyId: selectedCompanyId, action: "integration.connect", targetType: "integration", details: { provider } });
     await integrations.refetch();
-    toast.success("Conta conectada (mock)");
+    toast.success("Conta conectada");
   };
 
   return (
@@ -130,7 +130,7 @@ function EmpresasPage() {
                 <div className="text-xs text-muted-foreground mt-1 truncate">{connected?.account_name ?? "Nenhuma conta"}</div>
                 {isAdmin && !connected && (
                   <Button size="sm" variant="outline" className="mt-3 w-full" onClick={() => connect(p.id)}>
-                    <Link2 className="h-3.5 w-3.5 mr-1" />Conectar (mock)
+                    <Link2 className="h-3.5 w-3.5 mr-1" />Conectar
                   </Button>
                 )}
               </Card>

@@ -25,17 +25,6 @@ function Alertas() {
     },
   });
 
-  const seedIfEmpty = async () => {
-    if (!selectedCompany || !isAdmin) return;
-    const seed = [
-      { severity: "high", title: "CPA acima do teto na campanha Black Friday", description: "CPA subiu 42% em 24h. Considere revisar criativos." },
-      { severity: "medium", title: "Frequência acima de 4 no público Lookalike 1%", description: "Sinal de saturação; sugerido rotacionar criativos." },
-      { severity: "low", title: "Orçamento diário atingido às 15h", description: "Google Ads — campanha Search Marca." },
-    ];
-    await supabase.from("alerts").insert(seed.map((s) => ({ ...s, severity: s.severity as never, company_id: selectedCompany.id })));
-    await q.refetch();
-  };
-
   const resolve = async (id: string) => {
     await supabase.from("alerts").update({ resolved: true }).eq("id", id);
     await logAudit({ companyId: selectedCompany!.id, action: "alert.resolve", targetType: "alert", targetId: id });
@@ -53,9 +42,6 @@ function Alertas() {
           <h1 className="text-2xl font-semibold">Alertas</h1>
           <p className="text-sm text-muted-foreground">Anomalias detectadas nas contas conectadas.</p>
         </div>
-        {isAdmin && items.length === 0 && (
-          <Button variant="outline" onClick={seedIfEmpty}>Gerar alertas de exemplo</Button>
-        )}
       </div>
       <div className="space-y-3">
         {items.map((a) => (

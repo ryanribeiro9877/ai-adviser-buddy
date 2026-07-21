@@ -66,7 +66,7 @@ function Configuracoes() {
       <Card className="p-5">
         <h2 className="font-semibold mb-1">Integrações</h2>
         <p className="text-sm text-muted-foreground mb-3">
-          Conecte contas de mídia e analytics em <Link to="/empresas" className="underline">Empresas e contas</Link>. Suportado: Meta Ads, Google Ads, GA4, Google Search Console e Google Tag Manager.
+          Conecte contas de mídia e analytics em <Link to="/empresas" className="underline">Empresas e contas</Link>. Suportado: Meta Ads, GA4, Google Search Console e Google Tag Manager.
         </p>
       </Card>
     </div>
