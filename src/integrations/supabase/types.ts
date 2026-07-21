@@ -14,6 +14,192 @@ export type Database = {
   }
   public: {
     Tables: {
+      ad_sets: {
+        Row: {
+          account_id: string | null
+          bid_strategy: string | null
+          campaign_id: string | null
+          clicks: number | null
+          company_id: string | null
+          created_at: string
+          daily_budget: number | null
+          external_id: string
+          form_leads: number | null
+          id: string
+          impressions: number | null
+          landing_page_views: number | null
+          last_synced_at: string | null
+          leads: number | null
+          lifetime_budget: number | null
+          link_clicks: number | null
+          messaging_started: number | null
+          name: string | null
+          provider: Database["public"]["Enums"]["integration_provider"]
+          reach: number | null
+          revenue: number | null
+          sales: number | null
+          spend: number | null
+          status: string | null
+          targeting: Json | null
+        }
+        Insert: {
+          account_id?: string | null
+          bid_strategy?: string | null
+          campaign_id?: string | null
+          clicks?: number | null
+          company_id?: string | null
+          created_at?: string
+          daily_budget?: number | null
+          external_id: string
+          form_leads?: number | null
+          id?: string
+          impressions?: number | null
+          landing_page_views?: number | null
+          last_synced_at?: string | null
+          leads?: number | null
+          lifetime_budget?: number | null
+          link_clicks?: number | null
+          messaging_started?: number | null
+          name?: string | null
+          provider?: Database["public"]["Enums"]["integration_provider"]
+          reach?: number | null
+          revenue?: number | null
+          sales?: number | null
+          spend?: number | null
+          status?: string | null
+          targeting?: Json | null
+        }
+        Update: {
+          account_id?: string | null
+          bid_strategy?: string | null
+          campaign_id?: string | null
+          clicks?: number | null
+          company_id?: string | null
+          created_at?: string
+          daily_budget?: number | null
+          external_id?: string
+          form_leads?: number | null
+          id?: string
+          impressions?: number | null
+          landing_page_views?: number | null
+          last_synced_at?: string | null
+          leads?: number | null
+          lifetime_budget?: number | null
+          link_clicks?: number | null
+          messaging_started?: number | null
+          name?: string | null
+          provider?: Database["public"]["Enums"]["integration_provider"]
+          reach?: number | null
+          revenue?: number | null
+          sales?: number | null
+          spend?: number | null
+          status?: string | null
+          targeting?: Json | null
+        }
+        Relationships: []
+      }
+      ads: {
+        Row: {
+          account_id: string | null
+          adset_external_id: string | null
+          body: string | null
+          call_to_action_type: string | null
+          campaign_id: string | null
+          clicks: number | null
+          company_id: string | null
+          created_at: string
+          creative_id: string | null
+          external_id: string
+          form_leads: number | null
+          id: string
+          image_url: string | null
+          impressions: number | null
+          landing_page_views: number | null
+          last_synced_at: string | null
+          leads: number | null
+          link_clicks: number | null
+          messaging_started: number | null
+          name: string | null
+          object_type: string | null
+          permalink_url: string | null
+          preview_url: string | null
+          provider: Database["public"]["Enums"]["integration_provider"]
+          reach: number | null
+          revenue: number | null
+          sales: number | null
+          spend: number | null
+          status: string | null
+          thumbnail_url: string | null
+          title: string | null
+        }
+        Insert: {
+          account_id?: string | null
+          adset_external_id?: string | null
+          body?: string | null
+          call_to_action_type?: string | null
+          campaign_id?: string | null
+          clicks?: number | null
+          company_id?: string | null
+          created_at?: string
+          creative_id?: string | null
+          external_id: string
+          form_leads?: number | null
+          id?: string
+          image_url?: string | null
+          impressions?: number | null
+          landing_page_views?: number | null
+          last_synced_at?: string | null
+          leads?: number | null
+          link_clicks?: number | null
+          messaging_started?: number | null
+          name?: string | null
+          object_type?: string | null
+          permalink_url?: string | null
+          preview_url?: string | null
+          provider?: Database["public"]["Enums"]["integration_provider"]
+          reach?: number | null
+          revenue?: number | null
+          sales?: number | null
+          spend?: number | null
+          status?: string | null
+          thumbnail_url?: string | null
+          title?: string | null
+        }
+        Update: {
+          account_id?: string | null
+          adset_external_id?: string | null
+          body?: string | null
+          call_to_action_type?: string | null
+          campaign_id?: string | null
+          clicks?: number | null
+          company_id?: string | null
+          created_at?: string
+          creative_id?: string | null
+          external_id?: string
+          form_leads?: number | null
+          id?: string
+          image_url?: string | null
+          impressions?: number | null
+          landing_page_views?: number | null
+          last_synced_at?: string | null
+          leads?: number | null
+          link_clicks?: number | null
+          messaging_started?: number | null
+          name?: string | null
+          object_type?: string | null
+          permalink_url?: string | null
+          preview_url?: string | null
+          provider?: Database["public"]["Enums"]["integration_provider"]
+          reach?: number | null
+          revenue?: number | null
+          sales?: number | null
+          spend?: number | null
+          status?: string | null
+          thumbnail_url?: string | null
+          title?: string | null
+        }
+        Relationships: []
+      }
       ai_recommendations: {
         Row: {
           category: string | null

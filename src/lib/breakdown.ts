@@ -222,3 +222,171 @@ export const fmtBRL = (n: number) =>
 export const fmtInt = (n: number) => Math.round(n).toLocaleString("pt-BR");
 export const fmtPct = (n: number) => `${n.toFixed(2)}%`;
 export const fmtDec = (n: number, d = 2) => n.toFixed(d);
+
+// --- Anúncios (tabela ads) -----------------------------------------------------
+
+export type AdRow = {
+  id: string;
+  name: string;
+  status: string;
+  object_type: string | null;
+  call_to_action_type: string | null;
+  title: string | null;
+  body: string | null;
+  thumbnail_url: string | null;
+  image_url: string | null;
+  permalink_url: string | null;
+  spend: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  link_clicks: number;
+  leads: number;
+  sales: number;
+  revenue: number;
+  campaign_id: string | null;
+};
+
+// --- Conjuntos de anúncios (tabela ad_sets) ------------------------------------
+
+// Estrutura parcial do targeting (jsonb do Meta). Nem toda chave existe sempre.
+export type Targeting = {
+  age_min?: number;
+  age_max?: number;
+  genders?: number[];
+  geo_locations?: {
+    countries?: string[];
+    regions?: Array<{ name?: string }>;
+    cities?: Array<{ name?: string }>;
+  };
+  publisher_platforms?: string[];
+  facebook_positions?: string[];
+  instagram_positions?: string[];
+  targeting_automation?: unknown;
+  flexible_spec?: Array<{ interests?: Array<{ name?: string }> }>;
+  custom_audiences?: unknown[];
+};
+
+export type AdSetRow = {
+  id: string;
+  name: string;
+  status: string;
+  daily_budget: number | null;
+  lifetime_budget: number | null;
+  bid_strategy: string | null;
+  targeting: Targeting | null;
+  spend: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  link_clicks: number;
+  leads: number;
+  sales: number;
+  revenue: number;
+  campaign_id: string | null;
+};
+
+// Orçamento do Meta vem em centavos (5000 = R$ 50,00). 0/null => sem orçamento
+// no conjunto (provável CBO na campanha) => "—".
+export function fmtBudget(cents: number | null): string {
+  if (cents == null || cents === 0) return "—";
+  return fmtBRL(cents / 100);
+}
+
+// Converte o targeting jsonb em chips legíveis + flag Advantage+.
+export function summarizeTargeting(t: Targeting | null): {
+  chips: string[];
+  advantagePlus: boolean;
+} {
+  const chips: string[] = [];
+  if (!t) return { chips, advantagePlus: false };
+
+  // Idade
+  if (t.age_min && t.age_max) chips.push(`${t.age_min}–${t.age_max} anos`);
+  else if (t.age_min) chips.push(`${t.age_min}+ anos`);
+
+  // Gênero (1 = homens, 2 = mulheres; ausente = todos)
+  const g = t.genders;
+  if (Array.isArray(g) && g.length === 1) {
+    chips.push(g[0] === 1 ? "Homens" : g[0] === 2 ? "Mulheres" : "Todos os gêneros");
+  } else {
+    chips.push("Todos os gêneros");
+  }
+
+  // Localização
+  const geo = t.geo_locations;
+  if (geo) {
+    const parts: string[] = [];
+    if (Array.isArray(geo.countries) && geo.countries.length) {
+      parts.push(geo.countries.map((c) => (c === "BR" ? "Brasil" : c)).join(", "));
+    }
+    const regions = Array.isArray(geo.regions)
+      ? geo.regions.map((r) => r?.name).filter(Boolean)
+      : [];
+    const cities = Array.isArray(geo.cities)
+      ? geo.cities.map((c) => c?.name).filter(Boolean)
+      : [];
+    if (regions.length) parts.push(regions.join(", "));
+    if (cities.length) parts.push(cities.join(", "));
+    if (parts.length) chips.push(parts.join(" · "));
+  }
+
+  // Plataformas
+  if (Array.isArray(t.publisher_platforms) && t.publisher_platforms.length) {
+    const map: Record<string, string> = {
+      facebook: "Facebook",
+      instagram: "Instagram",
+      audience_network: "Audience Network",
+      messenger: "Messenger",
+      threads: "Threads",
+    };
+    chips.push(t.publisher_platforms.map((p) => map[p] ?? p).join(", "));
+  }
+
+  // Interesses (flexible_spec)
+  const interests: string[] = [];
+  if (Array.isArray(t.flexible_spec)) {
+    for (const spec of t.flexible_spec) {
+      if (spec && Array.isArray(spec.interests)) {
+        for (const i of spec.interests) if (i?.name) interests.push(i.name);
+      }
+    }
+  }
+  if (interests.length) {
+    chips.push(
+      `Interesses: ${interests.slice(0, 4).join(", ")}${interests.length > 4 ? "…" : ""}`,
+    );
+  }
+
+  // Públicos personalizados
+  if (Array.isArray(t.custom_audiences) && t.custom_audiences.length) {
+    chips.push("Público personalizado");
+  }
+
+  return { chips, advantagePlus: t.targeting_automation != null };
+}
+
+// Effective status do Meta (ads/ad_sets) -> rótulo pt-BR + variante de badge.
+export type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
+export function metaStatus(s: string): { label: string; variant: BadgeVariant } {
+  switch ((s || "").toUpperCase()) {
+    case "ACTIVE":
+      return { label: "Ativo", variant: "default" };
+    case "PAUSED":
+      return { label: "Pausado", variant: "secondary" };
+    case "ADSET_PAUSED":
+      return { label: "Conjunto pausado", variant: "secondary" };
+    case "CAMPAIGN_PAUSED":
+      return { label: "Campanha pausada", variant: "secondary" };
+    case "WITH_ISSUES":
+      return { label: "Com problemas", variant: "destructive" };
+    case "DISAPPROVED":
+      return { label: "Reprovado", variant: "destructive" };
+    case "PENDING_REVIEW":
+      return { label: "Em revisão", variant: "outline" };
+    case "ARCHIVED":
+      return { label: "Arquivado", variant: "secondary" };
+    default:
+      return { label: s || "—", variant: "outline" };
+  }
+}
