@@ -387,7 +387,54 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      v_account_breakdown: {
+        Row: {
+          account_id: string | null
+          account_name: string | null
+          campaigns: number | null
+          clicks: number | null
+          company_id: string | null
+          form_leads: number | null
+          landing_page_views: number | null
+          leads: number | null
+          link_clicks: number | null
+          messaging_started: number | null
+          revenue: number | null
+          sales: number | null
+          spend: number | null
+          tipo_conta: string | null
+        }
+        Relationships: []
+      }
+      v_campaign_breakdown: {
+        Row: {
+          account_id: string | null
+          account_name: string | null
+          campaign_id: string | null
+          campanha: string | null
+          clicks: number | null
+          company_id: string | null
+          cpc_link: number | null
+          cpl: number | null
+          empresa: string | null
+          form_leads: number | null
+          frequency: number | null
+          impressions: number | null
+          landing_page_views: number | null
+          last_synced_at: string | null
+          leads: number | null
+          link_clicks: number | null
+          messaging_started: number | null
+          objective: string | null
+          reach: number | null
+          revenue: number | null
+          sales: number | null
+          spend: number | null
+          status: string | null
+          tipo: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       has_role: {
