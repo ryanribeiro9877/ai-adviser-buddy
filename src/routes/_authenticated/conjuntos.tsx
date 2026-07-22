@@ -1,10 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useMemo } from "react";
 import { useApp } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAdSets } from "@/hooks/use-breakdown";
+import { GlobalFilters } from "@/components/global-filters";
+import { useGlobalFilters } from "@/hooks/use-filters";
+import { useAdSets, useCampaignBreakdown } from "@/hooks/use-breakdown";
 import {
   fmtBRL,
   fmtInt,
@@ -12,12 +15,16 @@ import {
   fmtBudget,
   metaStatus,
   summarizeTargeting,
+  TIPO_ORDER,
   type AdSetRow,
+  type TipoConta,
 } from "@/lib/breakdown";
+import { matchesStatus, validateFilterSearch } from "@/lib/filters";
 import { Target, Sparkles } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/conjuntos")({
   component: Conjuntos,
+  validateSearch: validateFilterSearch,
   head: () => ({ meta: [{ title: "Conjuntos e públicos" }] }),
 });
 
@@ -85,8 +92,31 @@ function AdSetCard({ s }: { s: AdSetRow }) {
 
 function Conjuntos() {
   const { selectedCompany } = useApp();
+  const { filters } = useGlobalFilters();
   const adSetsQ = useAdSets(selectedCompany?.id ?? null);
-  const adSets = adSetsQ.data ?? [];
+  const metaQ = useCampaignBreakdown(selectedCompany?.id ?? null);
+
+  // tipo (categoria) vem da campanha-mãe (ad_sets não carregam categoria).
+  const tipoByCampaign = useMemo(() => {
+    const m = new Map<string, TipoConta>();
+    for (const c of metaQ.data ?? []) m.set(c.campaign_id, c.tipo);
+    return m;
+  }, [metaQ.data]);
+
+  const typesPresent = useMemo<TipoConta[]>(() => {
+    const present = new Set(metaQ.data?.map((c) => c.tipo) ?? []);
+    return TIPO_ORDER.filter((t) => present.has(t));
+  }, [metaQ.data]);
+
+  const adSets = useMemo(
+    () =>
+      (adSetsQ.data ?? []).filter(
+        (s) =>
+          matchesStatus(s.status, filters.status) &&
+          (filters.tipo === "all" || tipoByCampaign.get(s.campaign_id ?? "") === filters.tipo),
+      ),
+    [adSetsQ.data, filters.status, filters.tipo, tipoByCampaign],
+  );
 
   if (!selectedCompany) return <EmptyCompany />;
 
@@ -99,6 +129,8 @@ function Conjuntos() {
           {!adSetsQ.isLoading && adSets.length > 0 ? ` · ${adSets.length} conjunto(s)` : ""}
         </p>
       </div>
+
+      <GlobalFilters mode="accumulated" typesPresent={typesPresent} />
 
       {adSetsQ.isLoading ? (
         <div className="grid md:grid-cols-2 gap-4">

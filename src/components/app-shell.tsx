@@ -8,6 +8,7 @@ import {
   Funnel,
   Bell,
   Sparkles,
+  MessagesSquare,
   CheckSquare,
   History,
   Settings,
@@ -17,6 +18,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useApp } from "@/lib/app-context";
+import { FEATURES } from "@/lib/features";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,7 +31,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
 
-const nav = [
+type NavItem = { to: string; label: string; icon: typeof LayoutDashboard };
+
+const nav: NavItem[] = [
   { to: "/dashboard", label: "Dashboard executivo", icon: LayoutDashboard },
   { to: "/empresas", label: "Empresas e contas", icon: Building2 },
   { to: "/campanhas", label: "Campanhas", icon: Megaphone },
@@ -37,11 +41,17 @@ const nav = [
   { to: "/anuncios", label: "Anúncios e criativos", icon: ImageIcon },
   { to: "/funil", label: "Funil e conversões", icon: Funnel },
   { to: "/alertas", label: "Alertas", icon: Bell },
-  { to: "/recomendacoes", label: "Recomendações da IA", icon: Sparkles },
-  { to: "/aprovacoes", label: "Aprovações pendentes", icon: CheckSquare },
+  // "Operação" = futuro chat do gestor de tráfego (Fase 3). Hoje abre a tela
+  // de recomendações reais com um placeholder honesto (ver rota /recomendacoes).
+  { to: "/recomendacoes", label: "Operação", icon: MessagesSquare },
+  // Aprovações: menu oculto por feature-flag (o fluxo volta dentro do chat na
+  // Fase 3). A rota continua no código e acessível por URL.
+  ...(FEATURES.approvalsMenu
+    ? [{ to: "/aprovacoes", label: "Aprovações pendentes", icon: CheckSquare } as NavItem]
+    : []),
   { to: "/auditoria", label: "Histórico e auditoria", icon: History },
   { to: "/configuracoes", label: "Configurações", icon: Settings },
-] as const;
+];
 
 export function AppShell() {
   const { user, role, isAdmin, companies, selectedCompany, setSelectedCompanyId } = useApp();

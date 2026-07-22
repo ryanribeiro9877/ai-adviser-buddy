@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import type { User } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -20,11 +21,18 @@ type Ctx = {
 const AppCtx = createContext<Ctx | null>(null);
 const STORAGE_KEY = "gt-selected-company";
 
+// Empresa inicial: a URL manda (query param ?company=); o localStorage só semeia
+// quando a URL não traz nenhuma (F0.1, decisão de produto). Sem localStorage novo.
+function initialCompanyId(): string | null {
+  if (typeof window === "undefined") return null;
+  const fromUrl = new URLSearchParams(window.location.search).get("company");
+  if (fromUrl && /^[0-9a-f-]{36}$/i.test(fromUrl)) return fromUrl;
+  return localStorage.getItem(STORAGE_KEY);
+}
+
 export function AppProvider({ user, children }: { user: User; children: ReactNode }) {
-  const [selectedCompanyId, setSelectedCompanyIdState] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    return localStorage.getItem(STORAGE_KEY);
-  });
+  const navigate = useNavigate();
+  const [selectedCompanyId, setSelectedCompanyIdState] = useState<string | null>(initialCompanyId);
 
   const rolesQuery = useQuery({
     queryKey: ["roles", user.id],
@@ -56,6 +64,12 @@ export function AppProvider({ user, children }: { user: User; children: ReactNod
   const setSelectedCompanyId = (id: string) => {
     setSelectedCompanyIdState(id);
     localStorage.setItem(STORAGE_KEY, id);
+    // Reflete a empresa na URL da rota atual (fonte da verdade / compartilhável).
+    navigate({
+      to: ".",
+      search: (prev: Record<string, unknown>) => ({ ...prev, company: id }),
+      replace: true,
+    });
   };
 
   const selectedCompany = companies.find((c) => c.id === selectedCompanyId) ?? null;

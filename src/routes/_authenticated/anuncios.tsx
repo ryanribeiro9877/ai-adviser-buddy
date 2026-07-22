@@ -1,15 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useMemo } from "react";
 import { useApp } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useAds } from "@/hooks/use-breakdown";
-import { fmtBRL, fmtInt, fmtPct, metaStatus, type AdRow } from "@/lib/breakdown";
+import { GlobalFilters } from "@/components/global-filters";
+import { useGlobalFilters } from "@/hooks/use-filters";
+import { useAds, useCampaignBreakdown } from "@/hooks/use-breakdown";
+import { fmtBRL, fmtInt, fmtPct, metaStatus, TIPO_ORDER, type AdRow, type TipoConta } from "@/lib/breakdown";
+import { matchesStatus, validateFilterSearch } from "@/lib/filters";
 import { Image as ImageIcon, ExternalLink } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/anuncios")({
   component: Anuncios,
+  validateSearch: validateFilterSearch,
   head: () => ({ meta: [{ title: "Anúncios e criativos" }] }),
 });
 
@@ -70,8 +75,31 @@ function AdCard({ ad }: { ad: AdRow }) {
 
 function Anuncios() {
   const { selectedCompany } = useApp();
+  const { filters } = useGlobalFilters();
   const adsQ = useAds(selectedCompany?.id ?? null);
-  const ads = adsQ.data ?? [];
+  const metaQ = useCampaignBreakdown(selectedCompany?.id ?? null);
+
+  // tipo (categoria) vem da campanha-mãe (ads não carregam categoria).
+  const tipoByCampaign = useMemo(() => {
+    const m = new Map<string, TipoConta>();
+    for (const c of metaQ.data ?? []) m.set(c.campaign_id, c.tipo);
+    return m;
+  }, [metaQ.data]);
+
+  const typesPresent = useMemo<TipoConta[]>(() => {
+    const present = new Set(metaQ.data?.map((c) => c.tipo) ?? []);
+    return TIPO_ORDER.filter((t) => present.has(t));
+  }, [metaQ.data]);
+
+  const ads = useMemo(
+    () =>
+      (adsQ.data ?? []).filter(
+        (a) =>
+          matchesStatus(a.status, filters.status) &&
+          (filters.tipo === "all" || tipoByCampaign.get(a.campaign_id ?? "") === filters.tipo),
+      ),
+    [adsQ.data, filters.status, filters.tipo, tipoByCampaign],
+  );
 
   if (!selectedCompany) return <EmptyCompany />;
 
@@ -84,6 +112,8 @@ function Anuncios() {
           {!adsQ.isLoading && ads.length > 0 ? ` · ${ads.length} anúncio(s)` : ""}
         </p>
       </div>
+
+      <GlobalFilters mode="accumulated" typesPresent={typesPresent} />
 
       {adsQ.isLoading ? (
         <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">

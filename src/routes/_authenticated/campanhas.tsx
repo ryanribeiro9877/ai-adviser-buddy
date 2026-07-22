@@ -9,21 +9,25 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { TypeBadge } from "@/components/type-badge";
-import { useCampaignBreakdown } from "@/hooks/use-breakdown";
-import { fmtBRL, fmtInt, fmtPct, fmtDec, type CampaignRow } from "@/lib/breakdown";
+import { GlobalFilters } from "@/components/global-filters";
+import { useGlobalFilters, useSnapshotMinDate } from "@/hooks/use-filters";
+import { usePeriodCampaigns } from "@/hooks/use-period";
+import { fmtBRL, fmtInt, fmtPct, fmtDec, TIPO_ORDER, type CampaignRow, type TipoConta } from "@/lib/breakdown";
+import { matchesStatus, resolveRange, validateFilterSearch } from "@/lib/filters";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Pause, Play, TrendingUp, ShieldAlert } from "lucide-react";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
 } from "@/components/ui/dialog";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
 export const Route = createFileRoute("/_authenticated/campanhas")({
   component: Campanhas,
+  validateSearch: validateFilterSearch,
   head: () => ({ meta: [{ title: "Campanhas" }] }),
 });
 
@@ -45,8 +49,30 @@ function Campanhas() {
   const { selectedCompany, isAdmin, user } = useApp();
   const [reqOpen, setReqOpen] = useState<string | null>(null);
 
-  const campaignsQ = useCampaignBreakdown(selectedCompany?.id ?? null);
-  const rows = campaignsQ.data ?? [];
+  const { filters } = useGlobalFilters();
+  const minDate = useSnapshotMinDate().data ?? "2026-03-03";
+  const range = useMemo(() => resolveRange(filters, minDate), [filters, minDate]);
+
+  const campaignsQ = usePeriodCampaigns(selectedCompany?.id ?? null, range);
+  const allRows = campaignsQ.data;
+
+  // Tipos presentes (para o dropdown de tipo), na ordem canônica.
+  const typesPresent = useMemo<TipoConta[]>(() => {
+    const present = new Set(allRows.map((c) => c.tipo));
+    return TIPO_ORDER.filter((t) => present.has(t));
+  }, [allRows]);
+
+  // Aplica status + tipo (empresa e período já entram na query).
+  const rows = useMemo(
+    () =>
+      allRows.filter(
+        (c) =>
+          matchesStatus(c.status, filters.status) &&
+          (filters.tipo === "all" || c.tipo === filters.tipo),
+      ),
+    [allRows, filters.status, filters.tipo],
+  );
+
   // Só mostra colunas de receita quando existe venda de verdade (e-commerce).
   const hasRevenue = rows.some((c) => c.sales > 0 || c.revenue > 0);
 
@@ -95,6 +121,8 @@ function Campanhas() {
           </p>
         </div>
       </div>
+
+      <GlobalFilters mode="series" typesPresent={typesPresent} />
 
       {campaignsQ.isLoading ? (
         <Skeleton className="h-64 rounded-xl" />
