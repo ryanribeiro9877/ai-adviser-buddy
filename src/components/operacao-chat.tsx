@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useApp } from "@/lib/app-context";
-import { useAudioRecorder } from "@/hooks/use-audio-recorder";
+import { useDictation } from "@/hooks/use-dictation";
 import {
   ACCEPT,
   MAX_FILES,
@@ -121,7 +121,6 @@ export function OperacaoChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
   const [attachments, setAttachments] = useState<PendingFile[]>([]);
   // Mensagem otimista do usuário, presa à conversa em que foi enviada.
   const [pending, setPending] = useState<{
@@ -176,15 +175,25 @@ export function OperacaoChat() {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
   }, [messages.data, showPending, sending, activeId]);
 
-  // --- Transcrição de áudio -------------------------------------------------
-  const onRecordingComplete = async (rec: { blob: Blob; mime: string } | null) => {
-    if (!rec) return; // cancelado ou vazio
-    setTranscribing(true);
+  // --- Auto-grow do textarea ------------------------------------------------
+  const autoGrow = () => {
+    const el = inputRef.current;
+    if (!el) return;
+    const MAX = 200; // ~8 linhas
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, MAX)}px`;
+    el.style.overflowY = el.scrollHeight > MAX ? "auto" : "hidden";
+  };
+  useEffect(autoGrow, [input]);
+
+  // --- Ditado por voz -------------------------------------------------------
+  // Fallback (sem Web Speech API, ex. Firefox): MediaRecorder → transcribe-audio.
+  const transcribeAudio = async (blob: Blob, mime: string): Promise<string> => {
     try {
-      const audio_base64 = await fileToBase64(rec.blob);
+      const audio_base64 = await fileToBase64(blob);
       const { data, error } = await supabase.functions.invoke<{ ok: boolean; text: string }>(
         "transcribe-audio",
-        { body: { audio_base64, mime: rec.mime } },
+        { body: { audio_base64, mime } },
       );
       if (error) {
         let msg = "Não consegui transcrever, tente de novo.";
@@ -198,31 +207,29 @@ export function OperacaoChat() {
           /* corpo não-JSON */
         }
         toast.error(msg);
-        return;
+        return "";
       }
-      const text = data?.text?.trim();
-      if (!text) {
-        toast.error("Não consegui transcrever, tente de novo.");
-        return;
-      }
-      // Preenche o input (anexa ao existente) — NUNCA envia sozinho.
-      setInput((prev) => (prev.trim() ? `${prev.trimEnd()} ${text}` : text));
-      requestAnimationFrame(() => inputRef.current?.focus());
+      return data?.text?.trim() ?? "";
     } catch {
       toast.error("Não consegui transcrever, tente de novo.");
-    } finally {
-      setTranscribing(false);
+      return "";
     }
   };
 
-  const recorder = useAudioRecorder({
-    onComplete: onRecordingComplete,
-    onLimitReached: () => toast("Limite de 10 minutos atingido — transcrevendo o que foi gravado."),
+  const dictation = useDictation({
+    transcribe: transcribeAudio,
+    onText: (full) => setInput(full),
+    onLimitReached: () => toast("Limite de 10 minutos atingido."),
+    onPermissionError: () =>
+      toast.error("Não foi possível acessar o microfone. Verifique a permissão do navegador."),
   });
+  const listening = dictation.state === "listening";
+  const transcribing = dictation.state === "transcribing";
 
-  const startRecording = async () => {
+  const startDictation = async () => {
     try {
-      await recorder.start();
+      await dictation.start(input);
+      requestAnimationFrame(() => inputRef.current?.focus());
     } catch {
       toast.error("Não foi possível acessar o microfone. Verifique a permissão do navegador.");
     }
@@ -496,22 +503,23 @@ export function OperacaoChat() {
               </div>
             )}
 
-            {recorder.isRecording ? (
+            {listening ? (
               <div className="flex items-center gap-3 rounded-md border border-border p-2">
-                <span className="flex items-center gap-2 text-sm font-medium text-destructive">
-                  <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-destructive" />
-                  Gravando {fmtDuration(recorder.elapsedMs)}
+                <MicWaveform analyser={dictation.analyser} />
+                <span className="text-sm font-medium tabular-nums text-destructive">
+                  {fmtDuration(dictation.elapsedMs)}
                 </span>
+                <span className="hidden text-xs text-muted-foreground sm:inline">Ouvindo…</span>
                 <div className="ml-auto flex gap-2">
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={recorder.cancel}
-                    aria-label="Cancelar"
+                    onClick={dictation.cancel}
+                    aria-label="Cancelar gravação"
                   >
                     <Trash2 className="h-4 w-4" />
                   </Button>
-                  <Button size="sm" onClick={recorder.stop}>
+                  <Button size="sm" onClick={dictation.stop}>
                     <Square className="mr-1 h-4 w-4" />
                     Parar
                   </Button>
@@ -543,9 +551,9 @@ export function OperacaoChat() {
                   size="icon"
                   variant="ghost"
                   className="h-[42px] w-[42px] shrink-0"
-                  onClick={startRecording}
-                  disabled={sending || transcribing || !companyId || !recorder.isSupported}
-                  aria-label="Gravar áudio"
+                  onClick={startDictation}
+                  disabled={sending || transcribing || !companyId}
+                  aria-label="Falar (transcrição por voz)"
                 >
                   {transcribing ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -565,7 +573,7 @@ export function OperacaoChat() {
                       : "Pergunte algo… (Enter envia, Shift+Enter quebra linha)"
                   }
                   rows={1}
-                  className="max-h-40 min-h-[42px] resize-none"
+                  className="chat-scroll min-h-[42px] resize-none overflow-y-hidden"
                 />
                 <Button
                   onClick={send}
@@ -585,6 +593,48 @@ export function OperacaoChat() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Ondas sonoras (estilo Claude). Lê o AnalyserNode via rAF e ajusta a altura das
+// barras mutando o DOM — não dispara re-render do chat a cada frame.
+function MicWaveform({ analyser }: { analyser: AnalyserNode | null }) {
+  const barsRef = useRef<Array<HTMLSpanElement | null>>([]);
+  useEffect(() => {
+    if (!analyser) return;
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    const N = 6;
+    let raf = 0;
+    const loop = () => {
+      analyser.getByteFrequencyData(data);
+      for (let i = 0; i < N; i++) {
+        const start = Math.floor((i * data.length) / N);
+        const end = Math.floor(((i + 1) * data.length) / N);
+        let sum = 0;
+        for (let j = start; j < end; j++) sum += data[j];
+        const avg = sum / Math.max(1, end - start) / 255;
+        const el = barsRef.current[i];
+        if (el) el.style.height = `${Math.round(15 + avg * 85)}%`;
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [analyser]);
+
+  return (
+    <div className="flex h-8 items-center gap-0.5" aria-hidden>
+      {Array.from({ length: 6 }).map((_, i) => (
+        <span
+          key={i}
+          ref={(el) => {
+            barsRef.current[i] = el;
+          }}
+          className="w-1 rounded-full bg-destructive"
+          style={{ height: "15%" }}
+        />
+      ))}
     </div>
   );
 }
