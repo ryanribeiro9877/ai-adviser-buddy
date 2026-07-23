@@ -219,7 +219,9 @@ export function OperacaoChat() {
       setInput(full);
       requestAnimationFrame(() => {
         const el = inputRef.current;
-        if (el) el.selectionStart = el.selectionEnd = el.value.length;
+        if (!el) return;
+        el.selectionStart = el.selectionEnd = el.value.length;
+        el.scrollTop = el.scrollHeight; // scroll acompanha o fim
       });
     },
     onLimitReached: () => toast("Limite de 10 minutos atingido."),
@@ -507,8 +509,9 @@ export function OperacaoChat() {
               </div>
             )}
 
-            {listening ? (
-              <div className="flex items-center gap-3 rounded-md border border-border p-2">
+            {/* Faixa compacta de gravação — ACIMA do textarea, não o substitui. */}
+            {listening && (
+              <div className="flex items-center gap-3 rounded-md border border-border bg-muted/40 px-2 py-1.5">
                 <MicWaveform analyser={dictation.analyser} />
                 <span className="text-sm font-medium tabular-nums text-destructive">
                   {fmtDuration(dictation.elapsedMs)}
@@ -529,71 +532,79 @@ export function OperacaoChat() {
                   </Button>
                 </div>
               </div>
-            ) : (
-              <div className="flex items-end gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept={ACCEPT}
-                  multiple
-                  className="hidden"
-                  onChange={onFilesPicked}
-                />
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-[42px] w-[42px] shrink-0"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={
-                    sending || transcribing || !companyId || attachments.length >= MAX_FILES
-                  }
-                  aria-label="Anexar arquivo"
-                >
-                  <Paperclip className="h-4 w-4" />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  className="h-[42px] w-[42px] shrink-0"
-                  onClick={startDictation}
-                  disabled={sending || transcribing || !companyId}
-                  aria-label="Falar (transcrição por voz)"
-                >
-                  {transcribing ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Mic className="h-4 w-4" />
-                  )}
-                </Button>
-                <Textarea
-                  ref={inputRef}
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={onKeyDown}
-                  disabled={sending || transcribing || !companyId}
-                  placeholder={
-                    transcribing
+            )}
+
+            {/* Linha do input — SEMPRE visível (read-only durante a gravação). */}
+            <div className="flex items-end gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPT}
+                multiple
+                className="hidden"
+                onChange={onFilesPicked}
+              />
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-[42px] w-[42px] shrink-0"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={
+                  sending ||
+                  transcribing ||
+                  listening ||
+                  !companyId ||
+                  attachments.length >= MAX_FILES
+                }
+                aria-label="Anexar arquivo"
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-[42px] w-[42px] shrink-0"
+                onClick={startDictation}
+                disabled={sending || transcribing || listening || !companyId}
+                aria-label="Falar (transcrição por voz)"
+              >
+                {transcribing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Mic className="h-4 w-4" />
+                )}
+              </Button>
+              <Textarea
+                ref={inputRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={onKeyDown}
+                readOnly={listening}
+                disabled={sending || transcribing || !companyId}
+                placeholder={
+                  listening
+                    ? "Transcrevendo…"
+                    : transcribing
                       ? "Transcrevendo áudio…"
                       : "Pergunte algo… (Enter envia, Shift+Enter quebra linha)"
-                  }
-                  rows={1}
-                  className="chat-scroll min-h-[42px] resize-none overflow-y-hidden"
-                />
-                <Button
-                  onClick={send}
-                  disabled={!canSend || sending || transcribing}
-                  size="icon"
-                  className="h-[42px] w-[42px] shrink-0"
-                  aria-label="Enviar"
-                >
-                  {sending ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Send className="h-4 w-4" />
-                  )}
-                </Button>
-              </div>
-            )}
+                }
+                rows={1}
+                className="chat-scroll min-h-[42px] resize-none overflow-y-hidden"
+              />
+              <Button
+                onClick={send}
+                disabled={!canSend || sending || transcribing || listening}
+                size="icon"
+                className="h-[42px] w-[42px] shrink-0"
+                aria-label="Enviar"
+              >
+                {sending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Send className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
           </div>
         </div>
       </div>
