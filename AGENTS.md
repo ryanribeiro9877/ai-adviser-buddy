@@ -1,10 +1,11 @@
-<!-- LOVABLE:BEGIN -->
-> [!IMPORTANT]
-> This project is connected to [Lovable](https://lovable.dev). Avoid rewriting
-> published git history — force pushing, or rebasing/amending/squashing commits
-> that are already pushed — as it rewrites history on Lovable's side and the
-> user will likely lose their project history.
->
-> Commits you push to the connected branch sync back to Lovable and show up in
-> the editor, so keep the branch in a working state.
-<!-- LOVABLE:END -->
+# AGENTS.md
+
+Projeto **ai-adviser-buddy** ("Gestor de Tráfego IA") — app TanStack Start + React
++ Supabase, autônomo (sem vínculo com Lovable).
+
+- **Deploy:** Vercel — `https://ai-adviser-buddy.vercel.app`. O push na branch `main`
+  dispara o build/deploy automático (Nitro autodetecta o preset `vercel`).
+- **Git:** commitar direto na `main`; push só quando o usuário pedir.
+- **Manutenção:** alterações feitas via Claude Code.
+- **Build local:** `bun run build` · **Dev:** `bun run dev` (porta 8080) ·
+  **Typecheck:** `bunx tsc --noEmit`.
