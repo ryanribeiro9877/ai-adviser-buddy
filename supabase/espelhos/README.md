@@ -21,3 +21,4 @@ Supabase do projeto `gestão_marketing` (`gzjwnjdpxpbmdhcyefvs`), aplicadas via
 | `espelho_winners_f22.sql` | F2.2 | Detector de criativos vencedores — `evaluate_winners` (grava em `ai_recommendations`) + cron. |
 | `espelho_r6_r7_f23.sql` | F2.3 | Regras R6 (queda de entrega) e R7 (orçamento) — `evaluate_alerts` v4 + seeds. |
 | `espelho_chat_tables_f31.sql` | F3.1 | Tabelas do chat "Operação" (`chat_conversations`, `chat_messages`) + RLS. |
+| `espelho_f3_anexos_audio.sql` | F3 | Coluna `chat_messages.attachments` (metadados de anexos multimodais + transcrição de áudio). |
