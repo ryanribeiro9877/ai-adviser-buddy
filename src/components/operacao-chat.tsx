@@ -186,11 +186,10 @@ export function OperacaoChat() {
   };
   useEffect(autoGrow, [input]);
 
-  // --- Ditado por voz -------------------------------------------------------
-  // Engine incremental (fallback e modo universal): transcreve o áudio via edge.
-  // Silencioso em erro genérico para não spammar toast a cada tick de ~3s; só
-  // avisa no caso específico de formato não suportado.
-  const transcribeAudio = async (blob: Blob, mime: string): Promise<string> => {
+  // --- Ditado por voz (engine única: MediaRecorder → transcribe-audio) ------
+  // Retorna o texto, "" se vazio, ou null em erro de invoke (o hook conta 2 erros
+  // seguidos para parar limpo). Loga [dictation] os erros com o corpo da resposta.
+  const transcribeAudio = async (blob: Blob, mime: string): Promise<string | null> => {
     try {
       const audio_base64 = await fileToBase64(blob);
       const { data, error } = await supabase.functions.invoke<{ ok: boolean; text: string }>(
@@ -198,29 +197,35 @@ export function OperacaoChat() {
         { body: { audio_base64, mime } },
       );
       if (error) {
+        let body: unknown = null;
         try {
-          const body = await (error as { context?: Response }).context?.json?.();
-          const detail = body?.detail ?? body?.error;
-          if (typeof detail === "string" && /format|codec|suport/i.test(detail)) {
-            toast.error("Formato de áudio não suportado neste navegador.");
-          }
+          body = await (error as { context?: Response }).context?.json?.();
         } catch {
           /* corpo não-JSON */
         }
-        return "";
+        console.log("[dictation] erro no invoke transcribe-audio:", error.message, body);
+        return null;
       }
       return data?.text?.trim() ?? "";
-    } catch {
-      return "";
+    } catch (e) {
+      console.log("[dictation] exceção no invoke transcribe-audio:", e);
+      return null;
     }
   };
 
   const dictation = useDictation({
     transcribe: transcribeAudio,
-    onText: (full) => setInput(full),
+    onText: (full) => {
+      setInput(full);
+      requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (el) el.selectionStart = el.selectionEnd = el.value.length;
+      });
+    },
     onLimitReached: () => toast("Limite de 10 minutos atingido."),
     onPermissionError: () =>
       toast.error("Não foi possível acessar o microfone. Verifique a permissão do navegador."),
+    onTranscribeError: () => toast.error("Não consegui transcrever, tente de novo."),
   });
   const listening = dictation.state === "listening";
   const transcribing = dictation.state === "transcribing";
