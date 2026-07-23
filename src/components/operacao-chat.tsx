@@ -1,9 +1,35 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Send, Bot, Loader2, MessagesSquare } from "lucide-react";
+import {
+  Plus,
+  Send,
+  Bot,
+  Loader2,
+  MessagesSquare,
+  Mic,
+  Paperclip,
+  Trash2,
+  Square,
+  X,
+  Image as ImageIcon,
+  FileText,
+  FileSpreadsheet,
+  File as FileIcon,
+} from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useApp } from "@/lib/app-context";
+import { useAudioRecorder } from "@/hooks/use-audio-recorder";
+import {
+  ACCEPT,
+  MAX_FILES,
+  MAX_BYTES,
+  fileToBase64,
+  toOutgoing,
+  kindFromMime,
+  type AttachmentKind,
+  type OutgoingAttachment,
+} from "@/lib/attachments";
 import { Markdown } from "@/components/markdown";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -24,6 +50,7 @@ type Message = {
   role: string;
   content: string | null;
   tool_calls: unknown;
+  attachments: unknown;
   model: string | null;
   created_at: string;
 };
@@ -33,15 +60,36 @@ type ChatReply = {
   conversation_id: string;
   reply: string;
   tools_used?: string[];
-  tokens_in?: number;
-  tokens_out?: number;
+};
+
+type PendingFile = {
+  id: string;
+  file: File;
+  name: string;
+  sizeKb: number;
+  mime: string;
+  url?: string;
+};
+
+type AttachmentMeta = { name?: string; mime?: string; kb?: number };
+
+const ICON_BY_KIND: Record<AttachmentKind, typeof FileIcon> = {
+  image: ImageIcon,
+  pdf: FileText,
+  sheet: FileSpreadsheet,
+  text: FileText,
+  file: FileIcon,
 };
 
 const fmtWhen = (iso: string) =>
   new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
 
-// Normaliza as tools para chips: histórico grava tool_calls = [{ tool, args }];
-// a edge ao vivo devolve tools_used: string[]. Só o histórico chega aqui (refetch).
+const fmtDuration = (ms: number) => {
+  const s = Math.floor(ms / 1000);
+  return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+};
+
+// Normaliza as tools para chips: histórico grava tool_calls = [{ tool, args }].
 function toolNames(toolCalls: unknown): string[] {
   if (!Array.isArray(toolCalls)) return [];
   return toolCalls
@@ -49,10 +97,15 @@ function toolNames(toolCalls: unknown): string[] {
     .filter((t): t is string => typeof t === "string");
 }
 
+function storedAttachments(att: unknown): AttachmentMeta[] {
+  if (!Array.isArray(att)) return [];
+  return att.filter((x): x is AttachmentMeta => !!x && typeof x === "object");
+}
+
 async function fetchMessages(conversationId: string): Promise<Message[]> {
   const { data, error } = await supabase
     .from("chat_messages")
-    .select("id, role, content, tool_calls, model, created_at")
+    .select("id, role, content, tool_calls, attachments, model, created_at")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true });
   if (error) throw error;
@@ -68,15 +121,31 @@ export function OperacaoChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [attachments, setAttachments] = useState<PendingFile[]>([]);
   // Mensagem otimista do usuário, presa à conversa em que foi enviada.
-  const [pending, setPending] = useState<{ convId: string | null; text: string } | null>(null);
-  const threadRef = useRef<HTMLDivElement>(null);
+  const [pending, setPending] = useState<{
+    convId: string | null;
+    text: string;
+    attachments: AttachmentMeta[];
+  } | null>(null);
 
-  // Trocar de empresa reseta a conversa aberta.
+  const threadRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const clearAttachments = () =>
+    setAttachments((a) => {
+      a.forEach((x) => x.url && URL.revokeObjectURL(x.url));
+      return [];
+    });
+
+  // Trocar de empresa reseta a conversa aberta e o compositor.
   useEffect(() => {
     setActiveId(null);
     setPending(null);
     setInput("");
+    clearAttachments();
   }, [companyId]);
 
   const convos = useQuery({
@@ -107,21 +176,128 @@ export function OperacaoChat() {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
   }, [messages.data, showPending, sending, activeId]);
 
+  // --- Transcrição de áudio -------------------------------------------------
+  const onRecordingComplete = async (rec: { blob: Blob; mime: string } | null) => {
+    if (!rec) return; // cancelado ou vazio
+    setTranscribing(true);
+    try {
+      const audio_base64 = await fileToBase64(rec.blob);
+      const { data, error } = await supabase.functions.invoke<{ ok: boolean; text: string }>(
+        "transcribe-audio",
+        { body: { audio_base64, mime: rec.mime } },
+      );
+      if (error) {
+        let msg = "Não consegui transcrever, tente de novo.";
+        try {
+          const body = await (error as { context?: Response }).context?.json?.();
+          const detail = body?.detail ?? body?.error;
+          if (typeof detail === "string" && /format|codec|suport/i.test(detail)) {
+            msg = "Formato de áudio não suportado neste navegador.";
+          }
+        } catch {
+          /* corpo não-JSON */
+        }
+        toast.error(msg);
+        return;
+      }
+      const text = data?.text?.trim();
+      if (!text) {
+        toast.error("Não consegui transcrever, tente de novo.");
+        return;
+      }
+      // Preenche o input (anexa ao existente) — NUNCA envia sozinho.
+      setInput((prev) => (prev.trim() ? `${prev.trimEnd()} ${text}` : text));
+      requestAnimationFrame(() => inputRef.current?.focus());
+    } catch {
+      toast.error("Não consegui transcrever, tente de novo.");
+    } finally {
+      setTranscribing(false);
+    }
+  };
+
+  const recorder = useAudioRecorder({
+    onComplete: onRecordingComplete,
+    onLimitReached: () => toast("Limite de 10 minutos atingido — transcrevendo o que foi gravado."),
+  });
+
+  const startRecording = async () => {
+    try {
+      await recorder.start();
+    } catch {
+      toast.error("Não foi possível acessar o microfone. Verifique a permissão do navegador.");
+    }
+  };
+
+  // --- Anexos ---------------------------------------------------------------
+  const onFilesPicked = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(e.target.files ?? []);
+    e.target.value = "";
+    const next: PendingFile[] = [];
+    for (const file of picked) {
+      if (attachments.length + next.length >= MAX_FILES) {
+        toast.error(`Máximo de ${MAX_FILES} arquivos por mensagem.`);
+        break;
+      }
+      if (file.size > MAX_BYTES) {
+        toast.error(`"${file.name}" excede 8MB.`);
+        continue;
+      }
+      next.push({
+        id: crypto.randomUUID(),
+        file,
+        name: file.name,
+        sizeKb: Math.max(1, Math.round(file.size / 1024)),
+        mime: file.type,
+        url: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+      });
+    }
+    if (next.length) setAttachments((a) => [...a, ...next]);
+  };
+
+  const removeAttachment = (id: string) =>
+    setAttachments((a) => {
+      const found = a.find((x) => x.id === id);
+      if (found?.url) URL.revokeObjectURL(found.url);
+      return a.filter((x) => x.id !== id);
+    });
+
   const newConversation = () => {
     setActiveId(null);
     setInput("");
   };
 
+  const canSend = (input.trim().length > 0 || attachments.length > 0) && !!companyId;
+
   const send = async () => {
     const text = input.trim();
-    if (!text || sending || !companyId) return;
+    if (!canSend || sending || transcribing) return;
     const convIdAtSend = activeId;
+    const snapshot = attachments;
     setInput("");
-    setPending({ convId: convIdAtSend, text });
+    setPending({
+      convId: convIdAtSend,
+      text,
+      attachments: snapshot.map((a) => ({ name: a.name, mime: a.mime, kb: a.sizeKb })),
+    });
     setSending(true);
     try {
+      let outgoing: OutgoingAttachment[] = [];
+      try {
+        outgoing = await Promise.all(snapshot.map((a) => toOutgoing(a.file)));
+      } catch {
+        toast.error("Não consegui processar um dos anexos.");
+        setInput(text);
+        setPending(null);
+        return; // mantém os anexos para nova tentativa
+      }
+
       const { data, error } = await supabase.functions.invoke<ChatReply>("traffic-chat", {
-        body: { message: text, conversation_id: convIdAtSend ?? undefined, company: companyName },
+        body: {
+          message: text,
+          conversation_id: convIdAtSend ?? undefined,
+          company: companyName,
+          ...(outgoing.length ? { attachments: outgoing } : {}),
+        },
       });
       if (error) {
         let msg = "Não foi possível obter resposta agora. Tente novamente.";
@@ -129,19 +305,19 @@ export function OperacaoChat() {
           const body = await (error as { context?: Response }).context?.json?.();
           if (body && typeof body.error === "string") msg = body.error;
         } catch {
-          /* corpo não-JSON: mantém a mensagem padrão */
+          /* corpo não-JSON */
         }
         toast.error(msg);
-        setInput(text); // devolve o texto para não se perder
+        setInput(text);
         setPending(null);
         return;
       }
+
       const convId = data!.conversation_id;
       qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
       if (convIdAtSend) {
         await qc.invalidateQueries({ queryKey: ["chat-messages", convId] });
       } else {
-        // conversa nova: semeia o cache antes de trocar a conversa ativa (sem flicker)
         await qc.fetchQuery({
           queryKey: ["chat-messages", convId],
           queryFn: () => fetchMessages(convId),
@@ -149,6 +325,7 @@ export function OperacaoChat() {
         setActiveId(convId);
       }
       setPending(null);
+      clearAttachments();
     } catch {
       toast.error("Erro de conexão. Tente novamente.");
       setInput(text);
@@ -249,8 +426,8 @@ export function OperacaoChat() {
                 Converse com o gestor de tráfego
               </div>
               <p className="mx-auto mt-1 max-w-sm text-sm">
-                Pergunte sobre metas, gastos, campanhas e o que aconteceu. As respostas usam os
-                dados reais de {selectedCompany?.name ?? "sua empresa"}.
+                Pergunte sobre metas, gastos e campanhas — por texto, voz ou anexando um print, PDF
+                ou planilha de {selectedCompany?.name ?? "sua empresa"}.
               </p>
             </div>
           ) : (
@@ -265,8 +442,11 @@ export function OperacaoChat() {
 
               {showPending && (
                 <div className="flex justify-end">
-                  <div className="max-w-[85%] rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
-                    {pending!.text}
+                  <div className="max-w-[85%] space-y-1 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
+                    {pending!.attachments.length > 0 && (
+                      <AttachmentChips items={pending!.attachments} onPrimary />
+                    )}
+                    {pending!.text && <div className="whitespace-pre-wrap">{pending!.text}</div>}
                   </div>
                 </div>
               )}
@@ -282,31 +462,126 @@ export function OperacaoChat() {
           )}
         </div>
 
-        {/* Input */}
+        {/* Compositor */}
         <div className="border-t border-border p-3">
-          <div className="mx-auto flex max-w-3xl items-end gap-2">
-            <Textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={onKeyDown}
-              disabled={sending || !companyId}
-              placeholder="Pergunte algo… (Enter envia, Shift+Enter quebra linha)"
-              rows={1}
-              className="max-h-40 min-h-[42px] resize-none"
-            />
-            <Button
-              onClick={send}
-              disabled={sending || !input.trim() || !companyId}
-              size="icon"
-              className="h-[42px] w-[42px] shrink-0"
-              aria-label="Enviar"
-            >
-              {sending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-            </Button>
+          <div className="mx-auto max-w-3xl space-y-2">
+            {/* Anexos pendentes */}
+            {attachments.length > 0 && !sending && (
+              <div className="flex flex-wrap gap-2">
+                {attachments.map((a) => {
+                  const Icon = ICON_BY_KIND[kindFromMime(a.mime, a.name)];
+                  return (
+                    <span
+                      key={a.id}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted py-1 pl-1.5 pr-1 text-xs"
+                    >
+                      {a.url ? (
+                        <img src={a.url} alt="" className="h-6 w-6 rounded object-cover" />
+                      ) : (
+                        <Icon className="h-4 w-4 text-muted-foreground" />
+                      )}
+                      <span className="max-w-[160px] truncate">{a.name}</span>
+                      <span className="text-muted-foreground">{a.sizeKb}KB</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(a.id)}
+                        className="rounded p-0.5 hover:bg-background"
+                        aria-label={`Remover ${a.name}`}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
+
+            {recorder.isRecording ? (
+              <div className="flex items-center gap-3 rounded-md border border-border p-2">
+                <span className="flex items-center gap-2 text-sm font-medium text-destructive">
+                  <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-destructive" />
+                  Gravando {fmtDuration(recorder.elapsedMs)}
+                </span>
+                <div className="ml-auto flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={recorder.cancel}
+                    aria-label="Cancelar"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                  <Button size="sm" onClick={recorder.stop}>
+                    <Square className="mr-1 h-4 w-4" />
+                    Parar
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-end gap-2">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept={ACCEPT}
+                  multiple
+                  className="hidden"
+                  onChange={onFilesPicked}
+                />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-[42px] w-[42px] shrink-0"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={
+                    sending || transcribing || !companyId || attachments.length >= MAX_FILES
+                  }
+                  aria-label="Anexar arquivo"
+                >
+                  <Paperclip className="h-4 w-4" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-[42px] w-[42px] shrink-0"
+                  onClick={startRecording}
+                  disabled={sending || transcribing || !companyId || !recorder.isSupported}
+                  aria-label="Gravar áudio"
+                >
+                  {transcribing ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Mic className="h-4 w-4" />
+                  )}
+                </Button>
+                <Textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={onKeyDown}
+                  disabled={sending || transcribing || !companyId}
+                  placeholder={
+                    transcribing
+                      ? "Transcrevendo áudio…"
+                      : "Pergunte algo… (Enter envia, Shift+Enter quebra linha)"
+                  }
+                  rows={1}
+                  className="max-h-40 min-h-[42px] resize-none"
+                />
+                <Button
+                  onClick={send}
+                  disabled={!canSend || sending || transcribing}
+                  size="icon"
+                  className="h-[42px] w-[42px] shrink-0"
+                  aria-label="Enviar"
+                >
+                  {sending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Send className="h-4 w-4" />
+                  )}
+                </Button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -314,15 +589,43 @@ export function OperacaoChat() {
   );
 }
 
+function AttachmentChips({ items, onPrimary }: { items: AttachmentMeta[]; onPrimary?: boolean }) {
+  if (!items.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {items.map((a, i) => {
+        const Icon = ICON_BY_KIND[kindFromMime(a.mime, a.name)];
+        return (
+          <span
+            key={i}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px]",
+              onPrimary
+                ? "border-primary-foreground/25 bg-primary-foreground/10"
+                : "border-border bg-background",
+            )}
+          >
+            <Icon className="h-3 w-3" />
+            <span className="max-w-[160px] truncate">{a.name ?? "arquivo"}</span>
+            {a.kb ? <span className="opacity-70">{a.kb}KB</span> : null}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function MessageBubble({ message }: { message: Message }) {
   const isUser = message.role === "user";
   const tools = toolNames(message.tool_calls);
+  const files = storedAttachments(message.attachments);
 
   if (isUser) {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
-          {message.content}
+        <div className="max-w-[85%] space-y-1 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
+          {files.length > 0 && <AttachmentChips items={files} onPrimary />}
+          {message.content && <div className="whitespace-pre-wrap">{message.content}</div>}
         </div>
       </div>
     );
@@ -343,7 +646,7 @@ function MessageBubble({ message }: { message: Message }) {
               <Badge
                 key={`${t}-${i}`}
                 variant="outline"
-                className="h-5 px-1.5 font-normal text-[11px]"
+                className="h-5 px-1.5 text-[11px] font-normal"
               >
                 {t}
               </Badge>

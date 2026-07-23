@@ -14,6 +14,9 @@ export const Route = createFileRoute("/_authenticated/alertas")({
   head: () => ({ meta: [{ title: "Alertas" }] }),
 });
 
+// Ordem de severidade: critical no topo (pendência da fase 2).
+const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
+
 function Alertas() {
   const { selectedCompany, isAdmin } = useApp();
   const q = useQuery({
@@ -33,7 +36,11 @@ function Alertas() {
   };
 
   if (!selectedCompany) return <EmptyCompany />;
-  const items = q.data ?? [];
+  // Ordena por severidade (critical → low) e, dentro de cada nível, por data desc.
+  const items = [...(q.data ?? [])].sort((a, b) => {
+    const rank = (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9);
+    return rank !== 0 ? rank : new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  });
 
   return (
     <div className="space-y-4">
