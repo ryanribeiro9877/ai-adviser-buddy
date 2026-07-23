@@ -10,7 +10,7 @@ import { useGlobalFilters, useSnapshotMinDate } from "@/hooks/use-filters";
 import { usePeriodCampaigns } from "@/hooks/use-period";
 import { fmtBRL, fmtInt, fmtPct, TIPO_ORDER, type TipoConta } from "@/lib/breakdown";
 import { matchesStatus, resolveRange, validateFilterSearch } from "@/lib/filters";
-import { HelpCircle, MessageCircle, Clock } from "lucide-react";
+import { HelpCircle, MessageCircle } from "lucide-react";
 
 export const Route = createFileRoute("/_authenticated/funil")({
   component: Funil,
@@ -60,8 +60,9 @@ function Funil() {
 
   // Somatório das campanhas filtradas (a régua do funil).
   const agg = useMemo(() => {
-    const sum = (k: "spend" | "impressions" | "clicks" | "link_clicks" | "form_leads" | "messaging_started") =>
-      rows.reduce((a, c) => a + c[k], 0);
+    const sum = (
+      k: "spend" | "impressions" | "clicks" | "link_clicks" | "form_leads" | "messaging_started",
+    ) => rows.reduce((a, c) => a + c[k], 0);
     return {
       spend: sum("spend"),
       impressions: sum("impressions"),
@@ -73,11 +74,11 @@ function Funil() {
   }, [rows]);
 
   // Etapas do funil do Roberto:
-  // Impressões → Cliques → Cliques no link (Lead) → Formulários → [Propostas: placeholder]
+  // Impressões → Cliques → Cliques no link (Lead) → Formulários.
   type Stage = {
     key: string;
     name: string;
-    value: number | null; // null => etapa ainda não integrada (Propostas)
+    value: number;
     tip: string;
     cost?: { label: string; value: string } | null;
   };
@@ -115,12 +116,6 @@ function Funil() {
           ? { label: "Custo por formulário", value: fmtBRL(agg.spend / agg.form_leads) }
           : null,
     },
-    {
-      key: "propostas",
-      name: "Propostas",
-      value: null,
-      tip: "Proposta = gerada no Dash da Legal. Integração prevista para a Fase 1.",
-    },
   ];
 
   if (!selectedCompany) return <EmptyCompany />;
@@ -128,20 +123,15 @@ function Funil() {
   const max = agg.impressions || 1;
   const hasData = agg.impressions > 0 || agg.clicks > 0 || agg.messaging_started > 0;
 
-  // Valor da etapa anterior (para taxa de conversão), pulando placeholders.
-  const prevValue = (i: number): number | null => {
-    for (let j = i - 1; j >= 0; j--) {
-      if (stages[j].value != null) return stages[j].value;
-    }
-    return null;
-  };
+  // Valor da etapa anterior, para a taxa de conversão entre etapas.
+  const prevValue = (i: number): number | null => (i > 0 ? stages[i - 1].value : null);
 
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-semibold">Funil e conversões</h1>
         <p className="text-sm text-muted-foreground">
-          Impressões → Cliques → Lead → Formulários → Propostas · {selectedCompany.name}
+          Impressões → Cliques → Lead → Formulários · {selectedCompany.name}
         </p>
       </div>
 
@@ -157,11 +147,9 @@ function Funil() {
         <>
           <Card className="p-6 space-y-3">
             {stages.map((s, i) => {
-              const placeholder = s.value == null;
-              const pct = placeholder ? 0 : Math.min(100, ((s.value as number) / max) * 100);
+              const pct = Math.min(100, (s.value / max) * 100);
               const prev = prevValue(i);
-              const rate =
-                i > 0 && !placeholder && prev && prev > 0 ? ((s.value as number) / prev) * 100 : null;
+              const rate = prev && prev > 0 ? (s.value / prev) * 100 : null;
               return (
                 <div key={s.key}>
                   <div className="flex items-center justify-between text-sm mb-1">
@@ -170,40 +158,22 @@ function Funil() {
                       <StageInfo text={s.tip} />
                     </div>
                     <div className="flex items-center gap-3">
-                      {placeholder ? (
-                        <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                          <Clock className="h-3 w-3" /> aguardando integração
+                      {s.cost && (
+                        <span className="text-xs text-muted-foreground">
+                          {s.cost.label}: <span className="tabular-nums">{s.cost.value}</span>
                         </span>
-                      ) : (
-                        <>
-                          {s.cost && (
-                            <span className="text-xs text-muted-foreground">
-                              {s.cost.label}: <span className="tabular-nums">{s.cost.value}</span>
-                            </span>
-                          )}
-                          {rate != null && (
-                            <span className="text-xs text-muted-foreground">
-                              conv. {fmtPct(rate)}
-                            </span>
-                          )}
-                          <span className="tabular-nums font-medium">{fmtInt(s.value as number)}</span>
-                        </>
                       )}
+                      {rate != null && (
+                        <span className="text-xs text-muted-foreground">conv. {fmtPct(rate)}</span>
+                      )}
+                      <span className="tabular-nums font-medium">{fmtInt(s.value)}</span>
                     </div>
                   </div>
-                  <div
-                    className={
-                      placeholder
-                        ? "h-9 rounded-md border border-dashed border-border bg-muted/20"
-                        : "h-9 rounded-md bg-muted overflow-hidden"
-                    }
-                  >
-                    {!placeholder && (
-                      <div
-                        className="h-full bg-gradient-to-r from-primary to-[color:var(--color-chart-2)]"
-                        style={{ width: `${pct}%` }}
-                      />
-                    )}
+                  <div className="h-9 rounded-md bg-muted overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-primary to-[color:var(--color-chart-2)]"
+                      style={{ width: `${pct}%` }}
+                    />
                   </div>
                 </div>
               );
