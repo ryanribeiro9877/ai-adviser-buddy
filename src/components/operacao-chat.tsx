@@ -187,7 +187,9 @@ export function OperacaoChat() {
   useEffect(autoGrow, [input]);
 
   // --- Ditado por voz -------------------------------------------------------
-  // Fallback (sem Web Speech API, ex. Firefox): MediaRecorder → transcribe-audio.
+  // Engine incremental (fallback e modo universal): transcreve o áudio via edge.
+  // Silencioso em erro genérico para não spammar toast a cada tick de ~3s; só
+  // avisa no caso específico de formato não suportado.
   const transcribeAudio = async (blob: Blob, mime: string): Promise<string> => {
     try {
       const audio_base64 = await fileToBase64(blob);
@@ -196,22 +198,19 @@ export function OperacaoChat() {
         { body: { audio_base64, mime } },
       );
       if (error) {
-        let msg = "Não consegui transcrever, tente de novo.";
         try {
           const body = await (error as { context?: Response }).context?.json?.();
           const detail = body?.detail ?? body?.error;
           if (typeof detail === "string" && /format|codec|suport/i.test(detail)) {
-            msg = "Formato de áudio não suportado neste navegador.";
+            toast.error("Formato de áudio não suportado neste navegador.");
           }
         } catch {
           /* corpo não-JSON */
         }
-        toast.error(msg);
         return "";
       }
       return data?.text?.trim() ?? "";
     } catch {
-      toast.error("Não consegui transcrever, tente de novo.");
       return "";
     }
   };
