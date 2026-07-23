@@ -7,29 +7,14 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { MessagesSquare, Sparkles, Check, X, Bot } from "lucide-react";
+import { MessagesSquare, Sparkles, Check, X } from "lucide-react";
 import { toast } from "sonner";
+import { OperacaoChat } from "@/components/operacao-chat";
 
 export const Route = createFileRoute("/_authenticated/recomendacoes")({
   component: Operacao,
   head: () => ({ meta: [{ title: "Operação" }] }),
 });
-
-// Placeholder honesto do chat do gestor de tráfego (chega na Fase 3).
-function ChatPlaceholder() {
-  return (
-    <Card className="p-10 text-center">
-      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary/15 text-primary">
-        <Bot className="h-6 w-6" />
-      </div>
-      <div className="mt-4 text-lg font-semibold">O gestor de tráfego conversacional chega aqui em breve</div>
-      <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
-        Relatório diário e comandos por conversa — pausar campanhas, ajustar orçamentos e aprovar
-        mudanças direto no chat. Por enquanto, veja as recomendações da IA na aba ao lado.
-      </p>
-    </Card>
-  );
-}
 
 function Recomendacoes() {
   const { selectedCompany } = useApp();
@@ -95,7 +80,7 @@ function Operacao() {
           Operação
         </h1>
         <p className="text-sm text-muted-foreground">
-          O chat do gestor de tráfego chega aqui em breve — relatório diário e comandos por conversa.
+          Converse com o gestor de tráfego IA sobre os dados reais e acompanhe as recomendações.
         </p>
       </div>
 
@@ -105,7 +90,7 @@ function Operacao() {
           <TabsTrigger value="recomendacoes">Recomendações da IA</TabsTrigger>
         </TabsList>
         <TabsContent value="chat" className="mt-4">
-          <ChatPlaceholder />
+          <OperacaoChat />
         </TabsContent>
         <TabsContent value="recomendacoes" className="mt-4">
           <Recomendacoes />
