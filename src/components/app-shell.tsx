@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import {
   LayoutDashboard,
@@ -17,6 +18,7 @@ import {
   ShieldCheck,
   Eye,
   ChevronDown,
+  Menu,
 } from "lucide-react";
 import { useApp } from "@/lib/app-context";
 import { FEATURES } from "@/lib/features";
@@ -30,6 +32,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Badge } from "@/components/ui/badge";
 
 type NavItem = { to: string; label: string; icon: typeof LayoutDashboard };
@@ -55,10 +58,75 @@ const nav: NavItem[] = [
   { to: "/configuracoes", label: "Configurações", icon: Settings },
 ];
 
+/**
+ * Conteúdo compartilhado da barra lateral (logo + navegação + rodapé).
+ * Reutilizado tanto pela sidebar fixa do desktop quanto pelo drawer mobile.
+ * `onNavigate` fecha o drawer ao clicar em um link (sem efeito no desktop).
+ */
+function SidebarContent({
+  currentPath,
+  isAdmin,
+  onNavigate,
+}: {
+  currentPath: string;
+  isAdmin: boolean;
+  onNavigate?: () => void;
+}) {
+  return (
+    <>
+      <div className="px-5 py-5 border-b border-sidebar-border">
+        <Link to="/dashboard" className="flex items-center gap-2" onClick={onNavigate}>
+          <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center">
+            <Sparkles className="h-4 w-4 text-primary-foreground" />
+          </div>
+          <div>
+            <div className="text-sm font-semibold leading-tight">Gestor de Tráfego</div>
+            <div className="text-[11px] text-muted-foreground uppercase tracking-wider">
+              IA · v1.0
+            </div>
+          </div>
+        </Link>
+      </div>
+      <nav className="flex-1 overflow-y-auto py-3">
+        {nav.map((item) => {
+          const Icon = item.icon;
+          const active = currentPath.startsWith(item.to);
+          return (
+            <Link
+              key={item.to}
+              to={item.to}
+              onClick={onNavigate}
+              className={`flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${
+                active
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground border-l-2 border-primary"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
+              }`}
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              {item.label}
+            </Link>
+          );
+        })}
+      </nav>
+      <div className="border-t border-sidebar-border px-4 py-3 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2">
+          {isAdmin ? (
+            <ShieldCheck className="h-3.5 w-3.5 text-primary" />
+          ) : (
+            <Eye className="h-3.5 w-3.5" />
+          )}
+          Modo somente leitura por padrão
+        </div>
+      </div>
+    </>
+  );
+}
+
 export function AppShell() {
   const { user, role, isAdmin, companies, selectedCompany, setSelectedCompanyId } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const signOut = async () => {
     await supabase.auth.signOut();
@@ -67,55 +135,44 @@ export function AppShell() {
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
+      {/* Sidebar fixa — apenas em telas grandes (>= lg) */}
       <aside className="hidden lg:flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
-        <div className="px-5 py-5 border-b border-sidebar-border">
-          <Link to="/dashboard" className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-lg bg-primary flex items-center justify-center">
-              <Sparkles className="h-4 w-4 text-primary-foreground" />
-            </div>
-            <div>
-              <div className="text-sm font-semibold leading-tight">Gestor de Tráfego</div>
-              <div className="text-[11px] text-muted-foreground uppercase tracking-wider">IA · v1.0</div>
-            </div>
-          </Link>
-        </div>
-        <nav className="flex-1 overflow-y-auto py-3">
-          {nav.map((item) => {
-            const Icon = item.icon;
-            const active = location.pathname.startsWith(item.to);
-            return (
-              <Link
-                key={item.to}
-                to={item.to}
-                className={`flex items-center gap-3 px-5 py-2.5 text-sm transition-colors ${
-                  active
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground border-l-2 border-primary"
-                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
-                }`}
-              >
-                <Icon className="h-4 w-4" />
-                {item.label}
-              </Link>
-            );
-          })}
-        </nav>
-        <div className="border-t border-sidebar-border px-4 py-3 text-xs text-muted-foreground">
-          <div className="flex items-center gap-2">
-            {isAdmin ? <ShieldCheck className="h-3.5 w-3.5 text-primary" /> : <Eye className="h-3.5 w-3.5" />}
-            Modo somente leitura por padrão
-          </div>
-        </div>
+        <SidebarContent currentPath={location.pathname} isAdmin={isAdmin} />
       </aside>
 
+      {/* Drawer de navegação — telas menores que lg */}
+      <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
+        <SheetContent
+          side="left"
+          className="flex w-72 flex-col gap-0 border-sidebar-border bg-sidebar p-0 text-sidebar-foreground"
+        >
+          <SheetTitle className="sr-only">Menu de navegação</SheetTitle>
+          <SidebarContent
+            currentPath={location.pathname}
+            isAdmin={isAdmin}
+            onNavigate={() => setMobileNavOpen(false)}
+          />
+        </SheetContent>
+      </Sheet>
+
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 border-b border-border flex items-center justify-between px-4 lg:px-6 bg-card/50 backdrop-blur">
-          <div className="flex items-center gap-3">
+        <header className="h-14 border-b border-border flex items-center justify-between gap-2 px-4 lg:px-6 bg-card/50 backdrop-blur">
+          <div className="flex items-center gap-2 min-w-0">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="lg:hidden shrink-0"
+              onClick={() => setMobileNavOpen(true)}
+              aria-label="Abrir menu"
+            >
+              <Menu className="h-5 w-5" />
+            </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="gap-2">
-                  <Building2 className="h-4 w-4" />
-                  {selectedCompany?.name ?? "Nenhuma empresa"}
-                  <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+                <Button variant="outline" size="sm" className="gap-2 min-w-0">
+                  <Building2 className="h-4 w-4 shrink-0" />
+                  <span className="truncate">{selectedCompany?.name ?? "Nenhuma empresa"}</span>
+                  <ChevronDown className="h-3.5 w-3.5 opacity-60 shrink-0" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-64">
@@ -128,7 +185,9 @@ export function AppShell() {
                   <DropdownMenuItem key={c.id} onClick={() => setSelectedCompanyId(c.id)}>
                     {c.name}
                     {selectedCompany?.id === c.id && (
-                      <Badge variant="secondary" className="ml-auto">Ativa</Badge>
+                      <Badge variant="secondary" className="ml-auto">
+                        Ativa
+                      </Badge>
                     )}
                   </DropdownMenuItem>
                 ))}
@@ -139,10 +198,10 @@ export function AppShell() {
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
             <Badge variant={isAdmin ? "default" : "secondary"} className="gap-1">
               {isAdmin ? <ShieldCheck className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-              {isAdmin ? "Administrador" : "Visualizador"}
+              <span className="hidden sm:inline">{isAdmin ? "Administrador" : "Visualizador"}</span>
             </Badge>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
