@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -31,6 +31,8 @@ import {
   type OutgoingAttachment,
 } from "@/lib/attachments";
 import { Markdown } from "@/components/markdown";
+import { ActionCard, decideApproval, type Approval, type Decision } from "@/components/action-card";
+import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -102,6 +104,20 @@ function storedAttachments(att: unknown): AttachmentMeta[] {
   return att.filter((x): x is AttachmentMeta => !!x && typeof x === "object");
 }
 
+// Marcadores de ActionCard nos attachments da mensagem assistant: extrai os approval_id.
+function actionCardIds(att: unknown): string[] {
+  if (!Array.isArray(att)) return [];
+  return att
+    .filter(
+      (x): x is { approval_id: string } =>
+        !!x &&
+        typeof x === "object" &&
+        (x as { tipo?: unknown }).tipo === "action_card" &&
+        typeof (x as { approval_id?: unknown }).approval_id === "string",
+    )
+    .map((x) => x.approval_id);
+}
+
 async function fetchMessages(conversationId: string): Promise<Message[]> {
   const { data, error } = await supabase
     .from("chat_messages")
@@ -113,7 +129,7 @@ async function fetchMessages(conversationId: string): Promise<Message[]> {
 }
 
 export function OperacaoChat() {
-  const { selectedCompany } = useApp();
+  const { selectedCompany, isAdmin } = useApp();
   const companyId = selectedCompany?.id ?? null;
   const companyName = selectedCompany?.name ?? "";
   const qc = useQueryClient();
@@ -167,6 +183,54 @@ export function OperacaoChat() {
     enabled: !!activeId,
     queryFn: () => fetchMessages(activeId!),
   });
+
+  // Pedidos de aprovação desta conversa (para renderizar os ActionCards com o
+  // status ATUAL do banco, tanto ao vivo quanto ao recarregar).
+  const approvals = useQuery({
+    queryKey: ["approvals", "conv", activeId],
+    enabled: !!activeId,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("approval_requests")
+        .select(APPROVAL_SELECT)
+        .eq("conversation_id", activeId!);
+      if (error) throw error;
+      return (data ?? []) as Approval[];
+    },
+  });
+  const approvalsById = useMemo(() => {
+    const m: Record<string, Approval> = {};
+    for (const a of approvals.data ?? []) m[a.id] = a;
+    return m;
+  }, [approvals.data]);
+
+  const [decidingId, setDecidingId] = useState<string | null>(null);
+  const onDecideApproval = async (id: string, decision: Decision, reason?: string) => {
+    setDecidingId(id);
+    const key = ["approvals", "conv", activeId];
+    const prev = qc.getQueryData<Approval[]>(key);
+    qc.setQueryData<Approval[]>(key, (old) =>
+      (old ?? []).map((a) =>
+        a.id === id
+          ? {
+              ...a,
+              status: decision,
+              reviewed_at: new Date().toISOString(),
+              review_note: reason ?? a.review_note,
+            }
+          : a,
+      ),
+    );
+    const { error } = await decideApproval(id, decision, reason);
+    setDecidingId(null);
+    if (error) {
+      qc.setQueryData(key, prev); // reverte
+      toast.error(error);
+      return;
+    }
+    toast.success(decision === "approved" ? "Pedido aprovado" : "Pedido rejeitado");
+    qc.invalidateQueries({ queryKey: ["approvals"] });
+  };
 
   const showPending = !!pending && pending.convId === activeId;
 
@@ -328,6 +392,7 @@ export function OperacaoChat() {
 
       const convId = data!.conversation_id;
       qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
+      qc.invalidateQueries({ queryKey: ["approvals"] });
       if (convIdAtSend) {
         await qc.invalidateQueries({ queryKey: ["chat-messages", convId] });
       } else {
@@ -450,7 +515,14 @@ export function OperacaoChat() {
                 [0, 1].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
 
               {msgs.map((m) => (
-                <MessageBubble key={m.id} message={m} />
+                <MessageBubble
+                  key={m.id}
+                  message={m}
+                  approvalsById={approvalsById}
+                  isAdmin={isAdmin}
+                  decidingId={decidingId}
+                  onDecide={onDecideApproval}
+                />
               ))}
 
               {showPending && (
@@ -680,10 +752,23 @@ function AttachmentChips({ items, onPrimary }: { items: AttachmentMeta[]; onPrim
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function MessageBubble({
+  message,
+  approvalsById,
+  isAdmin,
+  decidingId,
+  onDecide,
+}: {
+  message: Message;
+  approvalsById: Record<string, Approval>;
+  isAdmin: boolean;
+  decidingId: string | null;
+  onDecide: (id: string, decision: Decision, reason?: string) => void;
+}) {
   const isUser = message.role === "user";
   const tools = toolNames(message.tool_calls);
   const files = storedAttachments(message.attachments);
+  const cardIds = isUser ? [] : actionCardIds(message.attachments);
 
   if (isUser) {
     return (
@@ -705,6 +790,22 @@ function MessageBubble({ message }: { message: Message }) {
         <div className="rounded-lg bg-muted px-3 py-2">
           <Markdown>{message.content ?? ""}</Markdown>
         </div>
+        {cardIds.length > 0 && (
+          <div className="mt-2 space-y-2">
+            {cardIds.map((id) => {
+              const ap = approvalsById[id];
+              return ap ? (
+                <ActionCard
+                  key={id}
+                  approval={ap}
+                  isAdmin={isAdmin}
+                  deciding={decidingId === id}
+                  onDecide={onDecide}
+                />
+              ) : null;
+            })}
+          </div>
+        )}
         {(tools.length > 0 || message.model) && (
           <div className="mt-1 flex flex-wrap items-center gap-1">
             {tools.map((t, i) => (

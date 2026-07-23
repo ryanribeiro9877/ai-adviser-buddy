@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MessagesSquare, Sparkles, Check, X } from "lucide-react";
 import { toast } from "sonner";
 import { OperacaoChat } from "@/components/operacao-chat";
+import { ApprovalsQueue } from "@/components/approvals-queue";
 
 export const Route = createFileRoute("/_authenticated/recomendacoes")({
   component: Operacao,
@@ -22,14 +23,23 @@ function Recomendacoes() {
     queryKey: ["reco", selectedCompany?.id],
     enabled: !!selectedCompany,
     queryFn: async () => {
-      const { data } = await supabase.from("ai_recommendations").select("*").eq("company_id", selectedCompany!.id).order("created_at", { ascending: false });
+      const { data } = await supabase
+        .from("ai_recommendations")
+        .select("*")
+        .eq("company_id", selectedCompany!.id)
+        .order("created_at", { ascending: false });
       return data ?? [];
     },
   });
 
   const update = async (id: string, status: "accepted" | "dismissed") => {
     await supabase.from("ai_recommendations").update({ status }).eq("id", id);
-    await logAudit({ companyId: selectedCompany!.id, action: `recommendation.${status}`, targetType: "recommendation", targetId: id });
+    await logAudit({
+      companyId: selectedCompany!.id,
+      action: `recommendation.${status}`,
+      targetType: "recommendation",
+      targetId: id,
+    });
     toast.success(status === "accepted" ? "Recomendação aceita" : "Recomendação descartada");
     q.refetch();
   };
@@ -53,8 +63,14 @@ function Recomendacoes() {
             <div className="flex gap-2">
               {r.status === "new" ? (
                 <>
-                  <Button size="sm" variant="ghost" onClick={() => update(r.id, "dismissed")}><X className="h-4 w-4 mr-1" />Descartar</Button>
-                  <Button size="sm" onClick={() => update(r.id, "accepted")}><Check className="h-4 w-4 mr-1" />Aceitar</Button>
+                  <Button size="sm" variant="ghost" onClick={() => update(r.id, "dismissed")}>
+                    <X className="h-4 w-4 mr-1" />
+                    Descartar
+                  </Button>
+                  <Button size="sm" onClick={() => update(r.id, "accepted")}>
+                    <Check className="h-4 w-4 mr-1" />
+                    Aceitar
+                  </Button>
                 </>
               ) : (
                 <Badge>{r.status === "accepted" ? "Aceita" : "Descartada"}</Badge>
@@ -63,7 +79,11 @@ function Recomendacoes() {
           </div>
         </Card>
       ))}
-      {items.length === 0 && <Card className="p-6 text-sm text-muted-foreground md:col-span-2">Nenhuma recomendação ativa.</Card>}
+      {items.length === 0 && (
+        <Card className="p-6 text-sm text-muted-foreground md:col-span-2">
+          Nenhuma recomendação ativa.
+        </Card>
+      )}
     </div>
   );
 }
@@ -87,10 +107,14 @@ function Operacao() {
       <Tabs defaultValue="chat">
         <TabsList>
           <TabsTrigger value="chat">Chat do gestor</TabsTrigger>
+          <TabsTrigger value="aprovacoes">Aprovações</TabsTrigger>
           <TabsTrigger value="recomendacoes">Recomendações da IA</TabsTrigger>
         </TabsList>
         <TabsContent value="chat" className="mt-4">
           <OperacaoChat />
+        </TabsContent>
+        <TabsContent value="aprovacoes" className="mt-4">
+          <ApprovalsQueue companyId={selectedCompany.id} />
         </TabsContent>
         <TabsContent value="recomendacoes" className="mt-4">
           <Recomendacoes />

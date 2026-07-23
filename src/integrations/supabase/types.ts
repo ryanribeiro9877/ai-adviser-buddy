@@ -283,6 +283,7 @@ export type Database = {
         Row: {
           action: string
           company_id: string
+          conversation_id: string | null
           created_at: string
           entity_id: string | null
           entity_type: Database["public"]["Enums"]["approval_entity"]
@@ -298,6 +299,7 @@ export type Database = {
         Insert: {
           action: string
           company_id: string
+          conversation_id?: string | null
           created_at?: string
           entity_id?: string | null
           entity_type: Database["public"]["Enums"]["approval_entity"]
@@ -313,6 +315,7 @@ export type Database = {
         Update: {
           action?: string
           company_id?: string
+          conversation_id?: string | null
           created_at?: string
           entity_id?: string | null
           entity_type?: Database["public"]["Enums"]["approval_entity"]
@@ -775,6 +778,10 @@ export type Database = {
       }
     }
     Functions: {
+      decide_approval: {
+        Args: { p_id: string; p_decision: string; p_reason: string | null }
+        Returns: Json
+      }
       evaluate_alerts: {
         Args: Record<PropertyKey, never>
         Returns: number
