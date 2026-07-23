@@ -553,6 +553,60 @@ export type Database = {
         }
         Relationships: []
       }
+      targets: {
+        Row: {
+          active: boolean
+          campaign_id: string | null
+          company_id: string
+          created_at: string
+          fonte: string
+          id: string
+          memoria: Json | null
+          metric: string
+          updated_at: string
+          valor: number
+        }
+        Insert: {
+          active?: boolean
+          campaign_id?: string | null
+          company_id: string
+          created_at?: string
+          fonte?: string
+          id?: string
+          memoria?: Json | null
+          metric: string
+          updated_at?: string
+          valor: number
+        }
+        Update: {
+          active?: boolean
+          campaign_id?: string | null
+          company_id?: string
+          created_at?: string
+          fonte?: string
+          id?: string
+          memoria?: Json | null
+          metric?: string
+          updated_at?: string
+          valor?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "targets_campaign_id_fkey"
+            columns: ["campaign_id"]
+            isOneToOne: false
+            referencedRelation: "campaigns"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "targets_company_id_fkey"
+            columns: ["company_id"]
+            isOneToOne: false
+            referencedRelation: "companies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_roles: {
         Row: {
           id: string
@@ -623,6 +677,10 @@ export type Database = {
       }
     }
     Functions: {
+      evaluate_alerts: {
+        Args: Record<PropertyKey, never>
+        Returns: number
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
