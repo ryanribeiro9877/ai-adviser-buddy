@@ -24,3 +24,4 @@ Supabase do projeto `gestão_marketing` (`gzjwnjdpxpbmdhcyefvs`), aplicadas via
 | `espelho_f3_anexos_audio.sql` | F3 | Coluna `chat_messages.attachments` (metadados de anexos multimodais + transcrição de áudio). |
 | `espelho_f33_actioncards.sql` | F3.3 | ActionCards — aditivo em `approval_requests` (conversation_id), `audit_log` imutável e função `decide_approval`. |
 | `espelho_f4_execucao_meta.sql` | F4.1/F4.2 | Execução real na Meta — `meta_execution_config` (flags 3 camadas + dry_run), `set_meta_execution_config`, colunas `executed_at`/`execution_result` + campanha cobaia de teste. |
+| `espelho_f43_f44_compliance_bm.sql` | F4.3/F4.4 | Tabela `compliance_rules` versionada (16 regras FIN/CRI/LGL) + RLS; contexto das edges `compliance-check` e `bm-monitor`. Seed resumido — enunciados completos só na migração do Supabase. |
