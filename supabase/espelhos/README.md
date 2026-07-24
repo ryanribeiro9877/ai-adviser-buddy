@@ -23,3 +23,4 @@ Supabase do projeto `gestão_marketing` (`gzjwnjdpxpbmdhcyefvs`), aplicadas via
 | `espelho_chat_tables_f31.sql` | F3.1 | Tabelas do chat "Operação" (`chat_conversations`, `chat_messages`) + RLS. |
 | `espelho_f3_anexos_audio.sql` | F3 | Coluna `chat_messages.attachments` (metadados de anexos multimodais + transcrição de áudio). |
 | `espelho_f33_actioncards.sql` | F3.3 | ActionCards — aditivo em `approval_requests` (conversation_id), `audit_log` imutável e função `decide_approval`. |
+| `espelho_f4_execucao_meta.sql` | F4.1/F4.2 | Execução real na Meta — `meta_execution_config` (flags 3 camadas + dry_run), `set_meta_execution_config`, colunas `executed_at`/`execution_result` + campanha cobaia de teste. |
