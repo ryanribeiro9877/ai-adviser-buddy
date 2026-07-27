@@ -13,6 +13,9 @@
 //       cada, incluindo 5 chamadas ao compliance-check (3-6s cada). O modelo nao tem
 //       nocao de orcamento. Ao estourar, cada tool_call recebe resposta declarando o teto -
 //       obrigatorio, porque a API exige uma resposta para CADA tool_call_id.
+//   (5) FALLBACK DE CACHE: se o provider rejeitar cache_control com 4xx, remove o campo,
+//       retenta e desativa o cache pelo resto do turno. Sem isso, um campo opcional nao
+//       aceito derrubaria TODO turno com 502, nao apenas os grandes.
 //   (4) Corte da lista bruta de criativos 11.500 -> 4.000 chars. Depois do dedupe do v19,
 //       legendas_unicas cobre o que compliance precisa; a lista peca-por-peca perdeu uso.
 // v19 - ORCAMENTO DE TEMPO (fim dos 504) + DIAGNOSTICO PERSISTIDO + DEDUPE DE LEGENDA:
@@ -571,14 +574,39 @@ Deno.serve(async (req) => {
     return Math.max(600, Math.min(MAX_TOKENS, est));
   }
 
-  async function chamar(comTools: boolean, maxTokens = MAX_TOKENS) {
-    const payload: any = { model: MODEL, messages, max_tokens: maxTokens };
+  // v20: fallback de cache. Nao esta confirmado que o OpenRouter aceita cache_control para
+  // o claude-sonnet-5. Se ele IGNORAR o campo, tudo funciona sem cache (inofensivo). Se
+  // REJEITAR com 4xx, sem este fallback a edge devolveria 502 em TODO turno - queda total
+  // do chat por um campo opcional. Aqui: na primeira rejeicao, remove cache_control,
+  // retenta, e desativa o cache pelo resto do turno para nao dobrar chamadas.
+  let cacheDesativado = false, cacheRejeitado = false;
+  function semCache(ms: any[]) {
+    return ms.map((m) => {
+      if (!Array.isArray(m.content)) return m;
+      return { ...m, content: m.content.map((b: any) => {
+        if (b && typeof b === "object" && "cache_control" in b) {
+          const { cache_control: _drop, ...resto } = b; return resto;
+        }
+        return b;
+      }) };
+    });
+  }
+
+  async function chamar(comTools: boolean, maxTokens = MAX_TOKENS): Promise<any> {
+    const usarCache = !cacheDesativado;
+    const payload: any = { model: MODEL, messages: usarCache ? messages : semCache(messages), max_tokens: maxTokens };
     if (comTools) { payload.tools = TOOLS; payload.tool_choice = "auto"; }
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` }, body: JSON.stringify(payload),
     });
     const text = await resp.text();
-    if (!resp.ok) return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };
+    if (!resp.ok) {
+      if (usarCache && (resp.status === 400 || resp.status === 422)) {
+        cacheDesativado = true; cacheRejeitado = true;
+        return await chamar(comTools, maxTokens);
+      }
+      return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };
+    }
     try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
   }
 
@@ -658,6 +686,7 @@ Deno.serve(async (req) => {
     deadline_tools: deadlineTools, preambulos_detectados: preambulos.length,
     preambulos_recuperados: preambulosUsados, tools: toolsUsed.map((t) => t.tool),
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
+    cache_rejeitado: cacheRejeitado,
     tokens_in: tokensIn, tokens_out: tokensOut, versao: "v20" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
@@ -670,6 +699,6 @@ Deno.serve(async (req) => {
     iteracoes_usadas: iteracoes, finish_reason: finishReason, fatos_memoria: (ctxRows ?? []).length,
     preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
     deadline_tools: deadlineTools, ms_total: decorrido(),
-    teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
+    teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead, cache_rejeitado: cacheRejeitado,
     tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas, action_cards: actionCards });
 });
