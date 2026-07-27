@@ -1,4 +1,19 @@
-// supabase/functions/traffic-chat/index.ts (v17)
+// supabase/functions/traffic-chat/index.ts (v18)
+// v18 - EXPOSICAO DAS RPCs DE CONTEUDO/ESTRUTURA + CORRECAO DO TEXTO DESCARTADO (27/07):
+//   (1) Duas tools novas: get_criativos_conteudo (legenda/titulo/CTA/imagem dos anuncios)
+//       e get_estrutura_conjuntos (CBO vs ABO, orcamento, lance, targeting). Os dados
+//       JA estavam no banco desde sempre - o que faltava era exposicao ao agente.
+//   (2) CORTE ESTRUTURADO POR BYTES (nao previsto no briefing original): as duas RPCs
+//       devolvem 19.900 / 27.504 / 61.844 bytes, ACIMA do slice(0,14000) aplicado a todo
+//       resultado de tool. Sem tratamento o modelo receberia JSON cortado no meio -
+//       falha silenciosa e violacao pratica de R1/R3. As funcoes agora cortam a LISTA
+//       preservando JSON valido e declarando exibidos/omitidos/aviso.
+//   (3) BUG DO TEXTO DESCARTADO corrigido: quando o modelo emitia texto JUNTO com
+//       tool_calls na mesma mensagem, o loop empilhava a msg e o texto nunca chegava a
+//       'reply'. Agora e acumulado em preambulos[] e emendado. Heuristica: so emenda
+//       texto substantivo (>=120 chars) para nao poluir com "vou consultar os dados";
+//       se 'reply' terminar vazio, emenda tudo como resgate. Contador exposto no retorno.
+//   (4) Regra de FORMATO: compliance pode ser auditado SEM pedir texto ao usuario.
 // v17 - AJUSTE CRITICO DE TEMPO (incidente 504 em 27/07):
 //   (1) MAX_TOKENS 10000 -> 6000. Motivo medido: a plataforma mata a requisicao em 150s
 //       (IDLE_TIMEOUT) e uma geracao de 10k tokens leva ~120s; somando as tool calls,
@@ -175,6 +190,45 @@ async function t_funil_credito(dias: number) {
   return data;
 }
 
+// v18: corte estruturado. Todo resultado de tool passa por slice(0,14000) antes de ir ao
+// modelo. get_criativos_conteudo devolve 19.900 bytes (somente ativas) ou 61.844 (todas) e
+// get_estrutura_conjuntos devolve 27.504 - todos acima do teto. Cortar bytes crus quebraria
+// o JSON no meio e o modelo receberia dado mutilado sem saber (falha silenciosa). Aqui a
+// LISTA e reduzida item a item preservando JSON valido, e o que ficou de fora e DECLARADO.
+const TETO_TOOL_JSON = 11500;
+function cortarLista(obj: Record<string, unknown>, campo: string, teto = TETO_TOOL_JSON) {
+  const lista = Array.isArray(obj[campo]) ? (obj[campo] as unknown[]) : null;
+  if (!lista) return obj;
+  const baseLen = JSON.stringify({ ...obj, [campo]: [] }).length;
+  const mantidos: unknown[] = [];
+  let usados = 0;
+  for (const item of lista) {
+    const tam = JSON.stringify(item).length + 1;
+    if (baseLen + usados + tam > teto) break;
+    mantidos.push(item);
+    usados += tam;
+  }
+  const omitidos = lista.length - mantidos.length;
+  const out: Record<string, unknown> = { ...obj, [campo]: mantidos, exibidos: mantidos.length };
+  if (omitidos > 0) {
+    out.omitidos = omitidos;
+    out.aviso_corte = `A lista '${campo}' foi truncada para caber no limite de payload: ${mantidos.length} de ${lista.length} itens enviados. Os ${omitidos} restantes EXISTEM no banco mas NAO foram enviados nesta chamada - nao os trate como inexistentes nem como zero. Se precisar deles, peca um recorte mais estreito.`;
+  }
+  return out;
+}
+async function t_criativos_conteudo(somenteAtivas: boolean) {
+  const { data, error } = await supa.rpc("get_criativos_conteudo", { p_somente_ativas: somenteAtivas });
+  if (error) return { erro: `falha ao ler conteudo dos criativos: ${error.message}` };
+  if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo" };
+  return { ...cortarLista(data as Record<string, unknown>, "criativos"), somente_campanhas_ativas: somenteAtivas };
+}
+async function t_estrutura_conjuntos() {
+  const { data, error } = await supa.rpc("get_estrutura_conjuntos");
+  if (error) return { erro: `falha ao ler estrutura dos conjuntos: ${error.message}` };
+  if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
+  return cortarLista(data as Record<string, unknown>, "conjuntos");
+}
+
 type CardInfo = { approval_id: string; action: string; entity_type: string; target_name: string; summary: string; params: any; status: string };
 async function t_propose_action(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[]) {
   const action = String(args?.action_type ?? "");
@@ -243,6 +297,8 @@ const TOOLS = [
   { type: "function", function: { name: "get_funil_credito", description: "CONVERSAO FINAL DO TRAFEGO (fonte: CRM/Dash da Legal + gasto Meta). Retorna leads, propostas, CONTRATOS PAGOS, volume financiado, ticket, CAC por contrato pago, cobertura de UTM POR MES e contratos pagos POR CAMPANHA e POR CRIATIVO (utm_content). Use para qualquer pergunta de receita, CAC, retorno, atribuicao ou 'o que realmente vende'. NAO retorna dado por banco: analise de banco/esteira esta fora do escopo.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard) para pausar/escalar criativo, pausar campanha ou alterar orcamento. NAO executa.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento"] }, target_name: { type: "string" }, justificativa: { type: "string" }, params: { type: "object" } }, required: ["action_type", "target_name", "justificativa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
+  { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado." } } } } },
+  { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS: CBO vs ABO (deduzido de onde esta o orcamento), orcamento diario/vitalicio, estrategia de lance (bid_strategy) e targeting (pais, faixa de idade, interesses). Use para perguntas de estrutura de conta, sobreposicao de publico e estrategia de lance. Traz resumo_orcamento agregado e limite_conhecido. NAO contem historico de ALTERACOES de orcamento (exigiria o endpoint /activities da Graph).", parameters: { type: "object", properties: {} } } },
 ];
 
 async function runTool(name: string, args: any, ctx: any) {
@@ -258,6 +314,8 @@ async function runTool(name: string, args: any, ctx: any) {
       case "get_funil_credito": return await t_funil_credito(Number(args?.dias ?? 90));
       case "propose_action": return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
+      case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true);
+      case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
       default: return { erro: `tool desconhecida: ${name}` };
     }
   } catch (e) { return { erro: String((e as any)?.message ?? e) }; }
@@ -301,7 +359,8 @@ Lead(LP) = clique no link. Formulario = form preenchido. Conversa = WhatsApp ini
 
 == FORMATO ==
 Denso e sem enfeite: destaque o numero que decide, tabela quando houver 3+ numeros comparaveis, R$ com 2 casas, datas DD/MM. Sem preambulo, sem repetir a pergunta, sem repetir a mesma ressalva em varios blocos.
-Em pedido amplo: rode 3-5 tools relevantes e responda bloco a bloco na ordem pedida. Para cada item indisponivel, UMA linha dizendo o que integrar. Escreva de forma continua ate acabar - se a mensagem for cortada por limite, o sistema emenda a continuacao automaticamente, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
+Em pedido amplo: rode 3-5 tools relevantes e responda bloco a bloco na ordem pedida. Para cada item indisponivel, UMA linha dizendo o que integrar.
+Compliance: voce NAO precisa pedir o texto do anuncio ao usuario. Pegue a legenda real com get_criativos_conteudo e passe para check_compliance. Se uma tool devolver 'omitidos'/'aviso_corte', diga quantos itens ficaram fora e nao conclua nada sobre eles. Escreva de forma continua ate acabar - se a mensagem for cortada por limite, o sistema emenda a continuacao automaticamente, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
 
 == MEMORIA INSTITUCIONAL (fatos verificados desta conta - considere sempre) ==
 ${memoria}`;
@@ -399,6 +458,8 @@ Deno.serve(async (req) => {
   const actionCards: CardInfo[] = [];
   const ctx = { companyId: company.id, convId: convId!, requestedBy: requestedBy!, cards: actionCards, imgAtts, mcpKey: cfg?.api_key ?? "" };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
+  // v18: buffer do texto emitido JUNTO com tool_calls, que antes era descartado.
+  const preambulos: string[] = [];
 
   async function chamar(comTools: boolean) {
     const payload: any = { model: MODEL, messages, max_tokens: MAX_TOKENS };
@@ -422,6 +483,10 @@ Deno.serve(async (req) => {
     const msg = parsed?.choices?.[0]?.message;
     if (!msg) return json({ error: "openrouter_empty" }, 502);
     if (msg.tool_calls?.length) {
+      // v18: o modelo pode emitir texto E tool_calls na MESMA mensagem. Antes esse texto
+      // entrava no historico enviado ao modelo mas nunca chegava ao usuario.
+      const parcial = String(msg.content ?? "").trim();
+      if (parcial) preambulos.push(parcial);
       messages.push(msg);
       for (const tc of msg.tool_calls) {
         let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
@@ -446,6 +511,19 @@ Deno.serve(async (req) => {
       reply = p?.choices?.[0]?.message?.content ?? "";
     }
   }
+  // v18: emenda o texto que vinha junto com tool_calls e era descartado.
+  // Heuristica deliberada: preambulo curto costuma ser ruido operacional ("vou consultar os
+  // dados"), que o proprio prompt ja proibe; texto de 120+ chars e analise real. Se 'reply'
+  // ficou vazio, emenda TUDO como resgate - melhor texto parcial que mensagem de erro.
+  let preambulosUsados = 0;
+  if (preambulos.length) {
+    const aproveitar = reply ? preambulos.filter((p) => p.length >= 120) : preambulos;
+    if (aproveitar.length) {
+      preambulosUsados = aproveitar.length;
+      const pre = aproveitar.join("\n\n").trim();
+      reply = reply ? pre + "\n\n" + reply : pre;
+    }
+  }
   if (!reply) reply = "Tive um problema para concluir a resposta. Reenvie em partes menores.";
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
@@ -455,5 +533,6 @@ Deno.serve(async (req) => {
 
   return json({ ok: true, conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
     iteracoes_usadas: iteracoes, finish_reason: finishReason, fatos_memoria: (ctxRows ?? []).length,
+    preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
     tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas, action_cards: actionCards });
 });
