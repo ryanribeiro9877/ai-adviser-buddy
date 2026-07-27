@@ -1,4 +1,25 @@
-// supabase/functions/traffic-chat/index.ts (v20)
+// supabase/functions/traffic-chat/index.ts (v21)
+// v21 - A CAUSA REAL DO FALLBACK: RACIOCINIO CONSUMINDO O ORCAMENTO DE SAIDA.
+//   Diagnostico medido em 27/07 (turnos v20 19:40, 19:42, 19:44): tokens_out entre 9.868 e
+//   10.262 e o texto entregue foi de 69 CARACTERES - a mensagem de fallback. E no turno que
+//   funcionou (18:29), dos 10.809 tokens_out so ~1.750 eram texto; ~9.000 foram raciocinio.
+//   O Sonnet 5 raciocina antes de escrever e max_tokens cobre RACIOCINIO + TEXTO. Com
+//   MAX_TOKENS=6000 o modelo gastava tudo pensando, batia finish_reason=length e devolvia
+//   content VAZIO. Os ms_total (127-137s) estavam DENTRO do teto: nunca foi timeout.
+//   Isso reinterpreta v17/v19/v20 - todas trataram tempo, que era sintoma. Pior: reduzir
+//   MAX_TOKENS de 10000 para 6000 no v17 cortou justamente a margem que sobrava p/ o texto.
+//   (1) reasoning limitado no loop (budget explicito) e DESLIGADO na sintese final: quando
+//       os dados ja foram coletados, a sintese precisa ESCREVER, nao pensar. Era exatamente
+//       ali que os 3 turnos morriam.
+//   (2) MAX_TOKENS 6000 -> 7000. Cabe porque o raciocinio capado reduz tokens gerados, e
+//       gerar menos tokens tambem reduz TEMPO.
+//   (3) FALLBACK NAO E MAIS MARCADO COMO 'length'. O front (6908ec9) via 'length', concluia
+//       truncamento e disparava a costura sobre a MENSAGEM DE ERRO - 3 vezes, 57-91k tokens
+//       cada. Uma pergunta gastou +200k tokens para produzir 3 avisos de erro.
+//   (4) TELEMETRIA: reasoning_tokens gravado no diagnostico, para confirmar ou refutar a
+//       hipotese acima com dado em vez de inferencia.
+//   (5) Degradacao em 2 passos se o provider recusar parametros: remove reasoning primeiro
+//       (novo, nao provado), cache depois (ja provado funcionando em 4 turnos v20).
 // v20 - REDUCAO DE CUSTO DE TOKENS + TETO DE FERRAMENTAS:
 //   (1) PROMPT CACHING (anthropic via openrouter, cache_control ephemeral) no system prompt
 //       e na pergunta do usuario. Medicao que motivou: o turno de 18:35 gastou 66.395
@@ -73,7 +94,16 @@ const MAX_ITER = 10;
 // v20: teto de ferramentas por turno. 14 tools medidas em 2 turnos consecutivos, com 5
 // chamadas ao compliance-check a 3-6s cada. Corta tempo e tokens ao mesmo tempo.
 const MAX_TOOLS_TURNO = 8;
-const MAX_TOKENS = 6000;
+const MAX_TOKENS = 7000;
+// v21: orcamento de raciocinio. max_tokens cobre raciocinio + texto; sem teto, o modelo
+// gastava os 6000 pensando e devolvia content vazio. 2000 preserva o protocolo de 5 passos
+// e as 10 regras anti-alucinacao (o agente PRECISA raciocinar) e deixa ~5000 para o texto.
+const REASONING_LOOP = { max_tokens: 2000 };
+// Na sintese final os dados ja estao coletados: e hora de escrever, nao de pensar.
+// ATENCAO: 'exclude: true' apenas OMITE o raciocinio da resposta - o modelo continua
+// gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
+// Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
+const REASONING_SINTESE = { enabled: false };
 const HIST = 24;
 // v19 - orcamento de tempo. Teto da plataforma = 150s (IDLE_TIMEOUT, nao configuravel).
 // Calibrado com os logs de 27/07: sucessos entre 38s e 102s; o de 149,5s passou por 492ms.
@@ -562,6 +592,10 @@ Deno.serve(async (req) => {
   // (prompt_tokens_details.cached_tokens) - porque nao esta confirmado qual o OpenRouter
   // repassa para o claude-sonnet-5. Se ambos vierem zerados, o caching NAO esta pegando.
   let cacheWrite = 0, cacheRead = 0, tetoTools = false;
+  function somarReasoning(usage: any) {
+    reasoningTokens += Number(usage?.completion_tokens_details?.reasoning_tokens ?? 0)
+      + Number(usage?.reasoning_tokens ?? 0);
+  }
   function somarCache(usage: any) {
     cacheWrite += Number(usage?.cache_creation_input_tokens ?? 0);
     cacheRead += Number(usage?.cache_read_input_tokens ?? 0)
@@ -580,6 +614,8 @@ Deno.serve(async (req) => {
   // do chat por um campo opcional. Aqui: na primeira rejeicao, remove cache_control,
   // retenta, e desativa o cache pelo resto do turno para nao dobrar chamadas.
   let cacheDesativado = false, cacheRejeitado = false;
+  // v21: flags de raciocinio e contador para telemetria.
+  let reasoningDesativado = false, reasoningRejeitado = false, reasoningTokens = 0;
   function semCache(ms: any[]) {
     return ms.map((m) => {
       if (!Array.isArray(m.content)) return m;
@@ -592,18 +628,28 @@ Deno.serve(async (req) => {
     });
   }
 
-  async function chamar(comTools: boolean, maxTokens = MAX_TOKENS): Promise<any> {
+  async function chamar(comTools: boolean, maxTokens = MAX_TOKENS, semRaciocinio = false): Promise<any> {
     const usarCache = !cacheDesativado;
     const payload: any = { model: MODEL, messages: usarCache ? messages : semCache(messages), max_tokens: maxTokens };
     if (comTools) { payload.tools = TOOLS; payload.tool_choice = "auto"; }
+    // v21: na sintese o raciocinio e excluido para que TODO o orcamento va para o texto.
+    if (!reasoningDesativado) payload.reasoning = semRaciocinio ? REASONING_SINTESE : REASONING_LOOP;
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` }, body: JSON.stringify(payload),
     });
     const text = await resp.text();
     if (!resp.ok) {
-      if (usarCache && (resp.status === 400 || resp.status === 422)) {
-        cacheDesativado = true; cacheRejeitado = true;
-        return await chamar(comTools, maxTokens);
+      // v21: degradacao em 2 passos. Tira o reasoning primeiro (parametro novo, nao provado)
+      // e so depois o cache (provado funcionando em 4 turnos v20 - nao vale perder de graca).
+      if (resp.status === 400 || resp.status === 422) {
+        if (!reasoningDesativado) {
+          reasoningDesativado = true; reasoningRejeitado = true;
+          return await chamar(comTools, maxTokens, semRaciocinio);
+        }
+        if (usarCache) {
+          cacheDesativado = true; cacheRejeitado = true;
+          return await chamar(comTools, maxTokens, semRaciocinio);
+        }
       }
       return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };
     }
@@ -621,7 +667,7 @@ Deno.serve(async (req) => {
     const parsed = r.parsed;
     tokensIn += Number(parsed?.usage?.prompt_tokens ?? 0);
     tokensOut += Number(parsed?.usage?.completion_tokens ?? 0);
-    somarCache(parsed?.usage);
+    somarCache(parsed?.usage); somarReasoning(parsed?.usage);
     finishReason = String(parsed?.choices?.[0]?.finish_reason ?? "");
     const msg = parsed?.choices?.[0]?.message;
     if (!msg) return json({ error: "openrouter_empty" }, 502);
@@ -657,12 +703,12 @@ Deno.serve(async (req) => {
     messages.push({ role: "user", content: deadlineTools
       ? "PARE de usar ferramentas: o tempo de coleta acabou. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes. Diga em UMA linha, no fim, quais itens do pedido nao foram cobertos por falta de tempo de coleta, para o usuario poder pedir so esses depois. Nao responda que nao conseguiu."
       : "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes, dizendo explicitamente o que nao esta disponivel. Nao responda que nao conseguiu." });
-    const rf = await chamar(false, tokensDisponiveis());
+    const rf = await chamar(false, tokensDisponiveis(), true);
     if (!rf.erro) {
       const p = rf.parsed;
       tokensIn += Number(p?.usage?.prompt_tokens ?? 0);
       tokensOut += Number(p?.usage?.completion_tokens ?? 0);
-      somarCache(p?.usage);
+      somarCache(p?.usage); somarReasoning(p?.usage);
       finishReason = String(p?.choices?.[0]?.finish_reason ?? finishReason) + "+sintese_final";
       reply = p?.choices?.[0]?.message?.content ?? "";
     }
@@ -680,14 +726,22 @@ Deno.serve(async (req) => {
       reply = reply ? pre + "\n\n" + reply : pre;
     }
   }
-  if (!reply) reply = "Tive um problema para concluir a resposta. Reenvie em partes menores.";
+  // v21: o fallback NAO e uma resposta truncada. Marcar como 'length' fazia o front disparar
+  // a costura sobre a mensagem de erro - 3 vezes, 57-91k tokens cada.
+  let usouFallback = false;
+  if (!reply) {
+    reply = "Nao consegui produzir a resposta desta vez. Tente de novo, ou divida o pedido em partes menores.";
+    usouFallback = true;
+    finishReason = "erro_sem_conteudo";
+  }
 
   const diagnostico = { finish_reason: finishReason, iteracoes, ms_total: decorrido(),
     deadline_tools: deadlineTools, preambulos_detectados: preambulos.length,
     preambulos_recuperados: preambulosUsados, tools: toolsUsed.map((t) => t.tool),
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
-    cache_rejeitado: cacheRejeitado,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v20" };
+    cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
+    reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v21" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
@@ -700,5 +754,6 @@ Deno.serve(async (req) => {
     preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
     deadline_tools: deadlineTools, ms_total: decorrido(),
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead, cache_rejeitado: cacheRejeitado,
+    reasoning_rejeitado: reasoningRejeitado, reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
     tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas, action_cards: actionCards });
 });
