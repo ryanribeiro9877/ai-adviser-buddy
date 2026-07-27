@@ -1,0 +1,209 @@
+import { createClient } from "npm:@supabase/supabase-js@2";
+
+const db = createClient(
+  Deno.env.get("SUPABASE_URL")!,
+  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  { auth: { persistSession: false } },
+);
+
+const SERVER_INFO = { name: "gestao-marketing-mcp", version: "0.1.0" };
+const DEFAULT_PROTOCOL = "2025-06-18";
+
+const CORS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "authorization, x-mcp-key, content-type",
+};
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...CORS },
+  });
+}
+
+function toolText(data: unknown, isError = false) {
+  return {
+    content: [{ type: "text", text: typeof data === "string" ? data : JSON.stringify(data, null, 2) }],
+    isError,
+  };
+}
+
+async function checkAuth(req: Request): Promise<boolean> {
+  const auth = req.headers.get("authorization") ?? "";
+  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+  const provided = (req.headers.get("x-mcp-key") ?? bearer).trim();
+  if (!provided) return false;
+  const { data, error } = await db.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
+  if (error || !data) return false;
+  return provided === data.api_key;
+}
+
+function derive(r: Record<string, unknown>) {
+  const n = (v: unknown) => Number(v ?? 0);
+  const spend = n(r.spend), leads = n(r.leads), sales = n(r.sales),
+    revenue = n(r.revenue), clicks = n(r.clicks), impressions = n(r.impressions);
+  return {
+    cpl: leads ? +(spend / leads).toFixed(2) : null,
+    cpa: sales ? +(spend / sales).toFixed(2) : null,
+    roas: spend ? +(revenue / spend).toFixed(2) : null,
+    ctr: impressions ? +((clicks / impressions) * 100).toFixed(2) : null,
+  };
+}
+
+const sinceDate = (days: number) => new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+
+const TOOLS = [
+  { name: "list_companies", description: "Lista as empresas (clientes) cadastradas.", inputSchema: { type: "object", properties: {} } },
+  { name: "list_campaigns", description: "Lista campanhas com metricas atuais e derivadas (CPL, CPA, ROAS, CTR). Filtros opcionais por empresa e status.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, status: { type: "string" } } } },
+  { name: "get_campaign_timeseries", description: "Serie temporal diaria de metricas de UMA campanha (metric_snapshots). Base para tendencia e comparacao de periodo.", inputSchema: { type: "object", properties: { campaign_id: { type: "string" }, days: { type: "number" } }, required: ["campaign_id"] } },
+  { name: "get_portfolio_summary", description: "Resumo agregado do periodo (spend, leads, revenue + CPL/ROAS derivados) a partir dos snapshots.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, days: { type: "number" } } } },
+  { name: "list_alerts", description: "Lista alertas disparados. Por padrao apenas os nao resolvidos.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, only_unresolved: { type: "boolean" } } } },
+  { name: "list_alert_rules", description: "Lista as regras de alerta (thresholds) configuradas.", inputSchema: { type: "object", properties: { company_id: { type: "string" } } } },
+  { name: "list_approvals", description: "Lista solicitacoes de alteracao na fila de aprovacao. Por padrao as pendentes.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, status: { type: "string" } } } },
+  { name: "list_recommendations", description: "Lista recomendacoes de IA registradas.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, status: { type: "string" } } } },
+  { name: "list_integrations", description: "Lista integracoes de contas de anuncio e status de conexao (meta_ads, google_ads, ga4, gsc, gtm).", inputSchema: { type: "object", properties: { company_id: { type: "string" } } } },
+  { name: "create_approval_request", description: "PROPOE uma alteracao (campaign|budget|ad|audience|config). Entra na fila como pending. NADA e executado ate um humano aprovar no painel.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, entity_type: { type: "string", enum: ["campaign", "budget", "ad", "audience", "config"] }, action: { type: "string" }, summary: { type: "string" }, payload: { type: "object" } }, required: ["company_id", "entity_type", "action", "summary"] } },
+  { name: "create_alert_rule", description: "Cria uma regra de alerta com threshold (ex.: CPL > 50 na janela de 7 dias).", inputSchema: { type: "object", properties: { company_id: { type: "string" }, name: { type: "string" }, metric: { type: "string" }, comparator: { type: "string", enum: [">", "<", ">=", "<=", "pct_change_up", "pct_change_down"] }, threshold: { type: "number" }, window_days: { type: "number" }, severity: { type: "string", enum: ["low", "medium", "high", "critical"] } }, required: ["company_id", "name", "metric", "comparator", "threshold"] } },
+  { name: "resolve_alert", description: "Marca um alerta como resolvido.", inputSchema: { type: "object", properties: { alert_id: { type: "string" } }, required: ["alert_id"] } },
+  { name: "execute_change", description: "Executa na plataforma de anuncios (via Windsor) uma alteracao JA aprovada. AINDA NAO HABILITADO — stub proposital ate ter aprovacao humana + chave Windsor.", inputSchema: { type: "object", properties: { approval_id: { type: "string" } }, required: ["approval_id"] } },
+];
+
+// deno-lint-ignore no-explicit-any
+async function callTool(name: string, args: any) {
+  args = args ?? {};
+  try {
+    switch (name) {
+      case "list_companies": {
+        const { data, error } = await db.from("companies").select("id,name,industry,created_at").order("name");
+        return error ? toolText(error.message, true) : toolText(data);
+      }
+      case "list_campaigns": {
+        let q = db.from("campaigns").select("*");
+        if (args.company_id) q = q.eq("company_id", args.company_id);
+        if (args.status) q = q.eq("status", args.status);
+        const { data, error } = await q.order("spend", { ascending: false });
+        if (error) return toolText(error.message, true);
+        return toolText((data ?? []).map((c: Record<string, unknown>) => ({ ...c, derived: derive(c) })));
+      }
+      case "get_campaign_timeseries": {
+        const days = Number(args.days ?? 30);
+        const { data, error } = await db.from("metric_snapshots").select("*")
+          .eq("campaign_id", args.campaign_id).gte("snapshot_date", sinceDate(days)).order("snapshot_date");
+        if (error) return toolText(error.message, true);
+        return toolText({ days, rows: data, note: data && data.length ? undefined : "Sem snapshots ainda — a ingestao (pg_cron -> Windsor) precisa popular metric_snapshots." });
+      }
+      case "get_portfolio_summary": {
+        const days = Number(args.days ?? 7);
+        let q = db.from("metric_snapshots").select("spend,leads,sales,revenue,clicks,impressions").gte("snapshot_date", sinceDate(days));
+        if (args.company_id) q = q.eq("company_id", args.company_id);
+        const { data, error } = await q;
+        if (error) return toolText(error.message, true);
+        const totals = (data ?? []).reduce((a: Record<string, number>, r: Record<string, unknown>) => {
+          for (const k of ["spend", "leads", "sales", "revenue", "clicks", "impressions"]) a[k] = (a[k] ?? 0) + Number(r[k] ?? 0);
+          return a;
+        }, {});
+        return toolText({ window_days: days, totals, derived: derive(totals), note: data && data.length ? undefined : "Sem snapshots no periodo — ingestao pendente." });
+      }
+      case "list_alerts": {
+        let q = db.from("alerts").select("*");
+        if (args.company_id) q = q.eq("company_id", args.company_id);
+        if (args.only_unresolved !== false) q = q.eq("resolved", false);
+        const { data, error } = await q.order("created_at", { ascending: false });
+        return error ? toolText(error.message, true) : toolText(data);
+      }
+      case "list_alert_rules": {
+        let q = db.from("alert_rules").select("*");
+        if (args.company_id) q = q.eq("company_id", args.company_id);
+        const { data, error } = await q.order("created_at", { ascending: false });
+        return error ? toolText(error.message, true) : toolText(data);
+      }
+      case "list_approvals": {
+        let q = db.from("approval_requests").select("*").eq("status", args.status ?? "pending");
+        if (args.company_id) q = q.eq("company_id", args.company_id);
+        const { data, error } = await q.order("created_at", { ascending: false });
+        return error ? toolText(error.message, true) : toolText(data);
+      }
+      case "list_recommendations": {
+        let q = db.from("ai_recommendations").select("*");
+        if (args.company_id) q = q.eq("company_id", args.company_id);
+        if (args.status) q = q.eq("status", args.status);
+        const { data, error } = await q.order("created_at", { ascending: false });
+        return error ? toolText(error.message, true) : toolText(data);
+      }
+      case "list_integrations": {
+        let q = db.from("integrations").select("*");
+        if (args.company_id) q = q.eq("company_id", args.company_id);
+        const { data, error } = await q.order("provider");
+        return error ? toolText(error.message, true) : toolText(data);
+      }
+      case "create_approval_request": {
+        const { data, error } = await db.from("approval_requests").insert({
+          company_id: args.company_id, entity_type: args.entity_type, action: args.action,
+          summary: args.summary, payload: args.payload ?? {}, status: "pending",
+        }).select().single();
+        if (error) return toolText(error.message, true);
+        return toolText({ created: data, note: "Proposta registrada como pending. Um humano precisa aprovar no painel antes de qualquer execucao." });
+      }
+      case "create_alert_rule": {
+        const { data, error } = await db.from("alert_rules").insert({
+          company_id: args.company_id, name: args.name, metric: args.metric, comparator: args.comparator,
+          threshold: args.threshold, window_days: args.window_days ?? 1, severity: args.severity ?? "medium",
+        }).select().single();
+        return error ? toolText(error.message, true) : toolText({ created: data });
+      }
+      case "resolve_alert": {
+        const { data, error } = await db.from("alerts").update({ resolved: true }).eq("id", args.alert_id).select().single();
+        return error ? toolText(error.message, true) : toolText({ resolved: data });
+      }
+      case "execute_change":
+        return toolText("Execucao real via Windsor ainda NAO habilitada. Faltam: (1) approval_request 'approved' por um humano; (2) chave de API do Windsor como secret da edge function. Stub proposital ate o gate estar completo.", true);
+      default:
+        return toolText(`Tool desconhecida: ${name}`, true);
+    }
+  } catch (e) {
+    return toolText(`Erro interno na tool ${name}: ${String(e)}`, true);
+  }
+}
+
+// deno-lint-ignore no-explicit-any
+async function handleRpc(msg: any): Promise<any | null> {
+  const { id, method, params } = msg ?? {};
+  switch (method) {
+    case "initialize":
+      return { jsonrpc: "2.0", id, result: { protocolVersion: params?.protocolVersion ?? DEFAULT_PROTOCOL, capabilities: { tools: {} }, serverInfo: SERVER_INFO } };
+    case "notifications/initialized":
+    case "notifications/cancelled":
+      return null;
+    case "ping":
+      return { jsonrpc: "2.0", id, result: {} };
+    case "tools/list":
+      return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
+    case "tools/call":
+      return { jsonrpc: "2.0", id, result: await callTool(params?.name, params?.arguments) };
+    default:
+      return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } };
+  }
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method !== "POST") return json({ error: "Use POST (MCP JSON-RPC). SSE nao implementado neste servidor." }, 405);
+
+  if (!(await checkAuth(req))) {
+    return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized: chave MCP invalida ou ausente." } }, 401);
+  }
+
+  // deno-lint-ignore no-explicit-any
+  let body: any;
+  try { body = await req.json(); } catch { return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, 400); }
+
+  if (Array.isArray(body)) {
+    const out = [];
+    for (const m of body) { const r = await handleRpc(m); if (r) out.push(r); }
+    return json(out);
+  }
+  const r = await handleRpc(body);
+  if (r === null) return new Response(null, { status: 202, headers: CORS });
+  return json(r);
+});
