@@ -1,4 +1,35 @@
-// supabase/functions/traffic-chat/index.ts (v18)
+// supabase/functions/traffic-chat/index.ts (v20)
+// v20 - REDUCAO DE CUSTO DE TOKENS + TETO DE FERRAMENTAS:
+//   (1) PROMPT CACHING (anthropic via openrouter, cache_control ephemeral) no system prompt
+//       e na pergunta do usuario. Medicao que motivou: o turno de 18:35 gastou 66.395
+//       tokens de input em 3 rodadas, e quase todo o conteudo era IDENTICO entre elas
+//       (system 1.700 + memoria 1.900 + tools 1.300 + pergunta 2.500 tokens). Cache read
+//       custa 0,1x. NAO marcamos os tool results: mensagens role:"tool" nao aceitam blocos
+//       com cache_control de forma confiavel, e nao vale arriscar o protocolo. Economia
+//       esperada ~25-30% do input das rodadas 2+, nao os 65% de uma versao ideal.
+//   (2) TELEMETRIA DE CUSTO: cache_creation/cache_read gravados em chat_messages.diagnostico.
+//       Este projeto nao tinha nenhuma medicao de custo de LLM - agora tem.
+//   (3) TETO DE 8 FERRAMENTAS POR TURNO. Medido: 2 turnos consecutivos usaram 14 tools
+//       cada, incluindo 5 chamadas ao compliance-check (3-6s cada). O modelo nao tem
+//       nocao de orcamento. Ao estourar, cada tool_call recebe resposta declarando o teto -
+//       obrigatorio, porque a API exige uma resposta para CADA tool_call_id.
+//   (4) Corte da lista bruta de criativos 11.500 -> 4.000 chars. Depois do dedupe do v19,
+//       legendas_unicas cobre o que compliance precisa; a lista peca-por-peca perdeu uso.
+// v19 - ORCAMENTO DE TEMPO (fim dos 504) + DIAGNOSTICO PERSISTIDO + DEDUPE DE LEGENDA:
+//   (1) DEADLINE. Evidencia medida em 27/07: 5 respostas 504 em v21/v22/v23, todas com
+//       execution_time_ms entre 150.094 e 151.004 - e um 200 em 149.508ms, ou seja passou
+//       por 492ms. O sistema operava colado no teto de 150s e o resultado era sorteio.
+//       v13/v16/v17 tentaram resolver reduzindo tokens; nenhuma resolveu porque o custo
+//       real vem do NUMERO de rodadas de tool, nao do tamanho da geracao. Agora ha
+//       orcamento explicito: para de chamar tools em TOOLS_DEADLINE_MS e vai para a
+//       sintese, com max_tokens calculado pelo tempo que sobrou. Mesmo padrao que salvou
+//       o windsor-sync v15: garantir a entrega do que ja foi coletado.
+//   (2) DIAGNOSTICO PERSISTIDO em chat_messages.diagnostico (migracao
+//       add_chat_messages_diagnostico). Antes, preambulos_detectados/recuperados existiam
+//       so na resposta HTTP - instrumentacao que nao era observavel depois do instante.
+//   (3) DEDUPE DE LEGENDA em get_criativos_conteudo: campo novo legendas_unicas, calculado
+//       sobre a lista COMPLETA antes do corte. Resolve o audit retroativo de compliance,
+//       que antes ficava incompleto porque 13 de 32 criativos eram omitidos pelo corte.
 // v18 - EXPOSICAO DAS RPCs DE CONTEUDO/ESTRUTURA + CORRECAO DO TEXTO DESCARTADO (27/07):
 //   (1) Duas tools novas: get_criativos_conteudo (legenda/titulo/CTA/imagem dos anuncios)
 //       e get_estrutura_conjuntos (CBO vs ABO, orcamento, lance, targeting). Os dados
@@ -36,8 +67,20 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
 const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "anthropic/claude-sonnet-5").trim();
 const MAX_ITER = 10;
+// v20: teto de ferramentas por turno. 14 tools medidas em 2 turnos consecutivos, com 5
+// chamadas ao compliance-check a 3-6s cada. Corta tempo e tokens ao mesmo tempo.
+const MAX_TOOLS_TURNO = 8;
 const MAX_TOKENS = 6000;
 const HIST = 24;
+// v19 - orcamento de tempo. Teto da plataforma = 150s (IDLE_TIMEOUT, nao configuravel).
+// Calibrado com os logs de 27/07: sucessos entre 38s e 102s; o de 149,5s passou por 492ms.
+// TOOLS_DEADLINE: para de coletar aqui, deixando espaco para a sintese final.
+// HARD_LIMIT: teto proprio abaixo de 150s, com folga para gravar no banco.
+const TOOLS_DEADLINE_MS = 75_000;
+const HARD_LIMIT_MS = 143_000;
+const RESERVA_GRAVACAO_MS = 6_000;
+// Sonnet gera ~85 tok/s; usamos 60 para ser conservador.
+const TOKENS_POR_SEGUNDO = 60;
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
@@ -220,7 +263,39 @@ async function t_criativos_conteudo(somenteAtivas: boolean) {
   const { data, error } = await supa.rpc("get_criativos_conteudo", { p_somente_ativas: somenteAtivas });
   if (error) return { erro: `falha ao ler conteudo dos criativos: ${error.message}` };
   if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo" };
-  return { ...cortarLista(data as Record<string, unknown>, "criativos"), somente_campanhas_ativas: somenteAtivas };
+  const obj = data as Record<string, unknown>;
+  // v19: agrupa por legenda ANTES do corte. Varios anuncios compartilham o mesmo texto
+  // (variacoes do mesmo criativo), entao o conjunto de textos distintos e muito menor que
+  // a lista de pecas - e e o que compliance precisa. Isso torna a auditoria retroativa
+  // COMPLETA mesmo quando a lista de criativos vem truncada.
+  const lista = Array.isArray(obj.criativos) ? (obj.criativos as Record<string, unknown>[]) : [];
+  const grupos = new Map<string, Record<string, unknown>>();
+  for (const c of lista) {
+    const legenda = String(c.legenda ?? "").trim();
+    if (!legenda) continue;
+    const chave = norm(legenda).slice(0, 300);
+    const g = grupos.get(chave);
+    if (!g) {
+      grupos.set(chave, { legenda, titulo: c.titulo ?? null, cta: c.cta ?? null,
+        anuncios: 1, exemplos: [c.anuncio], gasto_total: Number(c.gasto_acumulado || 0),
+        formularios_total: Number(c.formularios || 0), alguma_em_campanha_ativa: c.campanha_ativa === true });
+    } else {
+      g.anuncios = Number(g.anuncios) + 1;
+      if ((g.exemplos as unknown[]).length < 3) (g.exemplos as unknown[]).push(c.anuncio);
+      g.gasto_total = Number(g.gasto_total) + Number(c.gasto_acumulado || 0);
+      g.formularios_total = Number(g.formularios_total) + Number(c.formularios || 0);
+      if (c.campanha_ativa === true) g.alguma_em_campanha_ativa = true;
+    }
+  }
+  const unicas = [...grupos.values()].sort((a, b) => Number(b.gasto_total) - Number(a.gasto_total));
+  // v20: lista bruta cortada em 4.000 (era 11.500). O dedupe do v19 tornou legendas_unicas
+  // a fonte util para compliance; a lista peca-por-peca serve so para contexto.
+  const cortado = cortarLista(obj, "criativos", 4000) as Record<string, unknown>;
+  const comUnicas = cortarLista({ ...cortado, legendas_unicas: unicas,
+    total_legendas_distintas: unicas.length,
+    nota_legendas: "legendas_unicas cobre TODOS os criativos coletados, inclusive os omitidos da lista 'criativos'. Use esta lista para auditoria de compliance completa: cada texto distinto precisa ser checado uma vez, nao uma vez por anuncio.",
+  }, "legendas_unicas", 6500);
+  return { ...comUnicas, somente_campanhas_ativas: somenteAtivas };
 }
 async function t_estrutura_conjuntos() {
   const { data, error } = await supa.rpc("get_estrutura_conjuntos");
@@ -360,14 +435,17 @@ Lead(LP) = clique no link. Formulario = form preenchido. Conversa = WhatsApp ini
 == FORMATO ==
 Denso e sem enfeite: destaque o numero que decide, tabela quando houver 3+ numeros comparaveis, R$ com 2 casas, datas DD/MM. Sem preambulo, sem repetir a pergunta, sem repetir a mesma ressalva em varios blocos.
 Em pedido amplo: rode 3-5 tools relevantes e responda bloco a bloco na ordem pedida. Para cada item indisponivel, UMA linha dizendo o que integrar.
-Compliance: voce NAO precisa pedir o texto do anuncio ao usuario. Pegue a legenda real com get_criativos_conteudo e passe para check_compliance. Se uma tool devolver 'omitidos'/'aviso_corte', diga quantos itens ficaram fora e nao conclua nada sobre eles.
-Escreva de forma continua ate acabar - se a mensagem for cortada por limite, o sistema emenda a continuacao automaticamente, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
+Compliance: voce NAO precisa pedir o texto do anuncio ao usuario. Pegue a legenda real com get_criativos_conteudo e passe para check_compliance. Se uma tool devolver 'omitidos'/'aviso_corte', diga quantos itens ficaram fora e nao conclua nada sobre eles. Escreva de forma continua ate acabar - se a mensagem for cortada por limite, o sistema emenda a continuacao automaticamente, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
 
 == MEMORIA INSTITUCIONAL (fatos verificados desta conta - considere sempre) ==
 ${memoria}`;
 }
 
 Deno.serve(async (req) => {
+  // v19: cronometro comeca AQUI, nao depois dos anexos. Processar planilha/PDF grande
+  // consome segundos que precisam entrar no orcamento, senao o teto de 143s e estourado
+  // por fora e volta o 504.
+  const tInicio = Date.now();
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   if (!OPENROUTER_KEY) return json({ error: "missing_openrouter_key" }, 500);
@@ -453,17 +531,48 @@ Deno.serve(async (req) => {
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "user", content: msgText, user_id: userId, attachments: attMeta.length ? attMeta : null });
 
-  const messages: any[] = [{ role: "system", content: systemPrompt(company.name, memoria) }, ...history,
-    { role: "user", content: userContent.length === 1 ? msgText : userContent }];
+  // v20: prompt caching. cache_control marca o bloco como cacheavel; leituras subsequentes
+  // do MESMO prefixo custam 0,1x. O system (escopo+protocolo+regras+memoria, ~3.600 tokens)
+  // e a pergunta atual sao identicos em todas as rodadas do turno. TTL ~5min, e as rodadas
+  // ocorrem em segundos. Anthropic exige minimo ~1024 tokens por bloco: o system passa;
+  // a pergunta so e marcada se for texto simples e suficientemente longa.
+  const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria),
+    cache_control: { type: "ephemeral" } }];
+  const perguntaSimples = userContent.length === 1;
+  const perguntaCacheavel = perguntaSimples && msgText.length >= 4000;
+  const userMsgContent: any = perguntaCacheavel
+    ? [{ type: "text", text: msgText, cache_control: { type: "ephemeral" } }]
+    : (perguntaSimples ? msgText : userContent);
+  const messages: any[] = [{ role: "system", content: cacheSystem }, ...history,
+    { role: "user", content: userMsgContent }];
   const toolsUsed: any[] = [];
   const actionCards: CardInfo[] = [];
   const ctx = { companyId: company.id, convId: convId!, requestedBy: requestedBy!, cards: actionCards, imgAtts, mcpKey: cfg?.api_key ?? "" };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
-  // v18: buffer do texto emitido JUNTO com tool_calls, que antes era descartado.
+  // v19: buffer do texto emitido JUNTO com tool_calls, que antes era descartado.
   const preambulos: string[] = [];
+  // v19: orcamento dinamico de geracao (tInicio declarado no topo do handler).
+  const decorrido = () => Date.now() - tInicio;
+  let deadlineTools = false;
+  // v20: telemetria de custo. Capturamos os dois formatos possiveis - anthropic
+  // (cache_creation_input_tokens / cache_read_input_tokens) e openai
+  // (prompt_tokens_details.cached_tokens) - porque nao esta confirmado qual o OpenRouter
+  // repassa para o claude-sonnet-5. Se ambos vierem zerados, o caching NAO esta pegando.
+  let cacheWrite = 0, cacheRead = 0, tetoTools = false;
+  function somarCache(usage: any) {
+    cacheWrite += Number(usage?.cache_creation_input_tokens ?? 0);
+    cacheRead += Number(usage?.cache_read_input_tokens ?? 0)
+      + Number(usage?.prompt_tokens_details?.cached_tokens ?? 0);
+  }
+  function tokensDisponiveis() {
+    const restanteMs = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
+    if (restanteMs <= 0) return 600;
+    const est = Math.floor((restanteMs / 1000) * TOKENS_POR_SEGUNDO);
+    return Math.max(600, Math.min(MAX_TOKENS, est));
+  }
 
-  async function chamar(comTools: boolean) {
-    const payload: any = { model: MODEL, messages, max_tokens: MAX_TOKENS };
+  async function chamar(comTools: boolean, maxTokens = MAX_TOKENS) {
+    const payload: any = { model: MODEL, messages, max_tokens: maxTokens };
     if (comTools) { payload.tools = TOOLS; payload.tool_choice = "auto"; }
     const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` }, body: JSON.stringify(payload),
@@ -474,12 +583,17 @@ Deno.serve(async (req) => {
   }
 
   for (let iter = 0; iter < MAX_ITER; iter++) {
+    // v19: orcamento de tempo. Sem isso o loop podia consumir os 150s inteiros coletando
+    // dados e morrer antes de escrever - 504, perda total. Melhor resposta parcial
+    // declarada que nenhuma resposta.
+    if (iter > 0 && decorrido() > TOOLS_DEADLINE_MS) { deadlineTools = true; break; }
     iteracoes = iter + 1;
     const r = await chamar(true);
     if (r.erro) return json({ error: r.erro, detail: r.detalhe }, 502);
     const parsed = r.parsed;
     tokensIn += Number(parsed?.usage?.prompt_tokens ?? 0);
     tokensOut += Number(parsed?.usage?.completion_tokens ?? 0);
+    somarCache(parsed?.usage);
     finishReason = String(parsed?.choices?.[0]?.finish_reason ?? "");
     const msg = parsed?.choices?.[0]?.message;
     if (!msg) return json({ error: "openrouter_empty" }, 502);
@@ -490,6 +604,16 @@ Deno.serve(async (req) => {
       if (parcial) preambulos.push(parcial);
       messages.push(msg);
       for (const tc of msg.tool_calls) {
+        // v20: teto de ferramentas. A API exige resposta para CADA tool_call_id, entao nao
+        // e possivel simplesmente pular - devolvemos um resultado que DECLARA o teto, para
+        // o modelo nao tratar o dado como zero nem como inexistente (R3).
+        if (toolsUsed.length >= MAX_TOOLS_TURNO) {
+          tetoTools = true;
+          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
+            erro: "teto_de_ferramentas_do_turno",
+            aviso: `Limite de ${MAX_TOOLS_TURNO} ferramentas por turno atingido. Este dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao usuario, em uma linha, que este item precisa de uma pergunta separada.` }) });
+          continue;
+        }
         let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
         const result = await runTool(tc.function?.name, args, ctx);
         toolsUsed.push({ tool: tc.function?.name, args });
@@ -502,12 +626,15 @@ Deno.serve(async (req) => {
   }
 
   if (!reply) {
-    messages.push({ role: "user", content: "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes, dizendo explicitamente o que nao esta disponivel. Nao responda que nao conseguiu." });
-    const rf = await chamar(false);
+    messages.push({ role: "user", content: deadlineTools
+      ? "PARE de usar ferramentas: o tempo de coleta acabou. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes. Diga em UMA linha, no fim, quais itens do pedido nao foram cobertos por falta de tempo de coleta, para o usuario poder pedir so esses depois. Nao responda que nao conseguiu."
+      : "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes, dizendo explicitamente o que nao esta disponivel. Nao responda que nao conseguiu." });
+    const rf = await chamar(false, tokensDisponiveis());
     if (!rf.erro) {
       const p = rf.parsed;
       tokensIn += Number(p?.usage?.prompt_tokens ?? 0);
       tokensOut += Number(p?.usage?.completion_tokens ?? 0);
+      somarCache(p?.usage);
       finishReason = String(p?.choices?.[0]?.finish_reason ?? finishReason) + "+sintese_final";
       reply = p?.choices?.[0]?.message?.content ?? "";
     }
@@ -527,13 +654,22 @@ Deno.serve(async (req) => {
   }
   if (!reply) reply = "Tive um problema para concluir a resposta. Reenvie em partes menores.";
 
+  const diagnostico = { finish_reason: finishReason, iteracoes, ms_total: decorrido(),
+    deadline_tools: deadlineTools, preambulos_detectados: preambulos.length,
+    preambulos_recuperados: preambulosUsados, tools: toolsUsed.map((t) => t.tool),
+    teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v20" };
+
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
+    diagnostico,
     attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
 
   return json({ ok: true, conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
     iteracoes_usadas: iteracoes, finish_reason: finishReason, fatos_memoria: (ctxRows ?? []).length,
     preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
+    deadline_tools: deadlineTools, ms_total: decorrido(),
+    teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
     tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas, action_cards: actionCards });
 });
