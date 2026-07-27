@@ -62,7 +62,16 @@ type ChatReply = {
   conversation_id: string;
   reply: string;
   tools_used?: string[];
+  // "stop" = completa; começa com "length" = cortada pelo limite de tamanho.
+  finish_reason?: string;
 };
+
+// Costura de respostas longas no FRONT: cada requisição fica dentro dos 150s da
+// plataforma e o cliente emenda os pedaços. Texto exigido pelo briefing.
+const CONTINUE_PROMPT =
+  "Sua resposta anterior foi cortada pelo limite de tamanho. Continue EXATAMENTE do ponto onde parou, na próxima palavra ou linha. Não repita nada do que já escreveu, não reintroduza o assunto, não reescreva títulos já entregues, não cumprimente. Apenas continue até concluir.";
+const MAX_CONTINUATIONS = 3;
+const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 
 type PendingFile = {
   id: string;
@@ -144,6 +153,11 @@ export function OperacaoChat() {
     text: string;
     attachments: AttachmentMeta[];
   } | null>(null);
+  // Resposta em construção (com as emendas de continuação) e aviso de interrupção.
+  const [live, setLive] = useState<{ convId: string; text: string; continuing: number } | null>(
+    null,
+  );
+  const [interrupted, setInterrupted] = useState(false);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -237,7 +251,7 @@ export function OperacaoChat() {
   // Rola para o fim quando chegam mensagens ou durante o envio.
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages.data, showPending, sending, activeId]);
+  }, [messages.data, showPending, sending, activeId, live]);
 
   // --- Auto-grow do textarea ------------------------------------------------
   const autoGrow = () => {
@@ -351,6 +365,7 @@ export function OperacaoChat() {
     const convIdAtSend = activeId;
     const snapshot = attachments;
     setInput("");
+    setInterrupted(false);
     setPending({
       convId: convIdAtSend,
       text,
@@ -391,6 +406,31 @@ export function OperacaoChat() {
       }
 
       const convId = data!.conversation_id;
+      clearAttachments();
+
+      // Resposta longa: a edge corta em ~150s (limite da plataforma). Enquanto
+      // finish_reason começar com "length", pedimos a continuação na MESMA conversa
+      // e emendamos os pedaços aqui, mostrando uma resposta só que cresce na tela.
+      let acc = data!.reply ?? "";
+      let finish = data!.finish_reason;
+      if (isTruncated(finish)) setLive({ convId, text: acc, continuing: 0 });
+
+      for (let n = 1; n <= MAX_CONTINUATIONS && isTruncated(finish); n++) {
+        setLive({ convId, text: acc, continuing: n });
+        const { data: more, error: contErr } = await supabase.functions.invoke<ChatReply>(
+          "traffic-chat",
+          { body: { message: CONTINUE_PROMPT, conversation_id: convId, company: companyName } },
+        );
+        if (contErr || !more) {
+          // Nunca descarta o que já veio: o texto recebido já está gravado no banco.
+          setInterrupted(true);
+          break;
+        }
+        acc = `${acc}\n${more.reply ?? ""}`;
+        finish = more.finish_reason;
+        setLive({ convId, text: acc, continuing: n });
+      }
+
       qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
       qc.invalidateQueries({ queryKey: ["approvals"] });
       if (convIdAtSend) {
@@ -403,11 +443,12 @@ export function OperacaoChat() {
         setActiveId(convId);
       }
       setPending(null);
-      clearAttachments();
+      setLive(null); // as mensagens canônicas do banco assumem a partir daqui
     } catch {
       toast.error("Erro de conexão. Tente novamente.");
       setInput(text);
       setPending(null);
+      setLive(null);
     } finally {
       setSending(false);
     }
@@ -421,7 +462,41 @@ export function OperacaoChat() {
   };
 
   const conversations = convos.data ?? [];
-  const msgs = messages.data ?? [];
+
+  // O backend grava cada pedaço de uma resposta longa como uma mensagem assistant
+  // separada. Mescla visualmente as consecutivas em janela de 3 min numa bolha só,
+  // igual ao que o usuário viu enquanto a resposta era costurada.
+  const msgs = useMemo(() => {
+    const src = messages.data ?? [];
+    const out: Message[] = [];
+    for (const m of src) {
+      const prev = out[out.length - 1];
+      const near =
+        prev &&
+        prev.role === "assistant" &&
+        m.role === "assistant" &&
+        new Date(m.created_at).getTime() - new Date(prev.created_at).getTime() < 3 * 60 * 1000;
+      if (near) {
+        out[out.length - 1] = {
+          ...prev,
+          content: `${prev.content ?? ""}\n${m.content ?? ""}`,
+          tool_calls: [
+            ...(Array.isArray(prev.tool_calls) ? prev.tool_calls : []),
+            ...(Array.isArray(m.tool_calls) ? m.tool_calls : []),
+          ],
+          attachments: [
+            ...(Array.isArray(prev.attachments) ? prev.attachments : []),
+            ...(Array.isArray(m.attachments) ? m.attachments : []),
+          ],
+          model: m.model ?? prev.model,
+          created_at: m.created_at,
+        };
+      } else {
+        out.push(m);
+      }
+    }
+    return out;
+  }, [messages.data]);
 
   const ConversationList = ({ onPick }: { onPick?: () => void }) => (
     <div className="flex flex-col gap-1">
@@ -536,11 +611,37 @@ export function OperacaoChat() {
                 </div>
               )}
 
-              {sending && showPending && (
+              {/* Resposta longa sendo costurada: uma bolha só que cresce. */}
+              {live && (
+                <div className="flex gap-2">
+                  <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
+                    <Bot className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="rounded-lg bg-muted px-3 py-2">
+                      <Markdown>{live.text}</Markdown>
+                    </div>
+                    {live.continuing > 0 && (
+                      <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        continuando resposta… ({live.continuing}/{MAX_CONTINUATIONS})
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {sending && showPending && !live && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Bot className="h-4 w-4 text-primary" />
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   Analisando os dados…
+                </div>
+              )}
+
+              {interrupted && !sending && (
+                <div className="text-xs text-muted-foreground">
+                  A resposta foi interrompida. Peça “continue” para retomar.
                 </div>
               )}
             </div>
