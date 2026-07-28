@@ -1,4 +1,12 @@
-// supabase/functions/meta-actions/index.ts (v2) — F4.2 + criação
+// supabase/functions/meta-actions/index.ts (v3) — F4.2 + criação + ISOLAMENTO POR EMPRESA
+// v3 — A configuracao de execucao deixou de ser global. meta_execution_config era singleton
+//   (check constraint travava id=1) e a linha unica valia para TODAS as empresas: ligar
+//   master_enabled alcançaria as 8 campanhas da COHAPM sob a configuracao calibrada para a
+//   Legal e Viver. Agora existe uma linha por empresa, e o executor carrega a config pela
+//   company_id DO PROPRIO CARD, dentro do loop - nao mais uma vez no inicio.
+//   Empresa sem linha propria NAO executa nada (antes herdaria a config da Legal).
+//   Mesma classe do bug do contasOk[0] no traffic-chat: seguro por acidente com uma empresa,
+//   errado com duas.
 // v2 — ACOES DE CRIACAO. O v1 sabia MODIFICAR objeto existente (POST /{id}); criar e
 // diferente em quatro pontos que exigiram caminho proprio:
 //   (a) nao existe target_external_id: o alvo e a CONTA, e o v1 falhava sem esse campo;
@@ -150,15 +158,13 @@ Deno.serve(async (req) => {
   let body: any = {}; try { body = await req.json(); } catch { /* */ }
   const onlyId: string | null = body?.approval_id ?? null;
 
-  const { data: conf } = await supa.from("meta_execution_config").select("*").eq("id", 1).single();
-  if (!conf) return json({ error: "meta_execution_config ausente" }, 500);
-  const contasOk: string[] = (conf.contas_permitidas_criacao ?? []).map((x: string) => actId(x));
-  const tetoSanidade = Number(conf.teto_sanidade_orcamento_diario ?? 5000);
+  // v3: a config NAO e mais lida aqui. Cada card carrega a da sua propria empresa, dentro do
+  // loop - uma leitura global voltaria a aplicar a configuracao de uma empresa a outra.
 
   let q = supa.from("approval_requests").select("*").eq("status", "approved").is("executed_at", null);
   if (onlyId) q = q.eq("id", onlyId);
   const { data: fila } = await q.order("created_at", { ascending: true }).limit(10);
-  if (!fila?.length) return json({ ok: true, processados: 0, nota: "fila vazia (nenhum aprovado pendente de execução)", config: { master: conf.master_enabled, dry_run: conf.dry_run } });
+  if (!fila?.length) return json({ ok: true, processados: 0, nota: "fila vazia (nenhum aprovado pendente de execução)" });
 
   const { count: naHora } = await supa.from("audit_log")
     .select("id", { count: "exact", head: true })
@@ -172,6 +178,19 @@ Deno.serve(async (req) => {
     const alvoExt = String(r.payload?.target_external_id ?? "");
     const alvoNome = String(r.payload?.target_name ?? r.summary);
     const sistema = r.reviewed_by ?? r.requested_by;
+
+    // v3: config DA EMPRESA DESTE CARD. Sem linha propria, nada executa.
+    const { data: conf } = await supa.from("meta_execution_config")
+      .select("*").eq("company_id", r.company_id).maybeSingle();
+    if (!conf) {
+      await audit(r.company_id, sistema, "meta_action_blocked", r.id,
+        { motivo: "empresa sem configuracao de execucao propria", acao });
+      resultados.push({ id: r.id, acao, resultado: "bloqueado",
+        motivo: "empresa sem configuracao de execucao - nada e executado sem config propria" });
+      continue;
+    }
+    const contasOk: string[] = (conf.contas_permitidas_criacao ?? []).map((x: string) => actId(x));
+    const tetoSanidade = Number(conf.teto_sanidade_orcamento_diario ?? 5000);
     const flagsOk = conf.master_enabled === true && conf.action_flags?.[acao] === true;
     const rateOk = executadasNaHora < conf.max_actions_per_hour;
 
@@ -334,8 +353,7 @@ Deno.serve(async (req) => {
     resultados.push({ id: r.id, acao, alvo: alvoNome, resultado: sucesso ? "EXECUTADO" : "falha_meta", antes: (antes.body as any)?.status, depois: (depois.body as any)?.status });
   }
 
-  return json({ ok: true, modo: conf.dry_run ? "DRY-RUN" : "REAL", processados: resultados.length, resultados,
-    config: { master: conf.master_enabled, dry_run: conf.dry_run, flags: conf.action_flags,
-      max_por_hora: conf.max_actions_per_hour, contas_permitidas_criacao: contasOk,
-      teto_sanidade_orcamento: tetoSanidade } });
+  // v3: nao ha "modo" unico - cada card foi avaliado sob a config da sua empresa.
+  return json({ ok: true, processados: resultados.length, resultados,
+    nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); cada resultado acima foi avaliado sob a config da empresa do proprio card" });
 });
