@@ -1,4 +1,21 @@
-// supabase/functions/traffic-chat/index.ts (v24)
+// supabase/functions/traffic-chat/index.ts (v25)
+// v25 - ACOES DE CRIACAO (campanha / conjunto / anuncio), lado da PROPOSTA.
+//   Sete travas decididas com o Ryan, todas no CODIGO e nao no prompt:
+//     (1) tudo nasce PAUSED - o executor forca; o gestor ativa no Gerenciador
+//     (2) special_ad_categories=['CREDIT'] e FORCADO, nao e parametro
+//     (3) compliance e BLOQUEANTE: criar_anuncio roda a legenda do molde no compliance-check
+//         e RECUSA criar se houver violacao (hoje o compliance era so consultivo)
+//     (4) UTM gerada pelo CODIGO, nunca pelo modelo (cobertura de UTM e KPI)
+//     (5) orcamento nao tem teto fixo - e OBRIGATORIO pedir ao gestor a cada pedido; existe
+//         apenas um teto de sanidade contra erro de digitacao (centavos x reais)
+//     (6) so admin aprova (fluxo existente de decide_approval)
+//     (7) card expira em 24h (migracao add_expiracao_24h_approval_requests)
+//   DESENHO: conjunto e anuncio nao sao criados "do zero" - sao REPLICADOS de um molde que
+//   ja funciona. POST /act_X/adsets exige optimization_goal, billing_event, promoted_object,
+//   destination_type, targeting e attribution_spec; nada disso pode ser inventado de memoria
+//   sem criar objeto quebrado ou pior que o atual. O executor le o molde na Graph API e troca
+//   apenas nome, orcamento, destino e status.
+// v24 - BASE DE CONHECIMENTO CONSULTAVEL + CORRECAO DO BREAKDOWN EFFECT + REVERSA:
 // v24 - BASE DE CONHECIMENTO CONSULTAVEL + CORRECAO DO BREAKDOWN EFFECT + RECOMENDACAO COM REVERSA:
 //   (1) get_conhecimento(tema, secao) le a tabela agent_knowledge (12 temas, ~128 mil chars
 //       destilados do pacote de skills de 28/07). Progressive disclosure em DOIS niveis: o
@@ -182,6 +199,9 @@ const today = () => new Date().toISOString().slice(0, 10);
 const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const deacc = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
+// v25: slug para UTM. Gerado no CODIGO - a cobertura de UTM e KPI e nao pode depender de o
+// modelo lembrar de montar a string certa.
+const slug = (s: string) => deacc(String(s).toLowerCase()).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
 
 async function resolveCompany(name?: string): Promise<{ id: string; name: string } | null> {
   const { data } = await supa.from("companies").select("id,name");
@@ -447,6 +467,145 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   cards.push({ approval_id: ins.id, action, entity_type: entityType, target_name: alvo.name, summary, params, status: "pending" });
   return { ok: true, approval_id: ins.id, resumo: summary, aviso: "Pedido PENDENTE. Nada foi executado." };
 }
+// v25: proposta das acoes de CRIACAO. Separada de t_propose_action porque a semantica e
+// oposta: lá o alvo e o objeto a modificar; aqui o "alvo" e o MOLDE a replicar (ou, no caso
+// de campanha, o nome do objeto que vai nascer).
+const ACOES_CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"];
+
+async function t_propose_criacao(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[], mcpKey: string) {
+  const action = String(args?.action_type ?? "");
+  const nomeAlvo = String(args?.target_name ?? "").trim();
+  const justificativa = String(args?.justificativa ?? "").trim();
+  const reversa = String(args?.reversa ?? "").trim();
+  const sucesso = String(args?.metrica_sucesso ?? "").trim();
+  const params = args?.params ?? {};
+
+  if (!justificativa) return { erro: "justificativa obrigatoria (EVIDENCIA: por que criar isso, com numero e fonte)" };
+  if (!reversa) return { erro: "reversa obrigatoria: como desfazer (ex.: excluir o objeto criado, que nasce PAUSED e nao gasta), quem desfaz e em quanto tempo" };
+  if (!sucesso) return { erro: "metrica_sucesso obrigatoria: qual metrica e limiar dizem que deu certo, no funil completo ate contrato pago" };
+
+  const { data: conf } = await supa.from("meta_execution_config")
+    .select("contas_permitidas_criacao,teto_sanidade_orcamento_diario").eq("id", 1).maybeSingle();
+  const contasOk: string[] = conf?.contas_permitidas_criacao ?? [];
+  const tetoSanidade = Number(conf?.teto_sanidade_orcamento_diario ?? 5000);
+  if (!contasOk.length) return { erro: "criacao bloqueada: nenhuma conta esta na lista de contas permitidas para criacao. Isso e configuracao do sistema, nao algo que voce possa contornar." };
+
+  // -------- criar_campanha: nao ha molde; o nome informado e o da campanha que vai nascer --------
+  if (action === "criar_campanha") {
+    if (!nomeAlvo) return { erro: "target_name deve ser o NOME da campanha a criar" };
+    const { data: existentes } = await supa.from("campaigns").select("name").eq("company_id", companyId);
+    if ((existentes ?? []).some((c) => norm(c.name) === norm(nomeAlvo))) {
+      return { erro: `ja existe uma campanha chamada '${nomeAlvo}'. Escolha outro nome ou proponha usar a existente.` };
+    }
+    const objetivo = String(params?.objetivo ?? "OUTCOME_LEADS").trim().toUpperCase();
+    const summary = `Criar campanha "${nomeAlvo}" (objetivo ${objetivo}) - nasce PAUSADA, categoria especial de credito obrigatoria`;
+    return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
+      nome_novo: nomeAlvo, objetivo, conta_destino: contasOk[0],
+      special_ad_categories: ["CREDIT"], status_inicial: "PAUSED",
+      justificativa, reversa, metrica_sucesso: sucesso,
+      janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
+      risco: String(args?.risco ?? "").trim() || null,
+    }, cards);
+  }
+
+  // -------- criar_conjunto_a_partir_de --------
+  if (action === "criar_conjunto_a_partir_de") {
+    const nomeNovo = String(params?.nome_novo ?? "").trim();
+    const campanhaDestino = String(params?.campanha_destino ?? "").trim();
+    const orcamento = Number(params?.orcamento_diario_reais ?? 0);
+    if (!nomeAlvo) return { erro: "target_name deve ser o nome do CONJUNTO MOLDE a replicar (um que ja funciona)" };
+    if (!nomeNovo) return { erro: "params.nome_novo obrigatorio (nome do conjunto que vai nascer)" };
+    if (!campanhaDestino) return { erro: "params.campanha_destino obrigatorio (nome da campanha que vai receber o conjunto)" };
+    if (!(orcamento > 0)) return { erro: "params.orcamento_diario_reais obrigatorio. NAO existe valor padrao: PERGUNTE ao gestor qual orcamento diario ele quer para este conjunto antes de propor." };
+    if (orcamento > tetoSanidade) return { erro: `orcamento de R$ ${orcamento} acima do teto de sanidade (R$ ${tetoSanidade}/dia). Confirme o valor com o gestor - atencao a confusao entre reais e centavos.` };
+
+    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,account_id").eq("company_id", companyId);
+    const molde = (sets ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
+    if (!molde) return { erro: `conjunto molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato ao gestor.` };
+    if (molde.account_id && !contasOk.includes(String(molde.account_id)) && !contasOk.includes(`act_${molde.account_id}`)) {
+      return { erro: `o conjunto molde pertence a conta ${molde.account_id}, que nao esta na lista de contas permitidas para criacao.` };
+    }
+    const { data: camps } = await supa.from("campaigns").select("id,name,external_id").eq("company_id", companyId);
+    const dest = (camps ?? []).find((c) => norm(c.name) === norm(campanhaDestino)) ?? (camps ?? []).filter((c) => norm(c.name).includes(norm(campanhaDestino)))[0];
+    if (!dest) return { erro: `campanha de destino '${campanhaDestino}' nao encontrada. Se ela ainda nao existe, proponha criar_campanha primeiro e aguarde a aprovacao.` };
+
+    const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO`;
+    return await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
+      nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
+      campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
+      orcamento_diario_reais: orcamento, conta_destino: contasOk[0], status_inicial: "PAUSED",
+      justificativa, reversa, metrica_sucesso: sucesso,
+      janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
+      risco: String(args?.risco ?? "").trim() || null,
+    }, cards);
+  }
+
+  // -------- criar_anuncio_a_partir_de (compliance BLOQUEANTE) --------
+  if (action === "criar_anuncio_a_partir_de") {
+    const nomeNovo = String(params?.nome_novo ?? "").trim();
+    const conjuntoDestino = String(params?.conjunto_destino ?? "").trim();
+    const utmCampaign = String(params?.utm_campaign ?? "").trim();
+    if (!nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar" };
+    if (!nomeNovo) return { erro: "params.nome_novo obrigatorio (nome do anuncio que vai nascer)" };
+    if (!conjuntoDestino) return { erro: "params.conjunto_destino obrigatorio (conjunto que vai receber o anuncio)" };
+    if (!utmCampaign) return { erro: "params.utm_campaign obrigatorio: e o valor que aparece no Dash como identificacao da campanha (ex.: AGOSTO26). Pergunte ao gestor se nao souber." };
+
+    const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id").eq("company_id", companyId);
+    const molde = (anuncios ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
+    if (!molde) return { erro: `anuncio molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato.` };
+    if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel replicar sem upload de midia, que nao esta implementado.` };
+
+    // v25 TRAVA 3: compliance BLOQUEANTE. A legenda do molde e submetida antes de propor.
+    const legenda = String(molde.body ?? "").trim();
+    if (!legenda) return { erro: `o anuncio molde '${molde.name}' nao tem legenda sincronizada; sem ela nao e possivel validar compliance, e criar anuncio financeiro sem essa validacao nao e permitido.` };
+    const comp: any = await t_check_compliance(legenda, [], mcpKey);
+    const vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
+    if (!vereditoOk) {
+      return { erro: "compliance_bloqueou_a_criacao",
+        detalhe: "A legenda do anuncio molde nao passou na validacao de compliance, entao a criacao NAO foi proposta. Relate ao gestor o veredito e as violacoes encontradas e sugira ajustar o texto antes de replicar.",
+        veredito_compliance: comp };
+    }
+
+    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id").eq("company_id", companyId);
+    const dest = (sets ?? []).find((x) => norm(x.name) === norm(conjuntoDestino)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(conjuntoDestino)))[0];
+    if (!dest) return { erro: `conjunto de destino '${conjuntoDestino}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro.` };
+
+    // v25 TRAVA 4: UTM montada aqui, no codigo. {{site_source_name}} e macro da Meta e resolve
+    // para fb/ig automaticamente - melhor que fixar um dos dois.
+    const urlTags = `utm_source={{site_source_name}}&utm_medium=paid&utm_campaign=${slug(utmCampaign)}&utm_content=${slug(nomeNovo)}`;
+
+    const summary = `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce PAUSADO`;
+    return await gravarCard(companyId, convId, requestedBy, action, "ad", molde.id, summary, {
+      nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
+      creative_id: molde.creative_id, conjunto_destino_external_id: dest.external_id,
+      conjunto_destino_nome: dest.name, url_tags: urlTags, utm_campaign: slug(utmCampaign),
+      conta_destino: contasOk[0], status_inicial: "PAUSED",
+      compliance: { veredito: comp?.veredito ?? "aprovado", regras_aplicadas: comp?.regras_aplicadas ?? null, validado_em: new Date().toISOString() },
+      justificativa, reversa, metrica_sucesso: sucesso,
+      janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
+      risco: String(args?.risco ?? "").trim() || null,
+    }, cards);
+  }
+
+  return { erro: `acao de criacao desconhecida: ${action}` };
+}
+
+async function gravarCard(companyId: string, convId: string, requestedBy: string, action: string,
+    entityType: string, entityId: string | null, summary: string, payload: Record<string, unknown>, cards: CardInfo[]) {
+  const { data: ins, error: ie } = await supa.from("approval_requests").insert({
+    company_id: companyId, requested_by: requestedBy, conversation_id: convId,
+    entity_type: entityType, entity_id: entityId, action, summary,
+    payload: { ...payload, proposto_por: "traffic-chat" }, status: "pending",
+  }).select("id,expires_at").single();
+  if (ie) return { erro: `falha ao criar pedido: ${ie.message}` };
+  await supa.from("audit_log").insert({ company_id: companyId, user_id: requestedBy, action: "approval_created",
+    target_type: "approval_request", target_id: ins.id,
+    details: { acao: action, resumo: summary, payload, origem: "edge:traffic-chat" } });
+  cards.push({ approval_id: ins.id, action, entity_type: entityType, target_name: String(payload.nome_novo ?? ""), summary, params: payload, status: "pending" });
+  return { ok: true, approval_id: ins.id, resumo: summary, expira_em: ins.expires_at,
+    aviso: "Pedido PENDENTE. Nada foi criado na Meta ainda. Ao ser aprovado por um administrador, o objeto nasce PAUSADO e precisa ser ativado manualmente no Gerenciador. O pedido expira em 24h se nao for decidido." };
+}
+
 async function t_check_compliance(legenda: string, imgAtts: { mime: string; b64: string }[], mcpKey: string) {
   const img = imgAtts[0];
   if (!legenda && !img) return { erro: "forneca a legenda e/ou anexe o criativo" };
@@ -467,7 +626,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_ads_ranking", description: "RECORTE de criativos por custo MEDIO de midia numa janela de dias. ATENCAO - este e um recorte (breakdown) e serve para ENTENDER, nunca para PRESCREVER: a Meta aloca verba por custo MARGINAL (do proximo resultado), entao um criativo com media mais alta pode estar segurando o custo total. E PROIBIDO propor pausar ou reduzir um criativo com base apenas nesta ordenacao; prescricao exige teste isolado ou tendencia temporal. Para decidir escala ou corte, cruze com get_funil_credito (contrato pago por criativo) e consulte get_conhecimento(tema=otimizacao).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "CONVERSAO FINAL DO TRAFEGO (fonte: CRM/Dash da Legal + gasto Meta). Retorna leads, propostas, CONTRATOS PAGOS, volume financiado, ticket, CAC por contrato pago, cobertura de UTM POR MES e contratos pagos POR CAMPANHA e POR CRIATIVO (utm_content). Use para qualquer pergunta de receita, CAC, retorno, atribuicao ou 'o que realmente vende'. NAO retorna dado por banco: analise de banco/esteira esta fora do escopo.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard) para pausar/escalar criativo, pausar campanha ou alterar orcamento. NAO executa - o card fica PENDENTE e expira em 24h se nao for decidido. Exige o formato completo de recomendacao: evidencia, metrica de sucesso e plano de REVERSA sao obrigatorios. Nunca proponha pausa baseada apenas em custo medio de recorte (veja a descricao de get_ads_ranking).", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.conjunto_destino e params.utm_campaign OBRIGATORIOS). Tudo que e criado nasce PAUSADO, com categoria especial de credito, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha)" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
@@ -576,7 +735,11 @@ async function runTool(name: string, args: any, ctx: any) {
       case "get_ads_ranking": return await t_ads_ranking(ctx.companyId, Number(args?.days ?? 7));
       case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
       case "get_funil_credito": return await t_funil_credito(Number(args?.dias ?? 90));
-      case "propose_action": return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "propose_action": {
+        const at = String(args?.action_type ?? "");
+        if (ACOES_CRIACAO.includes(at)) return await t_propose_criacao(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey);
+        return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      }
       case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
       case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true);
       case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
@@ -619,6 +782,18 @@ R10. Ao repassar dados de uma tool que traz campo 'avisos' ou 'nota', incorpore 
 - Va da metrica para a decisao: diga o que fazer, com qual numero, e qual o risco.
 - Prefira a explicacao mais simples e verificavel. Antes de teoria elaborada: a campanha esta ativa? teve entrega? o dado chegou?
 - "nao sei" e melhor que numero inventado; "provavel, porque X" e melhor que afirmacao seca.
+
+== CRIAR CAMPANHA, CONJUNTO E ANUNCIO ==
+Voce pode PROPOR criacao, nunca executar. A ordem e uma escada e cada degrau exige o anterior
+aprovado: campanha -> conjunto -> anuncio. Conjunto e anuncio sao REPLICADOS de um molde que
+ja funciona (voce informa o nome do molde), porque configuracao de conjunto nao pode ser
+inventada. Tudo nasce PAUSADO: o gestor ativa no Gerenciador depois de revisar.
+ORCAMENTO: nao existe valor padrao. Se o gestor nao disse quanto quer gastar por dia, PERGUNTE
+antes de propor - nunca escolha um numero por conta propria.
+UTM: nao escreva a string de UTM; o sistema monta. Voce so precisa do identificador que o
+gestor quer ver no Dash (ex.: AGOSTO26), em params.utm_campaign.
+Se a legenda do molde reprovar em compliance, a criacao e recusada automaticamente - relate o
+veredito ao gestor e sugira ajuste de texto, sem tentar contornar.
 
 == BASE DE CONHECIMENTO CONSULTAVEL (get_conhecimento) ==
 Voce tem uma base tecnica propria. Consulte-a com get_conhecimento(tema) SEMPRE que a pergunta
@@ -944,7 +1119,7 @@ Deno.serve(async (req) => {
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v24" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v25" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
