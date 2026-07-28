@@ -1,4 +1,23 @@
-// supabase/functions/traffic-chat/index.ts (v22)
+// supabase/functions/traffic-chat/index.ts (v23)
+// v23 - CAPACIDADE ANALITICA + FORMATACAO EXTERNALIZADA + CONHECIMENTO DE PLATAFORMA:
+//   (1) RACIOCINIO 2000 -> 6000 e MAX_TOKENS 7000 -> 12000. O teto de 2000 foi escolhido no
+//       v21 por TEMPO, sem medir o custo em qualidade - e as respostas seguintes sairam
+//       superficiais. Antes do v21 o modelo usava ~9000 tokens de raciocinio; cortar 78% de
+//       uma vez foi excessivo. Cabe: o ultimo turno com 8 ferramentas levou 102s de 143s.
+//   (2) TETO DE FERRAMENTAS 8 -> 12 (todas), com LIMITE POR FERRAMENTA. O que estourava o
+//       tempo nao era variedade: era repeticao - 5 chamadas de check_compliance a 3-6s cada
+//       num turno de 14 execucoes. Agora o teto global cobre as 12 disponiveis e a repeticao
+//       da mesma ferramenta e limitada individualmente. Deixa de cortar consulta legitima.
+//   (3) FORMATACAO SAI DO PROMPT e vem da tabela agent_style (12 regras, editaveis por SQL
+//       sem redeploy). Pedido do Ryan de manter a formatacao em fonte externa: arquivo nao
+//       funciona (o agente nao tem sistema de arquivos nem RAG), tabela funciona e nao gasta
+//       chamada de ferramenta por resposta. Inclui emoji como SINAL de estado.
+//   (4) BLOCO DE CONHECIMENTO DE PLATAFORMA + separacao entre NUMERO e CONHECIMENTO. R1/R2
+//       exigiam ferramenta para tudo, entao o agente respondia "nao disponivel" a perguntas
+//       CONCEITUAIS (o que a Categoria Especial restringe, o que e fadiga de criativo) que
+//       qualquer gestor senior responde de cabeca. Numero da conta continua exigindo
+//       ferramenta; conhecimento de plataforma pode ser respondido, marcado como tal.
+// v22 - PRIORIZACAO DE FERRAMENTAS + FIM DO JARGAO INTERNO:
 // v22 - PRIORIZACAO DE FERRAMENTAS + FIM DO JARGAO INTERNO:
 //   (1) O teto de 8 ferramentas do v20 cortava por ordem de chegada (FIFO). Medido em 2
 //       rodadas consecutivas do questionario de auditoria: o bloco 7 (criativos, legendas,
@@ -105,12 +124,16 @@ const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "anthropic/claude-sonnet-5").
 const MAX_ITER = 10;
 // v20: teto de ferramentas por turno. 14 tools medidas em 2 turnos consecutivos, com 5
 // chamadas ao compliance-check a 3-6s cada. Corta tempo e tokens ao mesmo tempo.
-const MAX_TOOLS_TURNO = 8;
-const MAX_TOKENS = 7000;
+const MAX_TOOLS_TURNO = 12;
+// v23: o gargalo de tempo era REPETICAO, nao variedade. check_compliance custa 3-6s por
+// chamada e foi chamada 5x num unico turno. Limite por ferramenta resolve na origem.
+const MAX_POR_FERRAMENTA: Record<string, number> = { check_compliance: 3 };
+const MAX_POR_FERRAMENTA_DEFAULT = 2;
+const MAX_TOKENS = 12000;
 // v21: orcamento de raciocinio. max_tokens cobre raciocinio + texto; sem teto, o modelo
 // gastava os 6000 pensando e devolvia content vazio. 2000 preserva o protocolo de 5 passos
 // e as 10 regras anti-alucinacao (o agente PRECISA raciocinar) e deixa ~5000 para o texto.
-const REASONING_LOOP = { max_tokens: 2000 };
+const REASONING_LOOP = { max_tokens: 6000 };
 // Na sintese final os dados ja estao coletados: e hora de escrever, nao de pensar.
 // ATENCAO: 'exclude: true' apenas OMITE o raciocinio da resposta - o modelo continua
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
@@ -461,7 +484,7 @@ async function runTool(name: string, args: any, ctx: any) {
   } catch (e) { return { erro: String((e as any)?.message ?? e) }; }
 }
 
-function systemPrompt(companyName: string, memoria: string) {
+function systemPrompt(companyName: string, memoria: string, estilo: string) {
   return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
 
 == ESCOPO (limite rigido) ==
@@ -477,8 +500,9 @@ ESTA FORA DO SEU ESCOPO e voce NAO comenta, analisa nem recomenda: relacao com b
 5. RESPONDA com numero + fonte + ressalva. Se algo nao fecha, diga que nao fecha em vez de escolher a versao mais bonita.
 
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
-R1. Todo numero citado precisa ter vindo de uma tool nesta conversa. Se nao veio, escreva "nao disponivel" e diga qual fonte precisaria ser integrada. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade.
-R2. NUNCA afirme como funciona a configuracao ou o canal de captacao (formulario instantaneo, landing page, WhatsApp, CBO/ABO, categoria especial, publico, pixel) sem dado de tool que prove. Se nao tem tool, diga que precisa checar no Gerenciador.
+R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
+R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
+R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. A frase correta e: "conceitualmente funciona assim; confirmar como esta configurado aqui exige checar no Gerenciador".
 R3. Distinga tres coisas diferentes: (a) o dado e ZERO, (b) o dado NAO EXISTE no sistema, (c) o dado NAO FOI COLETADO no periodo (sync/cobertura). Nunca trate (b) ou (c) como (a).
 R4. PROIBIDO misturar janelas temporais no mesmo raciocinio ou funil. Se as fontes tem janelas diferentes, ou iguale as janelas ou declare explicitamente que a comparacao nao e valida.
 R5. Amostra pequena nao vira conclusao. Poucos resultados = hipotese, e diga o volume.
@@ -494,15 +518,23 @@ R10. Ao repassar dados de uma tool que traz campo 'avisos' ou 'nota', incorpore 
 - Prefira a explicacao mais simples e verificavel. Antes de teoria elaborada: a campanha esta ativa? teve entrega? o dado chegou?
 - "nao sei" e melhor que numero inventado; "provavel, porque X" e melhor que afirmacao seca.
 
+== CONHECIMENTO DE PLATAFORMA (use para responder pergunta conceitual, sem precisar de consulta) ==
+CATEGORIA ESPECIAL DE CREDITO: obrigatoria para anuncio de credito/financiamento. Proibe segmentar ou excluir por idade fora de 18-65, genero, CEP e raio geografico menor que 15 milhas, e bloqueia interesses e comportamentos considerados sensiveis; lookalike vira "publico especial" com restricao. Nao marcar quando devido, ou tentar contornar, expoe a conta a reprovacao, restricao de entrega e bloqueio de BM - e risco operacional, nao estrategia.
+PROMESSA ENGANOSA em credito: "aprovacao garantida", "credito sem analise", "dinheiro na hora", taxa apresentada como certa sem "sujeito a analise", uso de simbolo de instituicao financeira sem autorizacao, e senso de urgencia falso. O contrapeso correto e declarar sujeicao a analise de credito e margem.
+CBO vs ABO: no CBO o orcamento fica na campanha e a Meta distribui entre conjuntos; no ABO cada conjunto tem seu proprio orcamento. CBO acelera aprendizado e concentra entrega no conjunto que responde melhor; ABO da controle por publico e evita que um conjunto absorva tudo. Estrutura hibrida na mesma conta e comum, mas dificulta comparacao justa entre conjuntos.
+EVENTO DE OTIMIZACAO: a Meta entrega para quem tem propensao a gerar o EVENTO otimizado. Otimizar para formulario ou clique entrega volume barato de quem preenche facil; otimizar para evento profundo (proposta, contrato) entrega menos volume e mais propensao a comprar. Alimentar a Meta com sinal raso e a causa mais comum de "lead barato que nao vira venda".
+FADIGA DE CRIATIVO: frequencia crescente com CTR caindo e custo por resultado subindo no mesmo publico. Antes de trocar criativo, verificar se a queda nao e de entrega, orcamento ou sazonalidade.
+APRENDIZADO LIMITADO: conjunto que nao atinge o volume minimo de eventos na janela sai da fase de aprendizado sem estabilizar, e o custo oscila. Fracionar orcamento em muitos conjuntos e a causa tipica.
+ATRIBUICAO: a janela padrao atual e 7 dias de clique e 1 dia de visualizacao. Janela maior credita mais conversoes a Meta e infla o resultado aparente; janela menor subestima. Comparar periodos com janelas diferentes invalida a comparacao.
+
 == GLOSSARIO ==
 Lead(LP) = clique no link. Formulario = form preenchido. Conversa = WhatsApp iniciado (linha separada, nao etapa). Proposta / contrato pago = CRM, via get_funil_credito. volume_financiado = total do contrato, NAO comissao: nunca chame de lucro nem de ROAS.
 
-== FORMATO ==
-Denso e sem enfeite: destaque o numero que decide, tabela quando houver 3+ numeros comparaveis, R$ com 2 casas, datas DD/MM. Sem preambulo, sem repetir a pergunta, sem repetir a mesma ressalva em varios blocos.
-Em pedido amplo: rode 3-5 tools relevantes e responda bloco a bloco na ordem pedida. Para cada item indisponivel, UMA linha dizendo o que integrar.
-Compliance: voce NAO precisa pedir o texto do anuncio ao usuario. Pegue a legenda real com get_criativos_conteudo e passe para check_compliance. Se uma tool devolver 'omitidos'/'aviso_corte', diga quantos itens ficaram fora e nao conclua nada sobre eles.
-NUNCA exponha o funcionamento interno ao gestor: nao cite nome de ferramenta ou funcao (get_*, check_*), nem limite de chamadas, orcamento de ferramentas, iteracao, token ou versao. Se algo nao foi consultado, escreva em linguagem de negocio - por exemplo "nao consultei os criativos nesta rodada, posso trazer em seguida" - e nunca "bateu no limite de N ferramentas".
-Escreva de forma continua ate acabar - se a mensagem for cortada por limite, o sistema emenda a continuacao automaticamente, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
+== FORMATO E APRESENTACAO (regras vigentes, vindas da configuracao do sistema) ==
+Siga TODAS as regras abaixo na montagem da resposta. Elas definem como o gestor le seu texto.
+${estilo}
+
+Alem delas: em pedido amplo, consulte o que for necessario e responda bloco a bloco na ordem pedida. Compliance: voce NAO precisa pedir o texto do anuncio ao gestor - pegue a legenda real com get_criativos_conteudo e passe para check_compliance. Escreva de forma continua ate acabar; se a mensagem for cortada por tamanho, o sistema emenda sozinho, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
 
 == MEMORIA INSTITUCIONAL (fatos verificados desta conta - considere sempre) ==
 ${memoria}`;
@@ -537,6 +569,12 @@ Deno.serve(async (req) => {
 
   const { data: ctxRows } = await supa.from("agent_context")
     .select("categoria,fato,desde").eq("vigente", true).order("categoria");
+  // v23: regras de formatacao vindas da tabela, nao do codigo.
+  const { data: styleRows } = await supa.from("agent_style")
+    .select("secao,regra").eq("vigente", true).order("ordem");
+  const estilo = (styleRows ?? []).length
+    ? (styleRows ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n")
+    : "(sem regras cadastradas - use titulos markdown, tabela para numeros comparaveis e negrito so no numero que decide)";
   const memoria = (ctxRows ?? []).length
     ? (ctxRows ?? []).map((r: any) => `- [${String(r.categoria).toUpperCase()}${r.desde ? " " + String(r.desde) : ""}] ${r.fato}`).join("\n")
     : "(sem fatos registrados)";
@@ -603,7 +641,7 @@ Deno.serve(async (req) => {
   // e a pergunta atual sao identicos em todas as rodadas do turno. TTL ~5min, e as rodadas
   // ocorrem em segundos. Anthropic exige minimo ~1024 tokens por bloco: o system passa;
   // a pergunta so e marcada se for texto simples e suficientemente longa.
-  const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria),
+  const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria, estilo),
     cache_control: { type: "ephemeral" } }];
   const perguntaSimples = userContent.length === 1;
   const perguntaCacheavel = perguntaSimples && msgText.length >= 4000;
@@ -719,7 +757,10 @@ Deno.serve(async (req) => {
         // v20: teto de ferramentas. A API exige resposta para CADA tool_call_id, entao nao
         // e possivel simplesmente pular - devolvemos um resultado que DECLARA o teto, para
         // o modelo nao tratar o dado como zero nem como inexistente (R3).
-        if (toolsUsed.length >= MAX_TOOLS_TURNO) {
+        const nomeTc = String(tc.function?.name ?? "");
+        const jaUsou = toolsUsed.filter((t) => t.tool === nomeTc).length;
+        const limiteDesta = MAX_POR_FERRAMENTA[nomeTc] ?? MAX_POR_FERRAMENTA_DEFAULT;
+        if (toolsUsed.length >= MAX_TOOLS_TURNO || jaUsou >= limiteDesta) {
           tetoTools = true;
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
             erro: "consulta_nao_realizada_nesta_rodada",
