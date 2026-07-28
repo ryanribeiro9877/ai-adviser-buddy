@@ -47,3 +47,7 @@ Há dois tipos de arquivo aqui:
 | `20260728140410_add_conhecimento_breakdown_effect_e_gates.sql` | 28/07 | Memória institucional: breakdown effect, triagem antes de interpretar número, fase de aprendizado, formato obrigatório de recomendação e sazonalidade do consignado. |
 | `20260728142936_prepara_acoes_de_criacao_meta.sql` | 28/07 | Preparação das ações de criação — enum `adset`, flags novas (OFF), lista branca `contas_permitidas_criacao` e teto de sanidade de orçamento. |
 | `20260728144316_isola_agent_context_por_empresa.sql` | 28/07 | Isola a memória institucional por empresa — `agent_context.company_id` (NULL = fato universal) + reclassificação dos fatos existentes. |
+| `20260728194745_f55_alertas_tier_quality_waba.sql` | F5.5 | Monitor de tier/qualidade dos números WhatsApp — `evaluate_waba_tier_alerts` (SQL puro) + dedup. **Superado pelo fix `…194905`.** |
+| `20260728194905_f55_fix_cast_alert_severity.sql` | F5.5 | Fix: `alerts.severity` é enum — cast `::alert_severity` no INSERT. Versão vigente de `evaluate_waba_tier_alerts`. |
+| `20260728195029_f54_f55_relatorio_diario_secao_waba.sql` | F5.4/F5.5 | Seção WhatsApp no relatório diário (08:30 BRT) — `post_daily_report` com números por tier/qualidade e cobertura declarada. **Superado pelo fix `…195151`.** |
+| `20260728195151_f54_fix_relatorio_waba_cobertura_e_nome_template.sql` | F5.4 | Fix: exclui `phone_external_id = ''` da contagem de cobertura (ausência de dado ≠ zero) e busca o nome do template via join. Versão vigente de `post_daily_report`. |
