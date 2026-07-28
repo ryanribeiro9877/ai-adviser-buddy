@@ -1,4 +1,22 @@
-// supabase/functions/traffic-chat/index.ts (v23)
+// supabase/functions/traffic-chat/index.ts (v24)
+// v24 - BASE DE CONHECIMENTO CONSULTAVEL + CORRECAO DO BREAKDOWN EFFECT + RECOMENDACAO COM REVERSA:
+//   (1) get_conhecimento(tema, secao) le a tabela agent_knowledge (12 temas, ~128 mil chars
+//       destilados do pacote de skills de 28/07). Progressive disclosure em DOIS niveis: o
+//       INDICE de temas entra no prompt (barato, sempre); o CONTEUDO so e carregado quando
+//       pedido; e se o tema for grande demais para um payload, devolve o indice de SECOES e
+//       carrega uma secao por vez. Sem isso os 128 mil chars ficariam inertes no banco.
+//       PROTOCOLO DE EVOLUCAO: cada tema tem revalidar_ate. Vencido volta com aviso explicito
+//       de "nao confirmado" - conhecimento com prazo, nao afirmado como atual para sempre.
+//   (2) BREAKDOWN EFFECT na descricao de get_ads_ranking. Achado da leitura das skills: esta
+//       ferramenta ranqueia criativos por CUSTO MEDIO, e a acao pausar_criativo executaria
+//       "pausar o mais caro na media" - exatamente o erro no 1 de analise de midia, porque a
+//       Meta aloca por custo MARGINAL. Havia uma ferramenta produzindo o input do erro e uma
+//       acao capaz de executa-lo. A descricao agora declara que e recorte para ENTENDER e
+//       proibe usar como base unica de pausa.
+//   (3) propose_action passa a exigir REVERSA e METRICA DE SUCESSO. Regra do pacote:
+//       "recomendacao sem reversa definida nao sobe para aprovacao". Card sem plano de
+//       desfazer e risco operacional, nao proposta.
+// v23 - CAPACIDADE ANALITICA + FORMATACAO EXTERNALIZADA + CONHECIMENTO DE PLATAFORMA:
 // v23 - CAPACIDADE ANALITICA + FORMATACAO EXTERNALIZADA + CONHECIMENTO DE PLATAFORMA:
 //   (1) RACIOCINIO 2000 -> 6000 e MAX_TOKENS 7000 -> 12000. O teto de 2000 foi escolhido no
 //       v21 por TEMPO, sem medir o custo em qualidade - e as respostas seguintes sairam
@@ -381,7 +399,13 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   const VALID = ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento"];
   if (!VALID.includes(action)) return { erro: `action_type invalido; use: ${VALID.join(", ")}` };
   if (!targetLike) return { erro: "target_name obrigatorio" };
-  if (!justificativa) return { erro: "justificativa obrigatoria com numeros reais" };
+  if (!justificativa) return { erro: "justificativa obrigatoria com numeros reais (EVIDENCIA: metrica + nivel + janela + periodo)" };
+  // v24: regra do pacote de skills - "recomendacao sem reversa definida nao sobe para
+  // aprovacao". Card sem plano de desfazer e risco operacional, nao proposta.
+  const reversa = String(args?.reversa ?? "").trim();
+  const sucesso = String(args?.metrica_sucesso ?? "").trim();
+  if (!reversa) return { erro: "reversa obrigatoria: descreva COMO desfazer esta acao, QUEM desfaz e EM QUANTO TEMPO. Sem plano de reversao o pedido nao pode ser criado." };
+  if (!sucesso) return { erro: "metrica_sucesso obrigatoria: qual metrica e qual limiar dizem que deu certo, lida no funil COMPLETO (ate contrato pago), nao apenas no custo de midia." };
   if (action === "alterar_orcamento" && !(Number(params?.novo_orcamento_diario_reais) > 0)) return { erro: "informe params.novo_orcamento_diario_reais (> 0)" };
   const needle = norm(targetLike);
   const isAd = action === "pausar_criativo" || action === "escalar_criativo";
@@ -409,7 +433,12 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   const { data: ins, error: ie } = await supa.from("approval_requests").insert({
     company_id: companyId, requested_by: requestedBy, conversation_id: convId, entity_type: entityType,
     entity_id: alvo.id, action, summary,
-    payload: { ...params, target_name: alvo.name, target_external_id: alvo.external_id ?? null, justificativa, proposto_por: "traffic-chat" },
+    payload: { ...params, target_name: alvo.name, target_external_id: alvo.external_id ?? null,
+      justificativa, reversa, metrica_sucesso: sucesso,
+      janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
+      risco: String(args?.risco ?? "").trim() || null,
+      mecanismo: String(args?.mecanismo ?? "").trim() || null,
+      proposto_por: "traffic-chat" },
     status: "pending",
   }).select("id").single();
   if (ie) return { erro: `falha ao criar pedido: ${ie.message}` };
@@ -435,14 +464,84 @@ const TOOLS = [
   { type: "function", function: { name: "get_recommendations", description: "Recomendacoes pendentes da IA (regua = custo de midia, nao contrato pago).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_targets", description: "Metas e tetos de custo vigentes.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real (dias efetivamente com dado). Nao contem proposta/contrato.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
-  { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por custo de MIDIA numa janela de dias.", parameters: { type: "object", properties: { days: { type: "number" } } } } },
+  { type: "function", function: { name: "get_ads_ranking", description: "RECORTE de criativos por custo MEDIO de midia numa janela de dias. ATENCAO - este e um recorte (breakdown) e serve para ENTENDER, nunca para PRESCREVER: a Meta aloca verba por custo MARGINAL (do proximo resultado), entao um criativo com media mais alta pode estar segurando o custo total. E PROIBIDO propor pausar ou reduzir um criativo com base apenas nesta ordenacao; prescricao exige teste isolado ou tendencia temporal. Para decidir escala ou corte, cruze com get_funil_credito (contrato pago por criativo) e consulte get_conhecimento(tema=otimizacao).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "CONVERSAO FINAL DO TRAFEGO (fonte: CRM/Dash da Legal + gasto Meta). Retorna leads, propostas, CONTRATOS PAGOS, volume financiado, ticket, CAC por contrato pago, cobertura de UTM POR MES e contratos pagos POR CAMPANHA e POR CRIATIVO (utm_content). Use para qualquer pergunta de receita, CAC, retorno, atribuicao ou 'o que realmente vende'. NAO retorna dado por banco: analise de banco/esteira esta fora do escopo.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard) para pausar/escalar criativo, pausar campanha ou alterar orcamento. NAO executa.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento"] }, target_name: { type: "string" }, justificativa: { type: "string" }, params: { type: "object" } }, required: ["action_type", "target_name", "justificativa"] } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard) para pausar/escalar criativo, pausar campanha ou alterar orcamento. NAO executa - o card fica PENDENTE e expira em 24h se nao for decidido. Exige o formato completo de recomendacao: evidencia, metrica de sucesso e plano de REVERSA sao obrigatorios. Nunca proponha pausa baseada apenas em custo medio de recorte (veja a descricao de get_ads_ranking).", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado." } } } } },
+  { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
   { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS: CBO vs ABO (deduzido de onde esta o orcamento), orcamento diario/vitalicio, estrategia de lance (bid_strategy) e targeting (pais, faixa de idade, interesses). Use para perguntas de estrutura de conta, sobreposicao de publico e estrategia de lance. Traz resumo_orcamento agregado e limite_conhecido. NAO contem historico de ALTERACOES de orcamento (exigiria o endpoint /activities da Graph).", parameters: { type: "object", properties: {} } } },
 ];
+
+// v24: leitura da base de conhecimento com corte por SECAO. Um tema pode ter 31 mil chars
+// (formatos visuais), muito acima do teto de payload de uma ferramenta. Cortar markdown por
+// bytes destroi a estrutura, entao dividimos por titulo de nivel 2 e entregamos secao a
+// secao, declarando o indice do que ficou de fora.
+const TETO_CONHECIMENTO = 10000;
+function dividirSecoes(md: string): { titulo: string; corpo: string }[] {
+  const linhas = md.split("\n");
+  const out: { titulo: string; corpo: string }[] = [];
+  let tituloAtual = "(inicio)";
+  let buffer: string[] = [];
+  for (const l of linhas) {
+    if (/^##\s+/.test(l)) {
+      if (buffer.length) out.push({ titulo: tituloAtual, corpo: buffer.join("\n").trim() });
+      tituloAtual = l.replace(/^#+\s*/, "").trim();
+      buffer = [];
+    } else buffer.push(l);
+  }
+  if (buffer.length) out.push({ titulo: tituloAtual, corpo: buffer.join("\n").trim() });
+  return out.filter((s) => s.corpo.length > 0);
+}
+async function t_conhecimento(tema: string, secao?: string) {
+  if (!tema) return { erro: "informe o tema. Os temas disponiveis estao listados no seu contexto." };
+  const { data, error } = await supa.from("agent_knowledge")
+    .select("tema,descricao,conteudo,fonte,verificado_em,revalidar_ate")
+    .eq("vigente", true).eq("tema", tema.trim().toLowerCase()).maybeSingle();
+  if (error) return { erro: `falha ao ler conhecimento: ${error.message}` };
+  if (!data) return { erro: `tema '${tema}' nao encontrado. Use exatamente um dos temas listados no seu contexto.` };
+
+  // Protocolo de evolucao: conteudo vencido nao pode ser afirmado como atual.
+  const hoje = new Date().toISOString().slice(0, 10);
+  const vencido = data.revalidar_ate ? String(data.revalidar_ate) < hoje : false;
+  const meta: Record<string, unknown> = {
+    tema: data.tema, verificado_em: data.verificado_em, revalidar_ate: data.revalidar_ate,
+    fonte: data.fonte,
+  };
+  if (vencido) {
+    meta.aviso_validade = "Este conhecimento passou do prazo de revalidacao. Trate como NAO CONFIRMADO: pode citar como referencia, mas declare ao gestor que precisa ser reverificado na fonte oficial antes de virar decisao.";
+  }
+
+  const conteudo = String(data.conteudo ?? "");
+  const secoes = dividirSecoes(conteudo);
+
+  if (secao) {
+    const alvo = norm(secao);
+    const hit = secoes.find((x) => norm(x.titulo).includes(alvo));
+    if (!hit) return { ...meta, erro: `secao '${secao}' nao encontrada`, secoes_disponiveis: secoes.map((x) => x.titulo) };
+    return { ...meta, secao: hit.titulo, conteudo: hit.corpo.slice(0, TETO_CONHECIMENTO) };
+  }
+
+  if (conteudo.length <= TETO_CONHECIMENTO) return { ...meta, conteudo };
+
+  // Grande demais: entrega o que couber e o indice do restante.
+  const entregues: string[] = [];
+  let usados = 0;
+  for (const sx of secoes) {
+    const bloco = `## ${sx.titulo}\n${sx.corpo}`;
+    if (usados + bloco.length > TETO_CONHECIMENTO) break;
+    entregues.push(bloco); usados += bloco.length;
+  }
+  const nEntregues = entregues.length;
+  return { ...meta,
+    conteudo: entregues.join("\n\n"),
+    secoes_entregues: secoes.slice(0, nEntregues).map((x) => x.titulo),
+    secoes_nao_entregues: secoes.slice(nEntregues).map((x) => x.titulo),
+    instrucao: nEntregues < secoes.length
+      ? "Este tema e extenso e veio parcial. As secoes listadas em secoes_nao_entregues EXISTEM - para le-las, chame de novo informando o parametro 'secao'. Nao conclua que o assunto nao esta coberto."
+      : undefined };
+}
 
 // v22: prioridade de ferramentas dentro de um mesmo lote. O teto por turno e necessario
 // (14 tools/turno estouravam tempo e tokens), mas cortar por ordem de chegada fazia o
@@ -453,13 +552,15 @@ function prioridadeTool(nome: string, pedido: string): number {
   const pedeCriativo = /criativ|legenda|compliance|anuncio|peca|texto|copy|oferta/.test(p);
   const pedeReceita = /receita|contrato|cac|retorno|vende|vendas|funil|proposta|lucro/.test(p);
   const pedeEstrutura = /cbo|abo|conjunto|estrutura|publico|targeting|lance|orcamento/.test(p);
+  const pedeConhecimento = /como funciona|por que|explique|conceito|politica|regra da meta|categoria especial|hook|formato|fadiga|aprendizado|learning|breakdown|metrica|historic|sazonal|sugira|briefing/.test(p);
+  if (pedeConhecimento && nome === "get_conhecimento") return 0;
   if (pedeCriativo && (nome === "get_criativos_conteudo" || nome === "check_compliance")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
   const base: Record<string, number> = {
     propose_action: 1, get_overview: 2, get_funil_credito: 3, get_alerts: 4,
     get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
-    get_estrutura_conjuntos: 9, get_targets: 10, get_recommendations: 11,
+    get_estrutura_conjuntos: 9, get_conhecimento: 9, get_targets: 10, get_recommendations: 11,
   };
   return base[nome] ?? 12;
 }
@@ -479,12 +580,13 @@ async function runTool(name: string, args: any, ctx: any) {
       case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
       case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true);
       case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
+      case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       default: return { erro: `tool desconhecida: ${name}` };
     }
   } catch (e) { return { erro: String((e as any)?.message ?? e) }; }
 }
 
-function systemPrompt(companyName: string, memoria: string, estilo: string) {
+function systemPrompt(companyName: string, memoria: string, estilo: string, indiceConhecimento: string) {
   return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
 
 == ESCOPO (limite rigido) ==
@@ -518,7 +620,17 @@ R10. Ao repassar dados de uma tool que traz campo 'avisos' ou 'nota', incorpore 
 - Prefira a explicacao mais simples e verificavel. Antes de teoria elaborada: a campanha esta ativa? teve entrega? o dado chegou?
 - "nao sei" e melhor que numero inventado; "provavel, porque X" e melhor que afirmacao seca.
 
-== CONHECIMENTO DE PLATAFORMA (use para responder pergunta conceitual, sem precisar de consulta) ==
+== BASE DE CONHECIMENTO CONSULTAVEL (get_conhecimento) ==
+Voce tem uma base tecnica propria. Consulte-a com get_conhecimento(tema) SEMPRE que a pergunta
+for conceitual, de politica da Meta, de definicao de metrica, de metodo de diagnostico, ou
+quando for propor/auditar criativo. Nao responda de memoria sobre politica ou metrica quando
+existe tema para consultar - e nao diga "nao disponivel" para assunto coberto abaixo.
+Temas disponiveis:
+${indiceConhecimento}
+Tema marcado como VENCIDO pode ser citado como referencia, mas declare ao gestor que precisa
+ser reverificado na fonte oficial antes de virar decisao.
+
+== CONHECIMENTO DE PLATAFORMA (resumo para resposta rapida; o detalhe esta na base acima) ==
 CATEGORIA ESPECIAL DE CREDITO: obrigatoria para anuncio de credito/financiamento. Proibe segmentar ou excluir por idade fora de 18-65, genero, CEP e raio geografico menor que 15 milhas, e bloqueia interesses e comportamentos considerados sensiveis; lookalike vira "publico especial" com restricao. Nao marcar quando devido, ou tentar contornar, expoe a conta a reprovacao, restricao de entrega e bloqueio de BM - e risco operacional, nao estrategia.
 PROMESSA ENGANOSA em credito: "aprovacao garantida", "credito sem analise", "dinheiro na hora", taxa apresentada como certa sem "sujeito a analise", uso de simbolo de instituicao financeira sem autorizacao, e senso de urgencia falso. O contrapeso correto e declarar sujeicao a analise de credito e margem.
 CBO vs ABO: no CBO o orcamento fica na campanha e a Meta distribui entre conjuntos; no ABO cada conjunto tem seu proprio orcamento. CBO acelera aprendizado e concentra entrega no conjunto que responde melhor; ABO da controle por publico e evita que um conjunto absorva tudo. Estrutura hibrida na mesma conta e comum, mas dificulta comparacao justa entre conjuntos.
@@ -569,6 +681,18 @@ Deno.serve(async (req) => {
 
   const { data: ctxRows } = await supa.from("agent_context")
     .select("categoria,fato,desde").eq("vigente", true).order("categoria");
+  // v24: INDICE da base de conhecimento. Progressive disclosure: o indice (barato) vai no
+  // prompt para o agente saber o que existe; o conteudo (caro) so e lido sob demanda.
+  const { data: knRows } = await supa.from("agent_knowledge")
+    .select("tema,descricao,revalidar_ate").eq("vigente", true).order("tema");
+  const hojeIso = new Date().toISOString().slice(0, 10);
+  const indiceConhecimento = (knRows ?? []).length
+    ? (knRows ?? []).map((r: any) => {
+        const venc = r.revalidar_ate && String(r.revalidar_ate) < hojeIso ? " [VENCIDO - reverificar antes de afirmar]" : "";
+        return `- ${r.tema}${venc}: ${r.descricao}`;
+      }).join("\n")
+    : "(base de conhecimento vazia)";
+
   // v23: regras de formatacao vindas da tabela, nao do codigo.
   const { data: styleRows } = await supa.from("agent_style")
     .select("secao,regra").eq("vigente", true).order("ordem");
@@ -641,7 +765,7 @@ Deno.serve(async (req) => {
   // e a pergunta atual sao identicos em todas as rodadas do turno. TTL ~5min, e as rodadas
   // ocorrem em segundos. Anthropic exige minimo ~1024 tokens por bloco: o system passa;
   // a pergunta so e marcada se for texto simples e suficientemente longa.
-  const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria, estilo),
+  const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento),
     cache_control: { type: "ephemeral" } }];
   const perguntaSimples = userContent.length === 1;
   const perguntaCacheavel = perguntaSimples && msgText.length >= 4000;
@@ -820,7 +944,7 @@ Deno.serve(async (req) => {
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v23" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v24" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
