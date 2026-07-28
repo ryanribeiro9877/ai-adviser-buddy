@@ -820,7 +820,7 @@ Deno.serve(async (req) => {
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v22" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v23" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
