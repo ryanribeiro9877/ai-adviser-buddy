@@ -8,6 +8,7 @@ import {
   Loader2,
   MessagesSquare,
   Mic,
+  Microscope,
   Paperclip,
   RefreshCw,
   Trash2,
@@ -32,12 +33,14 @@ import {
   type OutgoingAttachment,
 } from "@/lib/attachments";
 import { Markdown } from "@/components/markdown";
+import { JobProgressCard } from "@/components/job-progress-card";
 import { ActionCard, decideApproval, type Approval, type Decision } from "@/components/action-card";
 import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
   SelectContent,
@@ -81,6 +84,12 @@ const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 // ao HTTP, então o trabalho não se perde ao navegar.
 const TIMEOUT_TURNO_MS = 3 * 60 * 1000; // acima disso é falha, não "analisando"
 const JANELA_STATUS_MS = 30 * 60 * 1000; // recorte para varrer a lista de conversas
+
+// Análise profunda: a edge traffic-agent-job roda subagentes em background e
+// responde 202 em ~1s; a resposta final só chega por Realtime em chat_messages.
+// Pergunta longa é o caso típico (auditoria ampla), daí o auto-roteamento.
+const LIMITE_AUTO_PROFUNDA = 1500;
+type ChatJobReply = { ok: boolean; async?: boolean; job_id: string; conversation_id: string };
 
 type PendingFile = {
   id: string;
@@ -161,12 +170,20 @@ export function OperacaoChat() {
     convId: string | null;
     text: string;
     attachments: AttachmentMeta[];
+    profunda?: boolean;
+    autoProfunda?: boolean;
   } | null>(null);
   // Resposta em construção (com as emendas de continuação) e aviso de interrupção.
   const [live, setLive] = useState<{ convId: string; text: string; continuing: number } | null>(
     null,
   );
   const [interrupted, setInterrupted] = useState(false);
+  // Toggle da análise profunda e job em andamento — ambos por conversa, não globais.
+  const [deepByConv, setDeepByConv] = useState<Record<string, boolean>>({});
+  const [job, setJob] = useState<{ convId: string; jobId: string; texto: string } | null>(null);
+  const chaveConv = activeId ?? "__nova__";
+  const deepOn = !!deepByConv[chaveConv];
+  const setDeepOn = (v: boolean) => setDeepByConv((m) => ({ ...m, [chaveConv]: v }));
 
   const threadRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -322,6 +339,9 @@ export function OperacaoChat() {
           if (nova?.conversation_id) {
             qc.invalidateQueries({ queryKey: ["chat-messages", nova.conversation_id] });
             qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
+            // A resposta do job chegou: encerra o card (o job já virou done).
+            qc.invalidateQueries({ queryKey: ["chat-job-ativo", nova.conversation_id] });
+            setJob((j) => (j && j.convId === nova.conversation_id ? null : j));
           }
         },
       )
@@ -454,12 +474,20 @@ export function OperacaoChat() {
     if (reenvio && !text) return;
     const convIdAtSend = activeId;
     const snapshot = reenvio ? [] : attachments;
+    // Roteamento: toggle ligado OU pergunta longa vai para o modo assíncrono.
+    // `autoProfunda` marca o caso em que o usuário não pediu — a bolha ganha um
+    // chip explicando por que a resposta não vem na hora.
+    const autoProfunda = !deepOn && text.length > LIMITE_AUTO_PROFUNDA;
+    const profunda = deepOn || autoProfunda;
     if (!reenvio) setInput("");
     setInterrupted(false);
+    setJob(null);
     setPending({
       convId: convIdAtSend,
       text,
       attachments: snapshot.map((a) => ({ name: a.name, mime: a.mime, kb: a.sizeKb })),
+      profunda,
+      autoProfunda,
     });
     setSending(true);
     try {
@@ -471,6 +499,50 @@ export function OperacaoChat() {
         if (!reenvio) setInput(text);
         setPending(null);
         return; // mantém os anexos para nova tentativa
+      }
+
+      // --- Modo assíncrono: 202 em ~1s, sem reply. A resposta final chega por
+      // Realtime em chat_messages; aqui só adotamos a conversa e abrimos o card.
+      if (profunda) {
+        const { data: jobData, error: jobErr } = await supabase.functions.invoke<ChatJobReply>(
+          "traffic-agent-job",
+          {
+            body: {
+              message: text,
+              conversation_id: convIdAtSend ?? undefined,
+              company: companyName,
+              ...(outgoing.length ? { attachments: outgoing } : {}),
+            },
+          },
+        );
+        if (jobErr || !jobData?.job_id) {
+          let msg = "Não foi possível iniciar a análise profunda. Tente novamente.";
+          try {
+            const body = await (jobErr as { context?: Response })?.context?.json?.();
+            if (body && typeof body.error === "string") msg = body.error;
+          } catch {
+            /* corpo não-JSON */
+          }
+          toast.error(msg);
+          if (!reenvio) setInput(text);
+          setPending(null);
+          return;
+        }
+        const convJob = jobData.conversation_id;
+        qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
+        if (!convIdAtSend) {
+          await qc.fetchQuery({
+            queryKey: ["chat-messages", convJob],
+            queryFn: () => fetchMessages(convJob),
+          });
+          setActiveId(convJob);
+        } else {
+          await qc.invalidateQueries({ queryKey: ["chat-messages", convJob] });
+        }
+        setJob({ convId: convJob, jobId: jobData.job_id, texto: text });
+        setPending(null);
+        clearAttachments();
+        return; // NÃO há reply nem costura neste caminho
       }
 
       const { data, error } = await supabase.functions.invoke<ChatReply>("traffic-chat", {
@@ -598,6 +670,32 @@ export function OperacaoChat() {
     }
     return out;
   }, [messages.data]);
+
+  // Job de análise profunda em andamento nesta conversa. Vem do state (quem
+  // enviou) ou do banco (quem só abriu a conversa / voltou depois) — mesmo
+  // princípio do indicador síncrono: o estado é derivado, não presumido.
+  const jobDb = useQuery({
+    queryKey: ["chat-job-ativo", activeId],
+    enabled: !!activeId,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("chat_jobs")
+        .select("id, message, status")
+        .eq("conversation_id", activeId!)
+        .in("status", ["queued", "running"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+  });
+  const jobAtivo =
+    job && job.convId === activeId
+      ? job
+      : jobDb.data
+        ? { convId: activeId!, jobId: jobDb.data.id, texto: jobDb.data.message ?? "" }
+        : null;
 
   // Estado da conversa ABERTA: derivado das mensagens carregadas (não do recorte
   // de 30 min da lista) — assim uma conversa órfã antiga também é reconhecida ao
@@ -743,6 +841,14 @@ export function OperacaoChat() {
                       <AttachmentChips items={pending!.attachments} onPrimary />
                     )}
                     {pending!.text && <div className="whitespace-pre-wrap">{pending!.text}</div>}
+                    {/* Só quando o roteamento foi automático: explica por que não
+                        veio resposta imediata. Com o toggle ligado o usuário já sabe. */}
+                    {pending!.autoProfunda && (
+                      <div className="flex items-center gap-1 pt-0.5 text-[11px] opacity-80">
+                        <Microscope className="h-3 w-3" />
+                        análise profunda
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -769,7 +875,21 @@ export function OperacaoChat() {
 
               {/* Indicador derivado do banco: aparece também para quem apenas ABRIU
                   a conversa (outra aba, volta de navegação, F5) — não só para quem enviou. */}
-              {((sending && showPending) || processandoAtiva) && !live && (
+              {/* Análise profunda: o card de progresso ocupa o lugar do indicador
+                  síncrono. Some sozinho quando o job termina (a mensagem final
+                  chega pelo Realtime de chat_messages). */}
+              {jobAtivo && (
+                <JobProgressCard
+                  jobId={jobAtivo.jobId}
+                  onDone={() => setJob(null)}
+                  onResend={() => {
+                    setJob(null);
+                    send(jobAtivo.texto);
+                  }}
+                />
+              )}
+
+              {!jobAtivo && ((sending && showPending) || processandoAtiva) && !live && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Bot className="h-4 w-4 text-primary" />
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -905,6 +1025,25 @@ export function OperacaoChat() {
                   <Mic className="h-4 w-4" />
                 )}
               </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant={deepOn ? "default" : "ghost"}
+                    className="h-[42px] w-[42px] shrink-0"
+                    onClick={() => setDeepOn(!deepOn)}
+                    disabled={sending || transcribing || listening || !companyId}
+                    aria-pressed={deepOn}
+                    aria-label="Análise profunda"
+                  >
+                    <Microscope className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[260px] text-left">
+                  Análise profunda: vários especialistas em paralelo; demora mais, responde completo
+                  de uma vez.
+                </TooltipContent>
+              </Tooltip>
               <Textarea
                 ref={inputRef}
                 value={input}

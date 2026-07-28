@@ -482,6 +482,59 @@ export type Database = {
           },
         ]
       }
+      chat_jobs: {
+        Row: {
+          company_id: string
+          conversation_id: string
+          created_at: string
+          diagnostico: Json | null
+          erro: string | null
+          finished_at: string | null
+          id: string
+          message: string
+          progresso: Json
+          started_at: string | null
+          status: string
+          user_id: string | null
+        }
+        Insert: {
+          company_id: string
+          conversation_id: string
+          created_at?: string
+          diagnostico?: Json | null
+          erro?: string | null
+          finished_at?: string | null
+          id?: string
+          message: string
+          progresso?: Json
+          started_at?: string | null
+          status?: string
+          user_id?: string | null
+        }
+        Update: {
+          company_id?: string
+          conversation_id?: string
+          created_at?: string
+          diagnostico?: Json | null
+          erro?: string | null
+          finished_at?: string | null
+          id?: string
+          message?: string
+          progresso?: Json
+          started_at?: string | null
+          status?: string
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "chat_jobs_conversation_id_fkey"
+            columns: ["conversation_id"]
+            isOneToOne: false
+            referencedRelation: "chat_conversations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       chat_messages: {
         Row: {
           attachments: Json | null
