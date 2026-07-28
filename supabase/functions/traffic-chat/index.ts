@@ -1,4 +1,16 @@
-// supabase/functions/traffic-chat/index.ts (v21)
+// supabase/functions/traffic-chat/index.ts (v22)
+// v22 - PRIORIZACAO DE FERRAMENTAS + FIM DO JARGAO INTERNO:
+//   (1) O teto de 8 ferramentas do v20 cortava por ordem de chegada (FIFO). Medido em 2
+//       rodadas consecutivas do questionario de auditoria: o bloco 7 (criativos, legendas,
+//       compliance) ficou SEM NENHUM NUMERO nas duas, porque as 8 vagas se esgotavam antes.
+//       Ironia: essas tools foram justamente o que o v18/v19 destravaram. Agora o lote de
+//       tool_calls e ORDENADO por relevancia ao pedido antes de executar - se o usuario
+//       menciona criativo/legenda/compliance, essas entram primeiro.
+//   (2) JARGAO INTERNO. O agente escreveu ao gestor "get_criativos_conteudo bateu no limite
+//       de 8 tools". Nome de funcao e limite de implementacao nao existem para quem le.
+//       Mesma familia do "conforme R4" ja corrigido. Corrigido em dois lugares: a mensagem
+//       de teto nao cita mais numero nem nome, e o prompt proibe explicitamente.
+// v21 - A CAUSA REAL DO FALLBACK: RACIOCINIO CONSUMINDO O ORCAMENTO DE SAIDA.
 // v21 - A CAUSA REAL DO FALLBACK: RACIOCINIO CONSUMINDO O ORCAMENTO DE SAIDA.
 //   Diagnostico medido em 27/07 (turnos v20 19:40, 19:42, 19:44): tokens_out entre 9.868 e
 //   10.262 e o texto entregue foi de 69 CARACTERES - a mensagem de fallback. E no turno que
@@ -409,6 +421,26 @@ const TOOLS = [
   { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS: CBO vs ABO (deduzido de onde esta o orcamento), orcamento diario/vitalicio, estrategia de lance (bid_strategy) e targeting (pais, faixa de idade, interesses). Use para perguntas de estrutura de conta, sobreposicao de publico e estrategia de lance. Traz resumo_orcamento agregado e limite_conhecido. NAO contem historico de ALTERACOES de orcamento (exigiria o endpoint /activities da Graph).", parameters: { type: "object", properties: {} } } },
 ];
 
+// v22: prioridade de ferramentas dentro de um mesmo lote. O teto por turno e necessario
+// (14 tools/turno estouravam tempo e tokens), mas cortar por ordem de chegada fazia o
+// pedido perder justamente o que foi pedido. Aqui a ordem depende do que o gestor pediu:
+// menor numero = executa antes = sobrevive ao teto.
+function prioridadeTool(nome: string, pedido: string): number {
+  const p = norm(pedido);
+  const pedeCriativo = /criativ|legenda|compliance|anuncio|peca|texto|copy|oferta/.test(p);
+  const pedeReceita = /receita|contrato|cac|retorno|vende|vendas|funil|proposta|lucro/.test(p);
+  const pedeEstrutura = /cbo|abo|conjunto|estrutura|publico|targeting|lance|orcamento/.test(p);
+  if (pedeCriativo && (nome === "get_criativos_conteudo" || nome === "check_compliance")) return 0;
+  if (pedeReceita && nome === "get_funil_credito") return 0;
+  if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
+  const base: Record<string, number> = {
+    propose_action: 1, get_overview: 2, get_funil_credito: 3, get_alerts: 4,
+    get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
+    get_estrutura_conjuntos: 9, get_targets: 10, get_recommendations: 11,
+  };
+  return base[nome] ?? 12;
+}
+
 async function runTool(name: string, args: any, ctx: any) {
   try {
     switch (name) {
@@ -468,7 +500,9 @@ Lead(LP) = clique no link. Formulario = form preenchido. Conversa = WhatsApp ini
 == FORMATO ==
 Denso e sem enfeite: destaque o numero que decide, tabela quando houver 3+ numeros comparaveis, R$ com 2 casas, datas DD/MM. Sem preambulo, sem repetir a pergunta, sem repetir a mesma ressalva em varios blocos.
 Em pedido amplo: rode 3-5 tools relevantes e responda bloco a bloco na ordem pedida. Para cada item indisponivel, UMA linha dizendo o que integrar.
-Compliance: voce NAO precisa pedir o texto do anuncio ao usuario. Pegue a legenda real com get_criativos_conteudo e passe para check_compliance. Se uma tool devolver 'omitidos'/'aviso_corte', diga quantos itens ficaram fora e nao conclua nada sobre eles. Escreva de forma continua ate acabar - se a mensagem for cortada por limite, o sistema emenda a continuacao automaticamente, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
+Compliance: voce NAO precisa pedir o texto do anuncio ao usuario. Pegue a legenda real com get_criativos_conteudo e passe para check_compliance. Se uma tool devolver 'omitidos'/'aviso_corte', diga quantos itens ficaram fora e nao conclua nada sobre eles.
+NUNCA exponha o funcionamento interno ao gestor: nao cite nome de ferramenta ou funcao (get_*, check_*), nem limite de chamadas, orcamento de ferramentas, iteracao, token ou versao. Se algo nao foi consultado, escreva em linguagem de negocio - por exemplo "nao consultei os criativos nesta rodada, posso trazer em seguida" - e nunca "bateu no limite de N ferramentas".
+Escreva de forma continua ate acabar - se a mensagem for cortada por limite, o sistema emenda a continuacao automaticamente, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
 
 == MEMORIA INSTITUCIONAL (fatos verificados desta conta - considere sempre) ==
 ${memoria}`;
@@ -677,15 +711,19 @@ Deno.serve(async (req) => {
       const parcial = String(msg.content ?? "").trim();
       if (parcial) preambulos.push(parcial);
       messages.push(msg);
-      for (const tc of msg.tool_calls) {
+      // v22: ordena o lote por relevancia ao pedido antes de gastar as vagas do teto.
+      const loteOrdenado = [...msg.tool_calls].sort((a: any, b: any) =>
+        prioridadeTool(String(a.function?.name ?? ""), msgText) -
+        prioridadeTool(String(b.function?.name ?? ""), msgText));
+      for (const tc of loteOrdenado) {
         // v20: teto de ferramentas. A API exige resposta para CADA tool_call_id, entao nao
         // e possivel simplesmente pular - devolvemos um resultado que DECLARA o teto, para
         // o modelo nao tratar o dado como zero nem como inexistente (R3).
         if (toolsUsed.length >= MAX_TOOLS_TURNO) {
           tetoTools = true;
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
-            erro: "teto_de_ferramentas_do_turno",
-            aviso: `Limite de ${MAX_TOOLS_TURNO} ferramentas por turno atingido. Este dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao usuario, em uma linha, que este item precisa de uma pergunta separada.` }) });
+            erro: "consulta_nao_realizada_nesta_rodada",
+            aviso: "Esta consulta nao foi executada nesta rodada. O dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao gestor, em UMA linha e em linguagem natural, que este item ficou para a proxima. NAO cite nome de ferramenta, numero de limite nem detalhe de implementacao." }) });
           continue;
         }
         let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
@@ -741,7 +779,7 @@ Deno.serve(async (req) => {
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v21" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v22" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
