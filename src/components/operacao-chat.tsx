@@ -9,6 +9,7 @@ import {
   MessagesSquare,
   Mic,
   Paperclip,
+  RefreshCw,
   Trash2,
   Square,
   X,
@@ -72,6 +73,14 @@ const CONTINUE_PROMPT =
   "Sua resposta anterior foi cortada pelo limite de tamanho. Continue EXATAMENTE do ponto onde parou, na próxima palavra ou linha. Não repita nada do que já escreveu, não reintroduza o assunto, não reescreva títulos já entregues, não cumprimente. Apenas continue até concluir.";
 const MAX_CONTINUATIONS = 3;
 const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
+
+// Estado de processamento é DERIVADO do banco, não guardado em memória: um turno
+// está em andamento quando a última mensagem da conversa é 'user' e nenhuma
+// 'assistant' veio depois. Isso sobrevive a trocar de conversa, F5 e outra aba —
+// o que estado local nunca cobriria. A edge grava a resposta antes de responder
+// ao HTTP, então o trabalho não se perde ao navegar.
+const TIMEOUT_TURNO_MS = 3 * 60 * 1000; // acima disso é falha, não "analisando"
+const JANELA_STATUS_MS = 30 * 60 * 1000; // recorte para varrer a lista de conversas
 
 type PendingFile = {
   id: string;
@@ -246,6 +255,82 @@ export function OperacaoChat() {
     qc.invalidateQueries({ queryKey: ["approvals"] });
   };
 
+  // Perguntas sem resposta por conversa (convId -> created_at da pergunta).
+  // Uma consulta só: pega as mensagens recentes da empresa e fica com a última
+  // de cada conversa. Alimenta tanto o indicador da lista quanto o da thread.
+  const status = useQuery({
+    queryKey: ["chat-status", companyId],
+    enabled: !!companyId,
+    queryFn: async () => {
+      const desde = new Date(Date.now() - JANELA_STATUS_MS).toISOString();
+      const { data, error } = await supabase
+        .from("chat_messages")
+        .select("conversation_id, role, created_at")
+        .eq("company_id", companyId!)
+        .gte("created_at", desde)
+        .order("created_at", { ascending: false })
+        .limit(400);
+      if (error) throw error;
+      const ultima = new Map<string, { role: string; created_at: string }>();
+      for (const m of data ?? []) {
+        if (!ultima.has(m.conversation_id)) ultima.set(m.conversation_id, m);
+      }
+      const pendentes: Record<string, string> = {};
+      for (const [convId, m] of ultima) {
+        if (m.role === "user") pendentes[convId] = m.created_at;
+      }
+      return pendentes;
+    },
+  });
+  const pendentes = status.data ?? {};
+
+  // Relógio: sem isto a idade da pergunta não seria reavaliada e o indicador
+  // nunca viraria "falha" ao cruzar os 3 minutos.
+  const [agora, setAgora] = useState(() => Date.now());
+  const ultimaDaAtiva = messages.data?.[(messages.data?.length ?? 0) - 1];
+  const precisaRelogio = Object.keys(pendentes).length > 0 || ultimaDaAtiva?.role === "user";
+  useEffect(() => {
+    if (!precisaRelogio) return;
+    const t = setInterval(() => setAgora(Date.now()), 15_000);
+    return () => clearInterval(t);
+  }, [precisaRelogio]);
+
+  // Só para a LISTA: usa o recorte de 30 min (conversa em andamento é recente).
+  const idadePendente = (convId: string | null) => {
+    if (!convId) return null;
+    const iso = pendentes[convId];
+    return iso ? agora - new Date(iso).getTime() : null;
+  };
+
+  // Realtime: um canal por empresa cobre a thread aberta E a lista (toda mensagem
+  // carrega company_id), evitando um segundo canal só para a lista. Sem polling.
+  useEffect(() => {
+    if (!companyId) return;
+    const canal = supabase
+      .channel(`chat-msgs-${companyId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "chat_messages",
+          filter: `company_id=eq.${companyId}`,
+        },
+        (payload) => {
+          const nova = payload.new as { conversation_id?: string };
+          qc.invalidateQueries({ queryKey: ["chat-status", companyId] });
+          if (nova?.conversation_id) {
+            qc.invalidateQueries({ queryKey: ["chat-messages", nova.conversation_id] });
+            qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
+          }
+        },
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(canal);
+    };
+  }, [companyId, qc]);
+
   const showPending = !!pending && pending.convId === activeId;
 
   // Rola para o fim quando chegam mensagens ou durante o envio.
@@ -359,12 +444,17 @@ export function OperacaoChat() {
 
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !!companyId;
 
-  const send = async () => {
-    const text = input.trim();
-    if (!canSend || sending || transcribing) return;
+  // `textoOverride` só é usado pelo reenvio de uma pergunta órfã (turno que
+  // estourou os 3 min): reenvia aquele texto sem mexer no que o usuário digitou.
+  const send = async (textoOverride?: string) => {
+    const reenvio = typeof textoOverride === "string";
+    const text = (reenvio ? textoOverride : input).trim();
+    if (sending || transcribing || !companyId) return;
+    if (!reenvio && !canSend) return;
+    if (reenvio && !text) return;
     const convIdAtSend = activeId;
-    const snapshot = attachments;
-    setInput("");
+    const snapshot = reenvio ? [] : attachments;
+    if (!reenvio) setInput("");
     setInterrupted(false);
     setPending({
       convId: convIdAtSend,
@@ -378,7 +468,7 @@ export function OperacaoChat() {
         outgoing = await Promise.all(snapshot.map((a) => toOutgoing(a.file)));
       } catch {
         toast.error("Não consegui processar um dos anexos.");
-        setInput(text);
+        if (!reenvio) setInput(text);
         setPending(null);
         return; // mantém os anexos para nova tentativa
       }
@@ -400,7 +490,7 @@ export function OperacaoChat() {
           /* corpo não-JSON */
         }
         toast.error(msg);
-        setInput(text);
+        if (!reenvio) setInput(text);
         setPending(null);
         return;
       }
@@ -446,12 +536,23 @@ export function OperacaoChat() {
       setLive(null); // as mensagens canônicas do banco assumem a partir daqui
     } catch {
       toast.error("Erro de conexão. Tente novamente.");
-      setInput(text);
+      if (!reenvio) setInput(text);
       setPending(null);
       setLive(null);
     } finally {
       setSending(false);
     }
+  };
+
+  // Reenvia a última pergunta que ficou sem resposta (turno estourado).
+  const reenviarOrfa = () => {
+    const ultimaUser = [...msgs].reverse().find((m) => m.role === "user");
+    const texto = (ultimaUser?.content ?? "").trim();
+    if (!texto) {
+      toast.error("Não encontrei o texto da pergunta para reenviar.");
+      return;
+    }
+    send(texto);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -498,6 +599,23 @@ export function OperacaoChat() {
     return out;
   }, [messages.data]);
 
+  // Estado da conversa ABERTA: derivado das mensagens carregadas (não do recorte
+  // de 30 min da lista) — assim uma conversa órfã antiga também é reconhecida ao
+  // ser aberta, mostrando falha em vez de "analisando" para sempre.
+  const ultimaMsg = msgs[msgs.length - 1];
+  const idadeAtiva =
+    ultimaMsg && ultimaMsg.role === "user"
+      ? agora - new Date(ultimaMsg.created_at).getTime()
+      : null;
+  const processandoAtiva = idadeAtiva !== null && idadeAtiva < TIMEOUT_TURNO_MS;
+  const falhouAtiva = idadeAtiva !== null && idadeAtiva >= TIMEOUT_TURNO_MS;
+
+  // Com o Realtime, a pergunta gravada pela edge chega à thread durante o envio.
+  // Sem isto, a bolha otimista apareceria duplicada com a do banco.
+  const pendingNoBanco =
+    !!pending &&
+    msgs.some((m) => m.role === "user" && (m.content ?? "").trim() === pending.text.trim());
+
   const ConversationList = ({ onPick }: { onPick?: () => void }) => (
     <div className="flex flex-col gap-1">
       {convos.isLoading && [0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-9 w-full" />)}
@@ -520,7 +638,25 @@ export function OperacaoChat() {
           )}
           title={c.title ?? "Conversa sem título"}
         >
-          <div className="truncate">{c.title ?? "Conversa sem título"}</div>
+          <div className="flex items-center gap-1.5">
+            <span className="min-w-0 flex-1 truncate">{c.title ?? "Conversa sem título"}</span>
+            {/* 3.5: torna visível, de fora da conversa, que há um turno em andamento. */}
+            {(() => {
+              const idade = idadePendente(c.id);
+              if (idade === null) return null;
+              return idade < TIMEOUT_TURNO_MS ? (
+                <Loader2
+                  className="h-3 w-3 shrink-0 animate-spin text-primary"
+                  aria-label="Processando"
+                />
+              ) : (
+                <span
+                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-destructive"
+                  aria-label="Sem resposta"
+                />
+              );
+            })()}
+          </div>
           <div className="truncate text-[11px] text-muted-foreground">{fmtWhen(c.updated_at)}</div>
         </button>
       ))}
@@ -600,7 +736,7 @@ export function OperacaoChat() {
                 />
               ))}
 
-              {showPending && (
+              {showPending && !pendingNoBanco && (
                 <div className="flex justify-end">
                   <div className="max-w-[85%] space-y-1 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
                     {pending!.attachments.length > 0 && (
@@ -631,11 +767,33 @@ export function OperacaoChat() {
                 </div>
               )}
 
-              {sending && showPending && !live && (
+              {/* Indicador derivado do banco: aparece também para quem apenas ABRIU
+                  a conversa (outra aba, volta de navegação, F5) — não só para quem enviou. */}
+              {((sending && showPending) || processandoAtiva) && !live && (
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
                   <Bot className="h-4 w-4 text-primary" />
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   Analisando os dados…
+                </div>
+              )}
+
+              {falhouAtiva && !sending && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
+                  <div className="text-sm font-medium">A resposta não chegou</div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    A pergunta foi enviada há mais de 3 minutos e o turno não foi concluído
+                    (normalmente é o limite de tempo do servidor). Nada foi perdido: reenviar refaz
+                    a pergunta nesta mesma conversa.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2"
+                    onClick={() => reenviarOrfa()}
+                  >
+                    <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                    Reenviar pergunta
+                  </Button>
                 </div>
               )}
 
@@ -765,7 +923,7 @@ export function OperacaoChat() {
                 className="chat-scroll min-h-[42px] resize-none overflow-y-hidden"
               />
               <Button
-                onClick={send}
+                onClick={() => send()}
                 disabled={!canSend || sending || transcribing || listening}
                 size="icon"
                 className="h-[42px] w-[42px] shrink-0"
