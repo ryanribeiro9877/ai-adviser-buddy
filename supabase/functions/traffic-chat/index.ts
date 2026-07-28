@@ -1,4 +1,18 @@
-// supabase/functions/traffic-chat/index.ts (v26)
+// supabase/functions/traffic-chat/index.ts (v27)
+// v27 - LIGA O ORCAMENTO DE TEMPO NO LOOP (correcao de um defeito meu, nao ajuste novo).
+//   tokensDisponiveis() foi escrito no v19 para dimensionar a geracao pelo tempo restante,
+//   mas ficou ligado APENAS na sintese final. O loop principal chamava chamar(true) sem
+//   argumento, usando MAX_TOKENS fixo - que o v23 subiu para 12000. Resultado: com 100s ja
+//   decorridos o modelo ainda tentava gerar 12000 tokens (~140s), estourando o teto de 150s
+//   da plataforma de forma garantida. Foi o 504 de 28/07 as 17:54 (pergunta de 8.680 chars,
+//   nem a resposta chegou a ser gravada).
+//   Uma palavra de mudanca. Agora a geracao encolhe conforme o tempo aperta: 12000 tokens no
+//   inicio, ~2500 com 100s gastos, minimo de 600. Resposta menor, mas ENTREGUE - e o front
+//   emenda a continuacao.
+//   ISTO E O ULTIMO AJUSTE POSSIVEL POR ESTE CAMINHO. v13/v16/v17/v19/v21/v23 mexeram em
+//   orcamento; se estourar de novo, a saida e job assincrono com EdgeRuntime.waitUntil, que
+//   remove o teto em vez de negociar com ele.
+// v26 - DOIS CONSERTOS ENCONTRADOS EM TESTE REAL (28/07):
 // v26 - DOIS CONSERTOS ENCONTRADOS EM TESTE REAL (28/07):
 //   (1) OBJETIVO ODAX INVALIDO. No primeiro teste de criacao o modelo passou objetivo="LEADS"
 //       e o codigo aceitou (so fazia toUpperCase). A Graph API exige OUTCOME_LEADS - a criacao
@@ -1074,7 +1088,8 @@ Deno.serve(async (req) => {
     // declarada que nenhuma resposta.
     if (iter > 0 && decorrido() > TOOLS_DEADLINE_MS) { deadlineTools = true; break; }
     iteracoes = iter + 1;
-    const r = await chamar(true);
+    // v27: orcamento dimensionado pelo tempo restante, nao fixo.
+    const r = await chamar(true, tokensDisponiveis());
     if (r.erro) return json({ error: r.erro, detail: r.detalhe }, 502);
     const parsed = r.parsed;
     tokensIn += Number(parsed?.usage?.prompt_tokens ?? 0);
@@ -1160,7 +1175,7 @@ Deno.serve(async (req) => {
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v26" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v27" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
