@@ -11,6 +11,24 @@ Supabase do projeto `gestão_marketing` (`gzjwnjdpxpbmdhcyefvs`), aplicadas via
 > por `supabase db push`. Servem como registro histórico e de auditoria: o
 > cabeçalho de cada arquivo conta a decisão, a validação e o contexto.
 
+Há dois tipos de arquivo aqui:
+
+- **`<timestamp>_<nome>.sql`** — o SQL **exato** que rodou, extraído de
+  `supabase_migrations.schema_migrations`. O nome corresponde à versão
+  registrada no banco.
+- **`espelho_*.sql`** — espelho escrito à mão, consolidando uma ou mais
+  migrações com o contexto da decisão. Fiel ao efeito, não necessariamente
+  caractere a caractere.
+
+> ⚠️ **Esta pasta não é uma história reconstruível.** `../migrations/` só tem as
+> três migrações de 20/07; tudo depois disso foi aplicado via `apply_migration`
+> e existe apenas aqui. Como os espelhos pressupõem objetos criados por
+> migrações ausentes, **não dá para recriar o banco do zero** a partir deste
+> repositório — nem movendo estes arquivos para `../migrations/` (a cadeia
+> quebraria: p.ex. `20260728144316` altera `agent_context`, que nenhum arquivo
+> versionado cria). Para reconstruir, a fonte é o histórico de migrações do
+> próprio Supabase.
+
 | Arquivo | Fase | Conteúdo |
 |---|---|---|
 | `espelho_proposals_ciclo_f1.sql` | F1 | `v_custo_proposta` v2 (métrica oficial vs. rateio) + `security_invoker` + dormência das tabelas de propostas (decisão de escopo). |
@@ -25,3 +43,7 @@ Supabase do projeto `gestão_marketing` (`gzjwnjdpxpbmdhcyefvs`), aplicadas via
 | `espelho_f33_actioncards.sql` | F3.3 | ActionCards — aditivo em `approval_requests` (conversation_id), `audit_log` imutável e função `decide_approval`. |
 | `espelho_f4_execucao_meta.sql` | F4.1/F4.2 | Execução real na Meta — `meta_execution_config` (flags 3 camadas + dry_run), `set_meta_execution_config`, colunas `executed_at`/`execution_result` + campanha cobaia de teste. |
 | `espelho_f43_f44_compliance_bm.sql` | F4.3/F4.4 | Tabela `compliance_rules` versionada (16 regras FIN/CRI/LGL) + RLS; contexto das edges `compliance-check` e `bm-monitor`. Seed resumido — enunciados completos só na migração do Supabase. |
+| `espelho_migracoes_27-07-2026.sql` | 27/07 | Telemetria do turno (`chat_messages.diagnostico`), Realtime em `chat_messages`, watchdog de frescor (`check_data_freshness`, SQL puro sem edge) + cron 09:45. |
+| `20260728140410_add_conhecimento_breakdown_effect_e_gates.sql` | 28/07 | Memória institucional: breakdown effect, triagem antes de interpretar número, fase de aprendizado, formato obrigatório de recomendação e sazonalidade do consignado. |
+| `20260728142936_prepara_acoes_de_criacao_meta.sql` | 28/07 | Preparação das ações de criação — enum `adset`, flags novas (OFF), lista branca `contas_permitidas_criacao` e teto de sanidade de orçamento. |
+| `20260728144316_isola_agent_context_por_empresa.sql` | 28/07 | Isola a memória institucional por empresa — `agent_context.company_id` (NULL = fato universal) + reclassificação dos fatos existentes. |
