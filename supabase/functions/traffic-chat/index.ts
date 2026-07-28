@@ -1,4 +1,15 @@
-// supabase/functions/traffic-chat/index.ts (v25)
+// supabase/functions/traffic-chat/index.ts (v26)
+// v26 - DOIS CONSERTOS ENCONTRADOS EM TESTE REAL (28/07):
+//   (1) OBJETIVO ODAX INVALIDO. No primeiro teste de criacao o modelo passou objetivo="LEADS"
+//       e o codigo aceitou (so fazia toUpperCase). A Graph API exige OUTCOME_LEADS - a criacao
+//       teria falhado no momento em que as flags fossem ligadas. Agora ha mapa de sinonimos e
+//       recusa explicita para objetivo fora da lista ODAX.
+//   (2) MEMORIA POR EMPRESA. agent_context ganhou company_id (migracao isola_agent_context_
+//       por_empresa) mas o codigo ainda carregava TODOS os fatos. Com 2 empresas no banco
+//       (Legal e Viver e COHAPM), fatos da Legal - campanhas pausadas, WABAs, instrumentacao
+//       de UTM - apareciam em conversa da COHAPM como se fossem dela. Agora carrega os
+//       universais (company_id null) MAIS os da empresa da conversa.
+// v25 - ACOES DE CRIACAO (campanha / conjunto / anuncio), lado da PROPOSTA.
 // v25 - ACOES DE CRIACAO (campanha / conjunto / anuncio), lado da PROPOSTA.
 //   Sete travas decididas com o Ryan, todas no CODIGO e nao no prompt:
 //     (1) tudo nasce PAUSED - o executor forca; o gestor ativa no Gerenciador
@@ -486,9 +497,23 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
 
   const { data: conf } = await supa.from("meta_execution_config")
     .select("contas_permitidas_criacao,teto_sanidade_orcamento_diario").eq("id", 1).maybeSingle();
-  const contasOk: string[] = conf?.contas_permitidas_criacao ?? [];
+  const contasOk: string[] = (conf?.contas_permitidas_criacao ?? []).map((x: string) => x.startsWith("act_") ? x : `act_${x}`);
   const tetoSanidade = Number(conf?.teto_sanidade_orcamento_diario ?? 5000);
   if (!contasOk.length) return { erro: "criacao bloqueada: nenhuma conta esta na lista de contas permitidas para criacao. Isso e configuracao do sistema, nao algo que voce possa contornar." };
+
+  // v25 CORRECAO CRITICA (28/07): a conta de destino tem de vir da EMPRESA DESTA CONVERSA,
+  // nunca do primeiro item da lista branca. Existem 2 empresas no banco (Legal e Viver e
+  // COHAPM) e 20 contas meta_ads; usar contasOk[0] criaria o objeto na conta da Legal mesmo
+  // com a COHAPM selecionada - cruzar portfolio nao tem reversa simples.
+  const { data: integ } = await supa.from("integrations")
+    .select("external_id,account_name,status").eq("company_id", companyId).eq("provider", "meta_ads");
+  const candidatas = (integ ?? []).map((i: any) => String(i.external_id ?? "").trim())
+    .filter(Boolean).map((x: string) => x.startsWith("act_") ? x : `act_${x}`);
+  const contaDaEmpresa = candidatas.find((c: string) => contasOk.includes(c));
+  if (!contaDaEmpresa) {
+    return { erro: "criacao_bloqueada_por_isolamento_de_portfolio",
+      detalhe: `A empresa desta conversa nao tem nenhuma conta de anuncios habilitada para criacao. Contas da empresa: ${candidatas.join(", ") || "(nenhuma)"}. Habilitadas para criacao: ${contasOk.join(", ")}. Informe ao gestor que criar objeto para esta empresa exige liberar a conta dela na configuracao - e NAO proponha usar a conta de outra empresa.` };
+  }
 
   // -------- criar_campanha: nao ha molde; o nome informado e o da campanha que vai nascer --------
   if (action === "criar_campanha") {
@@ -497,10 +522,22 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if ((existentes ?? []).some((c) => norm(c.name) === norm(nomeAlvo))) {
       return { erro: `ja existe uma campanha chamada '${nomeAlvo}'. Escolha outro nome ou proponha usar a existente.` };
     }
-    const objetivo = String(params?.objetivo ?? "OUTCOME_LEADS").trim().toUpperCase();
+    // v26: ODAX. A API so aceita estes seis; sinonimos comuns sao mapeados e o resto e
+    // recusado, porque objetivo invalido so falharia no momento da execucao real.
+    const ODAX = ["OUTCOME_LEADS", "OUTCOME_SALES", "OUTCOME_TRAFFIC", "OUTCOME_ENGAGEMENT", "OUTCOME_AWARENESS", "OUTCOME_APP_PROMOTION"];
+    const SINONIMOS: Record<string, string> = {
+      LEADS: "OUTCOME_LEADS", LEAD_GENERATION: "OUTCOME_LEADS", LEADGEN: "OUTCOME_LEADS",
+      CONVERSIONS: "OUTCOME_SALES", SALES: "OUTCOME_SALES", VENDAS: "OUTCOME_SALES",
+      TRAFFIC: "OUTCOME_TRAFFIC", TRAFEGO: "OUTCOME_TRAFFIC", LINK_CLICKS: "OUTCOME_TRAFFIC",
+      MESSAGES: "OUTCOME_ENGAGEMENT", MENSAGEM: "OUTCOME_ENGAGEMENT", ENGAGEMENT: "OUTCOME_ENGAGEMENT",
+      AWARENESS: "OUTCOME_AWARENESS", RECONHECIMENTO: "OUTCOME_AWARENESS",
+    };
+    const bruto = String(params?.objetivo ?? "OUTCOME_LEADS").trim().toUpperCase().replace(/[\s-]+/g, "_");
+    const objetivo = ODAX.includes(bruto) ? bruto : (SINONIMOS[bruto] ?? "");
+    if (!objetivo) return { erro: `objetivo '${bruto}' nao e valido na Meta. Use um destes: ${ODAX.join(", ")}. Para geracao de lead em landing page o correto e OUTCOME_LEADS.` };
     const summary = `Criar campanha "${nomeAlvo}" (objetivo ${objetivo}) - nasce PAUSADA, categoria especial de credito obrigatoria`;
     return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
-      nome_novo: nomeAlvo, objetivo, conta_destino: contasOk[0],
+      nome_novo: nomeAlvo, objetivo, conta_destino: contaDaEmpresa,
       special_ad_categories: ["CREDIT"], status_inicial: "PAUSED",
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
@@ -522,8 +559,9 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,account_id").eq("company_id", companyId);
     const molde = (sets ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
     if (!molde) return { erro: `conjunto molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato ao gestor.` };
-    if (molde.account_id && !contasOk.includes(String(molde.account_id)) && !contasOk.includes(`act_${molde.account_id}`)) {
-      return { erro: `o conjunto molde pertence a conta ${molde.account_id}, que nao esta na lista de contas permitidas para criacao.` };
+    const contaMolde = molde.account_id ? (String(molde.account_id).startsWith("act_") ? String(molde.account_id) : `act_${molde.account_id}`) : null;
+    if (contaMolde && contaMolde !== contaDaEmpresa) {
+      return { erro: `o conjunto molde pertence a conta ${contaMolde}, diferente da conta desta empresa (${contaDaEmpresa}). Replicar entre contas nao e permitido - peca um molde da propria conta.` };
     }
     const { data: camps } = await supa.from("campaigns").select("id,name,external_id").eq("company_id", companyId);
     const dest = (camps ?? []).find((c) => norm(c.name) === norm(campanhaDestino)) ?? (camps ?? []).filter((c) => norm(c.name).includes(norm(campanhaDestino)))[0];
@@ -533,7 +571,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     return await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
-      orcamento_diario_reais: orcamento, conta_destino: contasOk[0], status_inicial: "PAUSED",
+      orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "PAUSED",
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
@@ -579,7 +617,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       creative_id: molde.creative_id, conjunto_destino_external_id: dest.external_id,
       conjunto_destino_nome: dest.name, url_tags: urlTags, utm_campaign: slug(utmCampaign),
-      conta_destino: contasOk[0], status_inicial: "PAUSED",
+      conta_destino: contaDaEmpresa, status_inicial: "PAUSED",
       compliance: { veredito: comp?.veredito ?? "aprovado", regras_aplicadas: comp?.regras_aplicadas ?? null, validado_em: new Date().toISOString() },
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
@@ -854,8 +892,11 @@ Deno.serve(async (req) => {
   const company = await resolveCompany(body?.company ? String(body.company) : undefined);
   if (!company) return json({ error: "empresa nao encontrada" }, 400);
 
+  // v26: carrega fatos UNIVERSAIS (company_id null) + fatos DESTA empresa. Nunca de outra.
   const { data: ctxRows } = await supa.from("agent_context")
-    .select("categoria,fato,desde").eq("vigente", true).order("categoria");
+    .select("categoria,fato,desde,company_id").eq("vigente", true)
+    .or(`company_id.is.null,company_id.eq.${company.id}`)
+    .order("categoria");
   // v24: INDICE da base de conhecimento. Progressive disclosure: o indice (barato) vai no
   // prompt para o agente saber o que existe; o conteudo (caro) so e lido sob demanda.
   const { data: knRows } = await supa.from("agent_knowledge")
@@ -1119,7 +1160,7 @@ Deno.serve(async (req) => {
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v25" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v26" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
