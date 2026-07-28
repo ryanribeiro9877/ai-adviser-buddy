@@ -51,3 +51,4 @@ Há dois tipos de arquivo aqui:
 | `20260728194905_f55_fix_cast_alert_severity.sql` | F5.5 | Fix: `alerts.severity` é enum — cast `::alert_severity` no INSERT. Versão vigente de `evaluate_waba_tier_alerts`. |
 | `20260728195029_f54_f55_relatorio_diario_secao_waba.sql` | F5.4/F5.5 | Seção WhatsApp no relatório diário (08:30 BRT) — `post_daily_report` com números por tier/qualidade e cobertura declarada. **Superado pelo fix `…195151`.** |
 | `20260728195151_f54_fix_relatorio_waba_cobertura_e_nome_template.sql` | F5.4 | Fix: exclui `phone_external_id = ''` da contagem de cobertura (ausência de dado ≠ zero) e busca o nome do template via join. Versão vigente de `post_daily_report`. |
+| `20260728_chat_jobs_select_policy_e_realtime.sql` | Subagentes | Pré-requisito do front: policy de SELECT em `chat_jobs` (`is_company_member`, escrita segue exclusiva do `service_role`) + `chat_jobs` no Realtime. |
