@@ -215,7 +215,7 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
   wsSerie.columns.forEach((c, i) => (c.width = i === 0 ? 13 : 15));
 
   // ============ 2) Resumo (referencia a linha TOTAL da Série diária) ============
-  titulo(wsResumo, `Relatório de tráfego — ${empresa}`, 5);
+  titulo(wsResumo, `Relatório de tráfego — ${empresa}`, 4);
   wsResumo.addRow([
     `Período: ${ddmm(periodo.inicio)} a ${ddmm(periodo.fim)} · ${cobertura}${
       periodo.dias_com_dado < periodo.dias_no_periodo ? " · ATENÇÃO: cobertura incompleta" : ""
@@ -223,7 +223,7 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
   ]);
   wsResumo.addRow([]);
   const T = `'Série diária'!`; // referência entre abas
-  const hResumo = cabecalho(wsResumo, ["Indicador", "Valor", "Teto", "Status", "Formato"]);
+  const hResumo = cabecalho(wsResumo, ["Indicador", "Valor", "Teto", "Status"]);
   const primeiraResumo = hResumo.number + 1;
 
   // Valor sempre por referência/fórmula — nada calculado em JS. Só recebem teto
@@ -275,7 +275,6 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
       { formula: i.formula },
       i.teto ?? "—",
       i.teto ? { formula: `IF(B${n}<=C${n},"Dentro do teto","ACIMA do teto")` } : "—",
-      i.fmt === F_MOEDA ? "R$" : i.fmt === F_PCT ? "%" : "nº",
     ]);
     const row = wsResumo.getRow(n);
     row.getCell(2).numFmt = i.fmt;
@@ -300,7 +299,8 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
     ]);
   }
   for (const n of dados.nao_disponivel ?? []) wsResumo.addRow([`Não disponível — ${n}`]);
-  wsResumo.columns.forEach((c, i) => (c.width = i === 0 ? 34 : i === 1 ? 16 : 14));
+  // Indicador · Valor · Teto · Status ("ACIMA do teto" precisa caber sem cortar).
+  wsResumo.columns.forEach((c, i) => (c.width = [34, 16, 12, 18][i] ?? 14));
 
   // ============ 3) Semana a semana ============
   titulo(wsSem, "Semana a semana", 9);
