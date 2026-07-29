@@ -28,6 +28,7 @@ import { AccountSelector, ALL_ACCOUNTS } from "@/components/account-selector";
 import { TypeFilter, ALL_TYPES } from "@/components/type-filter";
 import { AccountsTable } from "@/components/accounts-table";
 import { CampaignsTable } from "@/components/campaigns-table";
+import { WeeklyReport } from "@/components/weekly-report";
 import { Button } from "@/components/ui/button";
 import { useAccountBreakdown, useCampaignBreakdown } from "@/hooks/use-breakdown";
 import {
@@ -256,6 +257,12 @@ function Dashboard() {
             />
           </>
         ))}
+
+      {/* Relatório semanal: números prontos no formato que o gestor reporta.
+          Período próprio (segunda→domingo), independente dos filtros do topo. */}
+      <div className="border-t border-border pt-6">
+        <WeeklyReport companyId={selectedCompany.id} />
+      </div>
     </div>
   );
 }

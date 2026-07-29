@@ -1,8 +1,10 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, HelpCircle, Link2Off } from "lucide-react";
+import { AlertTriangle, Download, HelpCircle, Link2Off } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { exportarXlsx } from "@/lib/xlsx-export";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -325,7 +327,33 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
 
       {/* 2) Números */}
       <div>
-        <h2 className="mb-2 text-lg font-semibold">Números</h2>
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">Números</h2>
+          {vivos.length > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                exportarXlsx(
+                  vivos.map((p) => ({
+                    "Nome verificado": p.verified_name ?? "",
+                    Número: p.display_phone_number ?? "",
+                    Qualidade: (QUALIDADE[p.quality_rating ?? "UNKNOWN"] ?? QUALIDADE.UNKNOWN)
+                      .label,
+                    Tier: tierLabel(p.messaging_limit_tier),
+                    "Conta (WABA)": wabaNome.get(p.waba_external_id) ?? p.waba_external_id,
+                    Status: p.status ?? "",
+                  })),
+                  `whatsapp_numeros_${new Date().toISOString().slice(0, 10)}.xlsx`,
+                  "Números",
+                )
+              }
+            >
+              <Download className="mr-1 h-4 w-4" />
+              Exportar
+            </Button>
+          )}
+        </div>
         <div className="rounded-md border border-border">
           <div className="overflow-x-auto">
             <Table>
@@ -394,16 +422,43 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
       <div>
         <div className="mb-2 flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold">Templates</h2>
-          <ToggleGroup
-            type="single"
-            value={janela}
-            onValueChange={(v) => v && setJanela(v as "7" | "30")}
-            variant="outline"
-            size="sm"
-          >
-            <ToggleGroupItem value="7">7 dias</ToggleGroupItem>
-            <ToggleGroupItem value="30">30 dias</ToggleGroupItem>
-          </ToggleGroup>
+          <div className="flex items-center gap-2">
+            {(templates.data ?? []).length > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  exportarXlsx(
+                    (templates.data ?? []).map((t) => ({
+                      Template: t.nome,
+                      Categoria: t.categoria,
+                      Enviados: t.sent,
+                      Entregues: t.delivered,
+                      Lidos: t.read,
+                      Cliques: t.clicked,
+                      "Taxa de clique (%)":
+                        t.sent > 0 ? Number(((t.clicked / t.sent) * 100).toFixed(1)) : null,
+                    })),
+                    `whatsapp_templates_${janela}d_${new Date().toISOString().slice(0, 10)}.xlsx`,
+                    "Templates",
+                  )
+                }
+              >
+                <Download className="mr-1 h-4 w-4" />
+                Exportar
+              </Button>
+            )}
+            <ToggleGroup
+              type="single"
+              value={janela}
+              onValueChange={(v) => v && setJanela(v as "7" | "30")}
+              variant="outline"
+              size="sm"
+            >
+              <ToggleGroupItem value="7">7 dias</ToggleGroupItem>
+              <ToggleGroupItem value="30">30 dias</ToggleGroupItem>
+            </ToggleGroup>
+          </div>
         </div>
         <div className="rounded-md border border-border">
           <div className="overflow-x-auto">

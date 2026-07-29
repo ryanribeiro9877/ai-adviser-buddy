@@ -648,6 +648,90 @@ export type Database = {
           },
         ]
       }
+      infobip_dispatches: {
+        Row: {
+          clicks: number | null
+          communication_name: string | null
+          company_id: string
+          country_prefix: string | null
+          done_at: string | null
+          error_group: string | null
+          error_name: string | null
+          from_number: string | null
+          id: string
+          imported_at: string
+          message_id: string
+          messages_count: number | null
+          network_name: string | null
+          price_raw: number | null
+          raw: Json | null
+          reason: string | null
+          seen_at: string | null
+          send_at: string | null
+          service_name: string | null
+          source_file: string | null
+          status: string | null
+          template_name: string | null
+          to_number: string | null
+          traffic_source: string | null
+          user_name: string | null
+        }
+        Insert: {
+          clicks?: number | null
+          communication_name?: string | null
+          company_id: string
+          country_prefix?: string | null
+          done_at?: string | null
+          error_group?: string | null
+          error_name?: string | null
+          from_number?: string | null
+          id?: string
+          imported_at?: string
+          message_id: string
+          messages_count?: number | null
+          network_name?: string | null
+          price_raw?: number | null
+          raw?: Json | null
+          reason?: string | null
+          seen_at?: string | null
+          send_at?: string | null
+          service_name?: string | null
+          source_file?: string | null
+          status?: string | null
+          template_name?: string | null
+          to_number?: string | null
+          traffic_source?: string | null
+          user_name?: string | null
+        }
+        Update: {
+          clicks?: number | null
+          communication_name?: string | null
+          company_id?: string
+          country_prefix?: string | null
+          done_at?: string | null
+          error_group?: string | null
+          error_name?: string | null
+          from_number?: string | null
+          id?: string
+          imported_at?: string
+          message_id?: string
+          messages_count?: number | null
+          network_name?: string | null
+          price_raw?: number | null
+          raw?: Json | null
+          reason?: string | null
+          seen_at?: string | null
+          send_at?: string | null
+          service_name?: string | null
+          source_file?: string | null
+          status?: string | null
+          template_name?: string | null
+          to_number?: string | null
+          traffic_source?: string | null
+          user_name?: string | null
+        }
+        Relationships: []
+      }
       integrations: {
         Row: {
           account_name: string
@@ -1060,6 +1144,10 @@ export type Database = {
       evaluate_alerts: {
         Args: Record<PropertyKey, never>
         Returns: number
+      }
+      get_weekly_report_data: {
+        Args: { p_company_id: string; p_start: string; p_end: string }
+        Returns: Json
       }
       has_role: {
         Args: {

@@ -3,6 +3,7 @@ import { MessageCircle } from "lucide-react";
 import { useApp } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
 import { WhatsAppPanel } from "@/components/whatsapp-panel";
+import { InfobipPanel } from "@/components/infobip-panel";
 
 export const Route = createFileRoute("/_authenticated/whatsapp")({
   component: WhatsAppPage,
@@ -27,6 +28,10 @@ function WhatsAppPage() {
       </div>
 
       <WhatsAppPanel companyId={selectedCompany.id} />
+
+      <div className="border-t border-border pt-6">
+        <InfobipPanel companyId={selectedCompany.id} />
+      </div>
     </div>
   );
 }
