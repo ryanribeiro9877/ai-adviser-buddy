@@ -8,6 +8,7 @@ import {
   Image as ImageIcon,
   Funnel,
   Bell,
+  MessageCircle,
   Goal,
   Sparkles,
   MessagesSquare,
@@ -45,6 +46,7 @@ const nav: NavItem[] = [
   { to: "/anuncios", label: "Anúncios e criativos", icon: ImageIcon },
   { to: "/funil", label: "Funil e conversões", icon: Funnel },
   { to: "/alertas", label: "Alertas", icon: Bell },
+  { to: "/whatsapp", label: "WhatsApp", icon: MessageCircle },
   { to: "/metas", label: "Metas & Tetos", icon: Goal },
   // "Operação" = futuro chat do gestor de tráfego (Fase 3). Hoje abre a tela
   // de recomendações reais com um placeholder honesto (ver rota /recomendacoes).

@@ -779,6 +779,228 @@ export type Database = {
         }
         Relationships: []
       }
+      waba_analytics_daily: {
+        Row: {
+          company_id: string
+          date: string
+          delivered: number | null
+          id: string
+          phone_external_id: string | null
+          sent: number | null
+          waba_external_id: string
+        }
+        Insert: {
+          company_id: string
+          date: string
+          delivered?: number | null
+          id?: string
+          phone_external_id?: string | null
+          sent?: number | null
+          waba_external_id: string
+        }
+        Update: {
+          company_id?: string
+          date?: string
+          delivered?: number | null
+          id?: string
+          phone_external_id?: string | null
+          sent?: number | null
+          waba_external_id?: string
+        }
+        Relationships: []
+      }
+      waba_phone_numbers: {
+        Row: {
+          company_id: string
+          display_phone_number: string | null
+          external_id: string
+          id: string
+          is_official_business_account: boolean | null
+          last_synced_at: string | null
+          messaging_limit_tier: string | null
+          name_status: string | null
+          platform_type: string | null
+          quality_rating: string | null
+          status: string | null
+          throughput_level: string | null
+          verified_name: string | null
+          waba_external_id: string
+        }
+        Insert: {
+          company_id: string
+          display_phone_number?: string | null
+          external_id: string
+          id?: string
+          is_official_business_account?: boolean | null
+          last_synced_at?: string | null
+          messaging_limit_tier?: string | null
+          name_status?: string | null
+          platform_type?: string | null
+          quality_rating?: string | null
+          status?: string | null
+          throughput_level?: string | null
+          verified_name?: string | null
+          waba_external_id: string
+        }
+        Update: {
+          company_id?: string
+          display_phone_number?: string | null
+          external_id?: string
+          id?: string
+          is_official_business_account?: boolean | null
+          last_synced_at?: string | null
+          messaging_limit_tier?: string | null
+          name_status?: string | null
+          platform_type?: string | null
+          quality_rating?: string | null
+          status?: string | null
+          throughput_level?: string | null
+          verified_name?: string | null
+          waba_external_id?: string
+        }
+        Relationships: []
+      }
+      waba_phone_snapshots: {
+        Row: {
+          company_id: string
+          id: string
+          messaging_limit_tier: string | null
+          phone_external_id: string
+          quality_rating: string | null
+          snapshot_date: string
+          status: string | null
+        }
+        Insert: {
+          company_id: string
+          id?: string
+          messaging_limit_tier?: string | null
+          phone_external_id: string
+          quality_rating?: string | null
+          snapshot_date: string
+          status?: string | null
+        }
+        Update: {
+          company_id?: string
+          id?: string
+          messaging_limit_tier?: string | null
+          phone_external_id?: string
+          quality_rating?: string | null
+          snapshot_date?: string
+          status?: string | null
+        }
+        Relationships: []
+      }
+      waba_template_analytics_daily: {
+        Row: {
+          clicked: number | null
+          company_id: string
+          date: string
+          delivered: number | null
+          id: string
+          read: number | null
+          sent: number | null
+          template_external_id: string
+          template_name: string | null
+          waba_external_id: string
+        }
+        Insert: {
+          clicked?: number | null
+          company_id: string
+          date: string
+          delivered?: number | null
+          id?: string
+          read?: number | null
+          sent?: number | null
+          template_external_id: string
+          template_name?: string | null
+          waba_external_id: string
+        }
+        Update: {
+          clicked?: number | null
+          company_id?: string
+          date?: string
+          delivered?: number | null
+          id?: string
+          read?: number | null
+          sent?: number | null
+          template_external_id?: string
+          template_name?: string | null
+          waba_external_id?: string
+        }
+        Relationships: []
+      }
+      waba_templates: {
+        Row: {
+          category: string | null
+          company_id: string
+          external_id: string
+          id: string
+          language: string | null
+          name: string | null
+          quality_score: string | null
+          rejected_reason: string | null
+          status: string | null
+          waba_external_id: string
+        }
+        Insert: {
+          category?: string | null
+          company_id: string
+          external_id: string
+          id?: string
+          language?: string | null
+          name?: string | null
+          quality_score?: string | null
+          rejected_reason?: string | null
+          status?: string | null
+          waba_external_id: string
+        }
+        Update: {
+          category?: string | null
+          company_id?: string
+          external_id?: string
+          id?: string
+          language?: string | null
+          name?: string | null
+          quality_score?: string | null
+          rejected_reason?: string | null
+          status?: string | null
+          waba_external_id?: string
+        }
+        Relationships: []
+      }
+      wabas: {
+        Row: {
+          account_review_status: string | null
+          company_id: string
+          external_id: string
+          id: string
+          last_synced_at: string | null
+          name: string | null
+          obo_name: string | null
+          ownership_type: string | null
+        }
+        Insert: {
+          account_review_status?: string | null
+          company_id: string
+          external_id: string
+          id?: string
+          last_synced_at?: string | null
+          name?: string | null
+          obo_name?: string | null
+          ownership_type?: string | null
+        }
+        Update: {
+          account_review_status?: string | null
+          company_id?: string
+          external_id?: string
+          id?: string
+          last_synced_at?: string | null
+          name?: string | null
+          obo_name?: string | null
+          ownership_type?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       v_account_breakdown: {
