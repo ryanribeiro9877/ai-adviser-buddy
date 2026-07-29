@@ -1,4 +1,27 @@
-// supabase/functions/traffic-chat/index.ts (v27)
+// supabase/functions/traffic-chat/index.ts (v27.1)
+// v27.1 - CORTE DE HISTORICO COM DIRECAO CERTA E DECLARADO (bug achado na auditoria de 28/07).
+//   O historico cortava TODA mensagem com slice(0,6000) - a CABECA. Para a costura de
+//   continuacao esse e o sentido errado duas vezes, provado em banco:
+//   (1) a pergunta original longa (8.680 chars, questionario de 12 blocos) chegava as
+//       continuacoes truncada EXATAMENTE no char 6.000 - meio do bloco 9. Os blocos 9-12
+//       ficaram INVISIVEIS ao modelo nos turnos 2 e 3, por isso nunca foram respondidos.
+//       A alegacao do agente "a pergunta foi cortada" era VERDADEIRA, nao alucinacao.
+//   (2) a ultima resposta do assistente (7.058 chars) tambem entrava decapitada no
+//       historico do turno seguinte - a continuacao NAO VIA a propria cauda (a tabela
+//       terminando em "Retargeting"), nao retomava no ponto exato, reescrevia a secao 7
+//       e perdia linha de tabela. Tres anomalias, uma causa.
+//   Regras novas, todas DECLARADAS ao modelo (mesma licao do cortarLista e a licao 10 do
+//   dossie: corte silencioso e proibido):
+//   - mensagem de USUARIO mais recente: cap 12000 (a pergunta original precisa sobreviver
+//     inteira a costura; 8.680 chars entram sem corte). Custo: ~1,7k tokens no pior caso,
+//     desprezivel perto dos ~76k que cada continuacao ja gasta re-coletando tools.
+//   - demais mensagens de usuario: preserva CABECA + CAUDA com aviso do que foi omitido.
+//   - mensagem de ASSISTENTE mais recente: preserva a CAUDA (slice(-6000)) com aviso -
+//     e o final dela que a continuacao precisa para retomar no ponto exato.
+//   - demais mensagens de assistente: cabeca, com aviso quando cortar.
+//   Telemetria nova: hist_msgs_cortadas no diagnostico.
+//   O fix ESTRUTURAL continua sendo o job assincrono (EdgeRuntime.waitUntil), que elimina
+//   a costura inteira - este ajuste apenas a torna correta enquanto ela existir.
 // v27 - LIGA O ORCAMENTO DE TEMPO NO LOOP (correcao de um defeito meu, nao ajuste novo).
 //   tokensDisponiveis() foi escrito no v19 para dimensionar a geracao pelo tempo restante,
 //   mas ficou ligado APENAS na sintese final. O loop principal chamava chamar(true) sem
@@ -200,6 +223,11 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
 const HIST = 24;
+// v27.1: caps do corte de historico. HIST_CAP e o teto por mensagem; a mensagem de USUARIO
+// mais recente tem teto maior porque e a pergunta original que as continuacoes precisam
+// enxergar INTEIRA (o corte em 6000 escondeu os blocos 9-12 do questionario de 28/07).
+const HIST_CAP = 6000;
+const HIST_CAP_USER_RECENTE = 12000;
 // v19 - orcamento de tempo. Teto da plataforma = 150s (IDLE_TIMEOUT, nao configuravel).
 // Calibrado com os logs de 27/07: sucessos entre 38s e 102s; o de 149,5s passou por 492ms.
 // TOOLS_DEADLINE: para de coletar aqui, deixando espaco para a sintese final.
@@ -986,7 +1014,46 @@ Deno.serve(async (req) => {
 
   const { data: hist } = await supa.from("chat_messages").select("role,content").eq("conversation_id", convId)
     .in("role", ["user", "assistant"]).order("created_at", { ascending: false }).limit(HIST);
-  const history = (hist ?? []).reverse().map((m) => ({ role: m.role, content: (m.content ?? "").slice(0, 6000) }));
+  // v27.1: corte de historico com DIRECAO CERTA e DECLARADO. O slice(0,6000) uniforme do
+  // v15-v27 cortava a CAUDA da pergunta original (os blocos finais de um pedido longo
+  // sumiam nas continuacoes - provado: blocos 9-12 do questionario de 28/07 nunca foram
+  // respondidos) e a CAUDA da ultima resposta (a costura nao via onde a resposta anterior
+  // parou, entao reescrevia secao e perdia linha de tabela). Regras:
+  //   - mensagem de USUARIO mais recente: cap maior (a pergunta original entra inteira);
+  //   - demais mensagens de usuario longas: cabeca + cauda, com aviso;
+  //   - mensagem de ASSISTENTE mais recente: CAUDA (e o final dela que a continuacao usa);
+  //   - demais assistentes longas: cabeca, com aviso.
+  // Todo corte se DECLARA ao modelo - corte silencioso e proibido (licao do cortarLista).
+  const cronologico = (hist ?? []).reverse();
+  let ultimoAssistantIdx = -1, ultimoUserIdx = -1;
+  for (let i = cronologico.length - 1; i >= 0; i--) {
+    if (ultimoAssistantIdx < 0 && cronologico[i].role === "assistant") ultimoAssistantIdx = i;
+    if (ultimoUserIdx < 0 && cronologico[i].role === "user") ultimoUserIdx = i;
+    if (ultimoAssistantIdx >= 0 && ultimoUserIdx >= 0) break;
+  }
+  let histMsgsCortadas = 0;
+  const history = cronologico.map((m, i) => {
+    const c = String(m.content ?? "");
+    const cap = (m.role === "user" && i === ultimoUserIdx) ? HIST_CAP_USER_RECENTE : HIST_CAP;
+    if (c.length <= cap) return { role: m.role, content: c };
+    histMsgsCortadas++;
+    const omitidos = c.length - cap;
+    if (m.role === "assistant" && i === ultimoAssistantIdx) {
+      // A continuacao precisa do FINAL da ultima resposta, nao do inicio.
+      return { role: m.role, content:
+        `[AVISO DO SISTEMA: o INICIO desta resposta (${omitidos} caracteres) foi omitido do historico por limite de tamanho. O trecho abaixo e o FINAL EXATO da resposta anterior - ao continuar, retome da ultima linha dele, sem reescrever nem resumir o que ja foi entregue.]\n` + c.slice(-cap) };
+    }
+    if (m.role === "user") {
+      const cabeca = Math.floor(cap * 0.55);
+      const cauda = cap - cabeca;
+      return { role: m.role, content:
+        c.slice(0, cabeca) +
+        `\n[AVISO DO SISTEMA: ${omitidos} caracteres do MEIO desta mensagem foram omitidos do historico por limite de tamanho. O INICIO e o FINAL estao preservados - a mensagem NAO termina neste corte; considere tambem o trecho final abaixo antes de concluir o que foi pedido.]\n` +
+        c.slice(-cauda) };
+    }
+    return { role: m.role, content:
+      c.slice(0, cap) + `\n[AVISO DO SISTEMA: o final desta mensagem (${omitidos} caracteres) foi omitido do historico por limite de tamanho.]` };
+  });
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "user", content: msgText, user_id: userId, attachments: attMeta.length ? attMeta : null });
 
@@ -1175,7 +1242,8 @@ Deno.serve(async (req) => {
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead,
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v27" };
+    hist_msgs_cortadas: histMsgsCortadas,
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v27.1" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
@@ -1189,5 +1257,6 @@ Deno.serve(async (req) => {
     deadline_tools: deadlineTools, ms_total: decorrido(),
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead, cache_rejeitado: cacheRejeitado,
     reasoning_rejeitado: reasoningRejeitado, reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
+    hist_msgs_cortadas: histMsgsCortadas,
     tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas, action_cards: actionCards });
 });
