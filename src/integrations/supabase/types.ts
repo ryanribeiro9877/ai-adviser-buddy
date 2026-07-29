@@ -1145,6 +1145,10 @@ export type Database = {
         Args: Record<PropertyKey, never>
         Returns: number
       }
+      get_report_export_data: {
+        Args: { p_company_id: string; p_start: string; p_end: string }
+        Returns: Json
+      }
       get_weekly_report_data: {
         Args: { p_company_id: string; p_start: string; p_end: string }
         Returns: Json

@@ -1,13 +1,13 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Copy, Download, CalendarDays } from "lucide-react";
+import { Copy, Download, CalendarDays, Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { exportarXlsx, nomeComPeriodo } from "@/lib/xlsx-export";
+import { exportarRelatorioRico, type DadosExport } from "@/lib/relatorio-xlsx";
 import {
   Table,
   TableBody,
@@ -88,7 +88,13 @@ function textoWhatsApp(r: Relatorio): string {
   return L.join("\n");
 }
 
-export function WeeklyReport({ companyId }: { companyId: string }) {
+export function WeeklyReport({
+  companyId,
+  empresaNome = "empresa",
+}: {
+  companyId: string;
+  empresaNome?: string;
+}) {
   const inicial = useMemo(semanaAnterior, []);
   const [inicio, setInicio] = useState(inicial.inicio);
   const [fim, setFim] = useState(inicial.fim);
@@ -119,24 +125,32 @@ export function WeeklyReport({ companyId }: { companyId: string }) {
     }
   };
 
-  const exportar = () => {
-    if (!r) return;
-    const linhas = [
-      { Métrica: "Investimento", Valor: r.investimento },
-      { Métrica: "Formulários", Valor: r.formularios },
-      { Métrica: "Custo por formulário", Valor: r.custo_por_formulario },
-      { Métrica: "Cliques no link", Valor: r.cliques_link },
-      { Métrica: "Custo por clique", Valor: r.custo_por_clique },
-      { Métrica: "Visualizações da página", Valor: r.visualizacoes_pagina },
-      { Métrica: "CTR (%)", Valor: r.ctr_pct },
-      { Métrica: "Conversão view→form (%)", Valor: r.conversao_view_form_pct },
-      ...(r.por_campanha ?? []).flatMap((c) => [
-        { Métrica: `Campanha — ${c.campanha} (gasto)`, Valor: c.gasto },
-        { Métrica: `Campanha — ${c.campanha} (formulários)`, Valor: c.formularios },
-      ]),
-      ...(r.nao_disponivel ?? []).map((n) => ({ Métrica: "Não disponível", Valor: n })),
-    ];
-    exportarXlsx(linhas, nomeComPeriodo("relatorio", r.periodo.inicio, r.periodo.fim), "Relatório");
+  // A exportação usa uma RPC própria (get_report_export_data), que devolve série
+  // diária, campanhas, anúncios e tetos — bem mais que a RPC da tela. As métricas
+  // derivadas vão como FÓRMULA na planilha, então o arquivo é auditável no Excel.
+  const [exportando, setExportando] = useState(false);
+  const exportar = async () => {
+    setExportando(true);
+    try {
+      const { data, error } = await supabase.rpc("get_report_export_data", {
+        p_company_id: companyId,
+        p_start: inicio,
+        p_end: fim,
+      });
+      if (error) throw error;
+      const dados = data as unknown as DadosExport;
+      if (!dados?.serie_diaria?.length) {
+        toast.error("Sem dados no período para exportar.");
+        return;
+      }
+      const nome = await exportarRelatorioRico(dados, empresaNome);
+      toast.success(`Planilha gerada: ${nome}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`Não foi possível gerar a planilha: ${msg.slice(0, 140)}`);
+    } finally {
+      setExportando(false);
+    }
   };
 
   const METRICAS = r
@@ -188,8 +202,12 @@ export function WeeklyReport({ companyId }: { companyId: string }) {
             <Copy className="mr-1 h-4 w-4" />
             Copiar para WhatsApp
           </Button>
-          <Button size="sm" variant="outline" onClick={exportar} disabled={!r}>
-            <Download className="mr-1 h-4 w-4" />
+          <Button size="sm" variant="outline" onClick={exportar} disabled={!r || exportando}>
+            {exportando ? (
+              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="mr-1 h-4 w-4" />
+            )}
             Exportar planilha
           </Button>
         </div>

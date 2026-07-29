@@ -261,7 +261,7 @@ function Dashboard() {
       {/* Relatório semanal: números prontos no formato que o gestor reporta.
           Período próprio (segunda→domingo), independente dos filtros do topo. */}
       <div className="border-t border-border pt-6">
-        <WeeklyReport companyId={selectedCompany.id} />
+        <WeeklyReport companyId={selectedCompany.id} empresaNome={selectedCompany.name} />
       </div>
     </div>
   );
