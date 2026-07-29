@@ -1,13 +1,14 @@
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Upload, Loader2, Download, HelpCircle } from "lucide-react";
+import { Upload, Loader2, Download, HelpCircle, X } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useApp } from "@/lib/app-context";
 import { lerArquivoInfobip, enviarLotes, type ResultadoImport } from "@/lib/infobip-import";
 import { exportarXlsx } from "@/lib/xlsx-export";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -45,10 +46,25 @@ export function InfobipPanel({ companyId }: { companyId: string }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [importando, setImportando] = useState(false);
   const [resultado, setResultado] = useState<ResultadoImport[] | null>(null);
-  const [dias, setDias] = useState<"30" | "90" | "todos">("90");
+  // "custom" = período digitado nos campos de data. Mexer numa data entra nesse
+  // modo; clicar num preset volta para ele e limpa as datas.
+  const [dias, setDias] = useState<"30" | "90" | "todos" | "custom">("90");
+  const [de, setDe] = useState("");
+  const [ate, setAte] = useState("");
+
+  const escolherPreset = (v: "30" | "90" | "todos") => {
+    setDias(v);
+    setDe("");
+    setAte("");
+  };
+  const mudarData = (qual: "de" | "ate", valor: string) => {
+    if (qual === "de") setDe(valor);
+    else setAte(valor);
+    setDias("custom");
+  };
 
   const dados = useQuery({
-    queryKey: ["infobip", companyId, dias],
+    queryKey: ["infobip", companyId, dias, de, ate],
     queryFn: async () => {
       let q = supabase
         .from("infobip_dispatches")
@@ -56,13 +72,32 @@ export function InfobipPanel({ companyId }: { companyId: string }) {
           "message_id, service_name, traffic_source, communication_name, status, send_at, seen_at, price_raw",
         )
         .eq("company_id", companyId);
-      if (dias !== "todos") {
+      if (dias === "custom") {
+        // Datas soltas são válidas: só início, só fim, ou os dois. O fim inclui o
+        // dia inteiro (até 23:59:59 no horário de Brasília, igual ao parser do import).
+        if (de) q = q.gte("send_at", `${de}T00:00:00-03:00`);
+        if (ate) q = q.lte("send_at", `${ate}T23:59:59.999-03:00`);
+      } else if (dias !== "todos") {
         const desde = new Date(Date.now() - Number(dias) * 864e5).toISOString();
         q = q.gte("send_at", desde);
       }
       const { data, error } = await q.limit(20000);
       if (error) throw error;
       return (data ?? []) as Row[];
+    },
+  });
+
+  // Existe algo importado nesta empresa, ignorando o filtro de período? Sem isso,
+  // um período sem movimento mostraria "nenhum dado importado" — mensagem errada.
+  const totalGeral = useQuery({
+    queryKey: ["infobip-total", companyId],
+    queryFn: async () => {
+      const { count, error } = await supabase
+        .from("infobip_dispatches")
+        .select("message_id", { count: "exact", head: true })
+        .eq("company_id", companyId);
+      if (error) throw error;
+      return count ?? 0;
     },
   });
 
@@ -148,7 +183,10 @@ export function InfobipPanel({ companyId }: { companyId: string }) {
         Entregues: t.entregues,
         Lidas: t.lidas,
       })),
-      `infobip_transmissoes_${new Date().toISOString().slice(0, 10)}.xlsx`,
+      // O nome carrega o período consultado, para o arquivo não virar anônimo.
+      dias === "custom" && (de || ate)
+        ? `infobip_transmissoes_${de || "inicio"}_a_${ate || "hoje"}.xlsx`
+        : `infobip_transmissoes_${dias === "todos" ? "tudo" : `${dias}d`}_${new Date().toISOString().slice(0, 10)}.xlsx`,
       "Infobip",
     );
 
@@ -162,7 +200,7 @@ export function InfobipPanel({ companyId }: { companyId: string }) {
           <ToggleGroup
             type="single"
             value={dias}
-            onValueChange={(v) => v && setDias(v as "30" | "90" | "todos")}
+            onValueChange={(v) => v && escolherPreset(v as "30" | "90" | "todos")}
             variant="outline"
             size="sm"
           >
@@ -170,6 +208,38 @@ export function InfobipPanel({ companyId }: { companyId: string }) {
             <ToggleGroupItem value="90">90 d</ToggleGroupItem>
             <ToggleGroupItem value="todos">Tudo</ToggleGroupItem>
           </ToggleGroup>
+
+          <div className="flex items-center gap-1">
+            <Input
+              type="date"
+              aria-label="Data inicial"
+              value={de}
+              max={ate || undefined}
+              onChange={(e) => mudarData("de", e.target.value)}
+              className="h-8 w-[142px] text-xs"
+            />
+            <span className="text-xs text-muted-foreground">até</span>
+            <Input
+              type="date"
+              aria-label="Data final"
+              value={ate}
+              min={de || undefined}
+              onChange={(e) => mudarData("ate", e.target.value)}
+              className="h-8 w-[142px] text-xs"
+            />
+            {dias === "custom" && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8"
+                onClick={() => escolherPreset("90")}
+                aria-label="Limpar período"
+                title="Limpar período"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
           {!vazio && (
             <Button size="sm" variant="outline" onClick={exportar}>
               <Download className="mr-1 h-4 w-4" />
@@ -218,6 +288,14 @@ export function InfobipPanel({ companyId }: { companyId: string }) {
 
       {dados.isLoading ? (
         <Skeleton className="h-24 w-full" />
+      ) : vazio && (totalGeral.data ?? 0) > 0 ? (
+        <Card className="p-4">
+          <div className="text-sm font-medium">Nenhum envio no período selecionado</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Há {fmtInt(totalGeral.data ?? 0)} registro(s) importados nesta empresa, mas nenhum no
+            intervalo escolhido. Amplie o período ou use “Tudo”.
+          </p>
+        </Card>
       ) : vazio ? (
         <Card className="p-4">
           <div className="text-sm font-medium">Nenhum dado da Infobip importado</div>
