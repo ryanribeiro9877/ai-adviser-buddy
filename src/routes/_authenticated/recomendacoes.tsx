@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useApp, logAudit } from "@/lib/app-context";
@@ -88,8 +88,16 @@ function Recomendacoes() {
   );
 }
 
+const ABAS = ["chat", "aprovacoes", "recomendacoes"] as const;
+type Aba = (typeof ABAS)[number];
+
 function Operacao() {
   const { selectedCompany } = useApp();
+  const navigate = useNavigate();
+  // A aba mora na URL para o sino poder abrir direto em ?tab=aprovacoes&item=<id>.
+  const search = useSearch({ strict: false }) as { tab?: string; item?: string };
+  const aba: Aba = ABAS.includes(search.tab as Aba) ? (search.tab as Aba) : "chat";
+
   if (!selectedCompany) return <EmptyCompany />;
 
   return (
@@ -104,7 +112,19 @@ function Operacao() {
         </p>
       </div>
 
-      <Tabs defaultValue="chat">
+      <Tabs
+        value={aba}
+        onValueChange={(v) =>
+          navigate({
+            to: "/recomendacoes",
+            search: (prev: Record<string, unknown>): Record<string, unknown> => ({
+              ...prev,
+              tab: v,
+            }),
+            replace: true,
+          })
+        }
+      >
         <TabsList>
           <TabsTrigger value="chat">Chat do gestor</TabsTrigger>
           <TabsTrigger value="aprovacoes">Aprovações</TabsTrigger>
@@ -114,7 +134,7 @@ function Operacao() {
           <OperacaoChat />
         </TabsContent>
         <TabsContent value="aprovacoes" className="mt-4">
-          <ApprovalsQueue companyId={selectedCompany.id} />
+          <ApprovalsQueue companyId={selectedCompany.id} destacarId={search.item} />
         </TabsContent>
         <TabsContent value="recomendacoes" className="mt-4">
           <Recomendacoes />

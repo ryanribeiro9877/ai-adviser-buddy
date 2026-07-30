@@ -287,6 +287,9 @@ export type Database = {
           created_at: string
           entity_id: string | null
           entity_type: Database["public"]["Enums"]["approval_entity"]
+          executed_at: string | null
+          execution_result: Json | null
+          expires_at: string | null
           id: string
           payload: Json
           requested_by: string
@@ -303,6 +306,9 @@ export type Database = {
           created_at?: string
           entity_id?: string | null
           entity_type: Database["public"]["Enums"]["approval_entity"]
+          executed_at?: string | null
+          execution_result?: Json | null
+          expires_at?: string | null
           id?: string
           payload?: Json
           requested_by: string
@@ -319,6 +325,9 @@ export type Database = {
           created_at?: string
           entity_id?: string | null
           entity_type?: Database["public"]["Enums"]["approval_entity"]
+          executed_at?: string | null
+          execution_result?: Json | null
+          expires_at?: string | null
           id?: string
           payload?: Json
           requested_by?: string
@@ -1144,6 +1153,10 @@ export type Database = {
       evaluate_alerts: {
         Args: Record<PropertyKey, never>
         Returns: number
+      }
+      get_notificacoes_pendentes: {
+        Args: { p_company_id: string }
+        Returns: Json
       }
       get_report_export_data: {
         Args: { p_company_id: string; p_start: string; p_end: string }

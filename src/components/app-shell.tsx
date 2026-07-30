@@ -24,6 +24,8 @@ import {
 import { useApp } from "@/lib/app-context";
 import { FEATURES } from "@/lib/features";
 import { supabase } from "@/integrations/supabase/client";
+import { NotificacoesProvider } from "@/hooks/use-notificacoes";
+import { NotificationBell } from "@/components/notification-bell";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -136,98 +138,105 @@ export function AppShell() {
   };
 
   return (
-    <div className="flex min-h-screen bg-background text-foreground">
-      {/* Sidebar fixa — apenas em telas grandes (>= lg) */}
-      <aside className="hidden lg:flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
-        <SidebarContent currentPath={location.pathname} isAdmin={isAdmin} />
-      </aside>
+    // O sino vive no topbar (visível em todas as telas): uma aprovação que chega
+    // enquanto a pessoa está em /campanhas precisa aparecer do mesmo jeito.
+    <NotificacoesProvider>
+      <div className="flex min-h-screen bg-background text-foreground">
+        {/* Sidebar fixa — apenas em telas grandes (>= lg) */}
+        <aside className="hidden lg:flex w-64 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
+          <SidebarContent currentPath={location.pathname} isAdmin={isAdmin} />
+        </aside>
 
-      {/* Drawer de navegação — telas menores que lg */}
-      <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
-        <SheetContent
-          side="left"
-          className="flex w-72 flex-col gap-0 border-sidebar-border bg-sidebar p-0 text-sidebar-foreground"
-        >
-          <SheetTitle className="sr-only">Menu de navegação</SheetTitle>
-          <SidebarContent
-            currentPath={location.pathname}
-            isAdmin={isAdmin}
-            onNavigate={() => setMobileNavOpen(false)}
-          />
-        </SheetContent>
-      </Sheet>
+        {/* Drawer de navegação — telas menores que lg */}
+        <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
+          <SheetContent
+            side="left"
+            className="flex w-72 flex-col gap-0 border-sidebar-border bg-sidebar p-0 text-sidebar-foreground"
+          >
+            <SheetTitle className="sr-only">Menu de navegação</SheetTitle>
+            <SidebarContent
+              currentPath={location.pathname}
+              isAdmin={isAdmin}
+              onNavigate={() => setMobileNavOpen(false)}
+            />
+          </SheetContent>
+        </Sheet>
 
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 border-b border-border flex items-center justify-between gap-2 px-4 lg:px-6 bg-card/50 backdrop-blur">
-          <div className="flex items-center gap-2 min-w-0">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="lg:hidden shrink-0"
-              onClick={() => setMobileNavOpen(true)}
-              aria-label="Abrir menu"
-            >
-              <Menu className="h-5 w-5" />
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" className="gap-2 min-w-0">
-                  <Building2 className="h-4 w-4 shrink-0" />
-                  <span className="truncate">{selectedCompany?.name ?? "Nenhuma empresa"}</span>
-                  <ChevronDown className="h-3.5 w-3.5 opacity-60 shrink-0" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-64">
-                <DropdownMenuLabel>Empresas</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                {companies.length === 0 && (
-                  <DropdownMenuItem disabled>Nenhuma empresa cadastrada</DropdownMenuItem>
-                )}
-                {companies.map((c) => (
-                  <DropdownMenuItem key={c.id} onClick={() => setSelectedCompanyId(c.id)}>
-                    {c.name}
-                    {selectedCompany?.id === c.id && (
-                      <Badge variant="secondary" className="ml-auto">
-                        Ativa
-                      </Badge>
-                    )}
+        <div className="flex-1 flex flex-col min-w-0">
+          <header className="h-14 border-b border-border flex items-center justify-between gap-2 px-4 lg:px-6 bg-card/50 backdrop-blur">
+            <div className="flex items-center gap-2 min-w-0">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="lg:hidden shrink-0"
+                onClick={() => setMobileNavOpen(true)}
+                aria-label="Abrir menu"
+              >
+                <Menu className="h-5 w-5" />
+              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-2 min-w-0">
+                    <Building2 className="h-4 w-4 shrink-0" />
+                    <span className="truncate">{selectedCompany?.name ?? "Nenhuma empresa"}</span>
+                    <ChevronDown className="h-3.5 w-3.5 opacity-60 shrink-0" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-64">
+                  <DropdownMenuLabel>Empresas</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {companies.length === 0 && (
+                    <DropdownMenuItem disabled>Nenhuma empresa cadastrada</DropdownMenuItem>
+                  )}
+                  {companies.map((c) => (
+                    <DropdownMenuItem key={c.id} onClick={() => setSelectedCompanyId(c.id)}>
+                      {c.name}
+                      {selectedCompany?.id === c.id && (
+                        <Badge variant="secondary" className="ml-auto">
+                          Ativa
+                        </Badge>
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem asChild>
+                    <Link to="/empresas">Gerenciar empresas</Link>
                   </DropdownMenuItem>
-                ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
-                  <Link to="/empresas">Gerenciar empresas</Link>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            <Badge variant={isAdmin ? "default" : "secondary"} className="gap-1">
-              {isAdmin ? <ShieldCheck className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-              <span className="hidden sm:inline">{isAdmin ? "Administrador" : "Visualizador"}</span>
-            </Badge>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="sm" className="gap-2">
-                  <div className="h-7 w-7 rounded-full bg-accent flex items-center justify-center text-xs font-semibold">
-                    {user?.email?.[0]?.toUpperCase() ?? "?"}
-                  </div>
-                  <span className="hidden md:inline text-sm">{user?.email}</span>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuLabel>{user?.email}</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={signOut}>
-                  <LogOut className="h-4 w-4 mr-2" /> Sair
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </header>
-        <main className="flex-1 overflow-y-auto p-4 lg:p-6">
-          <Outlet />
-        </main>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+            <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+              <NotificationBell />
+              <Badge variant={isAdmin ? "default" : "secondary"} className="gap-1">
+                {isAdmin ? <ShieldCheck className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                <span className="hidden sm:inline">
+                  {isAdmin ? "Administrador" : "Visualizador"}
+                </span>
+              </Badge>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="sm" className="gap-2">
+                    <div className="h-7 w-7 rounded-full bg-accent flex items-center justify-center text-xs font-semibold">
+                      {user?.email?.[0]?.toUpperCase() ?? "?"}
+                    </div>
+                    <span className="hidden md:inline text-sm">{user?.email}</span>
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuLabel>{user?.email}</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={signOut}>
+                    <LogOut className="h-4 w-4 mr-2" /> Sair
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </header>
+          <main className="flex-1 overflow-y-auto p-4 lg:p-6">
+            <Outlet />
+          </main>
+        </div>
       </div>
-    </div>
+    </NotificacoesProvider>
   );
 }

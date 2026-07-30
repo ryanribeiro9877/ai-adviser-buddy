@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { toast } from "sonner";
 import {
   Plus,
@@ -217,6 +218,27 @@ export function OperacaoChat() {
       return (data ?? []) as Conversation[];
     },
   });
+
+  // ?conv=<id> vem do link "ver a conversa que originou" no cartão de aprovação.
+  // Abre a conversa uma vez e limpa o parâmetro, para não travar a navegação manual.
+  const search = useSearch({ strict: false }) as { conv?: string };
+  const navigate = useNavigate();
+  const convAplicadaRef = useRef<string | null>(null);
+  useEffect(() => {
+    const alvo = search.conv;
+    if (!alvo || convAplicadaRef.current === alvo) return;
+    if (!(convos.data ?? []).some((c) => c.id === alvo)) return;
+    convAplicadaRef.current = alvo;
+    setActiveId(alvo);
+    navigate({
+      to: ".",
+      search: (prev: Record<string, unknown>) => {
+        const { conv: _conv, ...resto } = prev;
+        return resto;
+      },
+      replace: true,
+    });
+  }, [search.conv, convos.data, navigate]);
 
   const messages = useQuery({
     queryKey: ["chat-messages", activeId],

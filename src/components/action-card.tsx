@@ -1,6 +1,20 @@
 import { useState } from "react";
-import { Pause, PauseCircle, TrendingUp, DollarSign, Check, X, Loader2, Clock } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import {
+  Pause,
+  PauseCircle,
+  TrendingUp,
+  DollarSign,
+  Check,
+  X,
+  Loader2,
+  Clock,
+  MessagesSquare,
+  Lock,
+} from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { useAgora } from "@/hooks/use-agora";
+import { expirado as jaExpirou, textoExpiracao } from "@/lib/notificacoes";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -18,6 +32,8 @@ export type Approval = {
   reviewed_by: string | null;
   created_at: string;
   conversation_id: string | null;
+  /** Padrão do banco: now() + 24h. Sem decisão, o pedido é rejeitado com nota. */
+  expires_at?: string | null;
 };
 
 export type Decision = "approved" | "rejected";
@@ -79,6 +95,7 @@ export function ActionCard({
   requesterName,
   reviewerName,
   showMeta,
+  linkConversa,
 }: {
   approval: Approval;
   isAdmin: boolean;
@@ -87,6 +104,8 @@ export function ActionCard({
   requesterName?: string;
   reviewerName?: string;
   showMeta?: boolean;
+  /** Link "ver a conversa que originou" — inútil dentro do próprio chat. */
+  linkConversa?: boolean;
 }) {
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
@@ -98,7 +117,27 @@ export function ActionCard({
   };
   const Icon = meta.icon;
   const just = justificativa(approval.payload);
-  const canDecide = isAdmin && approval.status === "pending";
+  const pendente = approval.status === "pending";
+  // Contador vivo enquanto o pedido está pendente (o minuto passa sem evento no banco).
+  const agora = useAgora(pendente && !!approval.expires_at, 30_000);
+  const expirou = pendente && jaExpirou(approval.expires_at ?? null, agora);
+  const prazo = pendente ? textoExpiracao(approval.expires_at ?? null, agora) : null;
+  const restamMin = approval.expires_at
+    ? Math.floor((new Date(approval.expires_at).getTime() - agora) / 60000)
+    : null;
+  const prazoUrgente = restamMin !== null && restamMin <= 120;
+  // Expirado não se aprova. Não-admin vê o botão desabilitado com o motivo — a RLS
+  // bloqueia o UPDATE e um botão que falha em silêncio é pior que um desabilitado.
+  const canDecide = pendente && !expirou;
+  const motivoBloqueio = !isAdmin
+    ? "Somente administrador pode aprovar ou rejeitar"
+    : expirou
+      ? "Pedido expirado — não pode mais ser aprovado"
+      : null;
+  const payloadJson =
+    approval.payload && Object.keys(approval.payload as object).length > 0
+      ? JSON.stringify(approval.payload, null, 2)
+      : null;
 
   return (
     <div className="rounded-lg border border-border bg-card p-3">
@@ -114,14 +153,73 @@ export function ActionCard({
             <span
               className={cn(
                 "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium",
-                status.className,
+                expirou
+                  ? "border-destructive/40 bg-destructive/15 text-destructive"
+                  : status.className,
               )}
             >
-              {status.label}
+              {expirou ? "Expirada sem decisão" : status.label}
             </span>
+            {prazo && !expirou && (
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1 text-[11px]",
+                  prazoUrgente ? "font-medium text-destructive" : "text-muted-foreground",
+                )}
+              >
+                <Clock className="h-3 w-3" />
+                {prazo}
+              </span>
+            )}
           </div>
           <div className="mt-1 text-sm font-medium">{approval.summary}</div>
           {just && <p className="mt-1 text-xs text-muted-foreground">{just}</p>}
+
+          {/* Os parâmetros reais da ação — recolhidos, mas sempre disponíveis:
+              sem eles a decisão é no escuro. */}
+          {payloadJson && (
+            <details className="mt-2">
+              <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                Parâmetros da ação
+              </summary>
+              <pre className="mt-1 max-w-full overflow-x-auto rounded bg-muted p-2 text-[11px]">
+                {payloadJson}
+              </pre>
+            </details>
+          )}
+
+          {pendente && (
+            <div className="mt-2 space-y-1 rounded-md border border-border bg-muted/40 p-2 text-[11px] text-muted-foreground">
+              <p className="flex items-start gap-1.5">
+                <Lock className="mt-0.5 h-3 w-3 shrink-0" />
+                <span>
+                  As travas de execução estão fechadas: aprovar <strong>registra a decisão</strong>{" "}
+                  e não aplica nada na Meta enquanto as flags seguirem desligadas.
+                </span>
+              </p>
+              <p className="flex items-start gap-1.5">
+                <Clock className="mt-0.5 h-3 w-3 shrink-0" />
+                <span>
+                  A aprovação expira em 24h — sem decisão, vira rejeitada automaticamente com nota.
+                </span>
+              </p>
+            </div>
+          )}
+
+          {linkConversa && approval.conversation_id && (
+            <Link
+              to="/recomendacoes"
+              search={(prev: Record<string, unknown>) => ({
+                ...prev,
+                tab: "chat",
+                conv: approval.conversation_id,
+              })}
+              className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+            >
+              <MessagesSquare className="h-3.5 w-3.5" />
+              Ver a conversa que originou
+            </Link>
+          )}
 
           {approval.status === "approved" && (
             <p className="mt-2 text-xs text-muted-foreground">
@@ -147,12 +245,13 @@ export function ActionCard({
             </div>
           )}
 
-          {canDecide && !rejecting && (
-            <div className="mt-3 flex gap-2">
+          {pendente && !rejecting && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
                 onClick={() => onDecide(approval.id, "approved")}
-                disabled={deciding}
+                disabled={deciding || !isAdmin || expirou}
+                title={motivoBloqueio ?? undefined}
               >
                 {deciding ? (
                   <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
@@ -165,30 +264,37 @@ export function ActionCard({
                 size="sm"
                 variant="outline"
                 onClick={() => setRejecting(true)}
-                disabled={deciding}
+                disabled={deciding || !isAdmin || expirou}
+                title={motivoBloqueio ?? undefined}
               >
                 <X className="mr-1 h-3.5 w-3.5" />
                 Rejeitar
               </Button>
+              {motivoBloqueio && (
+                <span className="text-[11px] text-muted-foreground">{motivoBloqueio}</span>
+              )}
             </div>
           )}
 
-          {canDecide && rejecting && (
+          {canDecide && isAdmin && rejecting && (
             <div className="mt-3 space-y-2">
+              {/* O motivo é obrigatório: é ele que ensina o sistema. */}
               <Textarea
                 value={reason}
                 onChange={(e) => setReason(e.target.value)}
-                placeholder="Motivo da rejeição (opcional)"
+                placeholder="Motivo da rejeição (obrigatório)"
                 rows={2}
                 className="resize-none text-sm"
                 disabled={deciding}
+                aria-required
               />
-              <div className="flex gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
                   variant="destructive"
                   onClick={() => onDecide(approval.id, "rejected", reason)}
-                  disabled={deciding}
+                  disabled={deciding || reason.trim().length === 0}
+                  title={reason.trim() ? undefined : "Escreva o motivo da rejeição"}
                 >
                   {deciding ? (
                     <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
