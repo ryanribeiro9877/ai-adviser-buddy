@@ -74,4 +74,6 @@ Há dois tipos de arquivo aqui:
 
 | `20260731135336_upload_midia_tabela_e_flag.sql` | Upload mídia v1 | `media_uploads` (Drive → biblioteca da conta Meta, dedup por `(drive_file_id, account)` com `nulls not distinct`) + flag `upload_midia` nascendo **OFF** nas duas empresas. Subir mídia não gasta nem publica, mas é escrita na conta: respeita master, dry_run, lista branca de contas e teto por hora. |
 
+| `20260731165022_drive_midia_analises.sql` | Job v2.2 | `drive_midia_analises` — veredito visual por mídia do Drive (produto aparente, texto visível, riscos, aproveitável sim/não/incerto). Chave por arquivo **+ versão**, então cada rodada analisa só o que falta ou mudou. `base_da_analise` declara o que foi visto (miniatura, nunca o vídeo interno). |
+
 **Sobre as três assinaturas de `get_criativos_conteudo`** (todas vivas no banco): `(boolean)` é a legada sem filtro de empresa, mantida só por compatibilidade e sem consumidor desde o `traffic-chat` v28; `(boolean, uuid)` é a que a edge do chat usa; `(boolean, uuid, int, int)` é a paginada, usada pelo `traffic-agent-job` v2.1.
