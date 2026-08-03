@@ -248,7 +248,7 @@ function EmpresasPage() {
                 <div className="mt-1 text-xs text-muted-foreground">
                   {doProvedor.length === 0
                     ? "Nenhuma conta"
-                    : `${doProvedor.length} conta(s) · ${resumo}`}
+                    : `${doProvedor.length} ${doProvedor.length === 1 ? "conta" : "contas"} · ${resumo}`}
                 </div>
 
                 {naoVerificadas > 0 && (
