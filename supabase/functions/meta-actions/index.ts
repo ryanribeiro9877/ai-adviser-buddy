@@ -1,4 +1,24 @@
-// supabase/functions/meta-actions/index.ts (v3) — F4.2 + criação + ISOLAMENTO POR EMPRESA
+// supabase/functions/meta-actions/index.ts (v4)
+// v4.2 (03/08/2026) - ESPELHO NO ATO. A executora passa a gravar em campaigns/ad_sets/ads o
+//   objeto que acabou de criar, com marca criado_pelo_sistema e link para o card de origem.
+//   Motivo: o windsor-sync nao devolve campanha sem entrega, logo o sistema ficava cego para o
+//   que ele mesmo criava - justamente na fase de montagem da estrutura. Falha de espelho nao
+//   derruba a execucao (o objeto ja existe na Meta) mas e declarada no audit_log e no card.
+// v4.1 (31/07/2026, minutos depois) - a Meta APOSENTOU a categoria especial CREDIT
+//   (erro 2909060: "nao esta mais disponivel; escolha Produtos e servicos financeiros").
+//   special_ad_categories agora envia FINANCIAL_PRODUCTS_SERVICES. Segunda evolucao de
+//   plataforma pega na mesma noite pela execucao real - fail-loud pagando de novo.
+// v4 (31/07/2026) - tres mudancas da primeira execucao real:
+//   (1) is_adset_budget_sharing_enabled=false na criacao de campanha ABO - campo que a Meta
+//       passou a EXIGIR (erro 100/4834011 recusou os 3 primeiros cards reais). false = cada
+//       conjunto com o proprio orcamento, sem os 20% compartilhaveis: e o default que casa
+//       com a disciplina de teto por conjunto; ligar compartilhamento = decisao declarada.
+//   (2) APROVACAO = ATIVACAO (decisao do Ryan, 31/07): objeto criado nasce ACTIVE, nao mais
+//       PAUSED. O portao passou a ser a APROVACAO HUMANA no card (sino) - quem aprova card
+//       de ANUNCIO esta ligando entrega/gasto no ato; o resumo do card e o execution_result
+//       dizem isso com todas as letras.
+//   (3) Idempotencia verificada e mantida: executed_at so no sucesso; varredura exige
+//       executed_at null; falha continua re-executavel. (v3) — F4.2 + criação + ISOLAMENTO POR EMPRESA
 // v3 — A configuracao de execucao deixou de ser global. meta_execution_config era singleton
 //   (check constraint travava id=1) e a linha unica valia para TODAS as empresas: ligar
 //   master_enabled alcançaria as 8 campanhas da COHAPM sob a configuracao calibrada para a
@@ -78,9 +98,10 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
       body: {
         name: nome,
         objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
-        status: "PAUSED",                                  // TRAVA 1
-        special_ad_categories: JSON.stringify(["CREDIT"]),  // TRAVA 2 (forcado, nao vem do payload)
+        status: "ACTIVE",                                  // v4: aprovacao humana e o portao
+        special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]),  // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
         buying_type: "AUCTION",
+        is_adset_budget_sharing_enabled: "false",           // v4: exigido pela Meta em ABO; false = sem compartilhamento de orcamento entre conjuntos
       } as Record<string, string>,
     };
   }
@@ -104,7 +125,7 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
       name: nome,
       campaign_id: campanha,
       daily_budget: String(Math.round(reais * 100)),   // centavos
-      status: "PAUSED",                                 // TRAVA 1
+      status: "ACTIVE",                                 // v4: aprovacao humana e o portao
     };
     // Replica apenas o que o molde realmente tem - nada e inventado.
     if (mb.optimization_goal) body.optimization_goal = String(mb.optimization_goal);
@@ -135,7 +156,7 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
 
     return {
       path: `/${conta}/ads`,
-      body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+      body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>,  // v4: aprovar card de ANUNCIO liga a entrega no ato
       criativo: temStorySpec
         ? { modo: "novo_adcreative", path: `/${conta}/adcreatives`,
             body: { name: `${nome} - creative`, object_story_spec: JSON.stringify(cb.object_story_spec),
@@ -146,6 +167,93 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
   }
 
   return { erro: `acao de criacao desconhecida: ${acao}` };
+}
+
+// v4.2 (03/08/2026) - ESPELHO NO ATO DA CRIACAO.
+// PROBLEMA QUE ISSO RESOLVE: a executora criava o objeto na Meta e nao gravava em
+// campaigns/ad_sets/ads. O espelho dependia do windsor-sync, que por construcao nao devolve
+// campanha sem entrega - logo o sistema ficava cego para o que ele mesmo acabou de criar,
+// exatamente durante a montagem da estrutura. As 3 campanhas de 31/07 ficaram 3 dias fora do
+// banco, e foi essa cegueira que fez o agente e o gestor operarem sobre estado falso.
+// CAIXA DO STATUS (nao mexer sem ler): campaigns usa MINUSCULO nesta base (24 'paused' +
+// 2 'active'), ad_sets e ads usam MAIUSCULO. Gravar a caixa errada faz a linha piscar a cada
+// sync. Seguimos a convencao de cada tabela; a divergencia entre elas e item separado (GT-09).
+// CONTA: campaigns.external_account_id e ad_sets/ads.account_id guardam o id SEM o prefixo act_.
+// FALHA DE ESPELHO NAO DERRUBA A EXECUCAO: o objeto JA existe na Meta nesse ponto. Mas tambem
+// nao e silenciosa - vai para o audit_log e para o execution_result do card.
+async function espelhar(
+  acao: string, novoId: string, objeto: any, p: any, conta: string,
+  companyId: string, approvalId: string, moldeLido: any, creativeUsado: string | null,
+): Promise<{ ok: boolean; erro?: string; tabela?: string }> {
+  const contaSemPrefixo = conta.replace(/^act_/, "");
+  const statusMeta = String(objeto?.status ?? "ACTIVE");
+  try {
+    if (acao === "criar_campanha") {
+      const { error } = await supa.from("campaigns").upsert({
+        company_id: companyId,
+        provider: "meta_ads",
+        name: String(objeto?.name ?? p?.nome_novo ?? ""),
+        objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
+        status: statusMeta.toLowerCase(),                 // campaigns = minusculo
+        daily_budget: 0,                                  // ABO: orcamento vive no conjunto
+        external_id: novoId,
+        external_account_id: contaSemPrefixo,
+        special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"],
+        criado_pelo_sistema: true,
+        criado_por_approval_id: approvalId,
+      }, { onConflict: "provider,external_id" });
+      return error ? { ok: false, erro: error.message, tabela: "campaigns" } : { ok: true, tabela: "campaigns" };
+    }
+
+    if (acao === "criar_conjunto_a_partir_de") {
+      // ad_sets.campaign_id e o uuid INTERNO, nao o id da Meta - precisa resolver.
+      const { data: camp } = await supa.from("campaigns").select("id")
+        .eq("provider", "meta_ads").eq("external_id", String(p?.campanha_destino_external_id ?? ""))
+        .maybeSingle();
+      const { error } = await supa.from("ad_sets").upsert({
+        company_id: companyId,
+        provider: "meta_ads",
+        account_id: contaSemPrefixo,
+        campaign_id: camp?.id ?? null,                    // null e aceito (FK ON DELETE SET NULL)
+        external_id: novoId,
+        name: String(objeto?.name ?? p?.nome_novo ?? ""),
+        status: statusMeta.toUpperCase(),                 // ad_sets = MAIUSCULO
+        daily_budget: Math.round(Number(p?.orcamento_diario_reais ?? 0) * 100),  // centavos
+        bid_strategy: moldeLido?.bid_strategy ?? null,
+        targeting: moldeLido?.targeting ?? null,
+        criado_pelo_sistema: true,
+        criado_por_approval_id: approvalId,
+      }, { onConflict: "provider,external_id" });
+      const aviso = camp?.id ? undefined : "conjunto gravado SEM vinculo de campanha: a campanha destino nao esta no espelho";
+      return error ? { ok: false, erro: error.message, tabela: "ad_sets" }
+                   : { ok: true, tabela: "ad_sets", ...(aviso ? { erro: aviso } : {}) };
+    }
+
+    if (acao === "criar_anuncio_a_partir_de") {
+      // Sobe pelo conjunto para achar a campanha - o anuncio guarda as duas referencias.
+      const { data: aset } = await supa.from("ad_sets").select("campaign_id")
+        .eq("provider", "meta_ads").eq("external_id", String(p?.conjunto_destino_external_id ?? ""))
+        .maybeSingle();
+      const { error } = await supa.from("ads").upsert({
+        company_id: companyId,
+        provider: "meta_ads",
+        account_id: contaSemPrefixo,
+        campaign_id: aset?.campaign_id ?? null,
+        adset_external_id: String(p?.conjunto_destino_external_id ?? ""),
+        external_id: novoId,
+        name: String(objeto?.name ?? p?.nome_novo ?? ""),
+        creative_id: creativeUsado,
+        status: statusMeta.toUpperCase(),                 // ads = MAIUSCULO
+        criado_pelo_sistema: true,
+        criado_por_approval_id: approvalId,
+      }, { onConflict: "provider,external_id" });
+      return error ? { ok: false, erro: error.message, tabela: "ads" } : { ok: true, tabela: "ads" };
+    }
+
+    return { ok: false, erro: `acao sem regra de espelho: ${acao}` };
+  } catch (e) {
+    return { ok: false, erro: String(e) };
+  }
 }
 
 Deno.serve(async (req) => {
@@ -260,7 +368,7 @@ Deno.serve(async (req) => {
       const exec = await g(pl.path, "POST", bodyFinal);
       const novoId = (exec.body as any)?.id ?? null;
       const sucesso = exec.status === 200 && !!novoId;
-      // Confere o estado do que nasceu: a trava de PAUSED precisa ser verificada, nao assumida.
+      // Confere o estado do que nasceu: o status (ACTIVE desde a v4) e verificado, nao assumido.
       const depois = sucesso ? await g(`/${novoId}?fields=name,status,effective_status`) : { status: 0, body: null };
 
       await audit(r.company_id, sistema, sucesso ? "meta_action_executed" : "meta_action_failed", r.id, {
@@ -270,11 +378,21 @@ Deno.serve(async (req) => {
 
       if (sucesso) {
         executadasNaHora++;
+        // v4.2: espelha ANTES de fechar o card, para que o proximo turno do agente ja veja.
+        const esp = await espelhar(acao, novoId, depois.body, r.payload, conta,
+          r.company_id, r.id, pl.molde_lido ?? null,
+          creativeCriado ?? (pl.criativo?.creative_id ?? null));
+        if (!esp.ok) {
+          await audit(r.company_id, sistema, "meta_action_espelho_falhou", r.id,
+            { acao, id_criado: novoId, tabela: esp.tabela ?? null, erro: esp.erro,
+              nota: "O OBJETO EXISTE NA META. Falhou apenas a gravacao no espelho local - o sistema ficara cego para este objeto ate o proximo sync." });
+        }
         await supa.from("approval_requests").update({
           executed_at: new Date().toISOString(),
           execution_result: { ok: true, id_criado: novoId, objeto: depois.body,
             adcreative_criado: creativeCriado, aviso: pl.criativo?.aviso ?? null,
-            lembrete: "Objeto criado PAUSADO. Precisa ser ativado manualmente no Gerenciador." },
+            espelho_gravado: esp.ok, espelho_tabela: esp.tabela ?? null, espelho_erro: esp.erro ?? null,
+            lembrete: "Objeto criado ATIVO por aprovacao humana (v4). Se a arvore inteira (campanha+conjunto+anuncio) estiver ativa, a entrega comeca sem passo manual." },
         }).eq("id", r.id);
       }
       resultados.push({ id: r.id, acao, resultado: sucesso ? "CRIADO" : "falha_meta",
@@ -354,6 +472,6 @@ Deno.serve(async (req) => {
   }
 
   // v3: nao ha "modo" unico - cada card foi avaliado sob a config da sua empresa.
-  return json({ ok: true, processados: resultados.length, resultados,
+  return json({ ok: true, versao: "meta-actions-v4.2", processados: resultados.length, resultados,
     nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); cada resultado acima foi avaliado sob a config da empresa do proprio card" });
 });
