@@ -1,0 +1,69 @@
+-- ESPELHO DE MIGRAÇÃO APLICADA
+-- version: 20260803141646
+-- name: gt05_gt27_escopo_fatos_e_contrato_ativacao
+-- aplicada por: Claude via MCP apply_migration em 03/08/2026
+-- projeto: gzjwnjdpxpbmdhcyefvs (Gestor de Tráfego IA)
+-- fecha: GT-05, GT-27 e a metade-banco do GT-07
+--
+-- CONTEXTO: com a criacao da 3a empresa (Cooperativa_ Cohapm, 03/08 11:39) o vazamento de
+-- doutrina deixou de ser latente. Ela nascia com 0 fatos proprios herdando 20 fatos globais,
+-- inclusive doutrina de credito consignado, tetos de outra empresa e o fato da categoria
+-- especial que SOMAVA as campanhas das duas empresas ("26 campanhas" = 18 LEV + 8 COHAPM).
+--
+-- O SQL completo aplicado esta em supabase_migrations.schema_migrations.statements[1]
+-- para a version 20260803141646. Resumo do que cada bloco fez:
+--
+--   BLOCO 1 (GT-05) -- UPDATE agent_context id=40
+--     Fato da categoria especial reescrito e escopado para Legal e Viver.
+--     Estava OBSOLETO (escrito 29/07, dois dias antes de a meta-actions v4.1 passar a gravar
+--     FINANCIAL_PRODUCTS_SERVICES por construcao) e por causa dele o agente RECUSOU em 02/08
+--     um pedido do gestor que ja estava 100% atendido.
+--     Estava CONTAMINADO: o numero 26 era a soma das duas empresas, e o fato era global.
+--     Texto novo separa DUAS situacoes: campanha criada pelo sistema (categoria gravada por
+--     construcao, afirmavel, nunca pedir ao gestor) x campanha legada (campo nao coletado,
+--     segue nao verificado).
+--
+--   BLOCO 2 (GT-07 metade banco) -- UPDATE agent_context id=11
+--     O contrato de ativacao na memoria estava errado desde 31/07: dizia "o card fica PENDENTE /
+--     nunca afirme que executou". Hoje aprovar card EXECUTA na Meta e o objeto nasce ACTIVE.
+--     Texto novo passa a ser o CANONICO do contrato: aprovar card de anuncio liga entrega e gasto
+--     no ato; nao existe mais "tirar a pausa"; o agente segue sem caminho proprio para gastar;
+--     e ato sem retorno de ferramenta nao existe.
+--
+--   BLOCO 3 (GT-27) -- UPDATE agent_context company_id para Legal e Viver
+--     ids 3, 10, 36, 39, 41, 42, 44 -- eram globais e sao da Legal e Viver:
+--       3  instrumentacao de UTM da captacao        10 CAPI ContratoPago / receita
+--       36 conversao final no dashboard da Legal    39 procedencia dos tetos
+--       41 mapa de contas Meta                      42 inventario de WhatsApp
+--       44 metrica custo por lead LP / teto R$ 1,50
+--
+--   BLOCO 4 (GT-27) -- INSERT agent_context para Cooperativa_ Cohapm (virou id 47)
+--     Fato-guarda de identidade. NAO inventa a diferenca entre ela e a COHAPM (isso e o GT-28,
+--     depende de uma frase do Ryan) -- apenas impede herdar identidade e numero de quem nao e ela:
+--     sem doutrina de credito, sem teto de outra empresa, sem comparacao, e declarar escopo
+--     indefinido em vez de assumir.
+--
+-- ============================================================================
+-- PROVA POS-APLICACAO (03/08/2026)
+-- ============================================================================
+-- fatos globais vigentes ................... 20 -> 12
+-- globais citando consignado/INSS/CLT/teto . NENHUM (criterio do GT-27 atendido)
+-- empresa nova recebe ...................... 12 universais + 1 fato-guarda proprio
+-- fato 40 .................................. escopo Legal e Viver, diz "POR CONSTRUCAO",
+--                                            nao contem mais "26 CAMPANHAS"
+-- fato 11 .................................. diz "APROVAR CARD E O ATO DE EXECUTAR",
+--                                            nao contem mais "card fica PENDENTE"
+-- distribuicao ............................. LEV 17 | GLOBAL 12 | COHAPM 2 | Cooperativa 1
+--
+-- ============================================================================
+-- CONSEQUENCIA CONHECIDA E NAO RESOLVIDA (declarada, nao silenciosa)
+-- ============================================================================
+-- O fato 39 (PROCEDENCIA DOS TETOS) carregava DUAS coisas: o METODO (teto = percentil 75 do
+-- custo diario; calculado uma unica vez em 22/07/2026 e sem rotina de recalculo; "dentro do
+-- teto" significa consistencia e NUNCA rentabilidade) e os NUMEROS das duas empresas.
+-- Ao escopar 39 para a Legal e Viver, a COHAPM perdeu acesso ao METODO. Os numeros dela seguem
+-- disponiveis no fato proprio de escopo COHAPM (custo por conversa R$ 21,80, custo por lead de
+-- LP R$ 6,85, com ressalva de amostra pequena), mas as tres ressalvas metodologicas nao.
+-- CONSERTO CORRETO: quebrar 39 em dois fatos -- um GLOBAL so com o metodo e as ressalvas, sem
+-- numero, e um da Legal e Viver com os numeros dela. Nao foi feito nesta migracao para nao
+-- ampliar escopo sem decisao; fica registrado como pendencia conhecida.
