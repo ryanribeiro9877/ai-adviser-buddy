@@ -76,4 +76,6 @@ Há dois tipos de arquivo aqui:
 
 | `20260731165022_drive_midia_analises.sql` | Job v2.2 | `drive_midia_analises` — veredito visual por mídia do Drive (produto aparente, texto visível, riscos, aproveitável sim/não/incerto). Chave por arquivo **+ versão**, então cada rodada analisa só o que falta ou mudou. `base_da_analise` declara o que foi visto (miniatura, nunca o vídeo interno). |
 
+| `20260803121910_fix_integrations_status_nao_nasce_conectada.sql` | 03/08 | **"Conectada" falsa vinha do schema:** `status` DEFAULT `'connected'` + `connected_at` DEFAULT `now()` faziam toda linha nascer conectada sem nenhuma chamada à Graph (22 de 22 `connected` desde sempre, 2 sem `external_id`). Defaults passam a `nao_verificada`/`quarentena`, `connected_at` sem default, CHECK de vocabulário e **trava estrutural** `status <> 'connected' OR external_id preenchido` — o banco recusa a mentira em vez de depender do front. |
+
 **Sobre as três assinaturas de `get_criativos_conteudo`** (todas vivas no banco): `(boolean)` é a legada sem filtro de empresa, mantida só por compatibilidade e sem consumidor desde o `traffic-chat` v28; `(boolean, uuid)` é a que a edge do chat usa; `(boolean, uuid, int, int)` é a paginada, usada pelo `traffic-agent-job` v2.1.
