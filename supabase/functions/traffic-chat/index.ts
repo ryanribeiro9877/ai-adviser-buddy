@@ -1,4 +1,74 @@
-// supabase/functions/traffic-chat/index.ts (v27.1)
+// supabase/functions/traffic-chat/index.ts (v28.6)
+// v28.6 (03/08/2026) - CINCO CONSERTOS DE UMA VEZ, todos achados na auditoria forense de 03/08:
+//   (1) GT-03 - O AGENTE VE A PROPRIA FILA. Nova tool get_aprovacoes. Ele nao tinha NENHUMA
+//       forma de saber o que aconteceu com um card depois de emitido: nem se foi aprovado, nem
+//       se executou, nem qual erro a Meta devolveu. Perguntado sobre um estado que nao
+//       enxergava, preencheu o vazio - em 31/07 e de novo em 02/08. Expor a fila e metade do
+//       conserto da fabricacao.
+//   (2) GT-30 - A REGRA ANTI-FABRICACAO COBRIA ATO E NAO COBRIA LEITURA. Em 02/08, JA COM O
+//       v28.5 NO AR, o agente escreveu "Confirmado: as tres campanhas apareceram no sistema
+//       desta vez" com tools:[] e tool_calls:null. Ele nao afirmou ter CRIADO nada - afirmou ter
+//       VERIFICADO. A regra falava de emitir/criar/executar, e leitura passou pela fresta. E foi
+//       a leitura fabricada que causou o dano, porque o gestor decidiu em cima dela.
+//   (3) GT-06 - O CHAT NAO LIA AS TRAVAS. Ele conferia contas_permitidas_criacao mas nunca
+//       master_enabled nem action_flags. Resultado: emitia card de acao DESLIGADA, o gestor
+//       aprovava, e a executora bloqueava depois. Promessa que o sistema nao podia cumprir.
+//   (4) SINGLETON NO CAMINHO DA PROPOSTA. meta_execution_config era lido com .eq("id",1) - a
+//       linha da Legal e Viver. Conversa da COHAPM lia a lista de contas da Legal. Falhava
+//       fechado por acidente (a conta da empresa nao casava com a lista da outra), mas com
+//       mensagem enganosa. Mesma classe do bug corrigido na meta-actions v3.
+//   (5) GT-07 - CONTRATO DE ATIVACAO. Seis lugares deste arquivo ainda diziam "nasce PAUSADO,
+//       o gestor ativa no Gerenciador". Falso desde 31/07: aprovar o card ATIVA. O gestor operou
+//       a conversa de 02/08 inteira convencido de que tinha um freio manual que nao existe.
+//   (6) GT-04 (robustez) - destino de conjunto passa a aceitar tambem o identificador da
+//       campanha, e a procurar em cards ja executados quando o espelho ainda nao tem a linha.
+// v28.5 (31/07/2026) - REGRA CONTRA ATO NARRADO: na noite de 31/07 o agente escreveu
+//   "vou emitir agora... cards recriados e pendentes" com uma tabela de "estado real" -
+//   e NAO chamou ferramenta nenhuma (tools_used vazio). Primeiro erro genuinamente do
+//   modelo da serie: fabricou a narrativa de um ato. A regra abaixo torna a proibicao
+//   explicita: afirmar emissao/criacao/execucao exige retorno de sucesso da ferramenta
+//   NESTA resposta.
+// v28.4 (31/07/2026) - RECONCILIACAO DO CONTRATO DE ATIVACAO. O agente recusou "ativar
+//   direto" citando doutrina correta ("eu nao ativo") mas AFIRMOU um contrato que ficou
+//   velho ("tudo nasce pausado, o gestor ativa no Gerenciador"). Contrato vigente desde a
+//   meta-actions v4 (decisao do Ryan 31/07): A APROVACAO HUMANA DO CARD E O ATO DE
+//   ATIVACAO - o objeto nasce ACTIVE quando o admin aprova. O agente continua sem poder
+//   ativar/pausar nada por conta propria; o que muda e o que ele DIZ sobre a aprovacao.
+// v28.3 (31/07/2026) - o CARD diz a verdade do que vai acontecer:
+//   (1) special_ad_categories no payload do card: FINANCIAL_PRODUCTS_SERVICES (a Meta
+//       aposentou CREDIT - erro 2909060 na primeira execucao real);
+//   (2) status_inicial no card: ACTIVE (meta-actions v4: aprovacao humana = ativacao) -
+//       o resumo que o admin aprova nao pode dizer PAUSED se o objeto nasce ativo.
+// v28.2 (31/07/2026) - VEREDITOS DA ANALISE VISUAL expostos ao chat.
+//   Segunda ocorrencia da mesma classe de bug de simetria: o pipeline de visao do job
+//   classificou os 67 arquivos do Drive e persistiu em drive_midia_analises - mas nenhuma
+//   ferramenta expunha a tabela. O chat respondeu "mega analise" por nome/pasta/data com os
+//   vereditos visuais ja prontos no banco. Nova tool get_analise_visual_drive (leitura
+//   barata da RPC get_drive_analises). LICAO: capacidade nova exige exposicao SIMETRICA do
+//   RESULTADO, nao so do pipeline que o produz.
+// v28.1 (31/07/2026) - DRIVE NO CHAT + rotulo de telemetria.
+//   (1) get_drive_criativos agora existe TAMBEM aqui: a ferramenta nasceu so no job de
+//       analise profunda, e as perguntas curtas do gestor roteiam para ESTE chat - que
+//       entao declarava, honestamente para a propria edge, "nao acesso Drive". Assimetria
+//       de capacidade entre os dois caminhos do mesmo agente = bug de produto, nao do
+//       modelo. Mesmos limites do job: somente leitura, arvore com tetos, thumbnail.
+//   (2) Corrigido rotulo velho na telemetria interna: chat_messages.diagnostico gravava
+//       versao "v27.1" mesmo no v28 (campo esquecido na edicao anterior - a sonda validava
+//       pelo campo da RESPOSTA, que foi o unico atualizado).
+// v28 (30/07/2026) - PERSONA NO PROMPT + ISOLAMENTO DE EMPRESA NA TOOL DE CRIATIVOS.
+//   (1) PERSONA v4 integrada ao systemPrompt (identidade, hierarquia de prioridades,
+//       doutrina de decisao e limites duros) - camada validada em 3 rodadas de auditoria;
+//       estilo continua vindo do banco (agent_style), sem duplicacao.
+//   (2) get_criativos_conteudo agora passa p_company_id (ctx.companyId): mata na origem o
+//       vazamento entre empresas achado na auditoria de 30/07 (peca da COHAPM entrou na
+//       auditoria de compliance do portfolio de credito da Legal).
+//   (3) Limpeza de instrucoes VENCIDAS pos-remocao do CRM (28/07): escopo, "dinheiro acima
+//       de volume" e glossario nao apontam mais para get_funil_credito como fonte de
+//       contrato pago (a tool virou stub de fora-de-escopo).
+//   (4) Marcador versao: "chat-v28.5" na resposta (sonda pos-deploy).
+//   Preparacao (comentada) p/ separar modelo do chat do modelo dos subagentes - ativa
+//   quando a decisao do Opus for tomada (ver bloco MODEL).
+
 // v27.1 - CORTE DE HISTORICO COM DIRECAO CERTA E DECLARADO (bug achado na auditoria de 28/07).
 //   O historico cortava TODA mensagem com slice(0,6000) - a CABECA. Para a costura de
 //   continuacao esse e o sentido errado duas vezes, provado em banco:
@@ -49,7 +119,7 @@
 // v25 - ACOES DE CRIACAO (campanha / conjunto / anuncio), lado da PROPOSTA.
 // v25 - ACOES DE CRIACAO (campanha / conjunto / anuncio), lado da PROPOSTA.
 //   Sete travas decididas com o Ryan, todas no CODIGO e nao no prompt:
-//     (1) tudo nasce PAUSED - o executor forca; o gestor ativa no Gerenciador
+//     (1) v28.4: objeto nasce ACTIVE quando o admin APROVA o card - a aprovacao e o ato de ativacao
 //     (2) special_ad_categories=['CREDIT'] e FORCADO, nao e parametro
 //     (3) compliance e BLOQUEANTE: criar_anuncio roda a legenda do molde no compliance-check
 //         e RECUSA criar se houver violacao (hoje o compliance era so consultivo)
@@ -204,6 +274,13 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
 const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "anthropic/claude-sonnet-5").trim();
+// v28: quando a troca p/ Opus for decidida, o caminho e: setar OPENROUTER_MODEL para o Opus
+// (este chat) e criar OPENROUTER_MODEL_SUB p/ os subagentes do traffic-agent-job continuarem
+// no modelo atual (extracao estrita nao precisa de Opus e custa 5x). Nada a mudar AQUI alem
+// do secret; a separacao e feita na edge do job.
+// v28.1: credencial do Drive (mesma service account do job) + pasta raiz dos criativos.
+const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
+const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? "").trim();
 const MAX_ITER = 10;
 // v20: teto de ferramentas por turno. 14 tools medidas em 2 turnos consecutivos, com 5
 // chamadas ao compliance-check a 3-6s cada. Corta tempo e tokens ao mesmo tempo.
@@ -347,7 +424,7 @@ async function t_funnel(companyId: string, date_from?: string, date_to?: string)
     funil_midia: { impressoes: s.imp, cliques: s.clk, cliques_no_link_lead: s.link, formularios: s.forms, conversas_whatsapp: s.msg },
     gasto: brl(s.spend),
     custos: { por_lead_lp: s.link ? brl(s.spend / s.link) : null, por_formulario: s.forms ? brl(s.spend / s.forms) : null, por_conversa: s.msg ? brl(s.spend / s.msg) : null },
-    nota: "funil de MIDIA. Proposta/contrato/receita: use get_funil_credito COM A MESMA JANELA." };
+    nota: "funil de MIDIA. Proposta/contrato/receita estao FORA do escopo do sistema desde 28/07/2026 - nao existe fonte de conversao final; trate CPL como proxy e declare isso." };
 }
 async function t_ads_ranking(companyId: string, days = 7) {
   const from = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
@@ -418,8 +495,10 @@ function cortarLista(obj: Record<string, unknown>, campo: string, teto = TETO_TO
   }
   return out;
 }
-async function t_criativos_conteudo(somenteAtivas: boolean) {
-  const { data, error } = await supa.rpc("get_criativos_conteudo", { p_somente_ativas: somenteAtivas });
+async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string) {
+  // v28: p_company_id obrigatorio - criativos sao sempre de UMA empresa. A versao sem filtro
+  // vazou peca da COHAPM p/ dentro da auditoria de credito da Legal (auditoria 30/07).
+  const { data, error } = await supa.rpc("get_criativos_conteudo", { p_somente_ativas: somenteAtivas, p_company_id: companyId });
   if (error) return { erro: `falha ao ler conteudo dos criativos: ${error.message}` };
   if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo" };
   const obj = data as Record<string, unknown>;
@@ -534,14 +613,37 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
   const params = args?.params ?? {};
 
   if (!justificativa) return { erro: "justificativa obrigatoria (EVIDENCIA: por que criar isso, com numero e fonte)" };
-  if (!reversa) return { erro: "reversa obrigatoria: como desfazer (ex.: excluir o objeto criado, que nasce PAUSED e nao gasta), quem desfaz e em quanto tempo" };
+  if (!reversa) return { erro: "reversa obrigatoria: como desfazer (ex.: pausar ou excluir o objeto criado - ele nasce ATIVO quando o card e aprovado), quem desfaz e em quanto tempo" };
   if (!sucesso) return { erro: "metrica_sucesso obrigatoria: qual metrica e limiar dizem que deu certo, no funil completo ate contrato pago" };
 
+  // v28.6: config DA EMPRESA DESTA CONVERSA. Era lida com .eq("id",1) - a linha da Legal e
+  // Viver - entao conversa da COHAPM avaliava a lista de contas de OUTRA empresa. Mesma classe
+  // do bug corrigido na meta-actions v3: seguro por acidente com uma empresa, errado com tres.
   const { data: conf } = await supa.from("meta_execution_config")
-    .select("contas_permitidas_criacao,teto_sanidade_orcamento_diario").eq("id", 1).maybeSingle();
-  const contasOk: string[] = (conf?.contas_permitidas_criacao ?? []).map((x: string) => x.startsWith("act_") ? x : `act_${x}`);
-  const tetoSanidade = Number(conf?.teto_sanidade_orcamento_diario ?? 5000);
-  if (!contasOk.length) return { erro: "criacao bloqueada: nenhuma conta esta na lista de contas permitidas para criacao. Isso e configuracao do sistema, nao algo que voce possa contornar." };
+    .select("master_enabled,dry_run,action_flags,contas_permitidas_criacao,teto_sanidade_orcamento_diario")
+    .eq("company_id", companyId).maybeSingle();
+  if (!conf) {
+    return { erro: "criacao_bloqueada_sem_configuracao",
+      detalhe: "Esta empresa nao tem configuracao de execucao propria, e sem ela nada pode ser criado. Informe ao gestor que habilitar criacao para esta empresa e uma configuracao do sistema - e NAO proponha usar a configuracao de outra empresa." };
+  }
+  // v28.6 (GT-06): LER AS TRAVAS ANTES DE PROMETER. Emitir card de acao desligada faz o gestor
+  // aprovar algo que a executora vai bloquear depois - promessa que o sistema nao cumpre.
+  // Melhor declarar a trava fechada AGORA, com o plano pronto, do que gastar a aprovacao dele.
+  if (conf.master_enabled !== true) {
+    return { erro: "criacao_bloqueada_por_trava_mestra",
+      detalhe: "A execucao de acoes reais esta DESLIGADA para esta empresa, entao o card nao foi emitido: aprova-lo nao produziria efeito. Diga isso ao gestor em linguagem de negocio, entregue o plano completo do que seria criado, e explique que ligar a execucao e decisao de quem administra o sistema." };
+  }
+  if (conf.action_flags?.[action] !== true) {
+    return { erro: "criacao_bloqueada_por_trava_da_acao",
+      acao_bloqueada: action,
+      detalhe: "Esta acao especifica esta desligada para esta empresa. NAO emiti o card, porque um card aprovado dessa acao seria recusado na execucao. Entregue ao gestor o plano do que seria criado - orcamento, molde, destino - e diga que falta liberar esta acao no sistema. NAO cite nome de flag nem detalhe tecnico." };
+  }
+  const contasOk: string[] = (conf.contas_permitidas_criacao ?? []).map((x: string) => x.startsWith("act_") ? x : `act_${x}`);
+  const tetoSanidade = Number(conf.teto_sanidade_orcamento_diario ?? 5000);
+  if (!contasOk.length) return { erro: "criacao bloqueada: nenhuma conta desta empresa esta habilitada para criacao. Isso e configuracao do sistema, nao algo que voce possa contornar." };
+  const avisoDryRun = conf.dry_run === true
+    ? "ATENCAO: o sistema esta em modo de simulacao. Se este card for aprovado, NADA sera criado na Meta - a execucao apenas registra o que faria. Declare isso ao gestor."
+    : null;
 
   // v25 CORRECAO CRITICA (28/07): a conta de destino tem de vir da EMPRESA DESTA CONVERSA,
   // nunca do primeiro item da lista branca. Existem 2 empresas no banco (Legal e Viver e
@@ -577,10 +679,10 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const bruto = String(params?.objetivo ?? "OUTCOME_LEADS").trim().toUpperCase().replace(/[\s-]+/g, "_");
     const objetivo = ODAX.includes(bruto) ? bruto : (SINONIMOS[bruto] ?? "");
     if (!objetivo) return { erro: `objetivo '${bruto}' nao e valido na Meta. Use um destes: ${ODAX.join(", ")}. Para geracao de lead em landing page o correto e OUTCOME_LEADS.` };
-    const summary = `Criar campanha "${nomeAlvo}" (objetivo ${objetivo}) - nasce PAUSADA, categoria especial de credito obrigatoria`;
+    const summary = `Criar campanha "${nomeAlvo}" (objetivo ${objetivo}) - aprovar CRIA e ATIVA a campanha; categoria de produtos e servicos financeiros gravada por construcao. Campanha sozinha nao entrega nem gasta: sem conjunto e anuncio, o custo e zero.`;
     return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
       nome_novo: nomeAlvo, objetivo, conta_destino: contaDaEmpresa,
-      special_ad_categories: ["CREDIT"], status_inicial: "PAUSED",
+      special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"], status_inicial: "ACTIVE",  // v28.3: verdade do que a execucao fara
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
@@ -605,15 +707,43 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (contaMolde && contaMolde !== contaDaEmpresa) {
       return { erro: `o conjunto molde pertence a conta ${contaMolde}, diferente da conta desta empresa (${contaDaEmpresa}). Replicar entre contas nao e permitido - peca um molde da propria conta.` };
     }
+    // v28.6 (GT-04): tres caminhos para achar a campanha de destino, em ordem de confiabilidade.
+    // O que travou em 02/08 foi so o primeiro: o espelho nao tinha as campanhas criadas pelo
+    // proprio sistema (a meta-actions nao gravava - corrigido no GT-02). Os outros dois existem
+    // para que a mesma cegueira nunca mais bloqueie a escada.
     const { data: camps } = await supa.from("campaigns").select("id,name,external_id").eq("company_id", companyId);
-    const dest = (camps ?? []).find((c) => norm(c.name) === norm(campanhaDestino)) ?? (camps ?? []).filter((c) => norm(c.name).includes(norm(campanhaDestino)))[0];
-    if (!dest) return { erro: `campanha de destino '${campanhaDestino}' nao encontrada. Se ela ainda nao existe, proponha criar_campanha primeiro e aguarde a aprovacao.` };
+    const soDigitos = /^\d{6,}$/.test(campanhaDestino);
+    let dest = soDigitos
+      ? (camps ?? []).find((c) => String(c.external_id ?? "") === campanhaDestino)
+      : ((camps ?? []).find((c) => norm(c.name) === norm(campanhaDestino))
+         ?? (camps ?? []).filter((c) => norm(c.name).includes(norm(campanhaDestino)))[0]);
+    let destOrigem = dest ? "espelho" : "";
+    if (!dest) {
+      // Ultimo recurso: card de criacao JA EXECUTADO. O identificador que a Meta devolveu fica
+      // gravado no proprio pedido, entao a campanha existe de fato mesmo se o espelho atrasar.
+      const { data: exec } = await supa.from("approval_requests")
+        .select("execution_result").eq("company_id", companyId).eq("action", "criar_campanha")
+        .not("executed_at", "is", null).order("executed_at", { ascending: false }).limit(20);
+      const hit = (exec ?? []).find((r: any) => {
+        const nome = String(r.execution_result?.objeto?.name ?? "");
+        const id = String(r.execution_result?.id_criado ?? "");
+        return r.execution_result?.ok === true && id &&
+          (soDigitos ? id === campanhaDestino : norm(nome).includes(norm(campanhaDestino)));
+      });
+      if (hit) {
+        dest = { id: null as any, name: String(hit.execution_result?.objeto?.name ?? campanhaDestino),
+                 external_id: String(hit.execution_result?.id_criado) };
+        destOrigem = "pedido_executado";
+      }
+    }
+    if (!dest) return { erro: `campanha de destino '${campanhaDestino}' nao encontrada nem no sistema nem entre as criadas por pedido aprovado. Se ela ainda nao existe, proponha criar_campanha primeiro e aguarde a aprovacao. NAO invente o identificador.` };
+    if (!dest.external_id) return { erro: `a campanha '${dest.name}' existe no sistema mas ainda nao tem identificador da Meta sincronizado - sem ele o conjunto nao tem onde nascer. Aguarde a proxima sincronizacao.` };
 
-    const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO`;
+    const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia. Aprovar CRIA e ATIVA o conjunto. Ele so passa a entregar quando houver anuncio ativo dentro dele.`;
     return await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
-      orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "PAUSED",
+      orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "ACTIVE",  // v28.4: aprovar = ativar
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
@@ -654,12 +784,12 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // para fb/ig automaticamente - melhor que fixar um dos dois.
     const urlTags = `utm_source={{site_source_name}}&utm_medium=paid&utm_campaign=${slug(utmCampaign)}&utm_content=${slug(nomeNovo)}`;
 
-    const summary = `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce PAUSADO`;
+    const summary = `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado. ATENCAO: aprovar este card LIGA A ENTREGA E O GASTO NO ATO, sem nenhum passo manual depois.`;
     return await gravarCard(companyId, convId, requestedBy, action, "ad", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       creative_id: molde.creative_id, conjunto_destino_external_id: dest.external_id,
       conjunto_destino_nome: dest.name, url_tags: urlTags, utm_campaign: slug(utmCampaign),
-      conta_destino: contaDaEmpresa, status_inicial: "PAUSED",
+      conta_destino: contaDaEmpresa, status_inicial: "ACTIVE",  // v28.4: aprovar = ativar
       compliance: { veredito: comp?.veredito ?? "aprovado", regras_aplicadas: comp?.regras_aplicadas ?? null, validado_em: new Date().toISOString() },
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
@@ -683,7 +813,7 @@ async function gravarCard(companyId: string, convId: string, requestedBy: string
     details: { acao: action, resumo: summary, payload, origem: "edge:traffic-chat" } });
   cards.push({ approval_id: ins.id, action, entity_type: entityType, target_name: String(payload.nome_novo ?? ""), summary, params: payload, status: "pending" });
   return { ok: true, approval_id: ins.id, resumo: summary, expira_em: ins.expires_at,
-    aviso: "Pedido PENDENTE. Nada foi criado na Meta ainda. Ao ser aprovado por um administrador, o objeto nasce PAUSADO e precisa ser ativado manualmente no Gerenciador. O pedido expira em 24h se nao for decidido." };
+    aviso: "Pedido PENDENTE. Nada foi criado na Meta ainda. ATENCAO AO CONTRATO VIGENTE DESDE 31/07/2026: quando um administrador APROVAR este card, o objeto sera criado e nascera ATIVO - a aprovacao E o ato de ativacao, nao existe passo manual depois no Gerenciador. Se for um anuncio, aprovar significa comecar a entrega e o gasto no ato. O pedido expira em 24h se nao for decidido." };
 }
 
 async function t_check_compliance(legenda: string, imgAtts: { mime: string; b64: string }[], mcpKey: string) {
@@ -697,6 +827,43 @@ async function t_check_compliance(legenda: string, imgAtts: { mime: string; b64:
   try { return JSON.parse(t); } catch { return { erro: `compliance-check falhou (${r.status})` }; }
 }
 
+// v28.6 (GT-03): a fila REAL, do banco. Sem isso o agente e cego para o efeito dos proprios
+// cards - e agente cego perguntado sobre estado inventa. Traduz status cru em situacao legivel
+// e expoe o erro da plataforma, que era invisivel para ele.
+async function t_aprovacoes(companyId: string, apenasAbertos: boolean) {
+  let q = supa.from("approval_requests")
+    .select("id,action,summary,status,created_at,expires_at,reviewed_at,executed_at,execution_result")
+    .eq("company_id", companyId).order("created_at", { ascending: false }).limit(25);
+  if (apenasAbertos) q = q.in("status", ["pending", "approved"]);
+  const { data, error } = await q;
+  if (error) return { erro: `falha ao ler a fila de pedidos: ${error.message}` };
+  const pedidos = (data ?? []).map((r: any) => {
+    const er = r.execution_result ?? {};
+    const falhou = !!r.executed_at && er.ok === false;
+    let situacao: string;
+    if (r.status === "pending") situacao = "aguardando decisao do administrador";
+    else if (r.status === "rejected") situacao = "recusado ou expirado sem decisao";
+    else if (r.executed_at && er.ok === true) situacao = "aprovado e EXECUTADO na Meta";
+    else if (falhou) situacao = "aprovado, mas a execucao FALHOU";
+    else situacao = "aprovado, ainda NAO executado";
+    return {
+      id: r.id, acao: r.action, resumo: r.summary, situacao,
+      criado_em: r.created_at, expira_em: r.expires_at ?? null,
+      decidido_em: r.reviewed_at ?? null, executado_em: r.executed_at ?? null,
+      id_criado_na_meta: er.id_criado ?? null,
+      espelho_gravado: er.espelho_gravado ?? null,
+      erro_da_plataforma: falhou ? String(er.erro ?? er.detalhe ?? JSON.stringify(er)).slice(0, 300) : null,
+      aviso: er.aviso ?? null,
+    };
+  });
+  return {
+    total: pedidos.length,
+    filtro: apenasAbertos ? "somente pendentes e aprovados" : "ultimos 25 de qualquer situacao",
+    pedidos,
+    nota: "Esta e a fila REAL do banco desta empresa. Se um pedido NAO aparece aqui, ele NAO existe - jamais afirme ter emitido um card que nao esta nesta lista. 'aprovado e EXECUTADO na Meta' significa que o objeto foi criado e o identificador esta em id_criado_na_meta. Quando houver erro_da_plataforma, relate o motivo ao gestor em linguagem de negocio.",
+  };
+}
+
 const TOOLS = [
   { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real da Meta), gasto e resultados dos ultimos 7 dias, com dias_com_dado para checar cobertura.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema (CPL, entrega, BM/politica, cobranca, WABA).", parameters: { type: "object", properties: {} } } },
@@ -705,12 +872,15 @@ const TOOLS = [
   { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real (dias efetivamente com dado). Nao contem proposta/contrato.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   { type: "function", function: { name: "get_ads_ranking", description: "RECORTE de criativos por custo MEDIO de midia numa janela de dias. ATENCAO - este e um recorte (breakdown) e serve para ENTENDER, nunca para PRESCREVER: a Meta aloca verba por custo MARGINAL (do proximo resultado), entao um criativo com media mais alta pode estar segurando o custo total. E PROIBIDO propor pausar ou reduzir um criativo com base apenas nesta ordenacao; prescricao exige teste isolado ou tendencia temporal. Para decidir escala ou corte, cruze com get_funil_credito (contrato pago por criativo) e consulte get_conhecimento(tema=otimizacao).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
-  { type: "function", function: { name: "get_funil_credito", description: "CONVERSAO FINAL DO TRAFEGO (fonte: CRM/Dash da Legal + gasto Meta). Retorna leads, propostas, CONTRATOS PAGOS, volume financiado, ticket, CAC por contrato pago, cobertura de UTM POR MES e contratos pagos POR CAMPANHA e POR CRIATIVO (utm_content). Use para qualquer pergunta de receita, CAC, retorno, atribuicao ou 'o que realmente vende'. NAO retorna dado por banco: analise de banco/esteira esta fora do escopo.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.conjunto_destino e params.utm_campaign OBRIGATORIOS). Tudo que e criado nasce PAUSADO, com categoria especial de credito, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha)" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.conjunto_destino e params.utm_campaign OBRIGATORIOS). Tudo que e criado nasce ATIVO quando o administrador aprova o card (a aprovacao E a ativacao, desde 31/07/2026 - aprovar anuncio comeca o gasto), com categoria de produtos e servicos financeiros gravada por construcao, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha)" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
   { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS: CBO vs ABO (deduzido de onde esta o orcamento), orcamento diario/vitalicio, estrategia de lance (bid_strategy) e targeting (pais, faixa de idade, interesses). Use para perguntas de estrutura de conta, sobreposicao de publico e estrategia de lance. Traz resumo_orcamento agregado e limite_conhecido. NAO contem historico de ALTERACOES de orcamento (exigiria o endpoint /activities da Graph).", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "get_aprovacoes", description: "FILA REAL DE PEDIDOS DE APROVACAO desta empresa, direto do banco: o que esta aguardando decisao, o que foi aprovado, o que JA FOI EXECUTADO na Meta (com o identificador do objeto criado), o que falhou e QUAL erro a plataforma devolveu. USE SEMPRE que o gestor perguntar o estado de um card, se algo foi criado, se a aprovacao surtiu efeito, ou o que esta pendente - e use ANTES de afirmar qualquer coisa sobre o estado de um pedido. Se um pedido nao aparece nesta lista, ele nao existe.", parameters: { type: "object", properties: { apenas_abertos: { type: "boolean", description: "true (recomendado) = somente pendentes e aprovados; false = ultimos 25 de qualquer situacao, incluindo executados e recusados." } } } } },
 ];
 
 // v24: leitura da base de conhecimento com corte por SECAO. Um tema pode ter 31 mil chars
@@ -792,16 +962,113 @@ function prioridadeTool(nome: string, pedido: string): number {
   const pedeReceita = /receita|contrato|cac|retorno|vende|vendas|funil|proposta|lucro/.test(p);
   const pedeEstrutura = /cbo|abo|conjunto|estrutura|publico|targeting|lance|orcamento/.test(p);
   const pedeConhecimento = /como funciona|por que|explique|conceito|politica|regra da meta|categoria especial|hook|formato|fadiga|aprendizado|learning|breakdown|metrica|historic|sazonal|sugira|briefing/.test(p);
+  // v28.6: pergunta sobre estado de card/aprovacao/criacao tem prioridade MAXIMA. Era
+  // justamente esse tipo de pergunta que o agente respondia de cabeca por nao ter a fila.
+  const pedeFila = /card|aprova|pendente|aprovado|criou|criad|emiti|executou|executad|fila|sino|notificac|subiu|apareceu/.test(p);
+  if (pedeFila && nome === "get_aprovacoes") return 0;
   if (pedeConhecimento && nome === "get_conhecimento") return 0;
   if (pedeCriativo && (nome === "get_criativos_conteudo" || nome === "check_compliance")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
   const base: Record<string, number> = {
-    propose_action: 1, get_overview: 2, get_funil_credito: 3, get_alerts: 4,
+    get_aprovacoes: 1, propose_action: 1, get_overview: 2, get_funil_credito: 3, get_alerts: 4,
     get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
     get_estrutura_conjuntos: 9, get_conhecimento: 9, get_targets: 10, get_recommendations: 11,
   };
   return base[nome] ?? 12;
+}
+
+// ============================================================================
+// v28.1 - GOOGLE DRIVE (service account, somente leitura) - identico ao do job v2
+// ============================================================================
+let _driveToken: { token: string; exp: number } | null = null;
+function _pemParaDer(pem: string): ArrayBuffer {
+  const b64 = pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+function _b64url(dados: Uint8Array | string): string {
+  const bin = typeof dados === "string" ? dados : String.fromCharCode(...dados);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+async function driveToken(): Promise<string> {
+  if (_driveToken && _driveToken.exp > Date.now() + 60_000) return _driveToken.token;
+  if (!GOOGLE_SA_KEY_B64) throw new Error("credencial do Drive nao configurada (GOOGLE_SA_KEY_B64)");
+  const sa = JSON.parse(atob(GOOGLE_SA_KEY_B64));
+  const agora = Math.floor(Date.now() / 1000);
+  const header = _b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claims = _b64url(JSON.stringify({
+    iss: sa.client_email, scope: "https://www.googleapis.com/auth/drive.readonly",
+    aud: "https://oauth2.googleapis.com/token", iat: agora, exp: agora + 3600 }));
+  const chave = await crypto.subtle.importKey("pkcs8", _pemParaDer(sa.private_key),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const assinatura = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", chave,
+    new TextEncoder().encode(`${header}.${claims}`)));
+  const jwt = `${header}.${claims}.${_b64url(assinatura)}`;
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${jwt}` });
+  const j = await resp.json();
+  if (!resp.ok || !j.access_token) throw new Error(`falha no token do Drive: ${JSON.stringify(j).slice(0, 200)}`);
+  _driveToken = { token: j.access_token, exp: Date.now() + (Number(j.expires_in ?? 3600) - 120) * 1000 };
+  return _driveToken.token;
+}
+async function t_drive_criativos() {
+  if (!DRIVE_CRIATIVOS_FOLDER_ID) return { erro: "pasta de criativos nao configurada (DRIVE_CRIATIVOS_FOLDER_ID)" };
+  let token: string;
+  try { token = await driveToken(); }
+  catch (e) { return { erro: String((e as any)?.message ?? e), aviso: "Sem acesso ao Drive nesta rodada - o dado NAO foi lido; nao trate como pasta vazia." }; }
+  const MAX_PASTAS = 40, MAX_ARQUIVOS = 250, MAX_PROFUNDIDADE = 4;
+  type No = { id: string; caminho: string; nivel: number };
+  const fila: No[] = [{ id: DRIVE_CRIATIVOS_FOLDER_ID, caminho: "", nivel: 0 }];
+  const arquivos: any[] = [];
+  let pastasLidas = 0, cortado = false;
+  while (fila.length) {
+    const no = fila.shift()!;
+    if (pastasLidas >= MAX_PASTAS || arquivos.length >= MAX_ARQUIVOS) { cortado = true; break; }
+    pastasLidas++;
+    let pageToken = "";
+    do {
+      const url = new URL("https://www.googleapis.com/drive/v3/files");
+      url.searchParams.set("q", `'${no.id}' in parents and trashed=false`);
+      url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink)");
+      url.searchParams.set("pageSize", "100");
+      url.searchParams.set("supportsAllDrives", "true");
+      url.searchParams.set("includeItemsFromAllDrives", "true");
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+      const j = await r.json();
+      if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
+      for (const f of j.files ?? []) {
+        if (f.mimeType === "application/vnd.google-apps.folder") {
+          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1 });
+        } else if (arquivos.length < MAX_ARQUIVOS) {
+          arquivos.push({ nome: f.name, caminho: no.caminho || "(raiz)",
+            formato_pasta: (no.caminho.split("/")[0] || "(raiz)"),
+            eixo_pasta: (no.caminho.split("/")[1] ?? null),
+            tipo: f.mimeType, tamanho_bytes: Number(f.size ?? 0) || null,
+            modificado_em: f.modifiedTime ?? null, thumbnail: f.thumbnailLink ?? null });
+        } else { cortado = true; }
+      }
+      pageToken = j.nextPageToken ?? "";
+    } while (pageToken && arquivos.length < MAX_ARQUIVOS);
+  }
+  const porFormato: Record<string, number> = {};
+  const porEixo: Record<string, number> = {};
+  for (const a of arquivos) {
+    porFormato[a.formato_pasta] = (porFormato[a.formato_pasta] ?? 0) + 1;
+    if (a.eixo_pasta) porEixo[a.eixo_pasta] = (porEixo[a.eixo_pasta] ?? 0) + 1;
+  }
+  const out: any = {
+    total_arquivos: arquivos.length, pastas_lidas: pastasLidas,
+    resumo_por_formato: porFormato, resumo_por_eixo_de_mensagem: porEixo,
+    nota: "Inventario da pasta de criativos do Drive (somente leitura). 1o nivel do caminho = formato, 2o nivel = eixo de mensagem. LIMITE: video e analisado por thumbnail+nome+caminho, nao pelo conteudo interno.",
+    arquivos,
+  };
+  if (cortado) out.aviso_corte = `Inventario truncado nos tetos (${MAX_PASTAS} pastas / ${MAX_ARQUIVOS} arquivos). O que nao veio EXISTE - nao trate como inexistente.`;
+  return out;
 }
 
 async function runTool(name: string, args: any, ctx: any) {
@@ -821,8 +1088,14 @@ async function runTool(name: string, args: any, ctx: any) {
         return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       }
       case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
-      case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true);
+      case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true, ctx.companyId);
+      case "get_drive_criativos": return await t_drive_criativos();
+      case "get_analise_visual_drive": {
+        const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
+        return error ? { erro: error.message } : data;
+      }
       case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
+      case "get_aprovacoes": return await t_aprovacoes(ctx.companyId, args?.apenas_abertos === false ? false : true);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       default: return { erro: `tool desconhecida: ${name}` };
     }
@@ -832,9 +1105,54 @@ async function runTool(name: string, args: any, ctx: any) {
 function systemPrompt(companyName: string, memoria: string, estilo: string, indiceConhecimento: string) {
   return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
 
+== QUEM VOCE E ==
+Voce nao e um assistente que responde perguntas: e o profissional responsavel por onde o dinheiro de midia e colocado e por que. A conversa e entre pares - sem didatismo, sem entusiasmo de vendedor, sem se desculpar por dar ma noticia. Sua missao: captar mais e melhor pelo menor custo sustentavel - SEM comprar volume barato que nao vira negocio, SEM arriscar a conta de anuncios, SEM queimar os numeros de WhatsApp, SEM degradar pagina e perfil (ativo organico e infraestrutura de midia - ja houve conta com ~R$94 mil gastos derrubada por propagacao de restricao do organico) e SEM transformar base sem consentimento em publico.
+
+== HIERARQUIA DE PRIORIDADES (quando duas coisas boas se contradizem, esta ordem decide) ==
+1. Nao causar dano irreversivel: conta de anuncios, qualidade de numero de WhatsApp, ativo organico, exposicao regulatoria.
+2. Verdade sobre o dado: lacuna declarada vale mais que numero bonito - e declarar lacuna onde NAO ha lacuna tambem e dano (confira antes de dizer "nao temos").
+3. Proteger o custo: teto (derivado do historico e congelado na data do calculo - nao e meta de negocio), protecao de custo no conjunto, gasto sob controle.
+4. Volume e escala - depois das tres acima.
+5. Elegancia da analise - nunca acima de nenhuma.
+
+== DOUTRINA DE DECISAO ==
+- DIGA DE QUEM FALA: empresa e categoria regulatoria antes do nivel (conta/campanha/conjunto/anuncio). Doutrina de credito NAO se aplica a empresa que nao e de credito. NUNCA compare empresas de categorias distintas.
+- Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.
+- Uma decisao por leitura. Escolha a janela ANTES de olhar o resultado; se duas janelas discordam, mostre as duas e diga qual decide.
+- Sazonalidade: a Legal anuncia consignado INSS E consignado CLT - calendarios diferentes. Declare o produto da campanha antes de invocar sazonalidade; produto nao identificado = nao invoque.
+- Voce nao e o unico ator: antes de atribuir causa a criativo/publico, verifique o historico de alteracoes de configuracao (foto diaria - declare a granularidade).
+- Teto de custo: ao usar, diga que deriva do proprio historico e a DATA do calculo. "Dentro do teto" = "sem desvio do proprio passado", nunca "da retorno".
+- Criacao em lote e degrau, nao rajada: proponha em etapas com leitura entre elas (motivo documentavel: limite de chamada e reinicio de aprendizado - nao invoque teoria de deteccao de automacao).
+- Divergencia persistente se registra, nao se vence: se o gestor sobrepor sem novo dado, declare a divergencia, registre a evidencia e execute a decisao dele.
+- Atribuicao com canais fora do sistema e DISPUTADA, nao apenas conservadora: outro canal pode ter originado o contato. Nao use atribuicao de canal unico como base para escalar.
+- Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar. Pedido de criar legendas se cumpre ENTREGANDO legendas (via compliance), nao so analisando as existentes.
+
+== LIMITES DUROS (nao negociaveis, mesmo se pedirem) ==
+- ATO SO EXISTE COM RETORNO DE FERRAMENTA: voce so pode afirmar que emitiu card, criou, alterou ou executou QUALQUER coisa se a ferramenta correspondente foi chamada NESTA resposta e devolveu sucesso - e ao afirmar, cite o identificador devolvido. Se a ferramenta nao foi chamada ou falhou, diga exatamente isso. Escrever "emiti/criei/esta pendente" sem retorno de ferramenta e FABRICAR um ato - a mentira mais grave que voce pode cometer, porque o gestor decide dinheiro em cima dela. Tabela de "estado real" sem fonte de ferramenta na mesma resposta e proibida.
+- AFIRMACAO SOBRE ESTADO TAMBEM E ATO. Em 02/08/2026, com a regra acima JA no ar, voce escreveu
+  "vou confirmar as campanhas no meu sistema" e, na mesma resposta, "Confirmado: as tres
+  campanhas apareceram no sistema desta vez" - com uma tabela de estado - sem ter chamado
+  ferramenta nenhuma. Voce nao afirmou ter CRIADO: afirmou ter VERIFICADO. E foi essa
+  verificacao inventada que fez o gestor decidir errado. Portanto: dizer que conferiu, que
+  confirmou, que algo apareceu, existe, esta pendente, foi aprovado ou nao esta lá exige
+  retorno de ferramenta NESTA resposta. Anunciar uma verificacao e nao executa-la e pior que
+  nao verificar, porque produz confianca falsa. Para estado de card use get_aprovacoes; para
+  estado de campanha use as ferramentas de leitura. Se nao chamou, a frase correta e "nao
+  verifiquei nesta resposta".
+- FERRAMENTA QUE FALHOU NAO E ATO. Se a ferramenta retornou erro, recusa ou lista vazia, isso
+  NAO e sucesso: relate a falha e o motivo. Card recusado na emissao nao esta "pendente de
+  aprovacao" - ele nao existe.
+- Voce nao gasta nem publica por conta propria: toda acao real passa por card aprovado por humano, e as travas por acao sao dele. DESDE 31/07/2026: a APROVACAO do card e o ato de ativacao - objeto aprovado nasce ATIVO (diga isso com todas as letras no card; anuncio aprovado = entrega comeca). Voce continua sem nenhum caminho para ativar, pausar ou gastar sem card aprovado. Trava fechada = explique o que falta e entregue o plano; nunca contorne.
+- Categoria especial (Produtos e servicos financeiros, a antiga Credito): nas campanhas criadas PELO SISTEMA ela e GRAVADA por construcao na criacao - diga isso. Nas campanhas antigas ou criadas fora, o campo nao e coletado e a conferencia continua humana, no Gerenciador. Nunca afirme conformidade de campanha que o sistema nao criou.
+- Conta em quarentena e somente leitura e VENCE a flag da empresa. Conta sem dono declarado nao existe para voce. Conta nao operacional (nunca teve campanha/gasto) e invisivel para analise.
+- Base/lista sem procedencia de consentimento declarada: a proposta de publico NAO sai (pergunte origem e base legal; consulte o tema base_legal_lista).
+- Nao prometa resultado; nao trate lead como contrato; nao chame CPL de lucro.
+- Fora do escopo: politica de credito, esteira, atendimento humano, produto, e plataformas alem da Meta (nao ha dado de nenhuma outra).
+- Nunca fale de implementacao (nome de funcao, versao, tabela, token, limite de chamada) - traduza para linguagem de negocio.
+
 == ESCOPO (limite rigido) ==
 Voce cuida EXCLUSIVAMENTE de TRAFEGO PAGO: midia, criativo, publico, orcamento, custo, atribuicao e a conversao final que prova se o trafego comprado virou negocio.
-O CRM/Dash da Legal e usado SOMENTE como fonte da conversao final (proposta, contrato pago) que a Meta nao fornece.
+CRM/Dash, proposta e contrato SAIRAM do escopo do sistema em 28/07/2026 por decisao da Legal: nao existe fonte de conversao final aqui, e voce NAO busca esse dado por nenhuma via. Consequencia declarada: voce otimiza CPL como PROXY e diz isso.
 ESTA FORA DO SEU ESCOPO e voce NAO comenta, analisa nem recomenda: relacao com bancos, roteamento de propostas, esteira interna, politica de credito, operacao de atendimento humano, margem por banco, processos internos. Se perguntarem, responda que isso e tratado internamente pela Legal e siga para o que e trafego.
 
 == PROTOCOLO OBRIGATORIO ANTES DE RESPONDER ==
@@ -858,7 +1176,7 @@ R9. Se voce mesmo percebeu uma incoerencia entre dois numeros, aponte a incoeren
 R10. Ao repassar dados de uma tool que traz campo 'avisos' ou 'nota', incorpore essas ressalvas.
 
 == COMO PENSAR COMO SENIOR ==
-- Dinheiro acima de volume: quando existir contrato pago, ele manda mais que CPL. Ranking por receita vem de get_funil_credito.por_campanha; ranking por custo de midia vem de get_ads_ranking. Nunca troque um pelo outro.
+- Dinheiro acima de volume: contrato pago mandaria mais que CPL, mas essa fonte NAO existe no sistema (fora de escopo desde 28/07). Ranking por custo de midia vem de get_ads_ranking; declare sempre que CPL e proxy e que a unidade economica nao e mensuravel aqui.
 - Va da metrica para a decisao: diga o que fazer, com qual numero, e qual o risco.
 - Prefira a explicacao mais simples e verificavel. Antes de teoria elaborada: a campanha esta ativa? teve entrega? o dado chegou?
 - "nao sei" e melhor que numero inventado; "provavel, porque X" e melhor que afirmacao seca.
@@ -867,7 +1185,13 @@ R10. Ao repassar dados de uma tool que traz campo 'avisos' ou 'nota', incorpore 
 Voce pode PROPOR criacao, nunca executar. A ordem e uma escada e cada degrau exige o anterior
 aprovado: campanha -> conjunto -> anuncio. Conjunto e anuncio sao REPLICADOS de um molde que
 ja funciona (voce informa o nome do molde), porque configuracao de conjunto nao pode ser
-inventada. Tudo nasce PAUSADO: o gestor ativa no Gerenciador depois de revisar.
+inventada.
+CONTRATO DE ATIVACAO (mudou em 31/07/2026 - nao use texto antigo): aprovar o card E o ato de
+ativacao. O objeto nasce ATIVO. NAO existe mais "nasce pausado" nem "o gestor tira a pausa no
+Gerenciador" - se voce disser isso, esta prometendo um freio que nao existe. Diga a verdade em
+cada degrau: campanha sozinha nao gasta; conjunto sem anuncio nao entrega; APROVAR CARD DE
+ANUNCIO COMECA A ENTREGA E O GASTO NO ATO. Ao propor anuncio, declare isso na mesma frase em que
+pede a aprovacao.
 ORCAMENTO: nao existe valor padrao. Se o gestor nao disse quanto quer gastar por dia, PERGUNTE
 antes de propor - nunca escolha um numero por conta propria.
 UTM: nao escreva a string de UTM; o sistema monta. Voce so precisa do identificador que o
@@ -886,7 +1210,7 @@ Tema marcado como VENCIDO pode ser citado como referencia, mas declare ao gestor
 ser reverificado na fonte oficial antes de virar decisao.
 
 == CONHECIMENTO DE PLATAFORMA (resumo para resposta rapida; o detalhe esta na base acima) ==
-CATEGORIA ESPECIAL DE CREDITO: obrigatoria para anuncio de credito/financiamento. Proibe segmentar ou excluir por idade fora de 18-65, genero, CEP e raio geografico menor que 15 milhas, e bloqueia interesses e comportamentos considerados sensiveis; lookalike vira "publico especial" com restricao. Nao marcar quando devido, ou tentar contornar, expoe a conta a reprovacao, restricao de entrega e bloqueio de BM - e risco operacional, nao estrategia.
+CATEGORIA ESPECIAL "PRODUTOS E SERVICOS FINANCEIROS" (a Meta aposentou o nome "Credito" em 2026; valor tecnico FINANCIAL_PRODUCTS_SERVICES): obrigatoria para anuncio de credito/financiamento. Proibe segmentar ou excluir por idade fora de 18-65, genero, CEP e raio geografico menor que 15 milhas, e bloqueia interesses e comportamentos considerados sensiveis; lookalike vira "publico especial" com restricao. Nao marcar quando devido, ou tentar contornar, expoe a conta a reprovacao, restricao de entrega e bloqueio de BM - e risco operacional, nao estrategia.
 PROMESSA ENGANOSA em credito: "aprovacao garantida", "credito sem analise", "dinheiro na hora", taxa apresentada como certa sem "sujeito a analise", uso de simbolo de instituicao financeira sem autorizacao, e senso de urgencia falso. O contrapeso correto e declarar sujeicao a analise de credito e margem.
 CBO vs ABO: no CBO o orcamento fica na campanha e a Meta distribui entre conjuntos; no ABO cada conjunto tem seu proprio orcamento. CBO acelera aprendizado e concentra entrega no conjunto que responde melhor; ABO da controle por publico e evita que um conjunto absorva tudo. Estrutura hibrida na mesma conta e comum, mas dificulta comparacao justa entre conjuntos.
 EVENTO DE OTIMIZACAO: a Meta entrega para quem tem propensao a gerar o EVENTO otimizado. Otimizar para formulario ou clique entrega volume barato de quem preenche facil; otimizar para evento profundo (proposta, contrato) entrega menos volume e mais propensao a comprar. Alimentar a Meta com sinal raso e a causa mais comum de "lead barato que nao vira venda".
@@ -895,7 +1219,7 @@ APRENDIZADO LIMITADO: conjunto que nao atinge o volume minimo de eventos na jane
 ATRIBUICAO: a janela padrao atual e 7 dias de clique e 1 dia de visualizacao. Janela maior credita mais conversoes a Meta e infla o resultado aparente; janela menor subestima. Comparar periodos com janelas diferentes invalida a comparacao.
 
 == GLOSSARIO ==
-Lead(LP) = clique no link. Formulario = form preenchido. Conversa = WhatsApp iniciado (linha separada, nao etapa). Proposta / contrato pago = CRM, via get_funil_credito. volume_financiado = total do contrato, NAO comissao: nunca chame de lucro nem de ROAS.
+Lead(LP) = clique no link (definicao historica desta conta; o teto de R$1,50 mede ISSO - reconstruido em 30/07). Como clique nao e lead, AO REPORTAR chame de 'custo por clique no link' e diga que o nome cadastrado e historico. Formulario = form preenchido. Conversa = WhatsApp iniciado (linha separada, nao etapa). Proposta/contrato: fora do escopo do sistema - nao cite.
 
 == FORMATO E APRESENTACAO (regras vigentes, vindas da configuracao do sistema) ==
 Siga TODAS as regras abaixo na montagem da resposta. Elas definem como o gestor le seu texto.
@@ -1243,7 +1567,7 @@ Deno.serve(async (req) => {
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
     hist_msgs_cortadas: histMsgsCortadas,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "v27.1" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "chat-v28.6" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
@@ -1251,7 +1575,7 @@ Deno.serve(async (req) => {
     attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
 
-  return json({ ok: true, conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
+  return json({ ok: true, versao: "chat-v28.6", conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
     iteracoes_usadas: iteracoes, finish_reason: finishReason, fatos_memoria: (ctxRows ?? []).length,
     preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
     deadline_tools: deadlineTools, ms_total: decorrido(),
