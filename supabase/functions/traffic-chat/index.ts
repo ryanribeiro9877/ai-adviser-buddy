@@ -17,9 +17,11 @@
 //       linha da Legal e Viver. Conversa da COHAPM lia a lista de contas da Legal. Falhava
 //       fechado por acidente (a conta da empresa nao casava com a lista da outra), mas com
 //       mensagem enganosa. Mesma classe do bug corrigido na meta-actions v3.
-//   (5) GT-07 - CONTRATO DE ATIVACAO. Seis lugares deste arquivo ainda diziam "nasce PAUSADO,
-//       o gestor ativa no Gerenciador". Falso desde 31/07: aprovar o card ATIVA. O gestor operou
-//       a conversa de 02/08 inteira convencido de que tinha um freio manual que nao existe.
+//   (5) GT-07 - CONTRATO DE ATIVACAO REVERTIDO. Entre 31/07 e 03/08 vigorou "aprovar = ativar";
+//       o gestor pediu o freio de volta e o objeto volta a nascer PAUSADO (meta-actions v4.3).
+//       Os textos deste arquivo que dizem "nasce PAUSADO" voltaram a estar CORRETOS e nao foram
+//       tocados. O que muda aqui e o campo status_inicial gravado no card, que a v28.3/v28.4
+//       tinham passado para ACTIVE.
 //   (6) GT-04 (robustez) - destino de conjunto passa a aceitar tambem o identificador da
 //       campanha, e a procurar em cards ja executados quando o espelho ainda nao tem a linha.
 // v28.5 (31/07/2026) - REGRA CONTRA ATO NARRADO: na noite de 31/07 o agente escreveu
@@ -613,7 +615,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
   const params = args?.params ?? {};
 
   if (!justificativa) return { erro: "justificativa obrigatoria (EVIDENCIA: por que criar isso, com numero e fonte)" };
-  if (!reversa) return { erro: "reversa obrigatoria: como desfazer (ex.: pausar ou excluir o objeto criado - ele nasce ATIVO quando o card e aprovado), quem desfaz e em quanto tempo" };
+  if (!reversa) return { erro: "reversa obrigatoria: como desfazer (ex.: excluir o objeto criado - ele nasce PAUSADO, entao a reversa antes da ativacao e barata), quem desfaz e em quanto tempo" };
   if (!sucesso) return { erro: "metrica_sucesso obrigatoria: qual metrica e limiar dizem que deu certo, no funil completo ate contrato pago" };
 
   // v28.6: config DA EMPRESA DESTA CONVERSA. Era lida com .eq("id",1) - a linha da Legal e
@@ -679,10 +681,10 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const bruto = String(params?.objetivo ?? "OUTCOME_LEADS").trim().toUpperCase().replace(/[\s-]+/g, "_");
     const objetivo = ODAX.includes(bruto) ? bruto : (SINONIMOS[bruto] ?? "");
     if (!objetivo) return { erro: `objetivo '${bruto}' nao e valido na Meta. Use um destes: ${ODAX.join(", ")}. Para geracao de lead em landing page o correto e OUTCOME_LEADS.` };
-    const summary = `Criar campanha "${nomeAlvo}" (objetivo ${objetivo}) - aprovar CRIA e ATIVA a campanha; categoria de produtos e servicos financeiros gravada por construcao. Campanha sozinha nao entrega nem gasta: sem conjunto e anuncio, o custo e zero.`;
+    const summary = `Criar campanha "${nomeAlvo}" (objetivo ${objetivo}) - nasce PAUSADA, categoria especial de credito obrigatoria`;
     return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
       nome_novo: nomeAlvo, objetivo, conta_destino: contaDaEmpresa,
-      special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"], status_inicial: "ACTIVE",  // v28.3: verdade do que a execucao fara
+      special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"], status_inicial: "PAUSED",  // v28.6: a execucao volta a criar PAUSADO (meta-actions v4.3)
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
@@ -739,11 +741,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!dest) return { erro: `campanha de destino '${campanhaDestino}' nao encontrada nem no sistema nem entre as criadas por pedido aprovado. Se ela ainda nao existe, proponha criar_campanha primeiro e aguarde a aprovacao. NAO invente o identificador.` };
     if (!dest.external_id) return { erro: `a campanha '${dest.name}' existe no sistema mas ainda nao tem identificador da Meta sincronizado - sem ele o conjunto nao tem onde nascer. Aguarde a proxima sincronizacao.` };
 
-    const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia. Aprovar CRIA e ATIVA o conjunto. Ele so passa a entregar quando houver anuncio ativo dentro dele.`;
+    const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO`;
     return await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
-      orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "ACTIVE",  // v28.4: aprovar = ativar
+      orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "PAUSED",  // v28.6: aprovar CRIA pausado; ativar e ato do gestor
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
@@ -784,12 +786,12 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // para fb/ig automaticamente - melhor que fixar um dos dois.
     const urlTags = `utm_source={{site_source_name}}&utm_medium=paid&utm_campaign=${slug(utmCampaign)}&utm_content=${slug(nomeNovo)}`;
 
-    const summary = `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado. ATENCAO: aprovar este card LIGA A ENTREGA E O GASTO NO ATO, sem nenhum passo manual depois.`;
+    const summary = `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce PAUSADO`;
     return await gravarCard(companyId, convId, requestedBy, action, "ad", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       creative_id: molde.creative_id, conjunto_destino_external_id: dest.external_id,
       conjunto_destino_nome: dest.name, url_tags: urlTags, utm_campaign: slug(utmCampaign),
-      conta_destino: contaDaEmpresa, status_inicial: "ACTIVE",  // v28.4: aprovar = ativar
+      conta_destino: contaDaEmpresa, status_inicial: "PAUSED",  // v28.6: aprovar CRIA pausado; ativar e ato do gestor
       compliance: { veredito: comp?.veredito ?? "aprovado", regras_aplicadas: comp?.regras_aplicadas ?? null, validado_em: new Date().toISOString() },
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
@@ -813,7 +815,7 @@ async function gravarCard(companyId: string, convId: string, requestedBy: string
     details: { acao: action, resumo: summary, payload, origem: "edge:traffic-chat" } });
   cards.push({ approval_id: ins.id, action, entity_type: entityType, target_name: String(payload.nome_novo ?? ""), summary, params: payload, status: "pending" });
   return { ok: true, approval_id: ins.id, resumo: summary, expira_em: ins.expires_at,
-    aviso: "Pedido PENDENTE. Nada foi criado na Meta ainda. ATENCAO AO CONTRATO VIGENTE DESDE 31/07/2026: quando um administrador APROVAR este card, o objeto sera criado e nascera ATIVO - a aprovacao E o ato de ativacao, nao existe passo manual depois no Gerenciador. Se for um anuncio, aprovar significa comecar a entrega e o gasto no ato. O pedido expira em 24h se nao for decidido." };
+    aviso: "Pedido PENDENTE. Nada foi criado na Meta ainda. Ao ser aprovado por um administrador, o objeto nasce PAUSADO e precisa ser ativado manualmente no Gerenciador. O pedido expira em 24h se nao for decidido." };
 }
 
 async function t_check_compliance(legenda: string, imgAtts: { mime: string; b64: string }[], mcpKey: string) {
@@ -875,7 +877,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.conjunto_destino e params.utm_campaign OBRIGATORIOS). Tudo que e criado nasce ATIVO quando o administrador aprova o card (a aprovacao E a ativacao, desde 31/07/2026 - aprovar anuncio comeca o gasto), com categoria de produtos e servicos financeiros gravada por construcao, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha)" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.conjunto_destino e params.utm_campaign OBRIGATORIOS). Tudo que e criado nasce PAUSADO, com categoria especial de credito, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha)" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
@@ -1142,7 +1144,7 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
 - FERRAMENTA QUE FALHOU NAO E ATO. Se a ferramenta retornou erro, recusa ou lista vazia, isso
   NAO e sucesso: relate a falha e o motivo. Card recusado na emissao nao esta "pendente de
   aprovacao" - ele nao existe.
-- Voce nao gasta nem publica por conta propria: toda acao real passa por card aprovado por humano, e as travas por acao sao dele. DESDE 31/07/2026: a APROVACAO do card e o ato de ativacao - objeto aprovado nasce ATIVO (diga isso com todas as letras no card; anuncio aprovado = entrega comeca). Voce continua sem nenhum caminho para ativar, pausar ou gastar sem card aprovado. Trava fechada = explique o que falta e entregue o plano; nunca contorne.
+- Voce nao gasta nem publica por conta propria: toda acao real passa por card aprovado por humano, e as travas por acao sao dele. CONTRATO VIGENTE DESDE 03/08/2026: aprovar o card CRIA o objeto na Meta, PAUSADO - e a criacao NAO inicia entrega nem gasto. A ativacao e um SEGUNDO ATO, MANUAL, do gestor no Gerenciador, para ele conferir a arvore inteira antes de qualquer verba sair. Diga isso com todas as letras ao propor: aprovar cria e nao gasta; quem liga a entrega e ele. Entre 31/07 e 03/08 vigorou o contrato oposto (aprovar = ativar) - se voce encontrar texto afirmando isso, esta VENCIDO. Voce continua sem nenhum caminho para ativar, pausar ou gastar sem card aprovado. Trava fechada = explique o que falta e entregue o plano; nunca contorne.
 - Categoria especial (Produtos e servicos financeiros, a antiga Credito): nas campanhas criadas PELO SISTEMA ela e GRAVADA por construcao na criacao - diga isso. Nas campanhas antigas ou criadas fora, o campo nao e coletado e a conferencia continua humana, no Gerenciador. Nunca afirme conformidade de campanha que o sistema nao criou.
 - Conta em quarentena e somente leitura e VENCE a flag da empresa. Conta sem dono declarado nao existe para voce. Conta nao operacional (nunca teve campanha/gasto) e invisivel para analise.
 - Base/lista sem procedencia de consentimento declarada: a proposta de publico NAO sai (pergunte origem e base legal; consulte o tema base_legal_lista).
@@ -1185,13 +1187,7 @@ R10. Ao repassar dados de uma tool que traz campo 'avisos' ou 'nota', incorpore 
 Voce pode PROPOR criacao, nunca executar. A ordem e uma escada e cada degrau exige o anterior
 aprovado: campanha -> conjunto -> anuncio. Conjunto e anuncio sao REPLICADOS de um molde que
 ja funciona (voce informa o nome do molde), porque configuracao de conjunto nao pode ser
-inventada.
-CONTRATO DE ATIVACAO (mudou em 31/07/2026 - nao use texto antigo): aprovar o card E o ato de
-ativacao. O objeto nasce ATIVO. NAO existe mais "nasce pausado" nem "o gestor tira a pausa no
-Gerenciador" - se voce disser isso, esta prometendo um freio que nao existe. Diga a verdade em
-cada degrau: campanha sozinha nao gasta; conjunto sem anuncio nao entrega; APROVAR CARD DE
-ANUNCIO COMECA A ENTREGA E O GASTO NO ATO. Ao propor anuncio, declare isso na mesma frase em que
-pede a aprovacao.
+inventada. Tudo nasce PAUSADO: o gestor ativa no Gerenciador depois de revisar.
 ORCAMENTO: nao existe valor padrao. Se o gestor nao disse quanto quer gastar por dia, PERGUNTE
 antes de propor - nunca escolha um numero por conta propria.
 UTM: nao escreva a string de UTM; o sistema monta. Voce so precisa do identificador que o

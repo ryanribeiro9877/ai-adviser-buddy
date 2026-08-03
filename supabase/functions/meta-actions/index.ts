@@ -1,4 +1,13 @@
-// supabase/functions/meta-actions/index.ts (v4)
+// supabase/functions/meta-actions/index.ts (v4.3)
+// v4.3 (03/08/2026) - REVERSAO DO CONTRATO DE ATIVACAO. O objeto volta a nascer PAUSED.
+//   Motivo: o gestor Roberto pediu por audio em 03/08 14:45 - "ela tem que nascer pausada para
+//   poder olhar e ativar ou nao" - e o Ryan acatou. A mudanca de 31/07 (aprovar = ativar) foi
+//   decisao tecnica que NAO passou pelo gestor, e ele operou dias acreditando ter um freio manual
+//   que nao existia mais. O desenho novo separa CRIAR de GASTAR em dois atos com donos
+//   diferentes: aprovar card = criar (nao gasta); ativar no Gerenciador = gastar (gestor).
+//   Aviso de arqueologia: o bloco "TRAVAS" mais abaixo neste cabecalho descrevia
+//   status=PAUSED e categoria CREDIT e ficou correto por acidente na parte do PAUSED - mas a
+//   categoria certa e FINANCIAL_PRODUCTS_SERVICES desde a v4.1. Corrigido nesta versao.
 // v4.2 (03/08/2026) - ESPELHO NO ATO. A executora passa a gravar em campaigns/ad_sets/ads o
 //   objeto que acabou de criar, com marca criado_pelo_sistema e link para o card de origem.
 //   Motivo: o windsor-sync nao devolve campanha sem entrega, logo o sistema ficava cego para o
@@ -39,8 +48,9 @@
 //       conjunto e anuncio sao REPLICADOS: o executor LE o molde na Graph API e troca apenas
 //       nome, destino, orcamento e status.
 // TRAVAS (decisoes do Ryan, todas no codigo):
-//   status=PAUSED forcado em tudo que nasce; special_ad_categories=['CREDIT'] forcado na
-//   campanha; teto de sanidade de orcamento; 3 camadas (master + flag + rate) preservadas;
+//   status=PAUSED forcado em tudo que nasce (v4.3 restaurou isso); special_ad_categories=
+//   ['FINANCIAL_PRODUCTS_SERVICES'] forcado na campanha (v4.1 - a Meta aposentou CREDIT);
+//   teto de sanidade de orcamento; 3 camadas (master + flag + rate) preservadas;
 //   dry_run mostra exatamente o que criaria sem escrever nada.
 // UTM: o anuncio novo recebe url_tags gerado pelo traffic-chat. Como creative existente e
 //   imutavel, criamos um adcreative NOVO reaproveitando o object_story_spec do molde (sem
@@ -98,7 +108,7 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
       body: {
         name: nome,
         objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
-        status: "ACTIVE",                                  // v4: aprovacao humana e o portao
+        status: "PAUSED",                                  // v4.3: aprovar CRIA; ativar e ato do gestor no Gerenciador
         special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]),  // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
         buying_type: "AUCTION",
         is_adset_budget_sharing_enabled: "false",           // v4: exigido pela Meta em ABO; false = sem compartilhamento de orcamento entre conjuntos
@@ -125,7 +135,7 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
       name: nome,
       campaign_id: campanha,
       daily_budget: String(Math.round(reais * 100)),   // centavos
-      status: "ACTIVE",                                 // v4: aprovacao humana e o portao
+      status: "PAUSED",                                 // v4.3: aprovar CRIA; ativar e ato do gestor
     };
     // Replica apenas o que o molde realmente tem - nada e inventado.
     if (mb.optimization_goal) body.optimization_goal = String(mb.optimization_goal);
@@ -156,7 +166,7 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
 
     return {
       path: `/${conta}/ads`,
-      body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>,  // v4: aprovar card de ANUNCIO liga a entrega no ato
+      body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,  // v4.3: anuncio nasce pausado - a entrega so comeca quando o gestor ativar
       criativo: temStorySpec
         ? { modo: "novo_adcreative", path: `/${conta}/adcreatives`,
             body: { name: `${nome} - creative`, object_story_spec: JSON.stringify(cb.object_story_spec),
@@ -368,7 +378,7 @@ Deno.serve(async (req) => {
       const exec = await g(pl.path, "POST", bodyFinal);
       const novoId = (exec.body as any)?.id ?? null;
       const sucesso = exec.status === 200 && !!novoId;
-      // Confere o estado do que nasceu: o status (ACTIVE desde a v4) e verificado, nao assumido.
+      // Confere o estado do que nasceu: o status (PAUSED desde a v4.3) e verificado, nao assumido.
       const depois = sucesso ? await g(`/${novoId}?fields=name,status,effective_status`) : { status: 0, body: null };
 
       await audit(r.company_id, sistema, sucesso ? "meta_action_executed" : "meta_action_failed", r.id, {
@@ -392,7 +402,7 @@ Deno.serve(async (req) => {
           execution_result: { ok: true, id_criado: novoId, objeto: depois.body,
             adcreative_criado: creativeCriado, aviso: pl.criativo?.aviso ?? null,
             espelho_gravado: esp.ok, espelho_tabela: esp.tabela ?? null, espelho_erro: esp.erro ?? null,
-            lembrete: "Objeto criado ATIVO por aprovacao humana (v4). Se a arvore inteira (campanha+conjunto+anuncio) estiver ativa, a entrega comeca sem passo manual." },
+            lembrete: "Objeto criado PAUSADO (v4.3). A aprovacao CRIOU o objeto e NAO iniciou entrega nem gasto. Para comecar a entregar, o gestor precisa ATIVAR manualmente no Gerenciador - conferindo a arvore inteira antes." },
         }).eq("id", r.id);
       }
       resultados.push({ id: r.id, acao, resultado: sucesso ? "CRIADO" : "falha_meta",
@@ -472,6 +482,6 @@ Deno.serve(async (req) => {
   }
 
   // v3: nao ha "modo" unico - cada card foi avaliado sob a config da sua empresa.
-  return json({ ok: true, versao: "meta-actions-v4.2", processados: resultados.length, resultados,
+  return json({ ok: true, versao: "meta-actions-v4.3", processados: resultados.length, resultados,
     nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); cada resultado acima foi avaliado sob a config da empresa do proprio card" });
 });
