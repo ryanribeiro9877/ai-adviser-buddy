@@ -745,7 +745,9 @@ export type Database = {
         Row: {
           account_name: string
           company_id: string
-          connected_at: string
+          connected_at: string | null
+          estado_motivo: string | null
+          estado_operacional: string
           external_id: string | null
           id: string
           provider: Database["public"]["Enums"]["integration_provider"]
@@ -754,7 +756,9 @@ export type Database = {
         Insert: {
           account_name: string
           company_id: string
-          connected_at?: string
+          connected_at?: string | null
+          estado_motivo?: string | null
+          estado_operacional?: string
           external_id?: string | null
           id?: string
           provider: Database["public"]["Enums"]["integration_provider"]
@@ -763,7 +767,9 @@ export type Database = {
         Update: {
           account_name?: string
           company_id?: string
-          connected_at?: string
+          connected_at?: string | null
+          estado_motivo?: string | null
+          estado_operacional?: string
           external_id?: string | null
           id?: string
           provider?: Database["public"]["Enums"]["integration_provider"]
