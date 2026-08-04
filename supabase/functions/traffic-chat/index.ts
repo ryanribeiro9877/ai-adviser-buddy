@@ -1,4 +1,13 @@
 // supabase/functions/traffic-chat/index.ts (v28.6)
+// v28.7 (04/08/2026) - GT-11: get_estrutura_conjuntos deixa de vazar entre empresas e passa a
+//   paginar. A RPC nova exige p_company_id; sem ele devolve lista vazia com AVISO_CRITICO, entao
+//   ate este deploy a tool estava CEGA - de proposito, porque cego declarando e melhor que ver
+//   conjunto de outro anunciante e concluir sobre ele. O card GT-11 dizia "28 de 53 invisiveis,
+//   falta paginacao" e estava errado nos dois pontos: nao havia truncagem (54 declarados, 54
+//   devolvidos) e o defeito era a AUSENCIA DE FILTRO DE EMPRESA - 46 conjuntos da Legal
+//   misturados com 8 da COHAPM, sem marcacao. Mesmo vazamento do get_criativos_conteudo (30/07).
+//   Teto da ferramenta vai a 3 chamadas: 46 relevantes em paginas de 20 nao cabem em 2, e o
+//   proprio limite recriaria o universo parcial que a paginacao existe para evitar.
 // v28.6 (03/08/2026) - CINCO CONSERTOS DE UMA VEZ, todos achados na auditoria forense de 03/08:
 //   (1) GT-03 - O AGENTE VE A PROPRIA FILA. Nova tool get_aprovacoes. Ele nao tinha NENHUMA
 //       forma de saber o que aconteceu com um card depois de emitido: nem se foi aprovado, nem
@@ -289,7 +298,10 @@ const MAX_ITER = 10;
 const MAX_TOOLS_TURNO = 12;
 // v23: o gargalo de tempo era REPETICAO, nao variedade. check_compliance custa 3-6s por
 // chamada e foi chamada 5x num unico turno. Limite por ferramenta resolve na origem.
-const MAX_POR_FERRAMENTA: Record<string, number> = { check_compliance: 3 };
+// v28.7: get_estrutura_conjuntos com teto 3. Sao 46 conjuntos relevantes em paginas de 20 - com o
+// default 2 o agente ficaria ESTRUTURALMENTE impedido de ver o universo completo, recriando o
+// problema do universo parcial numa forma nova, agora causada pelo proprio limite.
+const MAX_POR_FERRAMENTA: Record<string, number> = { check_compliance: 3, get_estrutura_conjuntos: 3 };
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
 const MAX_TOKENS = 12000;
 // v21: orcamento de raciocinio. max_tokens cobre raciocinio + texto; sem teto, o modelo
@@ -537,9 +549,23 @@ async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string) {
   }, "legendas_unicas", 6500);
   return { ...comUnicas, somente_campanhas_ativas: somenteAtivas };
 }
-async function t_estrutura_conjuntos() {
-  const { data, error } = await supa.rpc("get_estrutura_conjuntos");
-  if (error) return { erro: `falha ao ler estrutura dos conjuntos: ${error.message}` };
+// v28.7 (04/08/2026): a RPC ganhou empresa e paginacao. Sem p_company_id ela devolve lista vazia
+// com AVISO_CRITICO de proposito - a sobrecarga antiga e alarme, nao compatibilidade. Antes disso
+// a funcao nao tinha filtro de empresa NENHUM: devolvia os 46 conjuntos da Legal misturados com os
+// 8 da COHAPM, sem marcacao. Mesmo vazamento do get_criativos_conteudo (30/07), nunca replicado
+// aqui. Pagina comeca em 1 na interface da tool, como no get_criativos_conteudo.
+// cortarLista fica: hoje e no-op (pagina de 20 = 11.157 bytes, abaixo do teto de 11.500), mas e o
+// unico guarda que DECLARA truncagem. Sem ele, a unica protecao seria o slice(0,14000) bruto la no
+// envio ao modelo, que corta JSON no meio sem avisar - a falha silenciosa que o v18 existe para
+// impedir.
+async function t_estrutura_conjuntos(companyId: string, pagina: number) {
+  const tamanho = 20;
+  const { data, error } = await supa.rpc("get_estrutura_conjuntos", {
+    p_company_id: companyId,
+    p_offset: Math.max(0, (Math.max(1, pagina) - 1) * tamanho),
+    p_limit: tamanho,
+  });
+  if (error) return { erro: `falha ao ler estrutura de conjuntos: ${error.message}` };
   if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
   return cortarLista(data as Record<string, unknown>, "conjuntos");
 }
@@ -881,7 +907,7 @@ const TOOLS = [
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
-  { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS: CBO vs ABO (deduzido de onde esta o orcamento), orcamento diario/vitalicio, estrategia de lance (bid_strategy) e targeting (pais, faixa de idade, interesses). Use para perguntas de estrutura de conta, sobreposicao de publico e estrategia de lance. Traz resumo_orcamento agregado e limite_conhecido. NAO contem historico de ALTERACOES de orcamento (exigiria o endpoint /activities da Graph).", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, estrategia de lance, orcamento (no conjunto = ABO, na campanha = CBO), segmentacao com pais, faixa de idade, interesses e PUBLICOS PERSONALIZADOS, gasto e formularios. Vem PAGINADO em 20 por vez, ordenado por gasto. Se o campo 'restantes' vier maior que zero, chame de novo com a pagina seguinte ANTES de concluir qualquer coisa sobre o conjunto de conjuntos - e NUNCA afirme percentual sobre o total a partir de uma pagina so. NAO contem historico de ALTERACOES de orcamento (exigiria o endpoint /activities da Graph).", parameters: { type: "object", properties: { pagina: { type: "number", description: "Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero." } } } } },
   { type: "function", function: { name: "get_aprovacoes", description: "FILA REAL DE PEDIDOS DE APROVACAO desta empresa, direto do banco: o que esta aguardando decisao, o que foi aprovado, o que JA FOI EXECUTADO na Meta (com o identificador do objeto criado), o que falhou e QUAL erro a plataforma devolveu. USE SEMPRE que o gestor perguntar o estado de um card, se algo foi criado, se a aprovacao surtiu efeito, ou o que esta pendente - e use ANTES de afirmar qualquer coisa sobre o estado de um pedido. Se um pedido nao aparece nesta lista, ele nao existe.", parameters: { type: "object", properties: { apenas_abertos: { type: "boolean", description: "true (recomendado) = somente pendentes e aprovados; false = ultimos 25 de qualquer situacao, incluindo executados e recusados." } } } } },
 ];
 
@@ -1096,7 +1122,8 @@ async function runTool(name: string, args: any, ctx: any) {
         const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
         return error ? { erro: error.message } : data;
       }
-      case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
+      case "get_estrutura_conjuntos":
+        return await t_estrutura_conjuntos(ctx.companyId, Number(args?.pagina ?? 1));
       case "get_aprovacoes": return await t_aprovacoes(ctx.companyId, args?.apenas_abertos === false ? false : true);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       default: return { erro: `tool desconhecida: ${name}` };
@@ -1563,7 +1590,7 @@ Deno.serve(async (req) => {
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
     hist_msgs_cortadas: histMsgsCortadas,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "chat-v28.6" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "chat-v28.7" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
@@ -1571,7 +1598,7 @@ Deno.serve(async (req) => {
     attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
 
-  return json({ ok: true, versao: "chat-v28.6", conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
+  return json({ ok: true, versao: "chat-v28.7", conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
     iteracoes_usadas: iteracoes, finish_reason: finishReason, fatos_memoria: (ctxRows ?? []).length,
     preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
     deadline_tools: deadlineTools, ms_total: decorrido(),
