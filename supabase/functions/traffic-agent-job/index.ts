@@ -1,4 +1,4 @@
-// supabase/functions/traffic-agent-job/index.ts (v2.7)
+// supabase/functions/traffic-agent-job/index.ts (v2.8)
 // v1.1 - RELATORIO DE SUBAGENTE COMPLETO + SINTESE CIENTE DE CORTE (achado da auditoria
 //   verificada de 28/07 noite): no questionario do auditor, o subagente estrutura_conta
 //   terminou o relatorio em finish=length (teto de 3.500 tokens) ANTES dos numeros de
@@ -12,6 +12,10 @@
 //       sintese obriga a declarar "o levantamento de X veio incompleto" em vez de
 //       "nao disponivel" - truncamento nao pode virar inexistencia (regra R3 aplicada
 //       tambem ao proprio pipeline).
+// v2.8 (04/08/2026) - o detalhe do filtro de peso (quantos dos 15 quadros passaram, quantos foram
+//   usados, quais indices, e os videos sem video_id) sai NO RETORNO do modo drive_watch. Na corrida
+//   de 5 videos esses numeros existiam so na telemetria interna e tiveram de ser reconstruidos
+//   chamando a thumbnails de novo - numero que precisa ser reconstruido e numero que ninguem confere.
 // v2.7 (04/08/2026) - GT-45: MULTIQUADRO EM VIDEO. Base `multiquadro/criterio-v2.4`: 5 quadros da
 //   Meta por video em vez de uma miniatura do Drive. Os quadros vem da acao thumbnails da
 //   upload-midia (unica edge com META_ADS_TOKEN); este job usa a mcp key, nao o token.
@@ -1203,7 +1207,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.7", subagentes: [] };
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.8", subagentes: [] };
   tel.versao = "job-v2.4";
   try {
     await supa.from("chat_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId);
@@ -1414,13 +1418,18 @@ Deno.serve(async (req) => {
     const r = await rodarAnaliseVisual("varredura automatica do Drive",
       { companyId, mcpKey: String(cfg?.api_key ?? "") }, prazoW, telW, opts);
     const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0, falhas_gravacao: 0 };
-    return json({ ok: true, modo: "drive_watch", versao: "job-v2.7",
+    return json({ ok: true, modo: "drive_watch", versao: "job-v2.8",
       base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, limite: opts.limite ?? null },
       pastas_ativas: nPastas, pastas_desativadas: nDesativadas,
       pecas_novas_analisadas: v.analisados_nesta_rodada,
       cobertura_acumulada: v.cobertura_acumulada, total_com_miniatura: v.total,
       miniaturas_que_falharam: v.falhas_thumb, falhas_ao_gravar: v.falhas_gravacao ?? 0,
       candidatas_nesta_base: v.candidatas_nesta_base ?? null, em_base_mais_rasa: v.em_base_mais_rasa ?? null,
+      // v2.8: o detalhe do filtro de peso sai NO RETORNO. Na corrida de 5 videos eu tive de
+      // reconstruir esses numeros chamando a thumbnails de novo - numa corrida grande isso nao
+      // escala, e numero que precisa ser reconstruido e numero que ninguem confere.
+      multiquadro: v.multiquadro ?? null,
+      sem_video_id: v.sem_video_id ?? null,
       completo: (r as any)?.completo ?? null,
       resumo: `${v.analisados_nesta_rodada} peca(s) analisada(s) na base '${baseW}' em ${nPastas} pasta(s) monitorada(s)` +
         (nDesativadas ? ` (${nDesativadas} pasta(s) desativada(s) NAO foram lidas)` : "") +
