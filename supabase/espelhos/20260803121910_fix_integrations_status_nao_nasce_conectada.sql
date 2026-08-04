@@ -1,9 +1,10 @@
--- ESPELHO DE MIGRAÇÃO APLICADA
+-- ESPELHO DE MIGRACAO APLICADA
 -- version: 20260803121910
 -- name: fix_integrations_status_nao_nasce_conectada
--- aplicada por: Claude via MCP apply_migration em 03/08/2026
--- projeto: gzjwnjdpxpbmdhcyefvs (Gestor de Tráfego IA)
---
+-- projeto: gzjwnjdpxpbmdhcyefvs (Gestor de Trafego IA)
+-- aplicada por: Claude via MCP apply_migration
+-- espelho gerado a partir de supabase_migrations.schema_migrations - NAO transcrito a mao
+
 -- 03/08/2026 - "Conectada" FALSA no front. Causa raiz no SCHEMA, nao no frontend:
 --   integrations.status DEFAULT 'connected' + connected_at DEFAULT now() + estado_operacional DEFAULT 'ativa'.
 -- Qualquer INSERT nascia conectado, com data de conexao preenchida, sem conta e sem uma unica
@@ -66,13 +67,3 @@ WHERE NOT EXISTS (
   SELECT 1 FROM public.meta_execution_config
    WHERE company_id = '307849e6-78a7-4217-8112-3fb0a924f988'
 );
-
--- ============================================================================
--- PROVA PÓS-APLICAÇÃO (sonda auto-apagável, rodada em 03/08/2026)
--- ============================================================================
--- trava conectado-sem-conta ....... OK: banco RECUSOU connected sem external_id
--- default de linha nova ........... status=nao_verificada / estado=quarentena / connected_at=NULL
--- as 17 nao_operacional ........... 17 linhas, status intocado ('connected') conforme decisão
--- as 2 linhas de hoje ............. nao_verificada / quarentena / connected_at NULL / motivo gravado
--- config da empresa nova .......... id=3, master=false, dry_run=true, 0 flags true, contas=[]
--- empresas sem config ............. nenhuma
