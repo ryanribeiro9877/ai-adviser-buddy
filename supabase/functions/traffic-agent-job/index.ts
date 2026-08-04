@@ -1,4 +1,4 @@
-// supabase/functions/traffic-agent-job/index.ts (v2.5)
+// supabase/functions/traffic-agent-job/index.ts (v2.6)
 // v1.1 - RELATORIO DE SUBAGENTE COMPLETO + SINTESE CIENTE DE CORTE (achado da auditoria
 //   verificada de 28/07 noite): no questionario do auditor, o subagente estrutura_conta
 //   terminou o relatorio em finish=length (teto de 3.500 tokens) ANTES dos numeros de
@@ -12,6 +12,15 @@
 //       sintese obriga a declarar "o levantamento de X veio incompleto" em vez de
 //       "nao disponivel" - truncamento nao pode virar inexistencia (regra R3 aplicada
 //       tambem ao proprio pipeline).
+// v2.6 (04/08/2026) - BASE DA ANALISE NO CONTRATO + CONSERTO DE FALHA SILENCIOSA.
+//   (1) O pipeline de visao e o modo drive_watch aceitam base_da_analise (default thumbnail, para
+//       o cron das 08:45 nao regredir). O plano e pedido PARA a base, com recorte opcional por
+//       nome, por tipo (somente_imagens) e por limite - o aceite parcial de 5 antes de 48.
+//   (2) CONSERTO: o upsert citava onConflict (drive_file_id, drive_modified_time) e esse indice de
+//       2 colunas deixou de existir quando a chave virou (arquivo, versao, base). Toda gravacao
+//       falharia com 42P10 - e o erro era DESCARTADO: analisados++ acontecia igual e a telemetria
+//       diria "analisado". O cron de hoje devolveu 0 pecas novas, entao a quebra nunca foi
+//       exercitada; a primeira peca nova no Drive teria sumido em silencio.
 // v2.5 (04/08/2026) - COBERTURA DO DRIVE VEM DA TABELA + MODO VIGIA PARA O CRON.
 //   (B) As pastas a varrer saem de drive_pastas_monitoradas (RPC drive_plano_de_varredura), nao
 //       mais do segredo DRIVE_CRIATIVOS_FOLDER_ID - acrescentar pasta passou a ser INSERT, sem
@@ -891,7 +900,18 @@ async function baixarThumb(url: string): Promise<{ b64: string; mime: string } |
   } catch { return null; }
 }
 
-async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, prazo: () => number, tel: any) {
+// v2.6 (04/08/2026) - BASE DA ANALISE NO CONTRATO. A chave de drive_midia_analises passou a ser
+// (drive_file_id, drive_modified_time, base_da_analise): reanalise com base DIFERENTE cria linha
+// nova e o veredito antigo permanece. Convencao do nome: "<evidencia>/criterio-<versao do prompt>"
+// - se o prompt de visao mudar, a base muda e a reanalise dispara por construcao, sem ninguem
+// precisar lembrar de inventar nome. Foi exatamente esse esquecimento que deixou as 67 pecas de
+// 31/07 julgadas 2h11 ANTES do deploy que trouxe a taxonomia do gestor (educacao financeira e
+// seguranca), com zero pecas nesses dois temas.
+const BASE_PADRAO = "thumbnail";
+type OpcoesVisao = { base?: string; somenteNomes?: string[]; limite?: number; somenteImagens?: boolean };
+
+async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, prazo: () => number, tel: any, opts: OpcoesVisao = {}) {
+  const base = String(opts.base ?? BASE_PADRAO).trim() || BASE_PADRAO;
   const nomeSub = "analise_visual_drive";
   const inv = await t_drive_criativos(ctx.companyId);
   if ((inv as any)?.erro) return { nome: nomeSub, relatorio: `LACUNAS: inventario do Drive indisponivel (${(inv as any).erro}) - nenhuma analise visual feita nesta rodada.`, completo: false };
@@ -899,14 +919,30 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, praz
 
   // v2.5: as impressoes digitais vem do MESMO plano que definiu as pastas, em vez de uma consulta
   // propria - uma fonte so para "o que varrer" e "o que ja foi analisado".
-  const { data: plano } = await supa.rpc("drive_plano_de_varredura", { p_company_id: ctx.companyId });
+  // v2.6: o plano e pedido PARA A BASE desejada. `ja_analisados` sao as que ja foram vistas NESSA
+  // base (pulam); `vistos_em_base_mais_rasa` sao as vistas de forma menos completa (reanalisam).
+  const { data: plano } = await supa.rpc("drive_plano_de_varredura", {
+    p_company_id: ctx.companyId, p_base_desejada: base,
+  });
   const jaAnalisados: any[] = Array.isArray((plano as any)?.ja_analisados) ? (plano as any).ja_analisados : [];
   const jaFeito = new Set(jaAnalisados.map((f: any) => `${f.f}|${f.m ?? ""}`));
-  const pendentes = arquivos.filter((a: any) => a.thumbnail && !jaFeito.has(`${a.id ?? a.nome}|${a.modificado_em ?? ""}`));
+  const emBaseMaisRasa = Array.isArray((plano as any)?.vistos_em_base_mais_rasa) ? (plano as any).vistos_em_base_mais_rasa.length : 0;
+  // v2.6: filtros do recorte da rodada. `somenteImagens` existe porque reanalisar VIDEO por
+  // miniatura com critério novo gastaria visão para continuar vendo um quadro - o video espera a
+  // rota de quadros. `somenteNomes` e `limite` servem ao aceite parcial: provar em 5 antes de 48.
+  const alvoNomes = (opts.somenteNomes ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean);
+  const pendentes = arquivos.filter((a: any) => {
+    if (!a.thumbnail) return false;
+    if (jaFeito.has(`${a.id ?? a.nome}|${a.modificado_em ?? ""}`)) return false;
+    if (opts.somenteImagens && String(a.tipo ?? "").startsWith("video/")) return false;
+    if (alvoNomes.length && !alvoNomes.includes(String(a.nome ?? "").trim().toLowerCase())) return false;
+    return true;
+  });
   const semThumb = arquivos.filter((a: any) => !a.thumbnail);
 
-  let analisados = 0, falhasThumb = 0;
-  const fila = pendentes.slice(0, VISAO_MAX_POR_RODADA);
+  let analisados = 0, falhasThumb = 0, falhasGravacao = 0;
+  const teto = Math.max(1, Math.min(Number(opts.limite ?? VISAO_MAX_POR_RODADA), VISAO_MAX_POR_RODADA));
+  const fila = pendentes.slice(0, teto);
   for (let i = 0; i < fila.length; i += VISAO_LOTE) {
     if (prazo() < VISAO_MIN_PRAZO_MS) break;
     const lote = fila.slice(i, i + VISAO_LOTE);
@@ -926,34 +962,45 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, praz
     for (let k = 0; k < imagens.length; k++) {
       const arq = imagens[k].arq; const it = itens[k] ?? {};
       const aprov = ["sim", "nao", "incerto"].includes(String(it?.aproveitavel)) ? String(it.aproveitavel) : "incerto";
-      await supa.from("drive_midia_analises").upsert({
+      const { error: eUp } = await supa.from("drive_midia_analises").upsert({
         company_id: ctx.companyId, drive_file_id: String(arq.id ?? arq.nome), drive_modified_time: arq.modificado_em ?? "",
+        base_da_analise: base,
         nome: arq.nome, caminho: arq.caminho, formato_pasta: arq.formato_pasta, eixo_pasta: arq.eixo_pasta, mime: arq.tipo,
         produto_detectado: String(it?.produto_detectado ?? "indeterminado").slice(0, 120),
         texto_visivel: String(it?.texto_visivel ?? "").slice(0, 800),
         riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
         aproveitavel: aprov, motivo: String(it?.motivo ?? "sem motivo").slice(0, 400),
-        base_da_analise: "thumbnail", modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
-      }, { onConflict: "drive_file_id,drive_modified_time" });
+        modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
+        // v2.6: o onConflict TEM de citar as tres colunas da uq_drive_analise. A versao anterior
+        // citava (drive_file_id, drive_modified_time) e esse indice de 2 colunas NAO EXISTE MAIS -
+        // toda gravacao falharia com 42P10, e o erro era descartado: `analisados++` acontecia de
+        // qualquer jeito e a telemetria diria "analisado". Falha silenciosa, achada antes de rodar.
+      }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
+      if (eUp) { falhasGravacao++; continue; }
       analisados++;
     }
   }
 
-  // relatorio = estado ACUMULADO da tabela (inclui rodadas anteriores)
+  // relatorio = estado ACUMULADO da tabela (inclui rodadas anteriores) NA BASE DESTA RODADA.
+  // v2.6: sem o filtro por base, o relatorio somaria o veredito de 31/07 com o novo e a contagem
+  // de cobertura passaria do total - duas leituras da mesma peca nao sao duas pecas.
   const { data: tudo } = await supa.from("drive_midia_analises")
     .select("nome, caminho, formato_pasta, eixo_pasta, produto_detectado, aproveitavel, motivo, riscos_compliance")
-    .eq("company_id", ctx.companyId).order("caminho");
+    .eq("company_id", ctx.companyId).eq("base_da_analise", base).order("caminho");
   const linhas = (tudo ?? []).map((t2: any) =>
     `- [${t2.aproveitavel.toUpperCase()}] ${t2.caminho}/${t2.nome} | produto: ${t2.produto_detectado} | ${t2.motivo}${t2.riscos_compliance ? " | risco: " + t2.riscos_compliance : ""}`).join("\n");
   const cobertura = (tudo ?? []).length;
   const totalComThumb = arquivos.filter((a: any) => a.thumbnail).length;
-  const rel = `ANALISE VISUAL DAS MIDIAS DO DRIVE (persistida em banco; base: MINIATURA em alta resolucao - de video se ve um frame, nunca o interior)\n` +
-    `Cobertura acumulada: ${cobertura} de ${totalComThumb} arquivos com miniatura (${arquivos.length} no inventario; ${semThumb.length} sem miniatura disponivel). Nesta rodada: ${analisados} analisados, ${falhasThumb} miniaturas falharam.\n` +
+  const rel = `ANALISE VISUAL DAS MIDIAS DO DRIVE (persistida em banco; base desta leitura: ${base} - se a base cita "thumbnail", de video se ve UM frame, nunca o interior)\n` +
+    `Cobertura acumulada NESTA BASE: ${cobertura} de ${totalComThumb} arquivos com miniatura (${arquivos.length} no inventario; ${semThumb.length} sem miniatura disponivel). Nesta rodada: ${analisados} analisados, ${falhasThumb} miniaturas falharam, ${falhasGravacao} falharam ao gravar.\n` +
+    (emBaseMaisRasa ? `${emBaseMaisRasa} peca(s) tem leitura em base mais rasa e estao sendo reavaliadas nesta base - o veredito anterior NAO foi apagado, continua no banco sob a base antiga.\n` : "") +
     `Resumo: SIM=${(tudo ?? []).filter((x: any) => x.aproveitavel === "sim").length} · NAO=${(tudo ?? []).filter((x: any) => x.aproveitavel === "nao").length} · INCERTO=${(tudo ?? []).filter((x: any) => x.aproveitavel === "incerto").length}\n` +
     linhas +
     (cobertura < totalComThumb ? `\nLACUNAS: ${totalComThumb - cobertura} arquivos ainda sem analise (teto por rodada/prazo) - nova rodada continua de onde parou, nada se refaz.` : "\nCobertura completa dos arquivos com miniatura.") +
     (semThumb.length ? `\nSem miniatura (nao analisaveis por visao): ${semThumb.map((x: any) => x.nome).slice(0, 10).join(", ")}${semThumb.length > 10 ? "..." : ""}` : "");
-  tel.visao = { analisados_nesta_rodada: analisados, cobertura_acumulada: cobertura, total: totalComThumb, falhas_thumb: falhasThumb };
+  tel.visao = { base, analisados_nesta_rodada: analisados, cobertura_acumulada: cobertura,
+    total: totalComThumb, falhas_thumb: falhasThumb, falhas_gravacao: falhasGravacao,
+    candidatas_nesta_base: pendentes.length, em_base_mais_rasa: emBaseMaisRasa };
   return { nome: nomeSub, relatorio: rel.slice(0, 24000), completo: cobertura >= totalComThumb };
 }
 
@@ -1050,7 +1097,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.5", subagentes: [] };
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.6", subagentes: [] };
   tel.versao = "job-v2.4";
   try {
     await supa.from("chat_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId);
@@ -1244,20 +1291,32 @@ Deno.serve(async (req) => {
     const tw = Date.now();
     const prazoW = () => JOB_LIMIT_MS - (Date.now() - tw) - RESERVA_FINAL_MS;
     const telW: any = {};
-    const { data: planoW } = await supa.rpc("drive_plano_de_varredura", { p_company_id: companyId });
+    // v2.6: base e recorte pelo body. Default 'thumbnail' para o cron das 08:45 nao regredir.
+    const baseW = String(body?.base_da_analise ?? BASE_PADRAO).trim() || BASE_PADRAO;
+    const nomesW: string[] = Array.isArray(body?.somente_nomes) ? body.somente_nomes.map((x: unknown) => String(x)) : [];
+    const opts: OpcoesVisao = {
+      base: baseW,
+      somenteNomes: nomesW.length ? nomesW : undefined,
+      limite: body?.limite !== undefined ? Number(body.limite) : undefined,
+      somenteImagens: body?.somente_imagens === true,
+    };
+    const { data: planoW } = await supa.rpc("drive_plano_de_varredura", { p_company_id: companyId, p_base_desejada: baseW });
     const nPastas = Array.isArray((planoW as any)?.pastas_ativas) ? (planoW as any).pastas_ativas.length : 0;
     const nDesativadas = Array.isArray((planoW as any)?.pastas_desativadas) ? (planoW as any).pastas_desativadas.length : 0;
-    const r = await rodarAnaliseVisual("varredura automatica do Drive", { companyId }, prazoW, telW);
-    const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0 };
-    return json({ ok: true, modo: "drive_watch", versao: "job-v2.5",
+    const r = await rodarAnaliseVisual("varredura automatica do Drive", { companyId }, prazoW, telW, opts);
+    const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0, falhas_gravacao: 0 };
+    return json({ ok: true, modo: "drive_watch", versao: "job-v2.6",
+      base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, limite: opts.limite ?? null },
       pastas_ativas: nPastas, pastas_desativadas: nDesativadas,
       pecas_novas_analisadas: v.analisados_nesta_rodada,
       cobertura_acumulada: v.cobertura_acumulada, total_com_miniatura: v.total,
-      miniaturas_que_falharam: v.falhas_thumb,
+      miniaturas_que_falharam: v.falhas_thumb, falhas_ao_gravar: v.falhas_gravacao ?? 0,
+      candidatas_nesta_base: v.candidatas_nesta_base ?? null, em_base_mais_rasa: v.em_base_mais_rasa ?? null,
       completo: (r as any)?.completo ?? null,
-      resumo: `${v.analisados_nesta_rodada} peca(s) nova(s) analisada(s) em ${nPastas} pasta(s) monitorada(s)` +
+      resumo: `${v.analisados_nesta_rodada} peca(s) analisada(s) na base '${baseW}' em ${nPastas} pasta(s) monitorada(s)` +
         (nDesativadas ? ` (${nDesativadas} pasta(s) desativada(s) NAO foram lidas)` : "") +
-        (v.analisados_nesta_rodada === 0 ? " - nada mudou desde a ultima varredura, o que NAO e falha" : ""),
+        ((v.falhas_gravacao ?? 0) > 0 ? ` - ATENCAO: ${v.falhas_gravacao} falha(s) ao GRAVAR, o veredito foi produzido e nao persistiu` : "") +
+        (v.analisados_nesta_rodada === 0 ? " - nada a analisar nesta base, o que NAO e falha" : ""),
       duracao_ms: Date.now() - tw });
   }
 
