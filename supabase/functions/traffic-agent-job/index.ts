@@ -1,4 +1,4 @@
-// supabase/functions/traffic-agent-job/index.ts (v2.8)
+// supabase/functions/traffic-agent-job/index.ts (v2.9)
 // v1.1 - RELATORIO DE SUBAGENTE COMPLETO + SINTESE CIENTE DE CORTE (achado da auditoria
 //   verificada de 28/07 noite): no questionario do auditor, o subagente estrutura_conta
 //   terminou o relatorio em finish=length (teto de 3.500 tokens) ANTES dos numeros de
@@ -12,6 +12,10 @@
 //       sintese obriga a declarar "o levantamento de X veio incompleto" em vez de
 //       "nao disponivel" - truncamento nao pode virar inexistencia (regra R3 aplicada
 //       tambem ao proprio pipeline).
+// v2.9 (04/08/2026) - CONSERTO: na base multiquadro o filtro de video passou a ser aplicado antes
+//   do corte por `limite`, nao dentro do laco. Com limite 12 os 12 primeiros pendentes eram
+//   imagens e a corrida devolveu 0 analisadas em 5s - nao gravou nada errado, simplesmente nao
+//   fez. Foi a telemetria da v2.8 que tornou o no-op visivel.
 // v2.8 (04/08/2026) - o detalhe do filtro de peso (quantos dos 15 quadros passaram, quantos foram
 //   usados, quais indices, e os videos sem video_id) sai NO RETORNO do modo drive_watch. Na corrida
 //   de 5 videos esses numeros existiam so na telemetria interna e tiveram de ser reconstruidos
@@ -979,10 +983,18 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
   // miniatura com critério novo gastaria visão para continuar vendo um quadro - o video espera a
   // rota de quadros. `somenteNomes` e `limite` servem ao aceite parcial: provar em 5 antes de 48.
   const alvoNomes = (opts.somenteNomes ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean);
+  // v2.9: o recorte por TIPO entra AQUI, antes do corte por `limite`. Na v2.8 a base multiquadro
+  // filtrava video dentro do laco, depois do slice(0, limite): com limite 12 os 12 primeiros
+  // pendentes eram imagens, todas foram puladas e a corrida devolveu 0 analisadas em 5s. Nao
+  // quebrou nada e nao gravou nada errado - simplesmente nao fez, e so a telemetria nova
+  // (multiquadro: [] com falhas 0) tornou isso visivel em vez de parecer "nada a fazer".
+  const soVideo = base.startsWith("multiquadro");
   const pendentes = arquivos.filter((a: any) => {
     if (!a.thumbnail) return false;
     if (jaFeito.has(`${a.id ?? a.nome}|${a.modificado_em ?? ""}`)) return false;
-    if (opts.somenteImagens && String(a.tipo ?? "").startsWith("video/")) return false;
+    const ehVideo = String(a.tipo ?? "").startsWith("video/");
+    if (opts.somenteImagens && ehVideo) return false;
+    if (soVideo && !ehVideo) return false;
     if (alvoNomes.length && !alvoNomes.includes(String(a.nome ?? "").trim().toLowerCase())) return false;
     return true;
   });
@@ -1207,7 +1219,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.8", subagentes: [] };
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.9", subagentes: [] };
   tel.versao = "job-v2.4";
   try {
     await supa.from("chat_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId);
@@ -1418,7 +1430,7 @@ Deno.serve(async (req) => {
     const r = await rodarAnaliseVisual("varredura automatica do Drive",
       { companyId, mcpKey: String(cfg?.api_key ?? "") }, prazoW, telW, opts);
     const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0, falhas_gravacao: 0 };
-    return json({ ok: true, modo: "drive_watch", versao: "job-v2.8",
+    return json({ ok: true, modo: "drive_watch", versao: "job-v2.9",
       base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, limite: opts.limite ?? null },
       pastas_ativas: nPastas, pastas_desativadas: nDesativadas,
       pecas_novas_analisadas: v.analisados_nesta_rodada,
