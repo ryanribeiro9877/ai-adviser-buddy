@@ -1,4 +1,11 @@
-// supabase/functions/windsor-sync/index.ts (v15)
+// supabase/functions/windsor-sync/index.ts (v16)
+//
+// v16 (04/08/2026) — RANKINGS DE QUALIDADE DO ANUNCIO. O relatorio diario declarava a ausencia
+//   desses tres campos; o Windsor entrega e foi provado com dado real em 04/08 (conta
+//   3302001729967572), no MESMO nivel ad_daily que ja e coletado - custo zero de chamada nova.
+//   Requer as 3 colunas em ad_metric_snapshots e os 3 campos no jsonb_to_recordset da RPC
+//   sync_ingest_ad_snapshots; sem a migracao, estas 3 chaves sao ignoradas pela RPC (o
+//   recordset descarta chave que nao declara), entao esta versao NAO quebra se subir antes.
 //
 // v15 — CORREÇÃO CRÍTICA (incidente 23-27/07/2026: 5 dias sem métricas de campanha):
 //   (1) ORDEM DE INGESTÃO: as linhas de CAMPANHA agora são gravadas IMEDIATAMENTE após a
@@ -48,8 +55,13 @@ const FIELDS_ADS: Record<string, string[]> = {
     ...METRICS,
   ],
 };
+// v16 (04/08/2026): os tres rankings de qualidade da Meta vem na MESMA requisicao do nivel
+// ad_daily - testado no Windsor em 04/08 e ele entrega (nao foi o caso do url_tags). Sao
+// categoricos, nao numericos: ABOVE_AVERAGE | AVERAGE | BELOW_AVERAGE_10 | BELOW_AVERAGE_20 |
+// BELOW_AVERAGE_35 | UNKNOWN.
+const RANKINGS = ["quality_ranking", "engagement_rate_ranking", "conversion_rate_ranking"];
 const FIELDS_AD_DAILY: Record<string, string[]> = {
-  facebook: ["date", "account_id", "campaign_id", "ad_id", "frequency", ...METRICS],
+  facebook: ["date", "account_id", "campaign_id", "ad_id", "frequency", ...METRICS, ...RANKINGS],
 };
 const FIELDS_ADSETS: Record<string, string[]> = {
   facebook: [
@@ -106,6 +118,16 @@ function mapAd(row: any, integ: any) {
     ...m,
   };
 }
+// v16: ranking chega como texto. NULL e UNKNOWN sao coisas DIFERENTES e a distincao precisa
+// sobreviver no banco: null = nao coletado (campo ausente na resposta); UNKNOWN = coletado, e a
+// Meta declarou que ainda nao ha impressoes suficientes para julgar. Ler UNKNOWN como "qualidade
+// ruim" seria erro de leitura - hoje os 3 anuncios em entrega estao todos UNKNOWN, com 1,4 a 2,6
+// mil impressoes/dia cada.
+const rank = (v: unknown): string | null => {
+  const s = String(v ?? "").trim().toUpperCase();
+  return s ? s : null;
+};
+
 function mapAdDaily(row: any, integ: any) {
   if (!row.ad_id || !row.date) return null;
   const m = baseMetrics(row);
@@ -118,6 +140,9 @@ function mapAdDaily(row: any, integ: any) {
     link_clicks: m.link_clicks, landing_page_views: m.landing_page_views,
     messaging_started: m.messaging_started, form_leads: m.form_leads,
     frequency: num(row.frequency),
+    quality_ranking: rank(row.quality_ranking),
+    engagement_rate_ranking: rank(row.engagement_rate_ranking),
+    conversion_rate_ranking: rank(row.conversion_rate_ranking),
   };
 }
 function mapAdset(row: any, integ: any) {
