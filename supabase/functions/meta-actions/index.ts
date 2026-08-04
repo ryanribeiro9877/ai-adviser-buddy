@@ -1,4 +1,8 @@
 // supabase/functions/meta-actions/index.ts (v4.3)
+// v4.3.1 (04/08/2026) - o default do espelho deixa de ser literal. Ele apontava para "ACTIVE",
+//   escrito na v4.2, e a v4.3 passou a criar PAUSED: default de contrato revogado gravava verde
+//   falso no espelho quando a releitura na Graph nao trazia status. Agora segue o status que a
+//   propria executora enviou (bodyFinal.status), com PAUSED apenas como ultimo recurso.
 // v4.3 (03/08/2026) - REVERSAO DO CONTRATO DE ATIVACAO. O objeto volta a nascer PAUSED.
 //   Motivo: o gestor Roberto pediu por audio em 03/08 14:45 - "ela tem que nascer pausada para
 //   poder olhar e ativar ou nao" - e o Ryan acatou. A mudanca de 31/07 (aprovar = ativar) foi
@@ -194,9 +198,16 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
 async function espelhar(
   acao: string, novoId: string, objeto: any, p: any, conta: string,
   companyId: string, approvalId: string, moldeLido: any, creativeUsado: string | null,
+  statusEnviado: string,
 ): Promise<{ ok: boolean; erro?: string; tabela?: string }> {
   const contaSemPrefixo = conta.replace(/^act_/, "");
-  const statusMeta = String(objeto?.status ?? "ACTIVE");
+  // v4.3.1 (04/08/2026): tres fontes, em ordem de autoridade. (1) o que a Meta devolveu na
+  // releitura do objeto criado; (2) o que a executora ACABOU de enviar no corpo - fato conhecido,
+  // nao palpite; (3) PAUSED como ultimo recurso, que e a direcao segura. O literal "ACTIVE" que
+  // estava aqui foi escrito na v4.2, quando o objeto nascia ativo, e virou VERDE FALSO no
+  // instante em que a v4.3 passou a criar pausado - default digitado a mao aponta para o
+  // contrato do dia em que foi escrito, e este mudou duas vezes em quatro dias.
+  const statusMeta = String(objeto?.status ?? statusEnviado ?? "PAUSED") || "PAUSED";
   try {
     if (acao === "criar_campanha") {
       const { error } = await supa.from("campaigns").upsert({
@@ -391,7 +402,8 @@ Deno.serve(async (req) => {
         // v4.2: espelha ANTES de fechar o card, para que o proximo turno do agente ja veja.
         const esp = await espelhar(acao, novoId, depois.body, r.payload, conta,
           r.company_id, r.id, pl.molde_lido ?? null,
-          creativeCriado ?? (pl.criativo?.creative_id ?? null));
+          creativeCriado ?? (pl.criativo?.creative_id ?? null),
+          String(bodyFinal.status ?? ""));
         if (!esp.ok) {
           await audit(r.company_id, sistema, "meta_action_espelho_falhou", r.id,
             { acao, id_criado: novoId, tabela: esp.tabela ?? null, erro: esp.erro,
@@ -482,6 +494,6 @@ Deno.serve(async (req) => {
   }
 
   // v3: nao ha "modo" unico - cada card foi avaliado sob a config da sua empresa.
-  return json({ ok: true, versao: "meta-actions-v4.3", processados: resultados.length, resultados,
+  return json({ ok: true, versao: "meta-actions-v4.3.1", processados: resultados.length, resultados,
     nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); cada resultado acima foi avaliado sob a config da empresa do proprio card" });
 });
