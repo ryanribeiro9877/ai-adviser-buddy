@@ -1,8 +1,23 @@
-// supabase/functions/waba-sync/index.ts
+// supabase/functions/waba-sync/index.ts (v18)
 //
 // CONECTOR WABA — WhatsApp Business Management API (Graph) -> Supabase.
 // Traz: WABAs, números (qualidade + limite de mensagens nível portfólio), templates,
 // analytics diário (enviadas/entregues) e analytics por template (sent/delivered/read/clicked).
+//
+// v18.1 (29/07/2026) — F5.4 coleta POR NÚMERO + template_name:
+//   (1) NOVO: analytics diário POR NÚMERO — grava linhas em waba_analytics_daily com
+//       phone_external_id PREENCHIDO. HISTÓRICO DA ABORDAGEM: a v18 tentou 1 chamada por
+//       WABA com dimensions(["PHONE"]), mas a Graph IGNOROU o modificador em silêncio
+//       (200 ok, pontos agregados sem phone_number, zero gravados — validação 29/07).
+//       A v18.1 usa filtro phone_numbers([digitos]) com 1 chamada POR NÚMERO: a atribuição
+//       é por construção. Telemetria guarda 1 amostra crua da resposta por sync
+//       (analytics_por_numero_amostra_raw) p/ diagnosticar futuras mudanças da Graph.
+//       Falha nessa etapa NÃO derruba a coleta agregada: degrada com aviso no report.
+//   (2) template_name agora é preenchido na origem (mapa id->name dos templates da própria
+//       WABA). Backfill das 728 linhas antigas já foi aplicado direto no banco em 29/07.
+//   (3) Marcador de versão no retorno (versao: "waba-sync-v18") p/ sonda pós-deploy.
+//   A coleta agregada (phone_external_id = '') segue INALTERADA — relatório diário e telas
+//   que a consomem não mudam de contrato.
 //
 // Segredos (Edge Function Secrets — invisíveis ao SQL):
 //   WHATSAPP_ACCESS_TOKEN  (obrigatório) token de System User (whatsapp_business_management+messaging+business_management)
@@ -17,11 +32,13 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GRAPH = "https://graph.facebook.com/v22.0";
 const ANALYTICS_DAYS = 30;
+const VERSAO = "waba-sync-v18.1";
 
 function json(obj: unknown, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
 }
 const dayISO = (d: Date) => d.toISOString().slice(0, 10);
+const soDigitos = (s: unknown) => String(s ?? "").replace(/\D+/g, "");
 // limite de mensagens: campo novo (nível portfólio, out/2025) com fallback pro deprecado
 const limStr = (p: any) => {
   const v = p.whatsapp_business_manager_messaging_limit ?? p.messaging_limit_tier ?? null;
@@ -110,7 +127,7 @@ Deno.serve(async (req) => {
     report.push({ step: "discover:fallback_table", count: wabas.length });
   }
   if (wabas.length === 0) return json({
-    ok: false, error: "nenhuma_waba_encontrada",
+    ok: false, versao: VERSAO, error: "nenhuma_waba_encontrada",
     hint: "regenerar token incluindo business_management OU semear public.wabas(external_id)",
     report,
   }, 200);
@@ -150,6 +167,13 @@ Deno.serve(async (req) => {
     }
     wr.phones = phones.length;
 
+    // v18: mapa dígitos do número -> external_id (a analytics por número devolve dígitos, não id)
+    const phoneIdPorDigitos = new Map<string, string>();
+    for (const p of phones) {
+      const dig = soDigitos(p.display_phone_number);
+      if (dig) phoneIdPorDigitos.set(dig, String(p.id));
+    }
+
     // templates (paginado)
     const tp = await gGetAll(`${w.id}/message_templates`,
       { fields: "id,name,language,status,category,components,quality_score,rejected_reason", limit: "100" }, token);
@@ -168,7 +192,11 @@ Deno.serve(async (req) => {
     }
     wr.templates = templates.length;
 
-    // analytics agregado (enviadas/entregues por dia)
+    // v18: mapa id -> name p/ preencher template_name na analytics por template
+    const nomePorTemplateId = new Map<string, string>();
+    for (const t of templates) if (t.id && t.name) nomePorTemplateId.set(String(t.id), String(t.name));
+
+    // analytics agregado (enviadas/entregues por dia) — INALTERADO (phone_external_id = '')
     const an = await gGet(`${w.id}`, { fields: `analytics.start(${startTs}).end(${endTs}).granularity(DAY)` }, token);
     if (!an.ok) wr.analytics_error = an.error;
     else {
@@ -181,6 +209,40 @@ Deno.serve(async (req) => {
         }, { onConflict: "waba_external_id,phone_external_id,date" });
       }
       wr.analytics_days = points.length;
+    }
+
+    // v18.1: analytics POR NÚMERO via filtro phone_numbers([digitos]) — 1 chamada por número.
+    // Motivo da mudança: dimensions(["PHONE"]) foi IGNORADA silenciosamente pela Graph na
+    // validação de 29/07 (200 ok, pontos agregados sem phone_number, zero gravados). Com o
+    // filtro, a atribuição é por construção: pedi o número X, a resposta é do número X.
+    // Falha aqui degrada com aviso, nunca derruba a coleta agregada acima.
+    {
+      let gravados = 0; const errosNum: string[] = [];
+      let amostraGuardada = false;
+      for (const p of phones) {
+        const dig = soDigitos(p.display_phone_number);
+        if (!p.id || !dig) continue;
+        const anPh = await gGet(`${w.id}`,
+          { fields: `analytics.start(${startTs}).end(${endTs}).granularity(DAY).phone_numbers(["${dig}"])` }, token);
+        if (!anPh.ok) { errosNum.push(anPh.error ?? "erro"); continue; }
+        const points = anPh.body?.analytics?.data_points ?? [];
+        // telemetria de diagnóstico: guarda UMA amostra crua por sync (primeiro número com resposta)
+        if (!amostraGuardada) {
+          wr.analytics_por_numero_amostra_raw = JSON.stringify(anPh.body?.analytics ?? anPh.body ?? {}).slice(0, 400);
+          amostraGuardada = true;
+        }
+        for (const dp of points) {
+          const d = dayISO(new Date((dp.start ?? 0) * 1000));
+          await supa.from("waba_analytics_daily").upsert({
+            company_id: companyId, waba_external_id: w.id,
+            phone_external_id: String(p.id), // atribuição por construção (filtro da chamada)
+            date: d, sent: dp.sent ?? 0, delivered: dp.delivered ?? 0, raw: dp,
+          }, { onConflict: "waba_external_id,phone_external_id,date" });
+          gravados++;
+        }
+      }
+      wr.analytics_por_numero_pontos = gravados;
+      if (errosNum.length) wr.analytics_por_numero_errors = [...new Set(errosNum)].slice(0, 3);
     }
 
     // analytics por template (sent/delivered/read/clicked) — pode exigir habilitação; try & report
@@ -202,9 +264,11 @@ Deno.serve(async (req) => {
           const clicked = Array.isArray(dp.clicked)
             ? dp.clicked.reduce((s: number, c: any) => s + (c.count ?? 0), 0)
             : (dp.clicked ?? 0);
+          const tplId = String(dp.template_id ?? row.template_id ?? "");
           await supa.from("waba_template_analytics_daily").upsert({
             company_id: companyId, waba_external_id: w.id,
-            template_external_id: String(dp.template_id ?? row.template_id ?? ""), template_name: null,
+            template_external_id: tplId,
+            template_name: nomePorTemplateId.get(tplId) ?? null, // v18: preenchido na origem
             date: d, sent: dp.sent ?? 0, delivered: dp.delivered ?? 0, read: dp.read ?? 0, clicked,
             raw: dp,
           }, { onConflict: "waba_external_id,template_external_id,date" });
@@ -218,5 +282,5 @@ Deno.serve(async (req) => {
     report.push(wr);
   }
 
-  return json({ ok: true, window_days: ANALYTICS_DAYS, wabas: wabas.length, report });
+  return json({ ok: true, versao: VERSAO, window_days: ANALYTICS_DAYS, wabas: wabas.length, report });
 });

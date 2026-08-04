@@ -12,6 +12,54 @@
 //       sintese obriga a declarar "o levantamento de X veio incompleto" em vez de
 //       "nao disponivel" - truncamento nao pode virar inexistencia (regra R3 aplicada
 //       tambem ao proprio pipeline).
+// v2.4 (31/07/2026) - CRITERIO DO GESTOR no pipeline de visao (audios do Roberto):
+//   o universo criativo da marca e "credito CLT + educacao financeira + dicas de seguranca
+//   financeira" - peca desses temas e SIM. NAO fica reservado a peca que mostra
+//   explicitamente OUTRO produto financeiro (financiamento de veiculo, conta corrente,
+//   consorcio, imovel). Vale para PECAS FUTURAS; o acervo atual ja esta liberado pela
+//   camada de aprovacao humana (aprovado_pelo_gestor, decisao 31/07).
+//
+// v2.3 (31/07/2026) - vereditos visuais expostos como TOOL (get_analise_visual_drive):
+//   os demais especialistas e a sintese leem a classificacao persistida sem repetir visao.
+//
+// v2.2 (31/07/2026) - OLHOS: analise VISUAL das midias do Drive.
+//   O especialista criativos_drive lia a miniatura como URL EM TEXTO - o modelo nunca via
+//   os pixels, e recusar "classifique cada arquivo" era o comportamento correto de um
+//   analista cego. Agora existe o especialista analise_visual_drive: pipeline CODIFICADO
+//   (nao e loop de tools) que baixa a miniatura em alta resolucao (=s1600), entrega os
+//   pixels ao modelo em LOTES e PERSISTE cada veredito em drive_midia_analises (chave
+//   arquivo+versao: rodadas sucessivas so analisam o que falta ou mudou - segmentos e
+//   devolucoes convergem para a cobertura total sem reanalisar). Limite declarado em cada
+//   linha: base_da_analise='thumbnail' - de video se ve UM FRAME, nunca o interior.
+//
+// v2.1 (30/07/2026, mesma noite) - PAGINACAO DE DADOS: fecha a terceira lacuna, achada no
+//   teste real com a pergunta integral do gestor. Os mecanismos do v2 cobrem TEMPO
+//   (segmentos) e RELATORIO RUIM (devolucao) - mas nao cobriam DADO TRUNCADO no payload da
+//   ferramenta: 26 de 30 legendas ficaram invisiveis e o aviso "peca um recorte" apontava
+//   para um parametro que nao existia. Agora: get_criativos_conteudo aceita pagina
+//   (RPC paginada por gasto desc), o subagente tem ORDEM de paginar ate cobrir quando o
+//   foco exigir, e a mae ganhou o criterio 5: aceitar corte com paginacao disponivel =
+//   relatorio devolvido.
+//
+// v2 (30/07/2026) - TRES FRENTES NOVAS:
+//   (A) SUBAGENTE criativos_drive: le a pasta de criativos do Google Drive via service
+//       account (somente leitura), caminha a arvore (1o nivel=FORMATO, 2o nivel=EIXO),
+//       traz thumbnail de video/imagem e cruza com as legendas vencedoras (eixo validado
+//       vs hipotese). Limite declarado: video = thumbnail+nome+caminho; sem ffmpeg em edge.
+//   (B) DEVOLUCAO COORDENADOR->SUBAGENTE: apos a fase 2, a coordenacao (modelo da sintese)
+//       valida cada relatorio contra a pergunta e o foco atribuido; relatorio reprovado
+//       volta ao subagente COM O PARECER ("faltou X; a pergunta era A, voce respondeu B").
+//       Maximo DEVOLUCOES_MAX rodadas; ao esgotar, o relatorio entra marcado FALHO e a
+//       sintese declara a lacuna - nunca o meio-termo silencioso.
+//   (C) SEGMENTOS ENCADEADOS: o teto de ~330s e por INVOCACAO, nao por trabalho. Ao chegar
+//       perto do limite com trabalho pendente, o job grava CHECKPOINT em chat_jobs
+//       (relatorios validados congelados + fila de devolucoes) e reinvoca a PROPRIA edge;
+//       o novo worker retoma do ponto exato com orcamento zerado. Ate MAX_SEGMENTOS=3
+//       (~14 min de parede). Relatorio validado NUNCA e refeito.
+//   (D) SPLIT DE MODELO: planejador e subagentes leem OPENROUTER_MODEL_SUB (fallback p/ o
+//       principal); coordenacao e sintese leem OPENROUTER_MODEL. Permite Opus na sintese
+//       mantendo a extracao paralela no modelo mais barato.
+//
 // SUBAGENTES + JOB ASSINCRONO (EdgeRuntime.waitUntil) - remove o teto de 150s em vez de
 // negociar com ele, como declarado no v27 do traffic-chat.
 //
@@ -64,10 +112,23 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
 const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "anthropic/claude-sonnet-5").trim();
+// v2: modelo dos SUBAGENTES e do planejador (extracao estrita nao precisa do modelo caro).
+const MODEL_SUB = ((Deno.env.get("OPENROUTER_MODEL_SUB") ?? "").trim()) || MODEL;
+// v2: credencial do Drive (service account) + pasta raiz dos criativos.
+const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
+const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? "").trim();
 
 // Orcamentos do JOB (parede de ~400s do worker; 330s de trabalho + reserva de gravacao).
 const JOB_LIMIT_MS = 330_000;
 const RESERVA_FINAL_MS = 12_000;
+// v2: segmentos e devolucao
+const MAX_SEGMENTOS = 3;
+const DEVOLUCOES_MAX = 2;          // rodadas de devolucao por job (nao por subagente)
+const CHECKPOINT_MIN_MS = 75_000;  // se falta trabalho e o prazo esta abaixo disto, segmenta
+// v2.2: pipeline de visao
+const VISAO_LOTE = 6;               // imagens por chamada de visao
+const VISAO_MAX_POR_RODADA = 30;    // teto de arquivos analisados por segmento
+const VISAO_MIN_PRAZO_MS = 45_000;  // abaixo disto, para o lote e declara parcial
 const TOKENS_POR_SEGUNDO = 60;
 // Planner: classificacao curta, sem raciocinio longo.
 const PLANNER_MAX_TOKENS = 1200;
@@ -225,8 +286,12 @@ function cortarLista(obj: Record<string, unknown>, campo: string, teto = TETO_TO
   }
   return out;
 }
-async function t_criativos_conteudo(somenteAtivas: boolean) {
-  const { data, error } = await supa.rpc("get_criativos_conteudo", { p_somente_ativas: somenteAtivas });
+async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, pagina = 1) {
+  // v2: p_company_id obrigatorio (isolamento). v2.1: paginacao - cada pagina de 20 cabe no
+  // teto de payload da ferramenta; restantes>0 diz ao subagente que a lista continua.
+  const TAM_PAGINA = 20;
+  const off = (Math.max(1, pagina) - 1) * TAM_PAGINA;
+  const { data, error } = await supa.rpc("get_criativos_conteudo", { p_somente_ativas: somenteAtivas, p_company_id: companyId, p_offset: off, p_limit: TAM_PAGINA });
   if (error) return { erro: `falha ao ler conteudo dos criativos: ${error.message}` };
   if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo" };
   const obj = data as Record<string, unknown>;
@@ -382,8 +447,13 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       case "get_funnel": return await t_funnel(ctx.companyId, args?.date_from, args?.date_to);
       case "get_ads_ranking": return await t_ads_ranking(ctx.companyId, Number(args?.days ?? 7));
       case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
-      case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true);
+      case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true, ctx.companyId, Number(args?.pagina ?? 1));
       case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
+      case "get_drive_criativos": return await t_drive_criativos();
+      case "get_analise_visual_drive": {
+        const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
+        return error ? { erro: error.message } : data;
+      }
       case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.mcpKey);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       case "get_waba_status": return await t_waba_status(ctx.companyId);
@@ -395,6 +465,8 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
 
 // Schemas (subset do v27.1)
 const DEF: Record<string, any> = {
+  get_analise_visual_drive: { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Leitura instantanea - nao repete a visao. Se total_analisados < inventario, pecas novas ainda nao passaram pela visao: declare, nao invente.", parameters: { type: "object", properties: {} } } },
+  get_drive_criativos: { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, tamanho, data e thumbnail (um frame/preview) de cada arquivo, com resumo por formato e por eixo. Pode vir truncado: leia aviso_corte e nunca trate item omitido como inexistente. LIMITE: video e analisado por thumbnail+nome+caminho, nao pelo conteudo interno.", parameters: { type: "object", properties: {} } } },
   get_overview: { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real), gasto/resultados 7d, dias_com_dado.", parameters: { type: "object", properties: {} } } },
   get_alerts: { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema.", parameters: { type: "object", properties: {} } } },
   get_recommendations: { type: "function", function: { name: "get_recommendations", description: "Recomendacoes pendentes da IA (regua = custo de midia).", parameters: { type: "object", properties: {} } } },
@@ -402,7 +474,7 @@ const DEF: Record<string, any> = {
   get_funnel: { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "RECORTE por custo MEDIO (Breakdown Effect: serve p/ ENTENDER, proibido prescrever pausa so por isto).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
   get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria 14d de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
-  get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios (legendas_unicas cobre tudo p/ compliance).", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" } } } } },
+  get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios, PAGINADO por gasto (paginas de 20). O retorno traz total/exibidos/restantes: se restantes > 0 a lista NAO acabou - chame de novo com pagina+1 ate cobrir o que o seu foco exige. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, pagina: { type: "integer", description: "Pagina de 20 criativos, comecando em 1. Use restantes>0 do retorno anterior." } } } } },
   get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto.", parameters: { type: "object", properties: {} } } },
   check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL).", parameters: { type: "object", properties: { legenda: { type: "string" } }, required: ["legenda"] } } },
   get_conhecimento: { type: "function", function: { name: "get_conhecimento", description: "Base tecnica: politicas Meta, metricas, otimizacao, criativo. Use 'secao' p/ temas extensos.", parameters: { type: "object", properties: { tema: { type: "string" }, secao: { type: "string" } }, required: ["tema"] } } },
@@ -421,12 +493,12 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   },
   criativos: {
     tools: ["get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { get_criativos_conteudo: 2, get_conhecimento: 3 }, maxToolsTotal: 5,
+    maxPorTool: { get_criativos_conteudo: 4, get_conhecimento: 3 }, maxToolsTotal: 7,
     missao: "CONTEUDO REAL DAS PECAS em operacao: legendas, titulos, CTAs, gasto e formularios por legenda distinta, hooks e formatos (fundamentar na base de conhecimento de criativo). NAO faz auditoria de compliance (dominio do especialista compliance) nem analisa metricas de campanha (dominio do desempenho_campanhas).",
   },
   compliance: {
     tools: ["check_compliance", "get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { check_compliance: 8, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 11,
+    maxPorTool: { check_compliance: 8, get_criativos_conteudo: 3, get_conhecimento: 2 }, maxToolsTotal: 13,
     missao: "AUDITORIA DE COMPLIANCE: pegar legendas_unicas em get_criativos_conteudo e validar CADA legenda distinta em check_compliance (uma chamada por legenda, ATE COBRIR TODAS). Reportar veredito por legenda, violacoes FIN/CRI/LGL e riscos de Categoria Especial de Credito.",
   },
   estrutura_conta: {
@@ -444,6 +516,15 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     maxPorTool: { get_alerts: 1, get_recommendations: 1 }, maxToolsTotal: 2,
     missao: "PENDENCIAS DO SISTEMA: alertas ativos (severidade, motivo) e recomendacoes aguardando decisao do gestor. Reportar sem re-analisar os dominios dos outros especialistas.",
   },
+  analise_visual_drive: {
+    tools: [], maxPorTool: {}, maxToolsTotal: 0,  // pipeline codificado - nao usa loop de tools
+    missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive (pixels da miniatura em alta resolucao): produto detectado, texto visivel, riscos de compliance visiveis e veredito aproveitavel/nao/incerto por peca, persistido em banco. Use quando o gestor pedir para CLASSIFICAR/ANALISAR O CONTEUDO das pecas (nao apenas inventariar). Limite declarado: de video se ve UM FRAME.",
+  },
+  criativos_drive: {
+    tools: ["get_drive_criativos", "get_analise_visual_drive", "get_criativos_conteudo", "get_conhecimento"],
+    maxPorTool: { get_drive_criativos: 2, get_analise_visual_drive: 1, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 6,
+    missao: "CRIATIVOS NOVOS NO GOOGLE DRIVE (pasta compartilhada, somente leitura): inventariar os arquivos com caminho (1o nivel=formato, 2o nivel=eixo de mensagem), tipo, data e thumbnail; cruzar os EIXOS encontrados com as legendas que ja performaram na conta (via conteudo dos anuncios) e classificar cada grupo como EIXO JA VALIDADO (existe vencedora medida) ou EIXO NOVO/HIPOTESE (sem dado de custo); indicar a qual tipo de teste cada grupo serviria. DECLARAR SEMPRE o limite: video foi avaliado por thumbnail+nome+caminho, nao pelo conteudo interno. NAO analisa metricas de campanha nem faz compliance.",
+  },
   conhecimento: {
     tools: ["get_conhecimento"],
     maxPorTool: { get_conhecimento: 5 }, maxToolsTotal: 5,
@@ -452,10 +533,105 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
 };
 
 // ============================================================================
+// v2 - GOOGLE DRIVE (service account, somente leitura)
+// ============================================================================
+let _driveToken: { token: string; exp: number } | null = null;
+function _pemParaDer(pem: string): ArrayBuffer {
+  const b64 = pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+function _b64url(dados: Uint8Array | string): string {
+  const bin = typeof dados === "string" ? dados : String.fromCharCode(...dados);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+async function driveToken(): Promise<string> {
+  if (_driveToken && _driveToken.exp > Date.now() + 60_000) return _driveToken.token;
+  if (!GOOGLE_SA_KEY_B64) throw new Error("credencial do Drive nao configurada (GOOGLE_SA_KEY_B64)");
+  const sa = JSON.parse(atob(GOOGLE_SA_KEY_B64));
+  const agora = Math.floor(Date.now() / 1000);
+  const header = _b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const claims = _b64url(JSON.stringify({
+    iss: sa.client_email, scope: "https://www.googleapis.com/auth/drive.readonly",
+    aud: "https://oauth2.googleapis.com/token", iat: agora, exp: agora + 3600 }));
+  const chave = await crypto.subtle.importKey("pkcs8", _pemParaDer(sa.private_key),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+  const assinatura = new Uint8Array(await crypto.subtle.sign("RSASSA-PKCS1-v1_5", chave,
+    new TextEncoder().encode(`${header}.${claims}`)));
+  const jwt = `${header}.${claims}.${_b64url(assinatura)}`;
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: `grant_type=${encodeURIComponent("urn:ietf:params:oauth:grant-type:jwt-bearer")}&assertion=${jwt}` });
+  const j = await resp.json();
+  if (!resp.ok || !j.access_token) throw new Error(`falha no token do Drive: ${JSON.stringify(j).slice(0, 200)}`);
+  _driveToken = { token: j.access_token, exp: Date.now() + (Number(j.expires_in ?? 3600) - 120) * 1000 };
+  return _driveToken.token;
+}
+// Caminha a arvore da pasta raiz. Convencao observada na pasta real (30/07/2026):
+// 1o nivel = FORMATO (Videos, Cards, Carrossel N...), 2o nivel = EIXO DE MENSAGEM.
+async function t_drive_criativos() {
+  if (!DRIVE_CRIATIVOS_FOLDER_ID) return { erro: "pasta de criativos nao configurada (DRIVE_CRIATIVOS_FOLDER_ID)" };
+  let token: string;
+  try { token = await driveToken(); }
+  catch (e) { return { erro: String((e as any)?.message ?? e), aviso: "Sem acesso ao Drive nesta rodada - o dado NAO foi lido; nao trate como pasta vazia. Verificar credencial e compartilhamento da pasta com a service account." }; }
+  const MAX_PASTAS = 40, MAX_ARQUIVOS = 250, MAX_PROFUNDIDADE = 4;
+  type No = { id: string; caminho: string; nivel: number };
+  const fila: No[] = [{ id: DRIVE_CRIATIVOS_FOLDER_ID, caminho: "", nivel: 0 }];
+  const arquivos: any[] = [];
+  let pastasLidas = 0, cortado = false;
+  while (fila.length) {
+    const no = fila.shift()!;
+    if (pastasLidas >= MAX_PASTAS || arquivos.length >= MAX_ARQUIVOS) { cortado = true; break; }
+    pastasLidas++;
+    let pageToken = "";
+    do {
+      const url = new URL("https://www.googleapis.com/drive/v3/files");
+      url.searchParams.set("q", `'${no.id}' in parents and trashed=false`);
+      url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink)");
+      url.searchParams.set("pageSize", "100");
+      url.searchParams.set("supportsAllDrives", "true");
+      url.searchParams.set("includeItemsFromAllDrives", "true");
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+      const j = await r.json();
+      if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
+      for (const f of j.files ?? []) {
+        if (f.mimeType === "application/vnd.google-apps.folder") {
+          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1 });
+        } else if (arquivos.length < MAX_ARQUIVOS) {
+          arquivos.push({ id: f.id, nome: f.name, caminho: no.caminho || "(raiz)",
+            formato_pasta: (no.caminho.split("/")[0] || "(raiz)"),
+            eixo_pasta: (no.caminho.split("/")[1] ?? null),
+            tipo: f.mimeType, tamanho_bytes: Number(f.size ?? 0) || null,
+            modificado_em: f.modifiedTime ?? null, thumbnail: f.thumbnailLink ?? null });
+        } else { cortado = true; }
+      }
+      pageToken = j.nextPageToken ?? "";
+    } while (pageToken && arquivos.length < MAX_ARQUIVOS);
+  }
+  const porFormato: Record<string, number> = {};
+  const porEixo: Record<string, number> = {};
+  for (const a of arquivos) {
+    porFormato[a.formato_pasta] = (porFormato[a.formato_pasta] ?? 0) + 1;
+    if (a.eixo_pasta) porEixo[a.eixo_pasta] = (porEixo[a.eixo_pasta] ?? 0) + 1;
+  }
+  const out: any = {
+    total_arquivos: arquivos.length, pastas_lidas: pastasLidas,
+    resumo_por_formato: porFormato, resumo_por_eixo_de_mensagem: porEixo,
+    nota: "Inventario da pasta de criativos do Drive (somente leitura). Convencao: 1o nivel do caminho = formato, 2o nivel = eixo de mensagem. 'thumbnail' e um frame/preview servido pelo Google. LIMITE DECLARADO: video e analisado por thumbnail+nome+caminho; o conteudo interno (frames/audio) NAO e lido nesta versao.",
+    arquivos,
+  };
+  if (cortado) out.aviso_corte = `Inventario truncado nos tetos de leitura (${MAX_PASTAS} pastas / ${MAX_ARQUIVOS} arquivos). O que nao veio EXISTE na pasta - nao trate como inexistente; peca um recorte por subpasta.`;
+  return out;
+}
+
+// ============================================================================
 // LLM
 // ============================================================================
-async function chamarLLM(messages: any[], opts: { tools?: any[]; maxTokens: number; reasoning?: any }): Promise<any> {
-  const payload: any = { model: MODEL, messages, max_tokens: opts.maxTokens };
+async function chamarLLM(messages: any[], opts: { tools?: any[]; maxTokens: number; reasoning?: any; model?: string }): Promise<any> {
+  const payload: any = { model: opts.model ?? MODEL, messages, max_tokens: opts.maxTokens };
   if (opts.tools?.length) { payload.tools = opts.tools; payload.tool_choice = "auto"; }
   if (opts.reasoning) payload.reasoning = opts.reasoning;
   let resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -499,14 +675,15 @@ Especialistas disponiveis (use exatamente estes nomes):
 - estrutura_conta: CBO/ABO, orcamento por conjunto, lance, targeting
 - whatsapp_waba: numeros WhatsApp (tier, qualidade) e templates (envios, leituras, cliques)
 - alertas_recomendacoes: alertas ativos e recomendacoes pendentes
+- criativos_drive: pasta de criativos NOVOS no Google Drive (inventario, formatos, eixos, comparacao com vencedores)\n- analise_visual_drive: analise VISUAL arquivo a arquivo das pecas do Drive (produto, texto visivel, riscos, veredito aproveitavel) - so quando pedirem CLASSIFICAR/ANALISAR CONTEUDO das pecas
 - conhecimento: fundamento tecnico puro (so quando a pergunta exige conceito alem do operacional)
-REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio -> criativos; "pode anunciar isso?"/violacao -> compliance. NAO inclua especialista cujo dominio a pergunta nao toca.
+REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive. NAO inclua especialista cujo dominio a pergunta nao toca.
 Responda APENAS com JSON valido, sem markdown, no formato:
 {"subagentes":[{"nome":"...","foco":"instrucao curta e especifica do que ELE deve levantar"}]}
 Para auditoria ampla da conta, inclua todos os pertinentes.`;
   const r = await chamarLLM(
     [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 12000) }],
-    { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF },
+    { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB },
   );
   if (r.erro) return { plano: nomes.map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" })), degradado: true };
   const u = usoDe(r.parsed); tel.planner = { tokens_in: u.tin, tokens_out: u.tout };
@@ -533,14 +710,14 @@ async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx:
 MISSAO: ${cfg.missao}
 FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio (ex.: metricas de campanha para um especialista de criativo), NAO tente responder com suas ferramentas - registre na linha LACUNAS que aquilo e de outro especialista e siga apenas com a sua parte.
-REGRAS: todo numero vem de ferramenta CHAMADA AGORA (nunca de memoria); distinga zero / nao existe / nao coletado; incorpore campos 'nota'/'aviso' dos retornos; amostra pequena e hipotese; nao misture janelas.
+REGRAS: todo numero vem de ferramenta CHAMADA AGORA (nunca de memoria); distinga zero / nao existe / nao coletado; incorpore campos 'nota'/'aviso' dos retornos; amostra pequena e hipotese; nao misture janelas.\nPAGINACAO OBRIGATORIA: se um retorno trouxer restantes > 0 ou aviso de corte E o seu foco exigir cobertura da lista inteira, chame a MESMA ferramenta pedindo a proxima pagina ate cobrir ou esgotar seu teto de consultas. Aceitar o corte sem tentar a proxima pagina e falha sua; se esgotar o teto antes de cobrir, declare em LACUNAS exatamente quantos itens ficaram sem leitura.
 Ao terminar a coleta, escreva um RELATORIO conciso e denso em markdown com numeros + fonte + janela, terminando com a linha 'LACUNAS:' listando o que nao conseguiu cobrir (ou 'nenhuma').`;
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
   let tin = 0, tout = 0, reas = 0, relatorio = "", finish = "";
   for (let iter = 0; iter < SUB_MAX_ITER; iter++) {
     if (prazo() <= 0) { finish = "prazo_do_job"; break; }
-    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING });
+    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, model: MODEL_SUB });
     if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; break; }
     const u = usoDe(r.parsed); tin += u.tin; tout += u.tout; reas += u.reas;
     finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
@@ -571,7 +748,7 @@ Ao terminar a coleta, escreva um RELATORIO conciso e denso em markdown com numer
   if (!relatorio) {
     // Estourou iteracoes/prazo coletando: forca o relatorio com o que ha.
     messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
-    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF });
+    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB });
     if (!rf.erro) {
       const u = usoDe(rf.parsed); tin += u.tin; tout += u.tout;
       relatorio = String(rf.parsed?.choices?.[0]?.message?.content ?? "");
@@ -586,7 +763,7 @@ Ao terminar a coleta, escreva um RELATORIO conciso e denso em markdown com numer
     messages.push({ role: "assistant", content: relatorio });
     messages.push({ role: "user", content: "Seu relatorio foi cortado por limite de tamanho. Continue EXATAMENTE do ponto onde parou, na proxima palavra. Nao repita nada, nao reescreva secoes; ao concluir, termine com a linha LACUNAS:." });
     const maxTok = Math.max(1500, Math.min(SUB_MAX_TOKENS, Math.floor((prazo() / 1000) * TOKENS_POR_SEGUNDO)));
-    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF });
+    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, model: MODEL_SUB });
     if (rc.erro) break;
     const u = usoDe(rc.parsed); tin += u.tin; tout += u.tout;
     const pedaco = String(rc.parsed?.choices?.[0]?.message?.content ?? "");
@@ -641,6 +818,126 @@ Responda a pergunta INTEIRA, bloco a bloco na ordem pedida, com numero + fonte (
 }
 
 // ============================================================================
+// v2.2 - ANALISE VISUAL DO DRIVE (pipeline codificado com visao, persistido)
+// ============================================================================
+async function baixarThumb(url: string): Promise<{ b64: string; mime: string } | null> {
+  try {
+    const alta = url.replace(/=s\d+(-c)?$/, "=s1600");
+    let r = await fetch(alta);
+    if (!r.ok) { const t = await driveToken(); r = await fetch(alta, { headers: { authorization: `Bearer ${t}` } }); }
+    if (!r.ok) return null;
+    const mime = r.headers.get("content-type") ?? "image/jpeg";
+    const u = new Uint8Array(await r.arrayBuffer());
+    if (u.length > 1_800_000) return null; // grande demais p/ lote - pula com registro
+    let bin = ""; const CH = 0x8000;
+    for (let i = 0; i < u.length; i += CH) bin += String.fromCharCode.apply(null, u.subarray(i, i + CH) as any);
+    return { b64: btoa(bin), mime };
+  } catch { return null; }
+}
+
+async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, prazo: () => number, tel: any) {
+  const nomeSub = "analise_visual_drive";
+  const inv = await t_drive_criativos();
+  if ((inv as any)?.erro) return { nome: nomeSub, relatorio: `LACUNAS: inventario do Drive indisponivel (${(inv as any).erro}) - nenhuma analise visual feita nesta rodada.`, completo: false };
+  const arquivos: any[] = (inv as any).arquivos ?? [];
+
+  // o que ja foi analisado (mesma versao do arquivo) nao se refaz
+  const { data: feitos } = await supa.from("drive_midia_analises")
+    .select("drive_file_id, drive_modified_time").eq("company_id", ctx.companyId);
+  const jaFeito = new Set((feitos ?? []).map((f: any) => `${f.drive_file_id}|${f.drive_modified_time ?? ""}`));
+  const pendentes = arquivos.filter((a: any) => a.thumbnail && !jaFeito.has(`${a.id ?? a.nome}|${a.modificado_em ?? ""}`));
+  const semThumb = arquivos.filter((a: any) => !a.thumbnail);
+
+  let analisados = 0, falhasThumb = 0;
+  const fila = pendentes.slice(0, VISAO_MAX_POR_RODADA);
+  for (let i = 0; i < fila.length; i += VISAO_LOTE) {
+    if (prazo() < VISAO_MIN_PRAZO_MS) break;
+    const lote = fila.slice(i, i + VISAO_LOTE);
+    const imagens: { arq: any; b64: string; mime: string }[] = [];
+    for (const arq of lote) {
+      const th = await baixarThumb(String(arq.thumbnail));
+      if (th) imagens.push({ arq, b64: th.b64, mime: th.mime }); else falhasThumb++;
+    }
+    if (!imagens.length) continue;
+    const content: any[] = [{ type: "text", text:
+      `Voce analisa criativos de anuncio para uma operacao cuja campanha e EXCLUSIVAMENTE de credito consignado CLT (categoria especial de credito na Meta). O UNIVERSO CRIATIVO DA MARCA, por decisao do gestor (31/07/2026), inclui tres temas: credito consignado CLT, EDUCACAO FINANCEIRA e DICAS DE SEGURANCA financeira - pecas educativas e de seguranca SAO aproveitaveis. Para CADA imagem, na ordem, devolva um item JSON. Criterios: produto_detectado (o que a peca vende ou trata, pelo que esta VISIVEL: consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado); texto_visivel (transcreva o texto legivel da peca); riscos_compliance (promessa de aprovacao, taxa prometida, "garantido", urgencia enganosa, ausencia de ressalva de analise - so o que estiver VISIVEL); aproveitavel: "sim" se a peca e de credito CLT, educacao financeira ou dicas de seguranca e sem risco visivel, "nao" APENAS se mostra explicitamente OUTRO produto financeiro (financiamento de veiculo, conta corrente, consorcio, imovel) ou tem risco claro de texto, "incerto" se nao da para afirmar pelo frame. motivo: uma frase. LEMBRE: voce ve UM FRAME/miniatura - se a peca e video, o interior nao foi visto; na duvida, "incerto" e melhor que chute. Responda APENAS JSON: {"itens":[{"nome":"...","produto_detectado":"...","texto_visivel":"...","riscos_compliance":"...","aproveitavel":"sim|nao|incerto","motivo":"..."}]}` + `\nArquivos nesta ordem: ${imagens.map((x) => `${x.arq.nome} (pasta: ${x.arq.caminho})`).join(" | ")}` }];
+    for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
+    const r = await chamarLLM([{ role: "user", content }], { maxTokens: 2500, reasoning: REASONING_OFF, model: MODEL_SUB });
+    if (r.erro) continue;
+    const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
+    const itens = Array.isArray(bruto?.itens) ? bruto.itens : [];
+    for (let k = 0; k < imagens.length; k++) {
+      const arq = imagens[k].arq; const it = itens[k] ?? {};
+      const aprov = ["sim", "nao", "incerto"].includes(String(it?.aproveitavel)) ? String(it.aproveitavel) : "incerto";
+      await supa.from("drive_midia_analises").upsert({
+        company_id: ctx.companyId, drive_file_id: String(arq.id ?? arq.nome), drive_modified_time: arq.modificado_em ?? "",
+        nome: arq.nome, caminho: arq.caminho, formato_pasta: arq.formato_pasta, eixo_pasta: arq.eixo_pasta, mime: arq.tipo,
+        produto_detectado: String(it?.produto_detectado ?? "indeterminado").slice(0, 120),
+        texto_visivel: String(it?.texto_visivel ?? "").slice(0, 800),
+        riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
+        aproveitavel: aprov, motivo: String(it?.motivo ?? "sem motivo").slice(0, 400),
+        base_da_analise: "thumbnail", modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
+      }, { onConflict: "drive_file_id,drive_modified_time" });
+      analisados++;
+    }
+  }
+
+  // relatorio = estado ACUMULADO da tabela (inclui rodadas anteriores)
+  const { data: tudo } = await supa.from("drive_midia_analises")
+    .select("nome, caminho, formato_pasta, eixo_pasta, produto_detectado, aproveitavel, motivo, riscos_compliance")
+    .eq("company_id", ctx.companyId).order("caminho");
+  const linhas = (tudo ?? []).map((t2: any) =>
+    `- [${t2.aproveitavel.toUpperCase()}] ${t2.caminho}/${t2.nome} | produto: ${t2.produto_detectado} | ${t2.motivo}${t2.riscos_compliance ? " | risco: " + t2.riscos_compliance : ""}`).join("\n");
+  const cobertura = (tudo ?? []).length;
+  const totalComThumb = arquivos.filter((a: any) => a.thumbnail).length;
+  const rel = `ANALISE VISUAL DAS MIDIAS DO DRIVE (persistida em banco; base: MINIATURA em alta resolucao - de video se ve um frame, nunca o interior)\n` +
+    `Cobertura acumulada: ${cobertura} de ${totalComThumb} arquivos com miniatura (${arquivos.length} no inventario; ${semThumb.length} sem miniatura disponivel). Nesta rodada: ${analisados} analisados, ${falhasThumb} miniaturas falharam.\n` +
+    `Resumo: SIM=${(tudo ?? []).filter((x: any) => x.aproveitavel === "sim").length} · NAO=${(tudo ?? []).filter((x: any) => x.aproveitavel === "nao").length} · INCERTO=${(tudo ?? []).filter((x: any) => x.aproveitavel === "incerto").length}\n` +
+    linhas +
+    (cobertura < totalComThumb ? `\nLACUNAS: ${totalComThumb - cobertura} arquivos ainda sem analise (teto por rodada/prazo) - nova rodada continua de onde parou, nada se refaz.` : "\nCobertura completa dos arquivos com miniatura.") +
+    (semThumb.length ? `\nSem miniatura (nao analisaveis por visao): ${semThumb.map((x: any) => x.nome).slice(0, 10).join(", ")}${semThumb.length > 10 ? "..." : ""}` : "");
+  tel.visao = { analisados_nesta_rodada: analisados, cobertura_acumulada: cobertura, total: totalComThumb, falhas_thumb: falhasThumb };
+  return { nome: nomeSub, relatorio: rel.slice(0, 24000), completo: cobertura >= totalComThumb };
+}
+
+// ============================================================================
+// v2 - VALIDACAO DA COORDENACAO ("a mae"): aprova ou devolve com parecer
+// ============================================================================
+// A mae nao valida "esta certo" no sentido absoluto - valida criterios VERIFICAVEIS:
+// cobriu o foco atribuido? tem numero+fonte+janela? saiu do escopo? termina em LACUNAS?
+// Veredito subjetivo de "qualidade" e proibido de proposito: e a receita do loop infinito.
+async function validarRelatorios(
+  pergunta: string,
+  plano: { nome: string; foco: string }[],
+  relatorios: { nome: string; relatorio: string; completo: boolean }[],
+  tel: any,
+): Promise<{ nome: string; motivo: string }[]> {
+  const resumo = relatorios.map((r) => {
+    const foco = plano.find((p) => p.nome === r.nome)?.foco ?? "";
+    return `--- ${r.nome} (foco atribuido: ${foco || "geral"}) [${r.completo ? "COMPLETO" : "INCOMPLETO-cortado"}] ---\n${r.relatorio.slice(0, 3200)}`;
+  }).join("\n\n");
+  const sys = `Voce e a COORDENACAO de uma equipe de especialistas de trafego pago. Avalie cada relatorio contra CRITERIOS VERIFICAVEIS, nunca contra gosto:
+(1) COBERTURA: o relatorio atende o foco que foi atribuido ao especialista? (2) FORMA: numeros vem com fonte e janela, e existe a linha LACUNAS? (3) ESCOPO: ele respondeu o que era de OUTRO especialista em vez do proprio dominio? (4) COERENCIA INTERNA: ha contradicao evidente dentro do proprio relatorio? (5) COBERTURA PAGINAVEL: o relatorio aceitou corte de dados ('X de Y exibidos', 'restantes') SEM esgotar as paginas disponiveis, quando o foco exigia a lista inteira? Isso E motivo de devolucao - a ferramenta pagina e o especialista tinha teto sobrando.
+NAO devolva por: estilo, tamanho, relatorio marcado INCOMPLETO-cortado (isso e limite de tamanho, nao erro do especialista), ou lacuna JA DECLARADA na linha LACUNAS (declarar lacuna e comportamento correto).
+Responda APENAS JSON valido: {"avaliacoes":[{"nome":"...","veredito":"ok"|"devolver","motivo":"especifico: o que faltou/errou e o que a nova tentativa deve trazer"}]}`;
+  const r = await chamarLLM(
+    [{ role: "system", content: sys },
+     { role: "user", content: `PERGUNTA DO GESTOR:\n${pergunta.slice(0, 4000)}\n\nRELATORIOS:\n${resumo}` }],
+    { maxTokens: 1500, reasoning: REASONING_OFF },
+  );
+  if (r.erro) { tel.validacao = { erro: r.erro, aviso: "validacao indisponivel - relatorios seguem sem devolucao" }; return []; }
+  const u = usoDe(r.parsed);
+  const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
+  const lista = Array.isArray(bruto?.avaliacoes) ? bruto.avaliacoes : [];
+  const nomesValidos = new Set(relatorios.map((x) => x.nome));
+  const devolver = lista
+    .filter((a: any) => String(a?.veredito ?? "") === "devolver" && nomesValidos.has(String(a?.nome ?? "")))
+    .map((a: any) => ({ nome: String(a.nome), motivo: String(a?.motivo ?? "sem motivo declarado").slice(0, 500) }));
+  tel.validacao = { tokens_in: u.tin, tokens_out: u.tout, devolvidos: devolver.map((d: any) => d.nome) };
+  return devolver;
+}
+
+// ============================================================================
 // O JOB (roda em background via EdgeRuntime.waitUntil)
 // ============================================================================
 async function pushProgresso(jobId: string, fase: string, detalhe: string) {
@@ -650,12 +947,115 @@ async function pushProgresso(jobId: string, fase: string, detalhe: string) {
   await supa.from("chat_jobs").update({ progresso: arr }).eq("id", jobId);
 }
 
-async function processarJob(jobId: string, convId: string, companyId: string, pergunta: string, mcpKey: string) {
+// v2: helpers de lote, checkpoint e reinvocacao ------------------------------
+async function executarLote(
+  lote: { nome: string; foco: string }[], pergunta: string,
+  ctx: { companyId: string; mcpKey: string }, prazo: () => number, tel: any,
+): Promise<{ nome: string; relatorio: string; completo: boolean }[]> {
+  const resultados = await Promise.allSettled(lote.map((p) =>
+    p.nome === "analise_visual_drive"
+      ? rodarAnaliseVisual(p.foco, ctx, prazo, tel)
+      : rodarSubagente(p.nome, p.foco, pergunta, ctx, prazo)));
+  const saida: { nome: string; relatorio: string; completo: boolean }[] = [];
+  for (let i = 0; i < resultados.length; i++) {
+    const res = resultados[i];
+    if (res.status === "fulfilled") {
+      saida.push({ nome: res.value.nome, relatorio: res.value.relatorio, completo: res.value.completo });
+      tel.subagentes.push({ nome: res.value.nome, tools: res.value.tools, tokens_in: res.value.tokens_in,
+        tokens_out: res.value.tokens_out, reasoning_tokens: res.value.reasoning_tokens, finish: res.value.finish,
+        partes_relatorio: res.value.partes, relatorio_completo: res.value.completo });
+    } else {
+      saida.push({ nome: lote[i].nome, relatorio: `(especialista falhou: ${String(res.reason).slice(0, 200)} - trate como LACUNA)`, completo: false });
+      tel.subagentes.push({ nome: lote[i].nome, erro: String(res.reason).slice(0, 200), relatorio_completo: false });
+    }
+  }
+  return saida;
+}
+
+async function gravarCheckpointEReinvocar(
+  jobId: string, convId: string, companyId: string, mcpKey: string,
+  cp: { pergunta: string; plano: any[]; relatorios: any[]; devolver: any[]; rodada: number; tel_parcial: any; segmento: number; direto_para_sintese?: boolean },
+) {
+  await supa.from("chat_jobs").update({
+    checkpoint: cp, segmento: cp.segmento,
+    status: "running",
+  }).eq("id", jobId);
+  await pushProgresso(jobId, "segmento", `prazo do worker esgotando: continuando no segmento ${cp.segmento} de ${MAX_SEGMENTOS} (nada sera re-pensado)`);
+  // Reinvoca a PROPRIA edge. fire-and-forget: se o POST falhar, o watchdog adota o orfao.
+  await fetch(`${SUPABASE_URL}/functions/v1/traffic-agent-job`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+    body: JSON.stringify({ continuar: true, job_id: jobId }),
+  }).then(() => {}, () => {});
+}
+
+async function processarJob(jobId: string, convId: string, companyId: string, pergunta: string, mcpKey: string, retomada?: any) {
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
-  const tel: any = { versao: "job-v1.1", subagentes: [] };
+  const segmento: number = Number(retomada?.segmento ?? 1);
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.4", subagentes: [] };
+  tel.versao = "job-v2.4";
   try {
     await supa.from("chat_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId);
+
+    // v2: RETOMADA DE CHECKPOINT - pula direto para o ponto onde o segmento anterior parou.
+    if (retomada) {
+      await pushProgresso(jobId, "segmento", `segmento ${segmento}: retomando do checkpoint`);
+      const { data: styleRows0 } = await supa.from("agent_style").select("secao,regra").eq("vigente", true).order("ordem");
+      const estilo0 = (styleRows0 ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n") || "(sem regras cadastradas)";
+      const { data: ctxRows0 } = await supa.from("agent_context").select("categoria,fato,desde").eq("vigente", true)
+        .or(`company_id.is.null,company_id.eq.${companyId}`).order("categoria");
+      const memoria0 = (ctxRows0 ?? []).map((r: any) => `- [${String(r.categoria).toUpperCase()}${r.desde ? " " + String(r.desde) : ""}] ${r.fato}`).join("\n") || "(sem fatos registrados)";
+      let relatorios: { nome: string; relatorio: string; completo: boolean }[] = retomada.relatorios ?? [];
+      const plano: { nome: string; foco: string }[] = retomada.plano ?? [];
+      let rodada: number = Number(retomada.rodada ?? 0);
+      // devolucoes pendentes deste checkpoint (ja com parecer da coordenacao anexavel)
+      if (!retomada.direto_para_sintese && Array.isArray(retomada.devolver) && retomada.devolver.length) {
+        const refeitos = await executarLote(
+          retomada.devolver.map((d: any) => ({ nome: String(d.nome),
+            foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${String(d.motivo)}\nCorrija exatamente isso.` })),
+          pergunta, { companyId, mcpKey }, prazo, tel,
+        );
+        for (const novo of refeitos) {
+          const i = relatorios.findIndex((r) => r.nome === novo.nome);
+          if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
+        }
+        // uma re-validacao final se ainda ha rodadas e prazo
+        while (rodada < DEVOLUCOES_MAX) {
+          const devolver2 = await validarRelatorios(pergunta, plano, relatorios, tel);
+          if (!devolver2.length) break;
+          rodada++;
+          if (prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+            await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
+              pergunta, plano, relatorios, devolver: devolver2, rodada, tel_parcial: tel, segmento: segmento + 1 });
+            return;
+          }
+          const refeitos2 = await executarLote(
+            devolver2.map((d) => ({ nome: d.nome, foco: `DEVOLUCAO DA COORDENACAO (rodada ${rodada}): ${d.motivo}. Corrija exatamente isso.` })),
+            pergunta, { companyId, mcpKey }, prazo, tel,
+          );
+          for (const novo of refeitos2) {
+            const i = relatorios.findIndex((r) => r.nome === novo.nome);
+            if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
+          }
+        }
+      }
+      tel.rodadas_devolucao = rodada;
+      tel.segmento = segmento;
+      await pushProgresso(jobId, "sintese", "escrevendo a resposta final");
+      const texto0 = await sintetizar(pergunta, relatorios, estilo0, memoria0, prazo, tel);
+      tel.ms_total = Date.now() - t0;
+      const finishSint0 = tel.sintese?.finish_reason ?? "stop";
+      await supa.from("chat_messages").insert({
+        conversation_id: convId, company_id: companyId, role: "assistant", content: texto0, model: MODEL,
+        tokens_in: tel.subagentes.reduce((a: number, s2: any) => a + (s2.tokens_in ?? 0), 0) + (tel.sintese?.tokens_in ?? 0),
+        tokens_out: tel.subagentes.reduce((a: number, s2: any) => a + (s2.tokens_out ?? 0), 0) + (tel.sintese?.tokens_out ?? 0),
+        diagnostico: { ...tel, finish_reason: finishSint0, origem: "traffic-agent-job" },
+      });
+      await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
+      await supa.from("chat_jobs").update({ status: "done", finished_at: new Date().toISOString(), diagnostico: tel, checkpoint: null }).eq("id", jobId);
+      return;
+    }
 
     // Contexto institucional (mesmas fontes do chat)
     const { data: ctxRows } = await supa.from("agent_context")
@@ -678,23 +1078,53 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
     // FASE 2 - subagentes em paralelo
     await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
-    const resultados = await Promise.allSettled(
-      plano.map((p) => rodarSubagente(p.nome, p.foco, pergunta, { companyId, mcpKey }, prazo)),
-    );
-    const relatorios: { nome: string; relatorio: string; completo: boolean }[] = [];
-    for (let i = 0; i < resultados.length; i++) {
-      const res = resultados[i];
-      if (res.status === "fulfilled") {
-        relatorios.push({ nome: res.value.nome, relatorio: res.value.relatorio, completo: res.value.completo });
-        tel.subagentes.push({ nome: res.value.nome, tools: res.value.tools, tokens_in: res.value.tokens_in,
-          tokens_out: res.value.tokens_out, reasoning_tokens: res.value.reasoning_tokens, finish: res.value.finish,
-          partes_relatorio: res.value.partes, relatorio_completo: res.value.completo });
-      } else {
-        relatorios.push({ nome: plano[i].nome, relatorio: `(especialista falhou: ${String(res.reason).slice(0, 200)} - trate como LACUNA)`, completo: false });
-        tel.subagentes.push({ nome: plano[i].nome, erro: String(res.reason).slice(0, 200), relatorio_completo: false });
+    let relatorios = await executarLote(plano, pergunta, { companyId, mcpKey }, prazo, tel);
+    await pushProgresso(jobId, "subagentes", "relatorios prontos");
+
+    // FASE 2.5 (v2) - VALIDACAO DA COORDENACAO + DEVOLUCAO (com segmentacao se o prazo apertar)
+    let rodada = 0;
+    const falhosDefinitivos: string[] = [];
+    while (rodada < DEVOLUCOES_MAX) {
+      const devolver = await validarRelatorios(pergunta, plano, relatorios, tel);
+      if (!devolver.length) break;
+      rodada++;
+      await pushProgresso(jobId, "devolucao", `rodada ${rodada}: ${devolver.map((d) => d.nome).join(", ")}`);
+      // prazo apertado com trabalho pendente -> grava checkpoint e reinvoca (novo segmento)
+      if (prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+        await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
+          pergunta, plano, relatorios, devolver, rodada, tel_parcial: tel, segmento: segmento + 1 });
+        return; // este worker termina limpo; o proximo retoma do ponto exato
+      }
+      const refeitos = await executarLote(
+        devolver.map((d) => ({ nome: d.nome,
+          foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${d.motivo}\nCorrija exatamente isso; o que ja estava certo nao precisa ser repetido do zero.` })),
+        pergunta, { companyId, mcpKey }, prazo, tel,
+      );
+      for (const novo of refeitos) {
+        const i = relatorios.findIndex((r) => r.nome === novo.nome);
+        if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
+      }
+      if (rodada >= DEVOLUCOES_MAX) {
+        // ainda reprovados na proxima validacao entrariam aqui - marca sem re-validar para nao gastar o prazo
+        for (const d of devolver) if (!falhosDefinitivos.includes(d.nome)) falhosDefinitivos.push(d.nome);
       }
     }
-    await pushProgresso(jobId, "subagentes", "relatorios prontos");
+    if (falhosDefinitivos.length) {
+      tel.devolucao_esgotada = falhosDefinitivos;
+      for (const nome of falhosDefinitivos) {
+        const i = relatorios.findIndex((r) => r.nome === nome);
+        if (i >= 0) relatorios[i] = { ...relatorios[i], relatorio: `[RELATORIO COM DEVOLUCAO ESGOTADA - a coordenacao recusou ${DEVOLUCOES_MAX}x; use com reserva e declare a limitacao]\n` + relatorios[i].relatorio };
+      }
+    }
+    tel.rodadas_devolucao = rodada;
+    tel.segmento = segmento;
+
+    // Sintese em segmento proprio se o prazo nao comporta escrever a resposta inteira
+    if (prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+      await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
+        pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel, segmento: segmento + 1, direto_para_sintese: true });
+      return;
+    }
 
     // FASE 3 - sintese
     await pushProgresso(jobId, "sintese", "escrevendo a resposta final");
@@ -742,6 +1172,26 @@ Deno.serve(async (req) => {
 
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
+
+  // v2: CONTINUACAO DE SEGMENTO - a propria edge se reinvoca com o job_id; o novo worker
+  // le o checkpoint do banco e retoma do ponto exato, com orcamento de tempo zerado.
+  if (body?.continuar === true && body?.job_id) {
+    const { data: job } = await supa.from("chat_jobs")
+      .select("id, conversation_id, company_id, message, status, checkpoint, segmento")
+      .eq("id", String(body.job_id)).maybeSingle();
+    if (!job) return json({ error: "job nao encontrado" }, 404);
+    if (job.status === "done" || job.status === "error") return json({ ok: true, aviso: "job ja finalizado - nada a continuar" }, 200);
+    if (!job.checkpoint) return json({ error: "job sem checkpoint - nada a retomar" }, 400);
+    if (Number(job.segmento ?? 1) > MAX_SEGMENTOS) return json({ error: "teto de segmentos atingido" }, 400);
+    const cp = job.checkpoint as any;
+    // limpa o checkpoint consumido ANTES de processar: reentrega duplicada nao reprocessa
+    await supa.from("chat_jobs").update({ checkpoint: null }).eq("id", job.id);
+    (globalThis as any).EdgeRuntime?.waitUntil
+      ? (globalThis as any).EdgeRuntime.waitUntil(processarJob(job.id, job.conversation_id, job.company_id, String(job.message ?? cp.pergunta ?? ""), cfg?.api_key ?? "", cp))
+      : processarJob(job.id, job.conversation_id, job.company_id, String(job.message ?? cp.pergunta ?? ""), cfg?.api_key ?? "", cp);
+    return json({ ok: true, async: true, job_id: job.id, segmento: cp.segmento, aviso: "segmento retomado do checkpoint" }, 202);
+  }
+
   const message = String(body?.message ?? "").trim();
   if (!message) return json({ error: "message obrigatorio" }, 400);
 
