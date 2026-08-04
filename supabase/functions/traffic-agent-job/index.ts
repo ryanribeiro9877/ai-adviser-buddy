@@ -1,4 +1,4 @@
-// supabase/functions/traffic-agent-job/index.ts (v2.6)
+// supabase/functions/traffic-agent-job/index.ts (v2.7)
 // v1.1 - RELATORIO DE SUBAGENTE COMPLETO + SINTESE CIENTE DE CORTE (achado da auditoria
 //   verificada de 28/07 noite): no questionario do auditor, o subagente estrutura_conta
 //   terminou o relatorio em finish=length (teto de 3.500 tokens) ANTES dos numeros de
@@ -12,6 +12,14 @@
 //       sintese obriga a declarar "o levantamento de X veio incompleto" em vez de
 //       "nao disponivel" - truncamento nao pode virar inexistencia (regra R3 aplicada
 //       tambem ao proprio pipeline).
+// v2.7 (04/08/2026) - GT-45: MULTIQUADRO EM VIDEO. Base `multiquadro/criterio-v2.4`: 5 quadros da
+//   Meta por video em vez de uma miniatura do Drive. Os quadros vem da acao thumbnails da
+//   upload-midia (unica edge com META_ADS_TOKEN); este job usa a mcp key, nao o token.
+//   Selecao por PESO e nao por posicao: descarta quadro abaixo de 40% da mediana de bytes (quase
+//   uniforme) e distribui 5 no tempo entre os que sobram. `is_preferred` e ignorado - medido que a
+//   capa escolhida pela Meta tinha 26 KB contra 186 KB dos vizinhos, ou seja, pode ser o pior
+//   quadro para julgar conteudo. Sem audio de proposito: se audio entrasse junto e o resultado
+//   melhorasse, nao se saberia qual dos dois resolveu.
 // v2.6 (04/08/2026) - BASE DA ANALISE NO CONTRATO + CONSERTO DE FALHA SILENCIOSA.
 //   (1) O pipeline de visao e o modo drive_watch aceitam base_da_analise (default thumbnail, para
 //       o cron das 08:45 nao regredir). O plano e pedido PARA a base, com recorte opcional por
@@ -910,7 +918,43 @@ async function baixarThumb(url: string): Promise<{ b64: string; mime: string } |
 const BASE_PADRAO = "thumbnail";
 type OpcoesVisao = { base?: string; somenteNomes?: string[]; limite?: number; somenteImagens?: boolean };
 
-async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, prazo: () => number, tel: any, opts: OpcoesVisao = {}) {
+// v2.7 (04/08/2026) - QUADROS DA META. O Drive entrega UMA miniatura por arquivo e nao aceita
+// offset de tempo; extrair quadro do mp4 no runtime da edge nao existe (isolate V8 sem shell,
+// Deno.Command bloqueado, ffmpeg.wasm estoura os 256 MB). Mas a Meta gera 15 quadros 1080x1920 por
+// video enviado, todos baixaveis sem credencial - medido em 04/08. Entao os quadros vem de la, via
+// a acao `thumbnails` da upload-midia (que tem o META_ADS_TOKEN; este job nao tem, e nao deve ter).
+// FILTRO POR PESO, nao por posicao: um quadro muito mais leve que os vizinhos e quase uniforme -
+// abertura em fundo liso. Medido: num dos videos o quadro `is_preferred` tinha 26 KB contra 186 KB
+// dos vizinhos, ou seja, a capa que a Meta escolhe pode ser o PIOR quadro para julgar conteudo.
+// Por isso `is_preferred` e ignorado de proposito.
+const QUADROS_POR_VIDEO = 5;
+const PESO_MINIMO_DA_MEDIANA = 0.40;
+
+async function quadrosDaMeta(videoId: string, mcpKey: string) {
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
+    method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+    body: JSON.stringify({ acao: "thumbnails", video_id: videoId, medir_todos: true }),
+  });
+  const t = await r.text();
+  let j: any; try { j = JSON.parse(t); } catch { return { erro: `thumbnails falhou (${r.status})` }; }
+  const v = Array.isArray(j?.videos) ? j.videos[0] : null;
+  if (!v || v.erro) return { erro: String(v?.erro ?? "sem quadros na resposta") };
+  const todos: any[] = Array.isArray(v.quadros) ? v.quadros : [];
+  const mediana = Number(v.mediana_bytes ?? 0);
+  const piso = mediana > 0 ? mediana * PESO_MINIMO_DA_MEDIANA : 0;
+  const sobreviventes = todos.filter((q) => typeof q.bytes === "number" && q.bytes >= piso && q.uri);
+  // Distribui os 5 ao longo do TEMPO entre os que sobraram (a ordem do array e a ordem temporal).
+  const escolhidos: any[] = [];
+  if (sobreviventes.length <= QUADROS_POR_VIDEO) escolhidos.push(...sobreviventes);
+  else {
+    const passo = (sobreviventes.length - 1) / (QUADROS_POR_VIDEO - 1);
+    for (let k = 0; k < QUADROS_POR_VIDEO; k++) escolhidos.push(sobreviventes[Math.round(k * passo)]);
+  }
+  return { total: todos.length, mediana, piso, sobreviventes: sobreviventes.length,
+    descartados_por_peso: todos.length - sobreviventes.length, escolhidos };
+}
+
+async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey?: string }, prazo: () => number, tel: any, opts: OpcoesVisao = {}) {
   const base = String(opts.base ?? BASE_PADRAO).trim() || BASE_PADRAO;
   const nomeSub = "analise_visual_drive";
   const inv = await t_drive_criativos(ctx.companyId);
@@ -943,7 +987,68 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, praz
   let analisados = 0, falhasThumb = 0, falhasGravacao = 0;
   const teto = Math.max(1, Math.min(Number(opts.limite ?? VISAO_MAX_POR_RODADA), VISAO_MAX_POR_RODADA));
   const fila = pendentes.slice(0, teto);
-  for (let i = 0; i < fila.length; i += VISAO_LOTE) {
+  const modoMultiquadro = base.startsWith("multiquadro");
+  const detalheQuadros: any[] = [];
+  const semVideoId: string[] = [];
+
+  // ---------- caminho MULTIQUADRO: 5 quadros da Meta por video, um video por chamada ----------
+  if (modoMultiquadro) {
+    for (const arq of fila) {
+      if (prazo() < VISAO_MIN_PRAZO_MS) break;
+      if (!String(arq.tipo ?? "").startsWith("video/")) continue;   // multiquadro so faz sentido em video
+      if (!ctx.mcpKey) { falhasThumb++; continue; }
+      // O quadro vem da Meta, entao exige o video JA na biblioteca. Sem video_id nao ha o que ler -
+      // e isso e lacuna declarada, nao peca ruim.
+      const { data: up } = await supa.from("media_uploads")
+        .select("meta_video_id").eq("drive_file_id", String(arq.id ?? ""))
+        .eq("status", "enviado").not("meta_video_id", "is", null).maybeSingle();
+      const videoId = up?.meta_video_id ? String(up.meta_video_id) : "";
+      if (!videoId) { semVideoId.push(String(arq.nome ?? arq.id)); continue; }
+
+      const q: any = await quadrosDaMeta(videoId, ctx.mcpKey);
+      if (q.erro) { falhasThumb++; detalheQuadros.push({ nome: arq.nome, erro: q.erro }); continue; }
+      const imagens: { b64: string; mime: string; indice: number }[] = [];
+      for (const esc of q.escolhidos ?? []) {
+        const th = await baixarThumb(String(esc.uri));
+        if (th) imagens.push({ b64: th.b64, mime: th.mime, indice: esc.indice });
+      }
+      detalheQuadros.push({ nome: arq.nome, video_id: videoId, total_da_meta: q.total,
+        mediana_bytes: q.mediana, descartados_por_peso: q.descartados_por_peso,
+        sobreviventes: q.sobreviventes, usados: imagens.length,
+        indices_usados: imagens.map((x) => x.indice) });
+      if (!imagens.length) { falhasThumb++; continue; }
+
+      const content: any[] = [{ type: "text", text:
+        `Voce analisa um VIDEO de anuncio a partir de ${imagens.length} QUADROS extraidos ao longo dele (ordem cronologica). A operacao e EXCLUSIVAMENTE de credito consignado CLT (categoria especial na Meta). O UNIVERSO CRIATIVO DA MARCA, por decisao do gestor (31/07/2026), inclui tres temas: credito consignado CLT, EDUCACAO FINANCEIRA e DICAS DE SEGURANCA financeira - pecas desses temas SAO aproveitaveis. Devolve UM objeto JSON para o video inteiro. Campos: produto_detectado (consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado); confianca ("alta"|"media"|"baixa"); quadro_que_sustenta (o numero do quadro, de 1 a ${imagens.length}, que sustenta a conclusao); texto_visivel (transcreva o texto legivel somando os quadros, sem repetir); menciona_taxa_prazo_ou_valor (true/false - materia de compliance de credito) e qual_valor (o trecho, ou vazio); quadros_divergem (true/false - se os quadros contam historias diferentes entre si, o que num video e comum e e informacao valiosa) e o_que_diverge (uma frase, ou vazio); riscos_compliance (promessa de aprovacao, taxa prometida, "garantido", urgencia enganosa, ausencia de ressalva - so o que estiver VISIVEL); aproveitavel: "sim" se e credito CLT, educacao financeira ou seguranca e sem risco visivel, "nao" APENAS se mostra explicitamente OUTRO produto financeiro (financiamento de veiculo, conta corrente, consorcio, imovel) ou tem risco claro, "incerto" se os quadros nao permitem afirmar; motivo (uma frase). LIMITE REAL: voce ve ${imagens.length} quadros de um video, NAO o video - nao ha audio e o que acontece entre os quadros nao foi visto. "indeterminado" e "incerto" continuam sendo respostas legitimas: com mais evidencia devem ficar mais raros, nao proibidos. Forcar classificacao produz numero bonito e falso. Responda APENAS JSON: {"produto_detectado":"...","confianca":"...","quadro_que_sustenta":1,"texto_visivel":"...","menciona_taxa_prazo_ou_valor":false,"qual_valor":"","quadros_divergem":false,"o_que_diverge":"","riscos_compliance":"","aproveitavel":"sim|nao|incerto","motivo":"..."}` +
+        `\nArquivo: ${arq.nome} (pasta: ${arq.caminho})` }];
+      for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
+      const r = await chamarLLM([{ role: "user", content }], { maxTokens: 1500, reasoning: REASONING_OFF, model: MODEL_SUB });
+      if (r.erro) continue;
+      const it = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? "")) ?? {};
+      const aprov = ["sim", "nao", "incerto"].includes(String(it?.aproveitavel)) ? String(it.aproveitavel) : "incerto";
+      const extras = [
+        it?.confianca ? `confianca: ${it.confianca}` : "",
+        it?.quadro_que_sustenta ? `quadro ${it.quadro_que_sustenta} sustenta` : "",
+        it?.menciona_taxa_prazo_ou_valor === true ? `MENCIONA VALOR/TAXA/PRAZO: ${String(it?.qual_valor ?? "").slice(0, 80)}` : "",
+        it?.quadros_divergem === true ? `QUADROS DIVERGEM: ${String(it?.o_que_diverge ?? "").slice(0, 80)}` : "",
+      ].filter(Boolean).join(" · ");
+      const { error: eUp } = await supa.from("drive_midia_analises").upsert({
+        company_id: ctx.companyId, drive_file_id: String(arq.id ?? arq.nome), drive_modified_time: arq.modificado_em ?? "",
+        base_da_analise: base,
+        nome: arq.nome, caminho: arq.caminho, formato_pasta: arq.formato_pasta, eixo_pasta: arq.eixo_pasta, mime: arq.tipo,
+        produto_detectado: String(it?.produto_detectado ?? "indeterminado").slice(0, 120),
+        texto_visivel: String(it?.texto_visivel ?? "").slice(0, 800),
+        riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
+        aproveitavel: aprov,
+        motivo: `${String(it?.motivo ?? "sem motivo")}${extras ? ` [${extras}]` : ""}`.slice(0, 400),
+        modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
+      }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
+      if (eUp) { falhasGravacao++; continue; }
+      analisados++;
+    }
+  }
+
+  for (let i = 0; !modoMultiquadro && i < fila.length; i += VISAO_LOTE) {
     if (prazo() < VISAO_MIN_PRAZO_MS) break;
     const lote = fila.slice(i, i + VISAO_LOTE);
     const imagens: { arq: any; b64: string; mime: string }[] = [];
@@ -1000,7 +1105,8 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, praz
     (semThumb.length ? `\nSem miniatura (nao analisaveis por visao): ${semThumb.map((x: any) => x.nome).slice(0, 10).join(", ")}${semThumb.length > 10 ? "..." : ""}` : "");
   tel.visao = { base, analisados_nesta_rodada: analisados, cobertura_acumulada: cobertura,
     total: totalComThumb, falhas_thumb: falhasThumb, falhas_gravacao: falhasGravacao,
-    candidatas_nesta_base: pendentes.length, em_base_mais_rasa: emBaseMaisRasa };
+    candidatas_nesta_base: pendentes.length, em_base_mais_rasa: emBaseMaisRasa,
+    ...(modoMultiquadro ? { multiquadro: detalheQuadros, sem_video_id: semVideoId } : {}) };
   return { nome: nomeSub, relatorio: rel.slice(0, 24000), completo: cobertura >= totalComThumb };
 }
 
@@ -1097,7 +1203,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.6", subagentes: [] };
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.7", subagentes: [] };
   tel.versao = "job-v2.4";
   try {
     await supa.from("chat_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId);
@@ -1303,9 +1409,12 @@ Deno.serve(async (req) => {
     const { data: planoW } = await supa.rpc("drive_plano_de_varredura", { p_company_id: companyId, p_base_desejada: baseW });
     const nPastas = Array.isArray((planoW as any)?.pastas_ativas) ? (planoW as any).pastas_ativas.length : 0;
     const nDesativadas = Array.isArray((planoW as any)?.pastas_desativadas) ? (planoW as any).pastas_desativadas.length : 0;
-    const r = await rodarAnaliseVisual("varredura automatica do Drive", { companyId }, prazoW, telW, opts);
+    // v2.7: mcpKey vai no ctx porque o caminho multiquadro precisa chamar a upload-midia (que tem o
+    // token da Meta). Este job nao tem META_ADS_TOKEN e nao deve ter - um segredo, um dono.
+    const r = await rodarAnaliseVisual("varredura automatica do Drive",
+      { companyId, mcpKey: String(cfg?.api_key ?? "") }, prazoW, telW, opts);
     const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0, falhas_gravacao: 0 };
-    return json({ ok: true, modo: "drive_watch", versao: "job-v2.6",
+    return json({ ok: true, modo: "drive_watch", versao: "job-v2.7",
       base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, limite: opts.limite ?? null },
       pastas_ativas: nPastas, pastas_desativadas: nDesativadas,
       pecas_novas_analisadas: v.analisados_nesta_rodada,

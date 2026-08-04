@@ -166,20 +166,35 @@ Deno.serve(async (req) => {
       const lista: any[] = Array.isArray(j?.data) ? j.data : [];
       // Um HEAD em cada uri responde a pergunta que decide a rota: o modelo de visao consegue
       // baixar? Se o uri exigir credencial, os quadros existem e nao servem.
-      const amostra: any[] = [];
-      for (const th of lista.slice(0, 3)) {
-        let acessivel: any = null;
+      // v2.1: com medir_todos, mede TODOS - o consumidor precisa do content-length de cada quadro
+      // para calcular a mediana e descartar os quase uniformes. Sem isso ele teria de escolher
+      // quadro por posicao, e a posicao 1 e justamente onde mora a abertura em fundo liso.
+      const medirTodos = body?.medir_todos === true;
+      const quantosMedir = medirTodos ? lista.length : Math.min(3, lista.length);
+      const medidos: any[] = [];
+      for (let i = 0; i < quantosMedir; i++) {
+        const th = lista[i];
+        let bytes: number | null = null, status: number | null = null, ctype: string | null = null, erro: string | null = null;
         try {
           const h = await fetch(String(th.uri), { method: "HEAD" });
-          acessivel = { status: h.status, content_type: h.headers.get("content-type"), bytes: h.headers.get("content-length") };
-        } catch (e) { acessivel = { erro: String((e as any)?.message ?? e) }; }
-        amostra.push({ id: th.id, width: th.width, height: th.height, scale: th.scale, is_preferred: th.is_preferred, uri_acessivel: acessivel });
+          status = h.status; ctype = h.headers.get("content-type");
+          const cl = h.headers.get("content-length");
+          bytes = cl ? Number(cl) : null;
+        } catch (e) { erro = String((e as any)?.message ?? e); }
+        medidos.push({ indice: i, id: th.id, uri: medirTodos ? th.uri : undefined,
+          width: th.width, height: th.height, scale: th.scale, is_preferred: th.is_preferred,
+          bytes, http_status: status, content_type: ctype, erro });
       }
+      const tamanhos = medidos.map((m) => m.bytes).filter((b) => typeof b === "number" && b > 0).sort((a, b) => a - b);
+      const mediana = tamanhos.length
+        ? (tamanhos.length % 2 ? tamanhos[(tamanhos.length - 1) / 2] : (tamanhos[tamanhos.length / 2 - 1] + tamanhos[tamanhos.length / 2]) / 2)
+        : null;
       porVideo.push({
         video_id: vid, total_thumbnails: lista.length,
         dimensoes: [...new Set(lista.map((x: any) => `${x.width}x${x.height}`))],
         preferidos: lista.filter((x: any) => x.is_preferred === true).length,
-        amostra_com_teste_de_download: amostra,
+        mediana_bytes: mediana,
+        quadros: medidos,
       });
     }
     const totais = porVideo.map((v) => v.total_thumbnails ?? 0);
