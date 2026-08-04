@@ -3,9 +3,10 @@
 // v17 (04/08/2026) — RECORTE DE PUBLICO (idade e genero) por ANUNCIO e por dia. O relatorio
 //   declarava que nao existia nenhuma tabela de segmentacao; agora existe coleta. Duas chamadas
 //   extras ao Windsor por sincronizacao, uma por dimensao - combinar as duas multiplicaria as
-//   linhas pelo mesmo preco de chamada. Grava em campaign_breakdown_daily via
-//   sync_ingest_breakdown_daily (migracao nao minha); sem a tabela, o passo reporta
-//   ingest_error e NAO derruba o resto da sincronizacao.
+//   linhas pelo mesmo preco de chamada. Grava em metric_breakdown_daily via
+//   sync_ingest_breakdown; sem a tabela, o passo reporta ingest_error e NAO derruba o resto.
+//   O passo e o ULTIMO da funcao de proposito (ver comentario no bloco): passo novo, sem
+//   paginacao e com volume que multiplica por faixa nao fica a montante de passo provado.
 //
 // v16 (04/08/2026) — RANKINGS DE QUALIDADE DO ANUNCIO. O relatorio diario declarava a ausencia
 //   desses tres campos; o Windsor entrega e foi provado com dado real em 04/08 (conta
@@ -73,14 +74,16 @@ const FIELDS_AD_DAILY: Record<string, string[]> = {
 // v17 (04/08/2026): RECORTE. Uma chamada por dimensao - combinar idade com genero multiplica as
 // linhas e a Meta cobra a chamada igual. O recorte vem no nivel de ANUNCIO (testado em 04/08), que
 // e mais granular que campanha e rola para ela por soma; o contrario nao seria possivel.
-// `reach` fica FORA de proposito: e gente deduplicada e a soma dos recortes NAO fecha com o total
-// (medido: 2.967 no total contra 2.938 somando genero, -1,0%). Gravar alcance por recorte
-// convidaria a somar e chegar a numero errado. Impressoes, gasto, cliques, cliques no link e
-// formularios fecham exatos - esses sim entram.
+// `reach` ENTRA (decisao de 04/08): eu o tinha deixado fora porque a coluna era NOT NULL DEFAULT 0
+// e "nao coletei" viraria "alcance zero" - numero falso com cara de medido, a mesma familia do
+// `?? "ACTIVE"` da meta-actions. Com a coluna anulavel e sem default, o risco desaparece e o dado
+// tem valor proprio: saber que a faixa 25-34 alcancou N pessoas informa mesmo sem somar.
+// ATENCAO A NAO-ADITIVIDADE: alcance e gente deduplicada e NAO fecha com o total do anuncio
+// (medido: 2.967 no total contra 2.938 somando genero, -1,0%). Impressoes, gasto, cliques,
+// cliques no link e formularios fecham exatos. Quem somar alcance por faixa chega a numero errado.
 const METRICS_RECORTE = [
-  "spend", "impressions", "clicks",
-  "actions_link_click", "actions_landing_page_view",
-  "actions_onsite_conversion_messaging_conversation_started_7d", "actions_lead",
+  "spend", "impressions", "reach", "clicks",
+  "actions_link_click", "actions_landing_page_view", "actions_lead",
 ];
 const RECORTES: { tipo: string; campo: string }[] = [
   { tipo: "idade", campo: "age" },
@@ -172,12 +175,18 @@ function mapAdDaily(row: any, integ: any) {
     conversion_rate_ranking: rank(row.conversion_rate_ranking),
   };
 }
-// v17: uma linha por (anuncio, dia, tipo de recorte, valor). Sem valor de recorte a linha nao
-// existe - gravar valor vazio criaria chave que colide com ela mesma no indice unico.
+// v17: uma linha por (anuncio, dia, tipo de recorte, valor).
+// O BALDE SEM ROTULO E ENVIADO, nao descartado: e ele que faz a soma dos recortes fechar com o
+// total do anuncio (medido em 04/08: impressoes, gasto, cliques no link e formularios fecham
+// exatos justamente porque o residuo cai em '65+' e 'unknown'). Filtrar aqui quebraria a
+// propriedade que a medicao provou existir. A RPC normaliza vazio/null para 'desconhecido' -
+// necessario, porque NULL nao colide em UNIQUE e o balde duplicaria a cada corrida da janela
+// rolante de 7 dias.
+// `messaging_started` NAO vai: a RPC nao declara o campo e metric_breakdown_daily nao tem a
+// coluna, entao enviar seria descarte silencioso. Conversa iniciada por faixa segue NAO coletada
+// - lacuna declarada, nao escondida.
 function mapRecorte(row: any, integ: any, tipo: string, campo: string) {
   if (!row.ad_id || !row.date) return null;
-  const valor = String(row[campo] ?? "").trim();
-  if (!valor) return null;
   const m = baseMetrics(row);
   return {
     account_id: integ.external_id,
@@ -185,10 +194,10 @@ function mapRecorte(row: any, integ: any, tipo: string, campo: string) {
     ad_external_id: String(row.ad_id),
     snapshot_date: row.date,
     tipo_recorte: tipo,
-    valor_recorte: valor,
-    spend: m.spend, impressions: m.impressions, clicks: m.clicks,
+    valor_recorte: String(row[campo] ?? "").trim(),
+    spend: m.spend, impressions: m.impressions, reach: m.reach, clicks: m.clicks,
     link_clicks: m.link_clicks, landing_page_views: m.landing_page_views,
-    messaging_started: m.messaging_started, form_leads: m.form_leads,
+    form_leads: m.form_leads,
   };
 }
 
@@ -313,35 +322,6 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ---- RECORTE DE PÚBLICO (janela do request COM date) ----
-    // Vem DEPOIS do ad_daily de propósito: são 2 chamadas extras ao Windsor por sincronização, e
-    // a lição do v15 é que o que é coletado primeiro precisa estar gravado antes de gastar tempo.
-    // Cada recorte falha por conta própria — um erro em gênero não pode derrubar idade.
-    if (FIELDS_RECORTE[connector]) {
-      for (const rec of RECORTES) {
-        const campos = [...FIELDS_RECORTE[connector], rec.campo];
-        const r = await fetchRows(connector, campos, windsorKey, reqWin);
-        if (r.error) {
-          report.push({ connector, level: `recorte:${rec.tipo}`, error: r.error, body: r.body });
-          continue;
-        }
-        const rows: any[] = [];
-        for (const row of r.rows) {
-          const integ = resolve(row, list);
-          if (!integ) continue;
-          const m = mapRecorte(row, integ, rec.tipo, rec.campo);
-          if (m) rows.push(m);
-        }
-        let ingested = 0;
-        if (rows.length) {
-          const { data, error } = await supa.rpc("sync_ingest_breakdown_daily", { p: rows });
-          if (error) report.push({ connector, level: `recorte:${rec.tipo}`, ingest_error: error.message });
-          else ingested = data as number;
-        }
-        report.push({ connector, level: `recorte:${rec.tipo}`, windsor_rows: r.rows.length, ingested });
-      }
-    }
-
     // ---- JANELA AMPLA (opcional, isolada: não pode derrubar o que já foi gravado) ----
     if (!skipWide) {
       try {
@@ -369,6 +349,39 @@ Deno.serve(async (req) => {
         }
       } catch (e) {
         report.push({ connector, level: "wide", erro_isolado: String((e as any)?.message ?? e), nota: "campanha e ad_daily JÁ foram gravados antes deste bloco" });
+      }
+    }
+
+    // ---- RECORTE DE PÚBLICO (janela do request COM date) — ÚLTIMO PASSO DE PROPÓSITO ----
+    // Fica no FIM porque é o passo mais novo, sem paginação, e o único cujo volume multiplica por
+    // faixa. Passo novo nao pode ficar a montante de passo provado: se estourar o teto de 150s
+    // estando a frente, derruba a coleta que funciona - foi assim que nasceram os cinco dias
+    // cegos de 23-27/07. No fim, um estouro custa apenas o recorte daquele ciclo.
+    // Cada dimensao falha por conta propria: erro em genero nao pode derrubar idade.
+    if (FIELDS_RECORTE[connector]) {
+      for (const rec of RECORTES) {
+        const campos = [...FIELDS_RECORTE[connector], rec.campo];
+        const r = await fetchRows(connector, campos, windsorKey, reqWin);
+        if (r.error) {
+          report.push({ connector, level: `recorte:${rec.tipo}`, error: r.error, body: r.body });
+          continue;
+        }
+        const rows: any[] = [];
+        for (const row of r.rows) {
+          const integ = resolve(row, list);
+          if (!integ) continue;
+          const m = mapRecorte(row, integ, rec.tipo, rec.campo);
+          if (m) rows.push(m);
+        }
+        let ingested = 0;
+        if (rows.length) {
+          const { data, error } = await supa.rpc("sync_ingest_breakdown", { p: rows });
+          if (error) report.push({ connector, level: `recorte:${rec.tipo}`, ingest_error: error.message });
+          else ingested = data as number;
+        }
+        // enviadas vs ingested: a RPC descarta em silencio tipo_recorte fora do CHECK, entao a
+        // diferenca entre os dois numeros e o sinal de que algo foi recusado na ingestao.
+        report.push({ connector, level: `recorte:${rec.tipo}`, windsor_rows: r.rows.length, enviadas: rows.length, ingested });
       }
     }
   }
