@@ -1,12 +1,16 @@
-// supabase/functions/upload-midia/index.ts (v1)
+// supabase/functions/upload-midia/index.ts (v2)
 // =============================================================================
+// v2 (04/08/2026) - acao "thumbnails": GET /{video_id}/thumbnails, LEITURA pura, para medir se a
+//   Meta entrega 3+ quadros por video ja enviado. Se entregar, o pipeline de visao ganha
+//   multiquadro sem download, sem ffmpeg e sem WASM - nenhum dos tres existe no runtime da edge.
+//   Nao sobe nada, nao grava nada, nao consulta trava.
 // UPLOAD DE MIDIA: Google Drive (service account, somente leitura) -> biblioteca
 // de midia da conta Meta (adimages / advideos). E a ponte que faltava para
 // "criar anuncio com criativo novo da pasta": o anuncio replicado passa a poder
 // referenciar image_hash / video_id de um arquivo que nasceu no Drive.
 //
 // CONTRATO (POST, auth x-mcp-key ou Bearer vs mcp_config.api_key):
-//   { acao: "plan" | "executar",
+//   { acao: "plan" | "executar" | "thumbnails",
 //     company: "<nome ou uuid>",
 //     drive_file_id: "<id do arquivo no Drive>"      // OU
 //     nome_arquivo: "<nome exato p/ localizar na pasta de criativos>",
@@ -137,7 +141,55 @@ Deno.serve(async (req) => {
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
   const acao = String(body?.acao ?? "plan");
-  if (!["plan", "executar"].includes(acao)) return json({ error: "acao deve ser plan ou executar" }, 400);
+  if (!["plan", "executar", "thumbnails"].includes(acao)) return json({ error: "acao deve ser plan, executar ou thumbnails" }, 400);
+
+  // v2 (04/08/2026) - GT-45 frente 1: LEITURA dos quadros que a Meta gerou para um video ja
+  // enviado. GET puro: nao sobe nada, nao escreve em tabela nenhuma, nao consulta trava - por isso
+  // vem ANTES da resolucao de empresa e config, que esta acao nao precisa.
+  // Existe aqui porque esta edge ja tem o META_ADS_TOKEN e ja e a de midia. O objetivo e medir se
+  // a Meta entrega 3+ quadros por video: se entregar, o pipeline de visao ganha multiquadro sem
+  // download, sem ffmpeg e sem WASM - nenhum dos tres existe no runtime da edge.
+  if (acao === "thumbnails") {
+    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    const ids: string[] = Array.isArray(body?.video_ids)
+      ? body.video_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
+      : (body?.video_id ? [String(body.video_id).trim()] : []);
+    if (!ids.length) return json({ error: "informe video_id ou video_ids" }, 400);
+
+    const porVideo: any[] = [];
+    for (const vid of ids) {
+      const url = `${GRAPH}/${vid}/thumbnails?fields=id,uri,width,height,scale,is_preferred&access_token=${encodeURIComponent(META_ADS_TOKEN)}`;
+      const r = await fetch(url);
+      const t = await r.text();
+      let j: any; try { j = JSON.parse(t); } catch { j = { parse_error: t.slice(0, 200) }; }
+      if (!r.ok) { porVideo.push({ video_id: vid, erro: `graph ${r.status}`, detalhe: JSON.stringify(j).slice(0, 300) }); continue; }
+      const lista: any[] = Array.isArray(j?.data) ? j.data : [];
+      // Um HEAD em cada uri responde a pergunta que decide a rota: o modelo de visao consegue
+      // baixar? Se o uri exigir credencial, os quadros existem e nao servem.
+      const amostra: any[] = [];
+      for (const th of lista.slice(0, 3)) {
+        let acessivel: any = null;
+        try {
+          const h = await fetch(String(th.uri), { method: "HEAD" });
+          acessivel = { status: h.status, content_type: h.headers.get("content-type"), bytes: h.headers.get("content-length") };
+        } catch (e) { acessivel = { erro: String((e as any)?.message ?? e) }; }
+        amostra.push({ id: th.id, width: th.width, height: th.height, scale: th.scale, is_preferred: th.is_preferred, uri_acessivel: acessivel });
+      }
+      porVideo.push({
+        video_id: vid, total_thumbnails: lista.length,
+        dimensoes: [...new Set(lista.map((x: any) => `${x.width}x${x.height}`))],
+        preferidos: lista.filter((x: any) => x.is_preferred === true).length,
+        amostra_com_teste_de_download: amostra,
+      });
+    }
+    const totais = porVideo.map((v) => v.total_thumbnails ?? 0);
+    return json({ ok: true, acao: "thumbnails", versao: "upload-midia-v2",
+      videos: porVideo,
+      veredito_da_rota: totais.length && Math.min(...totais) >= 3
+        ? "ROTA VIAVEL: a Meta entrega 3+ quadros por video - multiquadro sem download nem ffmpeg"
+        : "ROTA NAO PROVADA: menos de 3 quadros por video, o ganho sobre a miniatura atual e duvidoso",
+      nota: "GET puro - nada foi enviado, nada foi gravado. Quadro da Meta e gerado na ingestao do video; nao ha como pedir offset de tempo especifico." });
+  }
 
   // empresa
   const compRef = String(body?.company ?? "").trim();
