@@ -1,4 +1,4 @@
-// supabase/functions/traffic-agent-job/index.ts (v1.1)
+// supabase/functions/traffic-agent-job/index.ts (v2.5)
 // v1.1 - RELATORIO DE SUBAGENTE COMPLETO + SINTESE CIENTE DE CORTE (achado da auditoria
 //   verificada de 28/07 noite): no questionario do auditor, o subagente estrutura_conta
 //   terminou o relatorio em finish=length (teto de 3.500 tokens) ANTES dos numeros de
@@ -12,6 +12,15 @@
 //       sintese obriga a declarar "o levantamento de X veio incompleto" em vez de
 //       "nao disponivel" - truncamento nao pode virar inexistencia (regra R3 aplicada
 //       tambem ao proprio pipeline).
+// v2.5 (04/08/2026) - COBERTURA DO DRIVE VEM DA TABELA + MODO VIGIA PARA O CRON.
+//   (B) As pastas a varrer saem de drive_pastas_monitoradas (RPC drive_plano_de_varredura), nao
+//       mais do segredo DRIVE_CRIATIVOS_FOLDER_ID - acrescentar pasta passou a ser INSERT, sem
+//       deploy. Acesso amplo da conta de servico nunca foi cobertura: o codigo olhava um id fixo.
+//       O segredo fica como FALLBACK DECLARADO (se a lista vier vazia, avisa no retorno).
+//       Cada arquivo carrega pasta_monitorada, e a varredura de cada pasta e registrada.
+//   (A) modo drive_watch: caminho barato para o cron - so varredura + visao no que mudou, sem
+//       PLANNER, sem subagentes, sem sintese. Devolve "0 pecas novas em N pastas" em vez de
+//       silencio, porque silencio e indistinguivel de falha.
 // v2.4 (31/07/2026) - CRITERIO DO GESTOR no pipeline de visao (audios do Roberto):
 //   o universo criativo da marca e "credito CLT + educacao financeira + dicas de seguranca
 //   financeira" - peca desses temas e SIM. NAO fica reservado a peca que mostra
@@ -449,7 +458,7 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
       case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true, ctx.companyId, Number(args?.pagina ?? 1));
       case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
-      case "get_drive_criativos": return await t_drive_criativos();
+      case "get_drive_criativos": return await t_drive_criativos(ctx.companyId);
       case "get_analise_visual_drive": {
         const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
         return error ? { erro: error.message } : data;
@@ -571,15 +580,39 @@ async function driveToken(): Promise<string> {
 }
 // Caminha a arvore da pasta raiz. Convencao observada na pasta real (30/07/2026):
 // 1o nivel = FORMATO (Videos, Cards, Carrossel N...), 2o nivel = EIXO DE MENSAGEM.
-async function t_drive_criativos() {
-  if (!DRIVE_CRIATIVOS_FOLDER_ID) return { erro: "pasta de criativos nao configurada (DRIVE_CRIATIVOS_FOLDER_ID)" };
+// v2.5 (04/08/2026) - COBERTURA VEM DA TABELA, NAO DO SEGREDO. Antes o codigo lia UMA pasta, do
+// segredo DRIVE_CRIATIVOS_FOLDER_ID: por mais amplo que fosse o acesso da conta de servico, a
+// cobertura era um id fixo, e acrescentar pasta exigia mudar segredo e deployar. Agora a lista
+// vem de drive_pastas_monitoradas via drive_plano_de_varredura, e acrescentar pasta e um INSERT.
+// O segredo fica como FALLBACK DECLARADO: se a RPC nao devolver pasta ativa, ele e usado E o
+// retorno avisa - falha de leitura da tabela nao pode deixar o sistema cego em silencio.
+async function t_drive_criativos(companyId: string) {
+  const { data: plano, error: ePlano } = await supa.rpc("drive_plano_de_varredura", { p_company_id: companyId });
+  const pastasAtivas: any[] = Array.isArray((plano as any)?.pastas_ativas) ? (plano as any).pastas_ativas : [];
+  const desativadas: any[] = Array.isArray((plano as any)?.pastas_desativadas) ? (plano as any).pastas_desativadas : [];
+
+  let raizes: { folder_id: string; nome: string }[] = pastasAtivas
+    .map((p: any) => ({ folder_id: String(p.folder_id ?? ""), nome: String(p.nome ?? "(sem nome)") }))
+    .filter((p) => p.folder_id);
+  let avisoFallback: string | null = null;
+  if (!raizes.length) {
+    if (!DRIVE_CRIATIVOS_FOLDER_ID) {
+      return { erro: "nenhuma pasta monitorada para esta empresa e o segredo DRIVE_CRIATIVOS_FOLDER_ID esta vazio - nao ha o que varrer",
+        detalhe_rpc: ePlano?.message ?? null };
+    }
+    raizes = [{ folder_id: DRIVE_CRIATIVOS_FOLDER_ID, nome: "(fallback: segredo DRIVE_CRIATIVOS_FOLDER_ID)" }];
+    avisoFallback = `FALLBACK: a lista de pastas monitoradas veio vazia${ePlano ? ` (erro na leitura: ${ePlano.message})` : ""}, entao a varredura usou o id fixo do segredo. A cobertura desta rodada NAO e a cadastrada - declare isso.`;
+  }
+
   let token: string;
   try { token = await driveToken(); }
   catch (e) { return { erro: String((e as any)?.message ?? e), aviso: "Sem acesso ao Drive nesta rodada - o dado NAO foi lido; nao trate como pasta vazia. Verificar credencial e compartilhamento da pasta com a service account." }; }
   const MAX_PASTAS = 40, MAX_ARQUIVOS = 250, MAX_PROFUNDIDADE = 4;
-  type No = { id: string; caminho: string; nivel: number };
-  const fila: No[] = [{ id: DRIVE_CRIATIVOS_FOLDER_ID, caminho: "", nivel: 0 }];
+  type No = { id: string; caminho: string; nivel: number; raiz: string };
+  // Tetos GLOBAIS entre as raizes: o que protege e o payload, que nao sabe de quantas pastas veio.
+  const fila: No[] = raizes.map((r) => ({ id: r.folder_id, caminho: "", nivel: 0, raiz: r.nome }));
   const arquivos: any[] = [];
+  const porPasta: Record<string, number> = {};
   let pastasLidas = 0, cortado = false;
   while (fila.length) {
     const no = fila.shift()!;
@@ -599,13 +632,15 @@ async function t_drive_criativos() {
       if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
       for (const f of j.files ?? []) {
         if (f.mimeType === "application/vnd.google-apps.folder") {
-          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1 });
+          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz });
         } else if (arquivos.length < MAX_ARQUIVOS) {
           arquivos.push({ id: f.id, nome: f.name, caminho: no.caminho || "(raiz)",
+            pasta_monitorada: no.raiz,
             formato_pasta: (no.caminho.split("/")[0] || "(raiz)"),
             eixo_pasta: (no.caminho.split("/")[1] ?? null),
             tipo: f.mimeType, tamanho_bytes: Number(f.size ?? 0) || null,
             modificado_em: f.modifiedTime ?? null, thumbnail: f.thumbnailLink ?? null });
+          porPasta[no.raiz] = (porPasta[no.raiz] ?? 0) + 1;
         } else { cortado = true; }
       }
       pageToken = j.nextPageToken ?? "";
@@ -617,13 +652,34 @@ async function t_drive_criativos() {
     porFormato[a.formato_pasta] = (porFormato[a.formato_pasta] ?? 0) + 1;
     if (a.eixo_pasta) porEixo[a.eixo_pasta] = (porEixo[a.eixo_pasta] ?? 0) + 1;
   }
+  // v2.5: registra a varredura por pasta. `ultima_varredura_em` e o que distingue "varri e nao
+  // achei peca nova" de "nunca varri" - sem isso, silencio e indistinguivel de falha.
+  const registradas: string[] = [];
+  if (!avisoFallback) {
+    for (const r of raizes) {
+      const { error } = await supa.rpc("drive_registrar_varredura", {
+        p_company_id: companyId, p_folder_id: r.folder_id, p_pecas: porPasta[r.nome] ?? 0,
+      });
+      if (!error) registradas.push(r.nome);
+    }
+  }
+
   const out: any = {
     total_arquivos: arquivos.length, pastas_lidas: pastasLidas,
+    pastas_monitoradas_varridas: raizes.map((r) => ({ nome: r.nome, arquivos: porPasta[r.nome] ?? 0 })),
+    pastas_desativadas: desativadas,
+    varredura_registrada_em: registradas,
     resumo_por_formato: porFormato, resumo_por_eixo_de_mensagem: porEixo,
-    nota: "Inventario da pasta de criativos do Drive (somente leitura). Convencao: 1o nivel do caminho = formato, 2o nivel = eixo de mensagem. 'thumbnail' e um frame/preview servido pelo Google. LIMITE DECLARADO: video e analisado por thumbnail+nome+caminho; o conteudo interno (frames/audio) NAO e lido nesta versao.",
+    nota: "Inventario das pastas de criativo MONITORADAS desta empresa (somente leitura). Convencao: 1o nivel do caminho = formato, 2o nivel = eixo de mensagem. 'thumbnail' e um frame/preview servido pelo Google. LIMITE DECLARADO: video e analisado por thumbnail+nome+caminho; o conteudo interno (frames/audio) NAO e lido nesta versao.",
+    declare_a_cobertura: (plano as any)?.declare_a_cobertura
+      ?? "NUNCA diga que leu 'o Drive'. Diga quais pastas foram varridas e quando. Pasta fora da lista nao e lida por ninguem.",
     arquivos,
   };
-  if (cortado) out.aviso_corte = `Inventario truncado nos tetos de leitura (${MAX_PASTAS} pastas / ${MAX_ARQUIVOS} arquivos). O que nao veio EXISTE na pasta - nao trate como inexistente; peca um recorte por subpasta.`;
+  if (avisoFallback) out.aviso_fallback = avisoFallback;
+  if (desativadas.length) {
+    out.aviso_pastas_desativadas = `Existem ${desativadas.length} pasta(s) cadastradas e DESATIVADAS: elas nao foram lidas. Peca que exista nelas e invisivel para o sistema - declare isso se o gestor perguntar por peca que voce nao encontrou.`;
+  }
+  if (cortado) out.aviso_corte = `Inventario truncado nos tetos de leitura (${MAX_PASTAS} pastas / ${MAX_ARQUIVOS} arquivos), somados entre as pastas monitoradas. O que nao veio EXISTE nas pastas - nao trate como inexistente; peca um recorte por subpasta.`;
   return out;
 }
 
@@ -837,14 +893,15 @@ async function baixarThumb(url: string): Promise<{ b64: string; mime: string } |
 
 async function rodarAnaliseVisual(foco: string, ctx: { companyId: string }, prazo: () => number, tel: any) {
   const nomeSub = "analise_visual_drive";
-  const inv = await t_drive_criativos();
+  const inv = await t_drive_criativos(ctx.companyId);
   if ((inv as any)?.erro) return { nome: nomeSub, relatorio: `LACUNAS: inventario do Drive indisponivel (${(inv as any).erro}) - nenhuma analise visual feita nesta rodada.`, completo: false };
   const arquivos: any[] = (inv as any).arquivos ?? [];
 
-  // o que ja foi analisado (mesma versao do arquivo) nao se refaz
-  const { data: feitos } = await supa.from("drive_midia_analises")
-    .select("drive_file_id, drive_modified_time").eq("company_id", ctx.companyId);
-  const jaFeito = new Set((feitos ?? []).map((f: any) => `${f.drive_file_id}|${f.drive_modified_time ?? ""}`));
+  // v2.5: as impressoes digitais vem do MESMO plano que definiu as pastas, em vez de uma consulta
+  // propria - uma fonte so para "o que varrer" e "o que ja foi analisado".
+  const { data: plano } = await supa.rpc("drive_plano_de_varredura", { p_company_id: ctx.companyId });
+  const jaAnalisados: any[] = Array.isArray((plano as any)?.ja_analisados) ? (plano as any).ja_analisados : [];
+  const jaFeito = new Set(jaAnalisados.map((f: any) => `${f.f}|${f.m ?? ""}`));
   const pendentes = arquivos.filter((a: any) => a.thumbnail && !jaFeito.has(`${a.id ?? a.nome}|${a.modificado_em ?? ""}`));
   const semThumb = arquivos.filter((a: any) => !a.thumbnail);
 
@@ -993,7 +1050,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.4", subagentes: [] };
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.5", subagentes: [] };
   tel.versao = "job-v2.4";
   try {
     await supa.from("chat_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId);
@@ -1172,6 +1229,37 @@ Deno.serve(async (req) => {
 
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
+
+  // v2.5 (04/08/2026) - MODO VIGIA DO DRIVE: {"modo":"drive_watch","company_id":"..."}.
+  // Existe para o cron ter o que chamar. Roda SO a varredura das pastas monitoradas e a visao
+  // nas pecas novas - sem PLANNER, sem subagentes, sem sintese, portanto sem nenhuma chamada de
+  // LLM de raciocinio: o custo e a visao nas pecas que mudaram, e zero quando nada mudou.
+  // Modo em vez de edge nova pelo mesmo motivo do GT-09: acrescentar caminho a algo que ja sabe
+  // baixar e analisar e mais barato que uma segunda edge competindo pela mesma tabela.
+  // O retorno NUNCA e silencioso: "0 pecas novas em N pastas" e resposta, silencio seria
+  // indistinguivel de falha - e essa distincao e o que ultima_varredura_em existe para preservar.
+  if (String(body?.modo ?? "") === "drive_watch") {
+    const companyId = String(body?.company_id ?? "").trim();
+    if (!companyId) return json({ error: "drive_watch exige company_id - a RPC do plano e por empresa e a pasta de uma empresa nao pode ser lida sob outra" }, 400);
+    const tw = Date.now();
+    const prazoW = () => JOB_LIMIT_MS - (Date.now() - tw) - RESERVA_FINAL_MS;
+    const telW: any = {};
+    const { data: planoW } = await supa.rpc("drive_plano_de_varredura", { p_company_id: companyId });
+    const nPastas = Array.isArray((planoW as any)?.pastas_ativas) ? (planoW as any).pastas_ativas.length : 0;
+    const nDesativadas = Array.isArray((planoW as any)?.pastas_desativadas) ? (planoW as any).pastas_desativadas.length : 0;
+    const r = await rodarAnaliseVisual("varredura automatica do Drive", { companyId }, prazoW, telW);
+    const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0 };
+    return json({ ok: true, modo: "drive_watch", versao: "job-v2.5",
+      pastas_ativas: nPastas, pastas_desativadas: nDesativadas,
+      pecas_novas_analisadas: v.analisados_nesta_rodada,
+      cobertura_acumulada: v.cobertura_acumulada, total_com_miniatura: v.total,
+      miniaturas_que_falharam: v.falhas_thumb,
+      completo: (r as any)?.completo ?? null,
+      resumo: `${v.analisados_nesta_rodada} peca(s) nova(s) analisada(s) em ${nPastas} pasta(s) monitorada(s)` +
+        (nDesativadas ? ` (${nDesativadas} pasta(s) desativada(s) NAO foram lidas)` : "") +
+        (v.analisados_nesta_rodada === 0 ? " - nada mudou desde a ultima varredura, o que NAO e falha" : ""),
+      duracao_ms: Date.now() - tw });
+  }
 
   // v2: CONTINUACAO DE SEGMENTO - a propria edge se reinvoca com o job_id; o novo worker
   // le o checkpoint do banco e retoma do ponto exato, com orcamento de tempo zerado.
