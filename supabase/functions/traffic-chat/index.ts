@@ -1,4 +1,11 @@
 // supabase/functions/traffic-chat/index.ts (v28.6)
+// v28.8 (04/08/2026) - GT-06 fechado dos DOIS lados. O caminho de MODIFICACAO (pausar_campanha,
+//   pausar_criativo, alterar_orcamento, escalar_criativo) nao lia trava nenhuma: oferecia card de
+//   pausa com a flag desligada, o gestor gastaria a aprovacao e a executora bloquearia depois.
+//   A regra virou RPC unica - pode_executar_acao - e os DOIS caminhos consultam ela. O bloco
+//   inline que o v28.6 pos no caminho de criacao SAIU: doutrina em tres lugares (dois aqui, um na
+//   meta-actions) foi o que produziu o desync do "nasce pausado" de 31/07 a 03/08.
+//   Falha da propria verificacao tambem NAO emite card - se nao deu para saber, nao se promete.
 // v28.7 (04/08/2026) - GT-11: get_estrutura_conjuntos deixa de vazar entre empresas e passa a
 //   paginar. A RPC nova exige p_company_id; sem ele devolve lista vazia com AVISO_CRITICO, entao
 //   ate este deploy a tool estava CEGA - de proposito, porque cego declarando e melhor que ver
@@ -571,6 +578,32 @@ async function t_estrutura_conjuntos(companyId: string, pagina: number) {
 }
 
 type CardInfo = { approval_id: string; action: string; entity_type: string; target_name: string; summary: string; params: any; status: string };
+
+// v28.8 (GT-06): POSTURA DE EXECUCAO, FONTE UNICA. O v28.6 pos a doutrina inline no caminho de
+// CRIACAO e deixou o de MODIFICACAO sem ler nada - o agente ofereceu card de pausa com a flag
+// desligada, o gestor aprovaria e a executora bloquearia depois. Copiar o bloco poria a mesma
+// regra em tres lugares (dois aqui, um na meta-actions), que e exatamente o que produziu o desync
+// do "nasce pausado" entre 31/07 e 03/08. Agora os dois caminhos consultam a MESMA RPC e usam o
+// MESMO texto - `mensagem_para_o_gestor` tem dono unico no banco, o chat nao compoe frase propria.
+// A RPC nao autoriza nada: a trava que vale segue sendo a da meta-actions no ato da execucao.
+// Ela so evita que o chat prometa o que a executora vai recusar.
+async function verificarPostura(companyId: string, action: string) {
+  const { data, error } = await supa.rpc("pode_executar_acao", {
+    p_company_id: companyId, p_action: action,
+  });
+  if (error) {
+    // Falha de verificacao NAO emite card: se nao deu para saber, nao se promete.
+    return { perm: null, recusa: { erro: `nao consegui verificar a postura de execucao: ${error.message}. NAO emiti o card - sem essa verificacao nao ha como saber se a aprovacao surtiria efeito.` } };
+  }
+  const perm = data as Record<string, unknown> | null;
+  if (!perm?.permitido) {
+    return { perm: null, recusa: {
+      erro: String(perm?.motivo ?? "acao_nao_permitida"),
+      detalhe: String(perm?.mensagem_para_o_gestor ?? ""),
+      acao_bloqueada: action } };
+  }
+  return { perm, recusa: null };
+}
 async function t_propose_action(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[]) {
   const action = String(args?.action_type ?? "");
   const targetLike = String(args?.target_name ?? "").trim();
@@ -587,6 +620,13 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   if (!reversa) return { erro: "reversa obrigatoria: descreva COMO desfazer esta acao, QUEM desfaz e EM QUANTO TEMPO. Sem plano de reversao o pedido nao pode ser criado." };
   if (!sucesso) return { erro: "metrica_sucesso obrigatoria: qual metrica e qual limiar dizem que deu certo, lida no funil COMPLETO (ate contrato pago), nao apenas no custo de midia." };
   if (action === "alterar_orcamento" && !(Number(params?.novo_orcamento_diario_reais) > 0)) return { erro: "informe params.novo_orcamento_diario_reais (> 0)" };
+
+  // v28.8 (GT-06): a trava e consultada ANTES de montar payload ou gravar card - de nada serve
+  // descobrir depois que a acao esta desligada. Aqui so a recusa interessa: o caminho de
+  // modificacao nao usa conta permitida nem teto de sanidade (o alvo ja existe).
+  const { recusa } = await verificarPostura(companyId, action);
+  if (recusa) return recusa;
+
   const needle = norm(targetLike);
   const isAd = action === "pausar_criativo" || action === "escalar_criativo";
   let matches: { id: string; name: string; external_id?: string }[] = [];
@@ -644,34 +684,15 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
   if (!reversa) return { erro: "reversa obrigatoria: como desfazer (ex.: excluir o objeto criado - ele nasce PAUSADO, entao a reversa antes da ativacao e barata), quem desfaz e em quanto tempo" };
   if (!sucesso) return { erro: "metrica_sucesso obrigatoria: qual metrica e limiar dizem que deu certo, no funil completo ate contrato pago" };
 
-  // v28.6: config DA EMPRESA DESTA CONVERSA. Era lida com .eq("id",1) - a linha da Legal e
-  // Viver - entao conversa da COHAPM avaliava a lista de contas de OUTRA empresa. Mesma classe
-  // do bug corrigido na meta-actions v3: seguro por acidente com uma empresa, errado com tres.
-  const { data: conf } = await supa.from("meta_execution_config")
-    .select("master_enabled,dry_run,action_flags,contas_permitidas_criacao,teto_sanidade_orcamento_diario")
-    .eq("company_id", companyId).maybeSingle();
-  if (!conf) {
-    return { erro: "criacao_bloqueada_sem_configuracao",
-      detalhe: "Esta empresa nao tem configuracao de execucao propria, e sem ela nada pode ser criado. Informe ao gestor que habilitar criacao para esta empresa e uma configuracao do sistema - e NAO proponha usar a configuracao de outra empresa." };
-  }
-  // v28.6 (GT-06): LER AS TRAVAS ANTES DE PROMETER. Emitir card de acao desligada faz o gestor
-  // aprovar algo que a executora vai bloquear depois - promessa que o sistema nao cumpre.
-  // Melhor declarar a trava fechada AGORA, com o plano pronto, do que gastar a aprovacao dele.
-  if (conf.master_enabled !== true) {
-    return { erro: "criacao_bloqueada_por_trava_mestra",
-      detalhe: "A execucao de acoes reais esta DESLIGADA para esta empresa, entao o card nao foi emitido: aprova-lo nao produziria efeito. Diga isso ao gestor em linguagem de negocio, entregue o plano completo do que seria criado, e explique que ligar a execucao e decisao de quem administra o sistema." };
-  }
-  if (conf.action_flags?.[action] !== true) {
-    return { erro: "criacao_bloqueada_por_trava_da_acao",
-      acao_bloqueada: action,
-      detalhe: "Esta acao especifica esta desligada para esta empresa. NAO emiti o card, porque um card aprovado dessa acao seria recusado na execucao. Entregue ao gestor o plano do que seria criado - orcamento, molde, destino - e diga que falta liberar esta acao no sistema. NAO cite nome de flag nem detalhe tecnico." };
-  }
-  const contasOk: string[] = (conf.contas_permitidas_criacao ?? []).map((x: string) => x.startsWith("act_") ? x : `act_${x}`);
-  const tetoSanidade = Number(conf.teto_sanidade_orcamento_diario ?? 5000);
+  // v28.8 (GT-06): a leitura inline de meta_execution_config que o v28.6 introduziu aqui saiu.
+  // A mesma RPC do caminho de modificacao responde - vocabulario de recusa e texto ao gestor
+  // passam a ter um dono so. O que a config ainda fornece vem do retorno dela.
+  const { perm, recusa } = await verificarPostura(companyId, action);
+  if (recusa) return recusa;
+  const contasOk: string[] = ((perm!.contas_permitidas_criacao as string[]) ?? []).map((x: string) => x.startsWith("act_") ? x : `act_${x}`);
+  const tetoSanidade = Number(perm!.teto_sanidade_orcamento_diario ?? 5000);
   if (!contasOk.length) return { erro: "criacao bloqueada: nenhuma conta desta empresa esta habilitada para criacao. Isso e configuracao do sistema, nao algo que voce possa contornar." };
-  const avisoDryRun = conf.dry_run === true
-    ? "ATENCAO: o sistema esta em modo de simulacao. Se este card for aprovado, NADA sera criado na Meta - a execucao apenas registra o que faria. Declare isso ao gestor."
-    : null;
+  const avisoDryRun = (perm!.aviso_dry_run as string | null) ?? null;
 
   // v25 CORRECAO CRITICA (28/07): a conta de destino tem de vir da EMPRESA DESTA CONVERSA,
   // nunca do primeiro item da lista branca. Existem 2 empresas no banco (Legal e Viver e
@@ -1590,7 +1611,7 @@ Deno.serve(async (req) => {
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
     hist_msgs_cortadas: histMsgsCortadas,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "chat-v28.7" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "chat-v28.8" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
@@ -1598,7 +1619,7 @@ Deno.serve(async (req) => {
     attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
 
-  return json({ ok: true, versao: "chat-v28.7", conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
+  return json({ ok: true, versao: "chat-v28.8", conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
     iteracoes_usadas: iteracoes, finish_reason: finishReason, fatos_memoria: (ctxRows ?? []).length,
     preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
     deadline_tools: deadlineTools, ms_total: decorrido(),
