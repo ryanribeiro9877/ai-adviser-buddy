@@ -1,4 +1,11 @@
-// supabase/functions/windsor-sync/index.ts (v16)
+// supabase/functions/windsor-sync/index.ts (v17)
+//
+// v17 (04/08/2026) — RECORTE DE PUBLICO (idade e genero) por ANUNCIO e por dia. O relatorio
+//   declarava que nao existia nenhuma tabela de segmentacao; agora existe coleta. Duas chamadas
+//   extras ao Windsor por sincronizacao, uma por dimensao - combinar as duas multiplicaria as
+//   linhas pelo mesmo preco de chamada. Grava em campaign_breakdown_daily via
+//   sync_ingest_breakdown_daily (migracao nao minha); sem a tabela, o passo reporta
+//   ingest_error e NAO derruba o resto da sincronizacao.
 //
 // v16 (04/08/2026) — RANKINGS DE QUALIDADE DO ANUNCIO. O relatorio diario declarava a ausencia
 //   desses tres campos; o Windsor entrega e foi provado com dado real em 04/08 (conta
@@ -63,6 +70,26 @@ const RANKINGS = ["quality_ranking", "engagement_rate_ranking", "conversion_rate
 const FIELDS_AD_DAILY: Record<string, string[]> = {
   facebook: ["date", "account_id", "campaign_id", "ad_id", "frequency", ...METRICS, ...RANKINGS],
 };
+// v17 (04/08/2026): RECORTE. Uma chamada por dimensao - combinar idade com genero multiplica as
+// linhas e a Meta cobra a chamada igual. O recorte vem no nivel de ANUNCIO (testado em 04/08), que
+// e mais granular que campanha e rola para ela por soma; o contrario nao seria possivel.
+// `reach` fica FORA de proposito: e gente deduplicada e a soma dos recortes NAO fecha com o total
+// (medido: 2.967 no total contra 2.938 somando genero, -1,0%). Gravar alcance por recorte
+// convidaria a somar e chegar a numero errado. Impressoes, gasto, cliques, cliques no link e
+// formularios fecham exatos - esses sim entram.
+const METRICS_RECORTE = [
+  "spend", "impressions", "clicks",
+  "actions_link_click", "actions_landing_page_view",
+  "actions_onsite_conversion_messaging_conversation_started_7d", "actions_lead",
+];
+const RECORTES: { tipo: string; campo: string }[] = [
+  { tipo: "idade", campo: "age" },
+  { tipo: "genero", campo: "gender" },
+];
+const FIELDS_RECORTE: Record<string, string[]> = {
+  facebook: ["date", "account_id", "campaign_id", "ad_id", ...METRICS_RECORTE],
+};
+
 const FIELDS_ADSETS: Record<string, string[]> = {
   facebook: [
     "account_id", "campaign_id", "adset_id", "adset_name", "adset_status",
@@ -145,6 +172,26 @@ function mapAdDaily(row: any, integ: any) {
     conversion_rate_ranking: rank(row.conversion_rate_ranking),
   };
 }
+// v17: uma linha por (anuncio, dia, tipo de recorte, valor). Sem valor de recorte a linha nao
+// existe - gravar valor vazio criaria chave que colide com ela mesma no indice unico.
+function mapRecorte(row: any, integ: any, tipo: string, campo: string) {
+  if (!row.ad_id || !row.date) return null;
+  const valor = String(row[campo] ?? "").trim();
+  if (!valor) return null;
+  const m = baseMetrics(row);
+  return {
+    account_id: integ.external_id,
+    campaign_external_id: String(row.campaign_id ?? ""),
+    ad_external_id: String(row.ad_id),
+    snapshot_date: row.date,
+    tipo_recorte: tipo,
+    valor_recorte: valor,
+    spend: m.spend, impressions: m.impressions, clicks: m.clicks,
+    link_clicks: m.link_clicks, landing_page_views: m.landing_page_views,
+    messaging_started: m.messaging_started, form_leads: m.form_leads,
+  };
+}
+
 function mapAdset(row: any, integ: any) {
   if (!row.adset_id) return null;
   const m = baseMetrics(row);
@@ -263,6 +310,35 @@ Deno.serve(async (req) => {
         let ingested = 0;
         if (rows.length) { const { data, error } = await supa.rpc("sync_ingest_ad_snapshots", { p: rows }); if (error) report.push({ connector, level: "ad_daily", ingest_error: error.message }); else ingested = data as number; }
         report.push({ connector, level: "ad_daily", windsor_rows: r.rows.length, ingested });
+      }
+    }
+
+    // ---- RECORTE DE PÚBLICO (janela do request COM date) ----
+    // Vem DEPOIS do ad_daily de propósito: são 2 chamadas extras ao Windsor por sincronização, e
+    // a lição do v15 é que o que é coletado primeiro precisa estar gravado antes de gastar tempo.
+    // Cada recorte falha por conta própria — um erro em gênero não pode derrubar idade.
+    if (FIELDS_RECORTE[connector]) {
+      for (const rec of RECORTES) {
+        const campos = [...FIELDS_RECORTE[connector], rec.campo];
+        const r = await fetchRows(connector, campos, windsorKey, reqWin);
+        if (r.error) {
+          report.push({ connector, level: `recorte:${rec.tipo}`, error: r.error, body: r.body });
+          continue;
+        }
+        const rows: any[] = [];
+        for (const row of r.rows) {
+          const integ = resolve(row, list);
+          if (!integ) continue;
+          const m = mapRecorte(row, integ, rec.tipo, rec.campo);
+          if (m) rows.push(m);
+        }
+        let ingested = 0;
+        if (rows.length) {
+          const { data, error } = await supa.rpc("sync_ingest_breakdown_daily", { p: rows });
+          if (error) report.push({ connector, level: `recorte:${rec.tipo}`, ingest_error: error.message });
+          else ingested = data as number;
+        }
+        report.push({ connector, level: `recorte:${rec.tipo}`, windsor_rows: r.rows.length, ingested });
       }
     }
 
