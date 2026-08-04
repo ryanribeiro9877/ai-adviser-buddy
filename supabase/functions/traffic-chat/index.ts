@@ -1,4 +1,11 @@
 // supabase/functions/traffic-chat/index.ts (v28.6)
+// v28.9 (04/08/2026) - AVISO DE ORCAMENTO. Orcamento diario na Meta e MEDIA, nao limite do dia:
+//   a propria tela declarou, para R$ 60,00/dia, teto real de R$ 105,00 no dia (175%) e R$ 420,00
+//   na semana. O gestor decidiu "R$ 60 por campanha" achando que era limite; com tres campanhas o
+//   pior dia e R$ 315,00, e ninguem tinha lhe dito. Agora a RPC avaliar_orcamento_diario julga o
+//   valor E traduz o que ele permite, e o texto dela vai para o SUMMARY do card - onde o gestor le
+//   no momento de decidir, nao para tras na conversa. A comparacao local contra teto_sanidade SAIU
+//   junto com a variavel: dois juizes para a mesma pergunta produziram o desync de 31/07-03/08.
 // v28.8 (04/08/2026) - GT-06 fechado dos DOIS lados. O caminho de MODIFICACAO (pausar_campanha,
 //   pausar_criativo, alterar_orcamento, escalar_criativo) nao lia trava nenhuma: oferecia card de
 //   pausa com a flag desligada, o gestor gastaria a aprovacao e a executora bloquearia depois.
@@ -690,7 +697,9 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
   const { perm, recusa } = await verificarPostura(companyId, action);
   if (recusa) return recusa;
   const contasOk: string[] = ((perm!.contas_permitidas_criacao as string[]) ?? []).map((x: string) => x.startsWith("act_") ? x : `act_${x}`);
-  const tetoSanidade = Number(perm!.teto_sanidade_orcamento_diario ?? 5000);
+  // v28.9: teto_sanidade nao e mais lido aqui. Quem julga orcamento e avaliar_orcamento_diario,
+  // que ja compara contra o teto da empresa - manter a leitura aqui deixaria uma variavel pronta
+  // para alguem reintroduzir a comparacao local ao lado da RPC.
   if (!contasOk.length) return { erro: "criacao bloqueada: nenhuma conta desta empresa esta habilitada para criacao. Isso e configuracao do sistema, nao algo que voce possa contornar." };
   const avisoDryRun = (perm!.aviso_dry_run as string | null) ?? null;
 
@@ -747,7 +756,22 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!nomeNovo) return { erro: "params.nome_novo obrigatorio (nome do conjunto que vai nascer)" };
     if (!campanhaDestino) return { erro: "params.campanha_destino obrigatorio (nome da campanha que vai receber o conjunto)" };
     if (!(orcamento > 0)) return { erro: "params.orcamento_diario_reais obrigatorio. NAO existe valor padrao: PERGUNTE ao gestor qual orcamento diario ele quer para este conjunto antes de propor." };
-    if (orcamento > tetoSanidade) return { erro: `orcamento de R$ ${orcamento} acima do teto de sanidade (R$ ${tetoSanidade}/dia). Confirme o valor com o gestor - atencao a confusao entre reais e centavos.` };
+
+    // v28.9: quem decide se o orcamento cabe e a RPC, nao uma comparacao local. Ela devolve
+    // tambem o que o numero REALMENTE permite - media, teto real do dia (175%, texto da Meta),
+    // teto semanal garantido e o pior dia somando N campanhas. O gestor decidiu "R$ 60 por
+    // campanha" achando que era limite do dia; com tres campanhas o pior dia e R$ 315,00.
+    // A comparacao contra tetoSanidade que existia aqui SAIU: dois juizes para a mesma pergunta
+    // foi o que produziu o desync do contrato de ativacao entre 31/07 e 03/08.
+    const { data: orc, error: orcErr } = await supa.rpc("avaliar_orcamento_diario", {
+      p_company_id: companyId, p_reais: orcamento, p_campanhas: 1,
+    });
+    if (orcErr) return { erro: `nao consegui avaliar o orcamento: ${orcErr.message}. NAO emiti o card - sem essa avaliacao nao ha como dizer ao gestor o que o valor realmente permite.` };
+    if (!orc?.permitido) {
+      return { erro: String(orc?.motivo ?? "orcamento_nao_permitido"),
+               detalhe: String(orc?.mensagem_para_o_gestor ?? "") };
+    }
+    const avisoOrcamento = String(orc.mensagem_para_o_gestor ?? "");
 
     const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,account_id").eq("company_id", companyId);
     const molde = (sets ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
@@ -788,15 +812,28 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!dest) return { erro: `campanha de destino '${campanhaDestino}' nao encontrada nem no sistema nem entre as criadas por pedido aprovado. Se ela ainda nao existe, proponha criar_campanha primeiro e aguarde a aprovacao. NAO invente o identificador.` };
     if (!dest.external_id) return { erro: `a campanha '${dest.name}' existe no sistema mas ainda nao tem identificador da Meta sincronizado - sem ele o conjunto nao tem onde nascer. Aguarde a proxima sincronizacao.` };
 
-    const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO`;
-    return await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
+    // v28.9: o aviso entra NO SUMMARY, nao so no payload. O summary e o unico texto que o cartao
+    // mostra sem expandir nada, e o gestor decide lendo o cartao no sininho - aviso que fica so na
+    // conversa ja rolou para cima quando a decisao acontece.
+    const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO` +
+      (avisoOrcamento ? ` — ${avisoOrcamento}` : "");
+    const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
       orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "PAUSED",  // v28.6: aprovar CRIA pausado; ativar e ato do gestor
+      aviso_orcamento: avisoOrcamento || null,
+      orcamento_media_por_dia: orc?.media_por_dia ?? null,
+      orcamento_teto_real_do_dia: orc?.teto_real_do_dia ?? null,
+      orcamento_teto_semanal_garantido: orc?.teto_semanal_garantido ?? null,
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
     }, cards);
+    // Devolve o aviso na resposta da tool tambem: o agente precisa repassar ao gestor ANTES de ele
+    // decidir, e o texto vem inteiro da RPC - sem frase composta aqui, o dono do texto e um so.
+    return avisoOrcamento && card && typeof card === "object" && !(card as any).erro
+      ? { ...(card as any), aviso_orcamento: avisoOrcamento }
+      : card;
   }
 
   // -------- criar_anuncio_a_partir_de (compliance BLOQUEANTE) --------
@@ -1611,7 +1648,7 @@ Deno.serve(async (req) => {
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
     hist_msgs_cortadas: histMsgsCortadas,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "chat-v28.8" };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: "chat-v28.9" };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
@@ -1619,7 +1656,7 @@ Deno.serve(async (req) => {
     attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
 
-  return json({ ok: true, versao: "chat-v28.8", conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
+  return json({ ok: true, versao: "chat-v28.9", conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
     iteracoes_usadas: iteracoes, finish_reason: finishReason, fatos_memoria: (ctxRows ?? []).length,
     preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
     deadline_tools: deadlineTools, ms_total: decorrido(),
