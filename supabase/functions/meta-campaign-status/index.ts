@@ -1,4 +1,18 @@
-// supabase/functions/meta-campaign-status/index.ts (v4)
+// supabase/functions/meta-campaign-status/index.ts (v5)
+// v5 (05/08/2026) - ESPELHO DE OBJETO DO ANUNCIO. `ads.last_synced_at` ficou parado de 27/07 a
+//   05/08 nas tres contas, no mesmo microssegundo, enquanto campaigns e ad_metric_snapshots
+//   avancavam todo dia. Causa medida, em duas partes:
+//     (1) no windsor-sync os passos de objeto (ad_sets e ads) vivem dentro de `if (!skipWide)` e o
+//         cron diario manda skip_wide:true - `ads` nunca esteve na corrida diaria;
+//     (2) o Windsor descarta anuncio sem sinal de entrega (mapAd/anySignal), entao 13 anuncios que
+//         existem na Graph nao poderiam entrar no espelho por aquela rota nem sem timeout.
+//   POR QUE O ESPELHO PASSA A MORAR AQUI: a lista de anuncios e ESTADO, nao metrica - e este
+//   endpoint ja le a lista completa da conta na Graph (71 anuncios contra 58 no espelho). E a
+//   mesma decisao do GT-09 um nivel abaixo. Nao cabia no windsor-sync: medido em 05/08, a corrida
+//   diaria dele termina aos 145s de um teto de 150s, sem folga para um passo novo.
+//   A gravacao e da RPC espelhar_ads_da_graph: metrica de anuncio novo vem da soma de
+//   ad_metric_snapshots (nunca inventada), anuncio existente nao tem metrica tocada, e
+//   url_tags/destino_url continuam sendo exclusividade do GT-12.
 // v4 (05/08/2026) - GT-12: coleta url_tags e destino_url dos anuncios pela Graph.
 //   A coleta preserva a diferenca fundamental entre CAMPO AUSENTE e CAMPO VAZIO:
 //   so grava url_tags_coletado_em quando a chave veio na resposta da Graph. Um modificador
@@ -226,7 +240,18 @@ Deno.serve(async (req) => {
   const config = new Map<string, ConfigCampanha>(); // campaign_id -> configuracao lida da Graph
   const acessiveis: string[] = [];
   const inacessiveis: string[] = [];
-  const anunciosPorConta = new Map<string, Array<{ id: string; creative_id: string | null }>>();
+  // v5: o anuncio carrega o proprio objeto, nao apenas o id e o criativo. `status` guarda
+  // effective_status - o estado que a Meta de fato aplica, o mesmo que o windsor-sync grava.
+  type AnuncioGraph = {
+    id: string;
+    creative_id: string | null;
+    account_id: string;
+    name: string | null;
+    status: string | null;
+    adset_external_id: string | null;
+    campaign_external_id: string | null;
+  };
+  const anunciosPorConta = new Map<string, AnuncioGraph[]>();
 
   const CAMPOS = [
     "name",
@@ -267,8 +292,9 @@ Deno.serve(async (req) => {
     // GT-12: a lista de anuncios e estado da conta, como a configuracao de campanha. So tenta
     // esta ponta quando a conta respondeu na Graph; conta inacessivel permanece nunca_lido.
     if (okConta) {
-      const anuncios: Array<{ id: string; creative_id: string | null }> = [];
-      let urlAds = `${GRAPH}/act_${c}/ads?fields=id,creative{id}&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
+      const anuncios: AnuncioGraph[] = [];
+      const CAMPOS_ADS = "id,name,effective_status,adset_id,campaign_id,creative{id}";
+      let urlAds = `${GRAPH}/act_${c}/ads?fields=${CAMPOS_ADS}&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
       let pagAds = 0;
       while (urlAds && pagAds < 5) {
         const r = await fetch(urlAds);
@@ -281,9 +307,20 @@ Deno.serve(async (req) => {
           break;
         }
         for (const x of p?.data ?? []) {
+          // Campo que a Graph nao devolveu vira null e a RPC preserva o valor anterior com
+          // coalesce. Nunca um default: foi um `?? "ACTIVE"` que ja produziu status falso aqui.
+          const texto = (v: unknown) => {
+            const s = String(v ?? "").trim();
+            return s ? s : null;
+          };
           anuncios.push({
             id: String(x.id),
             creative_id: x?.creative?.id ? String(x.creative.id) : null,
+            account_id: c,
+            name: texto(x.name),
+            status: texto(x.effective_status),
+            adset_external_id: texto(x.adset_id),
+            campaign_external_id: texto(x.campaign_id),
           });
         }
         urlAds = p?.paging?.next ?? "";
@@ -300,6 +337,26 @@ Deno.serve(async (req) => {
   const creativeIds = [
     ...new Set(anunciosGraph.map((a) => a.creative_id).filter((x): x is string => !!x)),
   ];
+
+  // v5: ESPELHO ANTES DA SONDA, de proposito. A licao do windsor-sync v15 (os 5 dias cegos de
+  // 23-27/07) foi que passo de escrita nao fica atras de passo lento: se a sonda de campos
+  // estourar o teto de 120s do cron, o espelho do anuncio ja esta gravado. Como o espelho corre
+  // primeiro, o anuncio recem-inserido tambem entra na coleta do GT-12 nesta mesma corrida.
+  let espelhoAds: unknown = { nota: "nenhum anuncio lido na Graph" };
+  if (anunciosGraph.length) {
+    const linhas = anunciosGraph.map((a) => ({
+      account_id: a.account_id,
+      ad_external_id: a.id,
+      name: a.name,
+      status: a.status,
+      adset_external_id: a.adset_external_id,
+      campaign_external_id: a.campaign_external_id,
+      creative_id: a.creative_id,
+    }));
+    const { data, error } = await supa.rpc("espelhar_ads_da_graph", { p: linhas });
+    espelhoAds = error ? { erro: error.message } : data;
+  }
+
   const diagnosticoCampos: LeituraCampo[] = [];
 
   const adUrlTags = await lerCampoPorIds(adIds, "anuncio", "url_tags");
@@ -488,6 +545,10 @@ Deno.serve(async (req) => {
     sem_config_por_falta_de_acesso: (totalCampanhas ?? 0) - configGravada,
     nota_config:
       "config_coletada_em so e preenchido para campanha lida na Graph. Campanha em conta inacessivel fica com config NULA e sem a marca - nulo sem marca = nao coletado; nulo COM marca = a Meta nao tem o campo (tipico de daily_budget em campanha ABO, onde o orcamento vive no conjunto). Orcamentos em CENTAVOS.",
+    espelho_de_ads: {
+      resultado: espelhoAds,
+      nota: "inseridos = anuncio que existia na Graph e nao no espelho (a rota do Windsor nao o traz porque descarta objeto sem entrega). Metrica de anuncio novo e a soma de ad_metric_snapshots, nao um zero inventado; anuncio existente nao tem metrica tocada aqui - quem a mantem e o windsor-sync na janela ampla. last_synced_at avanca para todo anuncio lido na Graph.",
+    },
     gt12: {
       anuncios_lidos_na_meta: adIds.length,
       criativos_identificados: creativeIds.length,
@@ -500,6 +561,6 @@ Deno.serve(async (req) => {
       sonda: diagnosticoCampos,
       nota: "com_chave=0 significa que a Graph nao devolveu o campo e a respectiva marca de coleta nao foi gravada. Destino: uma URL inequívoca = unica; mais de uma = ambigua com candidatas cruas e destino_url NULL; nenhuma em spec retornado = ausente. template_url_spec e link_destination_display_url sao apenas sondados ate a forma real ser provada.",
     },
-    versao: "meta-campaign-status-v4",
+    versao: "meta-campaign-status-v5",
   });
 });

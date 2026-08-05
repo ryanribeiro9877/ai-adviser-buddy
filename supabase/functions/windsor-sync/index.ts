@@ -1,4 +1,17 @@
-// supabase/functions/windsor-sync/index.ts (v17)
+// supabase/functions/windsor-sync/index.ts (v18)
+//
+// v18 (05/08/2026) — `wide_only`: corrida dedicada a UM nivel da janela ampla.
+//   O PROBLEMA MEDIDO: na corrida semanal de 02/08 o passo de CONJUNTO gravou as 08:02:34, isto e,
+//   154s depois do inicio — o pg_net (timeout_milliseconds:=150000) ja tinha desistido 4s antes. O
+//   passo de ANUNCIO vem logo em seguida e por isso nunca escreveu: `ads.last_synced_at` ficou
+//   parado em 27/07 nas tres contas, no mesmo microssegundo. O cron marcava "succeeded" porque so
+//   mede o enfileiramento do http_post, nao a resposta da edge.
+//   POR QUE NAO BASTA REORDENAR: os dois niveis nao caibem na mesma corrida. Medido em 05/08, a
+//   corrida diaria termina aos 145s de um teto de 150s; a semanal gasta ~96s em campanha e
+//   ad_daily antes de chegar na janela ampla. Trocar a ordem so escolheria outro perdedor.
+//   COMO FUNCIONA: `wide_only: 'adsets' | 'ads'` roda so aquele nivel e PULA campanha, ad_daily e
+//   recorte — eles ja rodaram na corrida diaria, e o que falta a este nivel e o teto inteiro para
+//   ele so. Dois crons semanais em horarios distintos, um por nivel.
 //
 // v17 (04/08/2026) — RECORTE DE PUBLICO (idade e genero) por ANUNCIO e por dia. O relatorio
 //   declarava que nao existia nenhuma tabela de segmentacao; agora existe coleta. Duas chamadas
@@ -47,19 +60,47 @@ const today = () => new Date().toISOString().slice(0, 10);
 const PROVIDER_CONNECTOR: Record<string, string> = { meta_ads: "facebook" };
 
 const METRICS = [
-  "spend", "impressions", "reach", "clicks",
-  "actions_link_click", "actions_landing_page_view",
-  "actions_onsite_conversion_messaging_conversation_started_7d", "actions_lead",
-  "actions_offsite_conversion_fb_pixel_purchase", "action_values_offsite_conversion_fb_pixel_purchase",
+  "spend",
+  "impressions",
+  "reach",
+  "clicks",
+  "actions_link_click",
+  "actions_landing_page_view",
+  "actions_onsite_conversion_messaging_conversation_started_7d",
+  "actions_lead",
+  "actions_offsite_conversion_fb_pixel_purchase",
+  "action_values_offsite_conversion_fb_pixel_purchase",
 ];
 const FIELDS: Record<string, string[]> = {
-  facebook: ["date", "account_id", "account_name", "campaign", "campaign_id", "objective", "frequency", ...METRICS],
+  facebook: [
+    "date",
+    "account_id",
+    "account_name",
+    "campaign",
+    "campaign_id",
+    "objective",
+    "frequency",
+    ...METRICS,
+  ],
 };
 const FIELDS_ADS: Record<string, string[]> = {
   facebook: [
-    "account_id", "campaign_id", "adset_id", "ad_id", "ad_name", "creative_id",
-    "thumbnail_url", "image_url", "title", "body", "call_to_action_type", "object_type",
-    "effective_status", "instagram_permalink_url", "facebook_permalink_url", "mobile_feed_standard_preview_url",
+    "account_id",
+    "campaign_id",
+    "adset_id",
+    "ad_id",
+    "ad_name",
+    "creative_id",
+    "thumbnail_url",
+    "image_url",
+    "title",
+    "body",
+    "call_to_action_type",
+    "object_type",
+    "effective_status",
+    "instagram_permalink_url",
+    "facebook_permalink_url",
+    "mobile_feed_standard_preview_url",
     ...METRICS,
   ],
 };
@@ -82,8 +123,13 @@ const FIELDS_AD_DAILY: Record<string, string[]> = {
 // (medido: 2.967 no total contra 2.938 somando genero, -1,0%). Impressoes, gasto, cliques,
 // cliques no link e formularios fecham exatos. Quem somar alcance por faixa chega a numero errado.
 const METRICS_RECORTE = [
-  "spend", "impressions", "reach", "clicks",
-  "actions_link_click", "actions_landing_page_view", "actions_lead",
+  "spend",
+  "impressions",
+  "reach",
+  "clicks",
+  "actions_link_click",
+  "actions_landing_page_view",
+  "actions_lead",
 ];
 const RECORTES: { tipo: string; campo: string }[] = [
   { tipo: "idade", campo: "age" },
@@ -95,22 +141,41 @@ const FIELDS_RECORTE: Record<string, string[]> = {
 
 const FIELDS_ADSETS: Record<string, string[]> = {
   facebook: [
-    "account_id", "campaign_id", "adset_id", "adset_name", "adset_status",
-    "adset_daily_budget", "adset_lifetime_budget", "adset_bid_strategy", "adset_targeting",
+    "account_id",
+    "campaign_id",
+    "adset_id",
+    "adset_name",
+    "adset_status",
+    "adset_daily_budget",
+    "adset_lifetime_budget",
+    "adset_bid_strategy",
+    "adset_targeting",
     ...METRICS,
   ],
 };
 
-const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+const num = (v: unknown) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
 const int = (v: unknown) => Math.round(num(v));
 const anySignal = (o: any) =>
-  o.spend > 0 || o.impressions > 0 || o.clicks > 0 || o.link_clicks > 0 ||
-  o.messaging_started > 0 || o.form_leads > 0 || o.sales > 0;
+  o.spend > 0 ||
+  o.impressions > 0 ||
+  o.clicks > 0 ||
+  o.link_clicks > 0 ||
+  o.messaging_started > 0 ||
+  o.form_leads > 0 ||
+  o.sales > 0;
 
 function baseMetrics(row: any) {
   return {
-    spend: num(row.spend), impressions: int(row.impressions), reach: int(row.reach), clicks: int(row.clicks),
-    link_clicks: int(row.actions_link_click), landing_page_views: int(row.actions_landing_page_view),
+    spend: num(row.spend),
+    impressions: int(row.impressions),
+    reach: int(row.reach),
+    clicks: int(row.clicks),
+    link_clicks: int(row.actions_link_click),
+    landing_page_views: int(row.actions_landing_page_view),
     messaging_started: int(row.actions_onsite_conversion_messaging_conversation_started_7d),
     form_leads: int(row.actions_lead),
     sales: int(row.actions_offsite_conversion_fb_pixel_purchase),
@@ -122,10 +187,16 @@ function mapFacebook(row: any, integ: any) {
   const m = baseMetrics(row);
   if (!anySignal(m)) return null;
   return {
-    company_id: integ.company_id, provider: integ.provider, account_id: integ.external_id,
-    campaign_id: String(row.campaign_id ?? ""), campaign_name: row.campaign ?? "(sem nome)",
-    objective: row.objective ?? null, date: row.date, frequency: num(row.frequency),
-    ...m, source: "windsor:facebook",
+    company_id: integ.company_id,
+    provider: integ.provider,
+    account_id: integ.external_id,
+    campaign_id: String(row.campaign_id ?? ""),
+    campaign_name: row.campaign ?? "(sem nome)",
+    objective: row.objective ?? null,
+    date: row.date,
+    frequency: num(row.frequency),
+    ...m,
+    source: "windsor:facebook",
   };
 }
 function mapAd(row: any, integ: any) {
@@ -139,9 +210,12 @@ function mapAd(row: any, integ: any) {
     ad_external_id: String(row.ad_id),
     name: row.ad_name ?? null,
     creative_id: row.creative_id != null ? String(row.creative_id) : null,
-    thumbnail_url: row.thumbnail_url ?? null, image_url: row.image_url ?? null,
-    title: row.title ?? null, body: row.body ?? null,
-    call_to_action_type: row.call_to_action_type ?? null, object_type: row.object_type ?? null,
+    thumbnail_url: row.thumbnail_url ?? null,
+    image_url: row.image_url ?? null,
+    title: row.title ?? null,
+    body: row.body ?? null,
+    call_to_action_type: row.call_to_action_type ?? null,
+    object_type: row.object_type ?? null,
     status: row.effective_status ?? null,
     permalink_url: row.instagram_permalink_url ?? row.facebook_permalink_url ?? null,
     preview_url: row.mobile_feed_standard_preview_url ?? null,
@@ -154,7 +228,9 @@ function mapAd(row: any, integ: any) {
 // ruim" seria erro de leitura - hoje os 3 anuncios em entrega estao todos UNKNOWN, com 1,4 a 2,6
 // mil impressoes/dia cada.
 const rank = (v: unknown): string | null => {
-  const s = String(v ?? "").trim().toUpperCase();
+  const s = String(v ?? "")
+    .trim()
+    .toUpperCase();
   return s ? s : null;
 };
 
@@ -166,9 +242,14 @@ function mapAdDaily(row: any, integ: any) {
     campaign_external_id: String(row.campaign_id ?? ""),
     ad_external_id: String(row.ad_id),
     snapshot_date: row.date,
-    spend: m.spend, impressions: m.impressions, reach: m.reach, clicks: m.clicks,
-    link_clicks: m.link_clicks, landing_page_views: m.landing_page_views,
-    messaging_started: m.messaging_started, form_leads: m.form_leads,
+    spend: m.spend,
+    impressions: m.impressions,
+    reach: m.reach,
+    clicks: m.clicks,
+    link_clicks: m.link_clicks,
+    landing_page_views: m.landing_page_views,
+    messaging_started: m.messaging_started,
+    form_leads: m.form_leads,
     frequency: num(row.frequency),
     quality_ranking: rank(row.quality_ranking),
     engagement_rate_ranking: rank(row.engagement_rate_ranking),
@@ -195,8 +276,12 @@ function mapRecorte(row: any, integ: any, tipo: string, campo: string) {
     snapshot_date: row.date,
     tipo_recorte: tipo,
     valor_recorte: String(row[campo] ?? "").trim(),
-    spend: m.spend, impressions: m.impressions, reach: m.reach, clicks: m.clicks,
-    link_clicks: m.link_clicks, landing_page_views: m.landing_page_views,
+    spend: m.spend,
+    impressions: m.impressions,
+    reach: m.reach,
+    clicks: m.clicks,
+    link_clicks: m.link_clicks,
+    landing_page_views: m.landing_page_views,
     form_leads: m.form_leads,
   };
 }
@@ -205,7 +290,13 @@ function mapAdset(row: any, integ: any) {
   if (!row.adset_id) return null;
   const m = baseMetrics(row);
   let targeting: any = row.adset_targeting ?? null;
-  if (typeof targeting === "string") { try { targeting = JSON.parse(targeting); } catch { /* mantém string */ } }
+  if (typeof targeting === "string") {
+    try {
+      targeting = JSON.parse(targeting);
+    } catch {
+      /* mantém string */
+    }
+  }
   return {
     account_id: integ.external_id,
     campaign_external_id: String(row.campaign_id ?? ""),
@@ -221,10 +312,18 @@ function mapAdset(row: any, integ: any) {
 }
 
 function json(obj: unknown, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 
-async function fetchRows(connector: string, fields: string[], key: string, win: { preset?: string | null; from?: string | null; to?: string | null }) {
+async function fetchRows(
+  connector: string,
+  fields: string[],
+  key: string,
+  win: { preset?: string | null; from?: string | null; to?: string | null },
+) {
   const url = new URL(`https://connectors.windsor.ai/${connector}`);
   url.searchParams.set("api_key", key);
   url.searchParams.set("fields", fields.join(","));
@@ -233,9 +332,14 @@ async function fetchRows(connector: string, fields: string[], key: string, win: 
   if (win.to) url.searchParams.set("date_to", win.to);
   const resp = await fetch(url.toString(), { headers: { accept: "application/json" } });
   const text = await resp.text();
-  if (!resp.ok) return { error: `windsor_http_${resp.status}`, body: text.slice(0, 300), rows: [] as any[] };
+  if (!resp.ok)
+    return { error: `windsor_http_${resp.status}`, body: text.slice(0, 300), rows: [] as any[] };
   let parsed: any;
-  try { parsed = JSON.parse(text); } catch { return { error: "windsor_non_json", body: text.slice(0, 300), rows: [] as any[] }; }
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: "windsor_non_json", body: text.slice(0, 300), rows: [] as any[] };
+  }
   return { rows: (Array.isArray(parsed) ? parsed : (parsed?.data ?? [])) as any[] };
 }
 
@@ -246,26 +350,49 @@ Deno.serve(async (req) => {
   const authz = req.headers.get("authorization") ?? "";
   const bearer = authz.toLowerCase().startsWith("bearer ") ? authz.slice(7).trim() : "";
   const provided = bearer || (req.headers.get("x-mcp-key") ?? "").trim();
-  const { data: cfg, error: cfgErr } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
+  const { data: cfg, error: cfgErr } = await supa
+    .from("mcp_config")
+    .select("api_key")
+    .eq("id", 1)
+    .maybeSingle();
   if (cfgErr) return json({ error: "config_read_failed", detail: cfgErr.message }, 500);
   if (!cfg?.api_key || provided !== cfg.api_key) return json({ error: "unauthorized" }, 401);
 
-  const { data: sec } = await supa.from("integration_secrets").select("value").eq("name", "windsor_api_key").maybeSingle();
+  const { data: sec } = await supa
+    .from("integration_secrets")
+    .select("value")
+    .eq("name", "windsor_api_key")
+    .maybeSingle();
   const windsorKey = (sec?.value ?? "").trim();
   if (!windsorKey) return json({ error: "missing_windsor_api_key" }, 400);
 
   let body: any = {};
-  try { body = await req.json(); } catch { /* vazio ok */ }
+  try {
+    body = await req.json();
+  } catch {
+    /* vazio ok */
+  }
   const dateFrom = body?.date_from ? String(body.date_from) : null;
   const dateTo = body?.date_to ? String(body.date_to) : null;
   const datePreset = dateFrom ? null : String(body?.date_preset ?? "last_7d");
   const skipWide = body?.skip_wide === true;
+  // wide_only restringe a janela ampla a um nivel e, por consequencia, dispensa os passos da
+  // janela do request: uma corrida dedicada existe para dar o teto de 150s inteiro a esse nivel.
+  const wideOnly = body?.wide_only ? String(body.wide_only) : null;
+  if (wideOnly && wideOnly !== "adsets" && wideOnly !== "ads") {
+    return json(
+      { error: "wide_only_invalido", aceito: ["adsets", "ads"], recebido: wideOnly },
+      400,
+    );
+  }
+  const soJanelaAmpla = wideOnly !== null;
   const wideFromOverride = body?.wide_from ? String(body.wide_from) : null;
   const reqWin = { preset: datePreset, from: dateFrom, to: dateTo };
   const wideWin = { preset: null as string | null, from: wideFrom(wideFromOverride), to: today() };
 
   const { data: integs, error: ie } = await supa
-    .from("integrations").select("id, company_id, provider, external_id, account_name, status");
+    .from("integrations")
+    .select("id, company_id, provider, external_id, account_name, status");
   if (ie) return json({ error: "integrations_read_failed", detail: ie.message }, 500);
 
   const byAccount = new Map<string, any>();
@@ -290,14 +417,16 @@ Deno.serve(async (req) => {
     const accounts = list.map((x) => x.external_id);
 
     // ---- CAMPANHA (janela do request) — v15: COLETA + INGEST IMEDIATO ----
-    if (FIELDS[connector]) {
+    if (FIELDS[connector] && !soJanelaAmpla) {
       const r = await fetchRows(connector, FIELDS[connector], windsorKey, reqWin);
       if (r.error) report.push({ connector, level: "campaign", error: r.error, body: r.body });
       else {
         const rows: any[] = [];
         for (const row of r.rows) {
-          const integ = resolve(row, list); if (!integ) continue;
-          const m = mapFacebook(row, integ); if (m && m.campaign_id) rows.push(m);
+          const integ = resolve(row, list);
+          if (!integ) continue;
+          const m = mapFacebook(row, integ);
+          if (m && m.campaign_id) rows.push(m);
         }
         campaignRowsTotal += rows.length;
         if (rows.length) {
@@ -305,19 +434,35 @@ Deno.serve(async (req) => {
           if (re) report.push({ connector, level: "campaign", ingest_error: re.message });
           else campaignIngest = res;
         }
-        report.push({ connector, level: "campaign", accounts, windsor_rows: r.rows.length, kept: rows.length, ingerido_imediatamente: true });
+        report.push({
+          connector,
+          level: "campaign",
+          accounts,
+          windsor_rows: r.rows.length,
+          kept: rows.length,
+          ingerido_imediatamente: true,
+        });
       }
     }
 
     // ---- AD-SNAPSHOTS DIÁRIOS (janela do request COM date) ----
-    if (FIELDS_AD_DAILY[connector]) {
+    if (FIELDS_AD_DAILY[connector] && !soJanelaAmpla) {
       const r = await fetchRows(connector, FIELDS_AD_DAILY[connector], windsorKey, reqWin);
       if (r.error) report.push({ connector, level: "ad_daily", error: r.error, body: r.body });
       else {
         const rows: any[] = [];
-        for (const row of r.rows) { const integ = resolve(row, list); if (!integ) continue; const m = mapAdDaily(row, integ); if (m) rows.push(m); }
+        for (const row of r.rows) {
+          const integ = resolve(row, list);
+          if (!integ) continue;
+          const m = mapAdDaily(row, integ);
+          if (m) rows.push(m);
+        }
         let ingested = 0;
-        if (rows.length) { const { data, error } = await supa.rpc("sync_ingest_ad_snapshots", { p: rows }); if (error) report.push({ connector, level: "ad_daily", ingest_error: error.message }); else ingested = data as number; }
+        if (rows.length) {
+          const { data, error } = await supa.rpc("sync_ingest_ad_snapshots", { p: rows });
+          if (error) report.push({ connector, level: "ad_daily", ingest_error: error.message });
+          else ingested = data as number;
+        }
         report.push({ connector, level: "ad_daily", windsor_rows: r.rows.length, ingested });
       }
     }
@@ -325,30 +470,53 @@ Deno.serve(async (req) => {
     // ---- JANELA AMPLA (opcional, isolada: não pode derrubar o que já foi gravado) ----
     if (!skipWide) {
       try {
-        if (FIELDS_ADSETS[connector]) {
+        if (FIELDS_ADSETS[connector] && wideOnly !== "ads") {
           const r = await fetchRows(connector, FIELDS_ADSETS[connector], windsorKey, wideWin);
           if (r.error) report.push({ connector, level: "adset", error: r.error, body: r.body });
           else {
             const rows: any[] = [];
-            for (const row of r.rows) { const integ = resolve(row, list); if (!integ) continue; const m = mapAdset(row, integ); if (m) rows.push(m); }
+            for (const row of r.rows) {
+              const integ = resolve(row, list);
+              if (!integ) continue;
+              const m = mapAdset(row, integ);
+              if (m) rows.push(m);
+            }
             let ingested = 0;
-            if (rows.length) { const { data, error } = await supa.rpc("sync_ingest_adsets", { p: rows }); if (error) report.push({ connector, level: "adset", ingest_error: error.message }); else ingested = data as number; }
+            if (rows.length) {
+              const { data, error } = await supa.rpc("sync_ingest_adsets", { p: rows });
+              if (error) report.push({ connector, level: "adset", ingest_error: error.message });
+              else ingested = data as number;
+            }
             report.push({ connector, level: "adset", windsor_rows: r.rows.length, ingested });
           }
         }
-        if (FIELDS_ADS[connector]) {
+        if (FIELDS_ADS[connector] && wideOnly !== "adsets") {
           const r = await fetchRows(connector, FIELDS_ADS[connector], windsorKey, wideWin);
           if (r.error) report.push({ connector, level: "ad", error: r.error, body: r.body });
           else {
             const rows: any[] = [];
-            for (const row of r.rows) { const integ = resolve(row, list); if (!integ) continue; const m = mapAd(row, integ); if (m) rows.push(m); }
+            for (const row of r.rows) {
+              const integ = resolve(row, list);
+              if (!integ) continue;
+              const m = mapAd(row, integ);
+              if (m) rows.push(m);
+            }
             let ingested = 0;
-            if (rows.length) { const { data, error } = await supa.rpc("sync_ingest_ads", { p: rows }); if (error) report.push({ connector, level: "ad", ingest_error: error.message }); else ingested = data as number; }
+            if (rows.length) {
+              const { data, error } = await supa.rpc("sync_ingest_ads", { p: rows });
+              if (error) report.push({ connector, level: "ad", ingest_error: error.message });
+              else ingested = data as number;
+            }
             report.push({ connector, level: "ad", windsor_rows: r.rows.length, ingested });
           }
         }
       } catch (e) {
-        report.push({ connector, level: "wide", erro_isolado: String((e as any)?.message ?? e), nota: "campanha e ad_daily JÁ foram gravados antes deste bloco" });
+        report.push({
+          connector,
+          level: "wide",
+          erro_isolado: String((e as any)?.message ?? e),
+          nota: "campanha e ad_daily JÁ foram gravados antes deste bloco",
+        });
       }
     }
 
@@ -358,7 +526,7 @@ Deno.serve(async (req) => {
     // estando a frente, derruba a coleta que funciona - foi assim que nasceram os cinco dias
     // cegos de 23-27/07. No fim, um estouro custa apenas o recorte daquele ciclo.
     // Cada dimensao falha por conta propria: erro em genero nao pode derrubar idade.
-    if (FIELDS_RECORTE[connector]) {
+    if (FIELDS_RECORTE[connector] && !soJanelaAmpla) {
       for (const rec of RECORTES) {
         const campos = [...FIELDS_RECORTE[connector], rec.campo];
         const r = await fetchRows(connector, campos, windsorKey, reqWin);
@@ -376,19 +544,31 @@ Deno.serve(async (req) => {
         let ingested = 0;
         if (rows.length) {
           const { data, error } = await supa.rpc("sync_ingest_breakdown", { p: rows });
-          if (error) report.push({ connector, level: `recorte:${rec.tipo}`, ingest_error: error.message });
+          if (error)
+            report.push({ connector, level: `recorte:${rec.tipo}`, ingest_error: error.message });
           else ingested = data as number;
         }
         // enviadas vs ingested: a RPC descarta em silencio tipo_recorte fora do CHECK, entao a
         // diferenca entre os dois numeros e o sinal de que algo foi recusado na ingestao.
-        report.push({ connector, level: `recorte:${rec.tipo}`, windsor_rows: r.rows.length, enviadas: rows.length, ingested });
+        report.push({
+          connector,
+          level: `recorte:${rec.tipo}`,
+          windsor_rows: r.rows.length,
+          enviadas: rows.length,
+          ingested,
+        });
       }
     }
   }
 
   return json({
     ok: true,
-    window: dateFrom ? { date_from: dateFrom, date_to: dateTo } : { date_preset: datePreset },
+    window: soJanelaAmpla
+      ? { skipped: true, motivo: "wide_only" }
+      : dateFrom
+        ? { date_from: dateFrom, date_to: dateTo }
+        : { date_preset: datePreset },
+    wide_only: wideOnly,
     wide_window: skipWide ? { skipped: true } : wideWin,
     report,
     campaign_rows_ingested: campaignRowsTotal,
