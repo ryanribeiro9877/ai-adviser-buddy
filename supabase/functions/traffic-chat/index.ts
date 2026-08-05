@@ -1,3 +1,19 @@
+// supabase/functions/traffic-chat/index.ts (v28.10)
+// v28.10 (04/08/2026) - GT-13: A PONTE DO DRIVE ATE O ANUNCIO. Tres mudancas.
+//   (1) get_drive_criativos e get_analise_visual_drive passam a devolver drive_file_id (a segunda
+//       tambem ja_enviada_para_meta, via join com media_uploads na propria RPC). O id era lido do
+//       Drive e DESCARTADO antes de chegar ao agente: ele sabia dizer "o video tal e o melhor" e
+//       nao sabia dizer qual arquivo era, entao a peca do acervo nao tinha como virar anuncio.
+//   (2) criar_anuncio_a_partir_de reconhece DOIS pedidos - replicacao pura e peca nova - e chama
+//       pedido_de_anuncio_completo antes de montar qualquer coisa, nos dois casos. A funcao e a
+//       fonte unica do que cada pedido exige; deixar um ramo sem verificacao poria a doutrina em
+//       dois lugares. completo=false devolve a mensagem DELA e nao emite card; falha de
+//       verificacao tambem nao emite, igual a pode_executar_acao e avaliar_orcamento_diario.
+//       peca_ja_na_biblioteca=false a RPC apenas AVISA - aqui e recusa, porque o card falharia na
+//       execucao depois de aprovado, e aprovar card de anuncio e o ato que inicia gasto.
+//   (3) O summary do card leva a mensagem da verificacao INTEIRA, inclusive a nota visual da peca
+//       e a lacuna declarada (nada avalia o par texto+peca). O gestor le o card no instante da
+//       decisao; o que fica so no payload recolhido ele nao le - mesma razao do aviso de orcamento.
 // supabase/functions/traffic-chat/index.ts (v28.6)
 // v28.9 (04/08/2026) - AVISO DE ORCAMENTO. Orcamento diario na Meta e MEDIA, nao limite do dia:
 //   a propria tela declarou, para R$ 60,00/dia, teto real de R$ 105,00 no dia (175%) e R$ 420,00
@@ -841,6 +857,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const nomeNovo = String(params?.nome_novo ?? "").trim();
     const conjuntoDestino = String(params?.conjunto_destino ?? "").trim();
     const utmCampaign = String(params?.utm_campaign ?? "").trim();
+    const driveFileId = String(params?.drive_file_id ?? "").trim();   // v28.10 (GT-13): peca nova
     if (!nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar" };
     if (!nomeNovo) return { erro: "params.nome_novo obrigatorio (nome do anuncio que vai nascer)" };
     if (!conjuntoDestino) return { erro: "params.conjunto_destino obrigatorio (conjunto que vai receber o anuncio)" };
@@ -851,31 +868,102 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!molde) return { erro: `anuncio molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato.` };
     if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel replicar sem upload de midia, que nao esta implementado.` };
 
-    // v25 TRAVA 3: compliance BLOQUEANTE. A legenda do molde e submetida antes de propor.
-    const legenda = String(molde.body ?? "").trim();
+    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id").eq("company_id", companyId);
+    const dest = (sets ?? []).find((x) => norm(x.name) === norm(conjuntoDestino)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(conjuntoDestino)))[0];
+    if (!dest) return { erro: `conjunto de destino '${conjuntoDestino}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro.` };
+
+    // v28.10 (GT-13) - DOIS PEDIDOS, UMA FONTE. Existem dois anuncios diferentes com o mesmo nome
+    // de acao: REPLICAR um que ja roda (escalar o que funciona) e PUBLICAR PECA NOVA do acervo.
+    // Quem decide o que cada um exige e pedido_de_anuncio_completo, no banco - nao este arquivo.
+    // A LEGENDA NAO E ENTRADA NA REPLICACAO: vem do criativo do molde, e a fonte e declarada como
+    // tal. Na peca nova ela e entrada, porque nao existe em lugar nenhum do sistema: nem no Drive,
+    // nem em tabela. As tres procedencias legitimas (humano, herdada_do_molde, agente) sao da RPC.
+    let legendaFonte = String(params?.legenda_fonte ?? "").trim();
+    let legenda = String(params?.legenda ?? "").trim();
+    const legendaRefs = Array.isArray(params?.legenda_referencias) ? params.legenda_referencias : null;
+    if (!driveFileId) {
+      legenda = String(molde.body ?? "").trim();
+      legendaFonte = "herdada_do_molde";
+    } else if (!legenda && legendaFonte === "herdada_do_molde") {
+      // O gestor autorizou herdar: o texto e o do molde, e a procedencia diz exatamente isso.
+      legenda = String(molde.body ?? "").trim();
+    }
+
+    const pedido: Record<string, unknown> = { nome_novo: nomeNovo, conjunto_destino: dest.name, molde: molde.name };
+    if (driveFileId) {
+      pedido.drive_file_id = driveFileId;
+      pedido.legenda = legenda;
+      pedido.legenda_fonte = legendaFonte;
+      if (legendaRefs) pedido.legenda_referencias = legendaRefs;
+    }
+    const { data: ver, error: verErr } = await supa.rpc("pedido_de_anuncio_completo", { p_company_id: companyId, p_pedido: pedido });
+    // Falha de verificacao NAO emite card - mesmo tratamento de pode_executar_acao e
+    // avaliar_orcamento_diario. Verificador que nao respondeu nao autorizou nada.
+    if (verErr || !ver) {
+      return { erro: "verificacao_do_pedido_indisponivel",
+        detalhe: `Nao consegui verificar se o pedido esta completo (${verErr?.message ?? "resposta vazia"}), entao NAO emiti o card. Sem essa verificacao eu estaria propondo criacao de anuncio sem conferir o que ela exige.` };
+    }
+    const v: any = ver;
+    if (v.completo !== true) {
+      // A mensagem e dela, nao minha: recusa inventada aqui seria a doutrina em dois lugares.
+      return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
+        faltando: v.faltando ?? null, mensagem_para_o_gestor: v.mensagem_para_o_gestor,
+        instrucao: "Repasse esta mensagem ao gestor e peca o que falta. NAO monte card e NAO preencha o que falta por conta propria." };
+    }
+    // A RPC declara peca_ja_na_biblioteca=false e AVISA, mas nao recusa - a decisao e do fluxo.
+    // Aqui ela e recusa: aprovar um card e o ato que inicia gasto, e este card falharia na
+    // execucao DEPOIS de aprovado. Descobrir na execucao e o pior lugar para descobrir.
+    if (v.peca_ja_na_biblioteca === false) {
+      return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
+        mensagem_para_o_gestor: v.mensagem_para_o_gestor,
+        instrucao: "A peca ainda nao esta na biblioteca da conta. NAO emiti o card porque ele falharia na execucao, depois de aprovado. Repasse a mensagem ao gestor." };
+    }
+
+    // A biblioteca ja foi julgada pela RPC; aqui e so BUSCAR o valor que ela confirmou existir.
+    let metaVideoId: string | null = null;
+    if (driveFileId) {
+      const { data: up } = await supa.from("media_uploads").select("meta_video_id")
+        .eq("drive_file_id", driveFileId).not("meta_video_id", "is", null).limit(1).maybeSingle();
+      metaVideoId = up?.meta_video_id ? String(up.meta_video_id) : null;
+      if (!metaVideoId) {
+        return { erro: "inconsistencia_entre_verificacao_e_biblioteca",
+          detalhe: `A verificacao disse que a peca ${driveFileId} esta na biblioteca da conta, mas media_uploads nao devolve meta_video_id para ela. NAO emiti card: propor criacao sem saber que midia sera publicada e o caminho para publicar a peca errada.` };
+      }
+    }
+
+    // v25 TRAVA 3: compliance BLOQUEANTE, agora sobre a legenda DECIDIDA acima - do molde na
+    // replicacao, do gestor ou herdada na peca nova. Quem escreveu nao muda a exposicao
+    // regulatoria de um anuncio de credito, e por isso as duas passam pelas mesmas 16 regras.
     if (!legenda) return { erro: `o anuncio molde '${molde.name}' nao tem legenda sincronizada; sem ela nao e possivel validar compliance, e criar anuncio financeiro sem essa validacao nao e permitido.` };
     const comp: any = await t_check_compliance(legenda, [], mcpKey);
     const vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
     if (!vereditoOk) {
       return { erro: "compliance_bloqueou_a_criacao",
-        detalhe: "A legenda do anuncio molde nao passou na validacao de compliance, entao a criacao NAO foi proposta. Relate ao gestor o veredito e as violacoes encontradas e sugira ajustar o texto antes de replicar.",
+        detalhe: "A legenda nao passou na validacao de compliance, entao a criacao NAO foi proposta. Relate ao gestor o veredito e as violacoes encontradas e sugira ajustar o texto antes de replicar.",
         veredito_compliance: comp };
     }
-
-    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id").eq("company_id", companyId);
-    const dest = (sets ?? []).find((x) => norm(x.name) === norm(conjuntoDestino)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(conjuntoDestino)))[0];
-    if (!dest) return { erro: `conjunto de destino '${conjuntoDestino}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro.` };
 
     // v25 TRAVA 4: UTM montada aqui, no codigo. {{site_source_name}} e macro da Meta e resolve
     // para fb/ig automaticamente - melhor que fixar um dos dois.
     const urlTags = `utm_source={{site_source_name}}&utm_medium=paid&utm_campaign=${slug(utmCampaign)}&utm_content=${slug(nomeNovo)}`;
 
-    const summary = `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce PAUSADO`;
+    // A mensagem da verificacao vai INTEIRA para o summary, inclusive a nota visual da peca. O
+    // gestor le o card no instante da decisao; o que fica so no payload recolhido ele nao le.
+    const cabeca = driveFileId
+      ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", usando "${molde.name}" como molde de configuracao - compliance de texto aprovado, nasce PAUSADO`
+      : `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce PAUSADO`;
+    const summary = `${cabeca}\n\n${String(v.mensagem_para_o_gestor ?? "")}`.trim();
     return await gravarCard(companyId, convId, requestedBy, action, "ad", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       creative_id: molde.creative_id, conjunto_destino_external_id: dest.external_id,
       conjunto_destino_nome: dest.name, url_tags: urlTags, utm_campaign: slug(utmCampaign),
       conta_destino: contaDaEmpresa, status_inicial: "PAUSED",  // v28.6: aprovar CRIA pausado; ativar e ato do gestor
+      // v28.10 (GT-13): a executora le meta_video_id para trocar a midia no spec do molde.
+      // Ausente = replicacao pura, e ela replica o criativo inteiro como sempre fez.
+      tipo_de_pedido: v.tipo_de_pedido ?? null,
+      drive_file_id: driveFileId || null, meta_video_id: metaVideoId,
+      legenda, legenda_fonte: legendaFonte || null, legenda_referencias: legendaRefs,
+      nota_visual_da_peca: v.nota_visual_da_peca ?? null,
       compliance: { veredito: comp?.veredito ?? "aprovado", regras_aplicadas: comp?.regras_aplicadas ?? null, validado_em: new Date().toISOString() },
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
@@ -961,7 +1049,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.conjunto_destino e params.utm_campaign OBRIGATORIOS). Tudo que e criado nasce PAUSADO, com categoria especial de credito, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha)" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.conjunto_destino e params.utm_campaign OBRIGATORIOS). EXISTEM DOIS PEDIDOS DE ANUNCIO, e eles exigem coisas diferentes: (a) REPLICACAO PURA - escalar para outro conjunto um anuncio que ja funciona; nao passe params.drive_file_id, e a legenda NAO e sua: vem do molde. (b) PECA NOVA do acervo do Drive - passe params.drive_file_id (o id vem de get_drive_criativos ou get_analise_visual_drive, nunca o nome do arquivo), params.legenda e params.legenda_fonte, que e 'humano' se o gestor escreveu, 'herdada_do_molde' se ele autorizou usar o texto do molde, ou 'agente' se voce escreveu - e nesse caso params.legenda_referencias com os anuncios que serviram de base e OBRIGATORIO. So proponha peca nova cujo ja_enviada_para_meta seja true. NAO invente legenda para o pedido passar: se o gestor nao disse de onde vem o texto, PERGUNTE. Tudo que e criado nasce PAUSADO, com categoria especial de credito, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha). SO no anuncio com peca nova: drive_file_id, legenda, legenda_fonte ('humano' | 'herdada_do_molde' | 'agente') e legenda_referencias (array, obrigatorio quando a fonte e 'agente')" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
@@ -1131,7 +1219,10 @@ async function t_drive_criativos() {
         if (f.mimeType === "application/vnd.google-apps.folder") {
           if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1 });
         } else if (arquivos.length < MAX_ARQUIVOS) {
-          arquivos.push({ nome: f.name, caminho: no.caminho || "(raiz)",
+          // v28.10 (GT-13): o drive_file_id era lido do Drive e descartado aqui. Sem ele o agente
+          // sabia dizer "o video tal e o melhor" e nao sabia dizer QUAL ARQUIVO - logo nao havia
+          // como pedir anuncio com aquela peca. E o unico identificador estavel: nome repete.
+          arquivos.push({ drive_file_id: f.id, nome: f.name, caminho: no.caminho || "(raiz)",
             formato_pasta: (no.caminho.split("/")[0] || "(raiz)"),
             eixo_pasta: (no.caminho.split("/")[1] ?? null),
             tipo: f.mimeType, tamanho_bytes: Number(f.size ?? 0) || null,

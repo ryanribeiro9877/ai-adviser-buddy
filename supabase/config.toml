@@ -1,1 +1,10 @@
 project_id = "ghlitpgdwurrwbsmkagb"
+
+# 04/08/2026 (GT-13) - upload-midia estava com verify_jwt=true no projeto e um deploy meu com
+# --no-verify-jwt mudou isso para false. O flag da CLI so sabe DESLIGAR; sem uma declaracao aqui
+# o valor anterior nao volta sozinho. Esta linha existe para o deploy restaurar o estado em que a
+# funcao foi encontrada, e para que a proxima pessoa nao dependa de lembrar disso.
+# As demais edges deste projeto estao com verify_jwt=false e continuam assim - nao mexo em nada
+# que nao tenha sido eu que mudei.
+[functions.upload-midia]
+verify_jwt = true

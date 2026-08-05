@@ -1,5 +1,9 @@
-// supabase/functions/upload-midia/index.ts (v2)
+// supabase/functions/upload-midia/index.ts (v4)
 // =============================================================================
+// v4 (04/08/2026) - GT-13: acao "creative": GET /{creative_id}?fields=object_story_spec,...,
+//   LEITURA pura, para responder se o molde expoe o spec que a rota "copiar e trocar a midia"
+//   precisa. Nao sobe nada, nao grava nada, nao consulta trava. Mesmo padrao da acao
+//   "thumbnails", que ja esta provada em producao.
 // v2 (04/08/2026) - acao "thumbnails": GET /{video_id}/thumbnails, LEITURA pura, para medir se a
 //   Meta entrega 3+ quadros por video ja enviado. Se entregar, o pipeline de visao ganha
 //   multiquadro sem download, sem ffmpeg e sem WASM - nenhum dos tres existe no runtime da edge.
@@ -141,7 +145,73 @@ Deno.serve(async (req) => {
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
   const acao = String(body?.acao ?? "plan");
-  if (!["plan", "executar", "thumbnails"].includes(acao)) return json({ error: "acao deve ser plan, executar ou thumbnails" }, 400);
+  if (!["plan", "executar", "thumbnails", "creative"].includes(acao)) return json({ error: "acao deve ser plan, executar, thumbnails ou creative" }, 400);
+
+  // v4 (04/08/2026) - GT-13: LEITURA do object_story_spec de um criativo que ja roda. GET puro,
+  // mesmo padrao provado da acao "thumbnails": nao sobe nada, nao grava nada, nao consulta trava,
+  // e por isso vem antes da resolucao de empresa. Existe para responder UMA pergunta de desenho:
+  // a rota "copiar o spec do molde e trocar a midia" e viavel, ou o molde nao expoe o spec?
+  // A resposta decide se `criar_anuncio_a_partir_de` com peca nova pode existir sem montar spec
+  // do zero - e montar do zero exigiria a URL de destino, que nao esta em tabela nenhuma.
+  if (acao === "creative") {
+    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    const ids: string[] = Array.isArray(body?.creative_ids)
+      ? body.creative_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
+      : (body?.creative_id ? [String(body.creative_id).trim()] : []);
+    if (!ids.length) return json({ error: "informe creative_id ou creative_ids" }, 400);
+
+    const CAMPOS = "id,name,object_type,object_story_spec,asset_feed_spec,thumbnail_url,image_hash,video_id,url_tags,degrees_of_freedom_spec";
+    const lidos: any[] = [];
+    for (const cid of ids) {
+      const url = `${GRAPH}/${cid}?fields=${CAMPOS}&access_token=${encodeURIComponent(META_ADS_TOKEN)}`;
+      const r = await fetch(url);
+      const t = await r.text();
+      let j: any; try { j = JSON.parse(t); } catch { j = { parse_error: t.slice(0, 200) }; }
+      if (!r.ok) { lidos.push({ creative_id: cid, erro: `graph ${r.status}`, detalhe: JSON.stringify(j).slice(0, 300) }); continue; }
+
+      const spec = j?.object_story_spec ?? null;
+      const ld = spec?.link_data ?? null;
+      const vd = spec?.video_data ?? null;
+      // O que interessa nao e "veio algo", e "veio o suficiente para copiar": page_id (sem ele a
+      // Meta recusa a criacao) e o link de destino (sem ele so daria para inventar URL, que e
+      // exatamente o que nao se faz). Declarado campo a campo, nao como booleano unico.
+      lidos.push({
+        creative_id: cid, nome: j?.name ?? null, object_type: j?.object_type ?? null,
+        tem_object_story_spec: !!spec,
+        spec_chaves: spec ? Object.keys(spec) : null,
+        page_id: spec?.page_id ?? null,
+        instagram_actor_id: spec?.instagram_actor_id ?? spec?.instagram_user_id ?? null,
+        formato_do_spec: vd ? "video_data" : ld ? "link_data" : spec ? "outro" : null,
+        link_destino: ld?.link ?? vd?.call_to_action?.value?.link ?? ld?.call_to_action?.value?.link ?? null,
+        legenda_do_spec: (ld?.message ?? vd?.message ?? null),
+        call_to_action_type: (ld?.call_to_action?.type ?? vd?.call_to_action?.type ?? null),
+        video_data_chaves: vd ? Object.keys(vd) : null,
+        link_data_chaves: ld ? Object.keys(ld) : null,
+        image_hash_no_spec: ld?.image_hash ?? vd?.image_hash ?? null,
+        video_id_no_spec: vd?.video_id ?? null,
+        tem_asset_feed_spec: !!j?.asset_feed_spec,
+        // v4.1: quando o spec vem so com page_id e ha asset_feed_spec, o criativo e flexivel
+        // (Advantage+): midia, textos e link vivem AQUI, e a rota de copia tem de olhar para ca.
+        afs_chaves: j?.asset_feed_spec ? Object.keys(j.asset_feed_spec) : null,
+        afs_videos: Array.isArray(j?.asset_feed_spec?.videos) ? j.asset_feed_spec.videos.length : null,
+        afs_link_urls: Array.isArray(j?.asset_feed_spec?.link_urls)
+          ? j.asset_feed_spec.link_urls.map((l: any) => l?.website_url ?? null) : null,
+        url_tags: j?.url_tags ?? null,
+        thumbnail_url: j?.thumbnail_url ?? null,
+        // Enviado inteiro so quando pedido: e o material da decisao de copia, e cabe olhar cru.
+        spec_cru: body?.incluir_spec_cru === true ? spec : undefined,
+        afs_cru: body?.incluir_spec_cru === true ? (j?.asset_feed_spec ?? null) : undefined,
+      });
+    }
+    const copiaveis = lidos.filter((x) => x.tem_object_story_spec && x.page_id && x.link_destino);
+    return json({ ok: true, acao: "creative", versao: "upload-midia-v4",
+      criativos: lidos,
+      copiaveis: copiaveis.length, lidos_com_erro: lidos.filter((x) => x.erro).length,
+      veredito_da_rota: copiaveis.length
+        ? "ROTA VIAVEL: ha molde que expoe object_story_spec com page_id e link - da para copiar o spec e trocar a midia"
+        : "ROTA NAO PROVADA: nenhum dos criativos lidos expoe spec com page_id e link - copiar a midia exigiria montar spec do zero, e a URL de destino nao existe em tabela nenhuma",
+      nota: "GET puro - nada foi enviado, nada foi gravado. link_destino nulo com spec presente significa que o molde nao carrega a URL onde este codigo a procura; nao presuma ausencia de link no anuncio." });
+  }
 
   // v2 (04/08/2026) - GT-45 frente 1: LEITURA dos quadros que a Meta gerou para um video ja
   // enviado. GET puro: nao sobe nada, nao escreve em tabela nenhuma, nao consulta trava - por isso

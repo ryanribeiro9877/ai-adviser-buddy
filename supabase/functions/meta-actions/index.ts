@@ -1,4 +1,16 @@
-// supabase/functions/meta-actions/index.ts (v4.3)
+// supabase/functions/meta-actions/index.ts (v4.4)
+// v4.4 (04/08/2026) - GT-13: a executora aceita PECA NOVA. criar_anuncio_a_partir_de passa a ler
+//   payload.meta_video_id e, quando ele existe, COPIA o object_story_spec do molde e TROCA a
+//   midia (video_id + capa), em vez de replicar o criativo inteiro. Duas coisas sao inegociaveis
+//   neste caminho: (1) a capa e OBRIGATORIA e sai do proprio video novo, escolhida POR PESO -
+//   is_preferred da Meta foi medido e pode ser o quadro mais fraco; (2) NAO ha degradacao para
+//   reusar_creative_id. No caminho de replicacao pura esse fallback e correto, porque o pedido e
+//   publicar o criativo do molde; com peca nova ele publicaria a PECA ERRADA - o gestor aprova
+//   "sobe o video novo" e a Meta entrega o antigo, gastando, sem ninguem notar. Cada
+//   pre-requisito ausente (spec, video_data, page_id, link, capa) recusa com nome proprio.
+//   O espelho passa a gravar procedencia do texto: legenda_fonte, legenda_referencias e
+//   compliance_verificado_em. Sem elas, "quem escreveu esta legenda" so tem resposta no card,
+//   que expira em 24h.
 // v4.3.1 (04/08/2026) - o default do espelho deixa de ser literal. Ele apontava para "ACTIVE",
 //   escrito na v4.2, e a v4.3 passou a criar PAUSED: default de contrato revogado gravava verde
 //   falso no espelho quando a releitura na Graph nao trazia status. Agora segue o status que a
@@ -91,6 +103,51 @@ async function g(path: string, method = "GET", body?: Record<string, string>) {
   const t = await r.text();
   try { return { status: r.status, body: JSON.parse(redact(t)) }; } catch { return { status: r.status, body: redact(t.slice(0, 300)) }; }
 }
+// v4.4 (04/08/2026) - GT-13: a thumbnail do video_data e OBRIGATORIA na Meta, e ela nao vem de
+// graca: o quadro do molde e o do video ANTIGO. Os quadros do video novo saem de
+// GET /{video_id}/thumbnails, gerados pela Meta na ingestao.
+// POR PESO, NAO POR is_preferred: foi medido nos 19 videos do Drive que o quadro marcado como
+// preferido pela Meta pode ser justamente o mais fraco - abertura em fundo liso, quase uniforme,
+// que pesa uma fracao dos demais. Peso em bytes e o proxy de densidade visual disponivel sem
+// baixar e decodificar imagem, o que este runtime nao faz.
+// SEM PESO MENSURAVEL A FUNCAO RECUSA. Escolher por posicao seria escolher no escuro e entregar
+// como se fosse critério; quem precisar de capa especifica passa thumbnail_url no payload.
+async function escolherThumbnail(
+  videoId: string, urlExplicita: string,
+): Promise<{ url?: string; erro?: string; indice?: number; bytes?: number; total?: number; criterio?: string }> {
+  if (urlExplicita) return { url: urlExplicita, criterio: "url informada no payload (nao foi escolhida por peso)" };
+
+  const r = await g(`/${videoId}/thumbnails?fields=id,uri,width,height,is_preferred`);
+  if (r.status !== 200) {
+    return { erro: `a Meta nao devolveu os quadros do video ${videoId} (HTTP ${r.status}). Sem quadro nao ha capa, e a Meta exige capa em video_data.` };
+  }
+  const lista: any[] = Array.isArray((r.body as any)?.data) ? (r.body as any).data : [];
+  if (!lista.length) {
+    return { erro: `o video ${videoId} nao tem quadro gerado pela Meta ainda. A geracao acontece na ingestao e pode nao ter terminado - tente de novo, ou passe thumbnail_url no payload.` };
+  }
+
+  const medidos: { i: number; uri: string; bytes: number | null }[] = [];
+  for (let i = 0; i < lista.length; i++) {
+    const uri = String(lista[i]?.uri ?? "");
+    if (!uri) { medidos.push({ i, uri, bytes: null }); continue; }
+    let bytes: number | null = null;
+    try {
+      const h = await fetch(uri, { method: "HEAD" });
+      const cl = h.headers.get("content-length");
+      bytes = h.ok && cl ? Number(cl) : null;
+    } catch { bytes = null; }
+    medidos.push({ i, uri, bytes });
+  }
+  const comPeso = medidos.filter((m) => typeof m.bytes === "number" && (m.bytes as number) > 0);
+  if (!comPeso.length) {
+    return { erro: `nenhum dos ${lista.length} quadros do video ${videoId} respondeu ao HEAD com content-length, entao NAO ha como escolher por densidade visual. Escolher por posicao seria escolher no escuro. Passe thumbnail_url no payload se quiser uma capa especifica.` };
+  }
+  comPeso.sort((a, b) => (b.bytes as number) - (a.bytes as number));
+  const melhor = comPeso[0];
+  return { url: melhor.uri, indice: melhor.i, bytes: melhor.bytes as number, total: lista.length,
+    criterio: `quadro mais pesado entre os ${comPeso.length} de ${lista.length} que responderam ao HEAD (peso = proxy de densidade visual; is_preferred da Meta foi IGNORADO de proposito)` };
+}
+
 async function audit(companyId: string, userId: string, action: string, approvalId: string, details: unknown) {
   await supa.from("audit_log").insert({
     company_id: companyId, user_id: userId, action, target_type: "approval_request", target_id: approvalId,
@@ -161,12 +218,65 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
     const adset = String(p?.conjunto_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
     const urlTags = String(p?.url_tags ?? "").trim();
+    const videoNovo = String(p?.meta_video_id ?? "").trim();   // v4.4: peca nova
+    const legendaNova = String(p?.legenda ?? "").trim();
     if (!creativeMolde || !adset || !nome) return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
 
     // Le o creative do molde para tentar recria-lo com as UTMs novas.
     const c = await g(`/${creativeMolde}?fields=object_story_spec,url_tags,name,degrees_of_freedom_spec`);
     const cb: any = c.body ?? {};
     const temStorySpec = c.status === 200 && cb.object_story_spec;
+
+    // ============ v4.4: PECA NOVA (video do Drive ja na biblioteca da conta) ============
+    // Rota: COPIAR o object_story_spec do molde e TROCAR a midia. So esta rota existe porque a
+    // configuracao que faz um anuncio funcionar (page_id, link de destino, CTA, titulo) nao esta
+    // em tabela nenhuma do sistema - ela vive dentro do spec do molde. Montar do zero exigiria
+    // inventar a URL de destino, e inventar URL de anuncio de credito nao esta em questao.
+    // AQUI NAO EXISTE DEGRADACAO. No caminho de replicacao pura, cair para reusar_creative_id e
+    // correto - o pedido E publicar o criativo do molde. Com peca nova seria publicar A PECA
+    // ERRADA: o gestor aprovaria "subir o video novo" e a Meta entregaria o video antigo, sem
+    // ninguem notar, gastando. Por isso cada pre-requisito ausente RECUSA, com nome proprio.
+    if (videoNovo) {
+      if (!temStorySpec) {
+        return { erro: "molde_sem_object_story_spec",
+          detalhe: `O anuncio molde (creative ${creativeMolde}) nao expoe object_story_spec - tipico de criativo flexivel/Advantage+, onde midia, textos e link vivem no asset_feed_spec. Sem o spec nao ha de onde copiar page_id, link de destino e CTA, e este caminho NAO reusa o criativo do molde: reusar publicaria a peca ANTIGA num card que pede a peca NOVA. Escolha um molde que exponha o spec (na conta da Legal e Viver os CREATIVE_LPV2_Reel* expoem) ou monte o anuncio no Gerenciador.` };
+      }
+      const vd: any = cb.object_story_spec?.video_data ?? null;
+      if (!vd) {
+        return { erro: "molde_sem_video_data",
+          detalhe: `O molde expoe object_story_spec, mas sem video_data (chaves presentes: ${Object.keys(cb.object_story_spec ?? {}).join(", ") || "nenhuma"}). Trocar a midia de um spec de imagem por video mudaria o formato do anuncio, nao so a peca - e isso nao e replicar molde. Use como molde um anuncio de VIDEO.` };
+      }
+      if (!cb.object_story_spec?.page_id) {
+        return { erro: "molde_sem_page_id",
+          detalhe: "O object_story_spec do molde nao traz page_id, e a Meta recusa adcreative sem pagina. Nao ha default seguro: publicar por outra pagina mudaria o emissor do anuncio." };
+      }
+      // §7 do briefing: a URL de destino nao existe em tabela nenhuma - ela vem do molde ou nao vem.
+      const linkMolde = vd?.call_to_action?.value?.link ?? vd?.link ?? null;
+      if (!linkMolde) {
+        return { erro: "molde_sem_link_de_destino",
+          detalhe: `O video_data do molde nao traz link de destino (chaves: ${Object.keys(vd).join(", ")}). A URL de destino nao esta em nenhuma tabela do sistema, so dentro do spec do molde - e nao sera inventada. Escolha um molde que carregue o link.` };
+      }
+      const th = await escolherThumbnail(videoNovo, String(p?.thumbnail_url ?? ""));
+      if (th.erro) {
+        return { erro: "thumbnail_obrigatoria_nao_resolvida", detalhe: th.erro };
+      }
+
+      // image_hash do molde e o quadro do video ANTIGO: mantido, a Meta publicaria a capa errada.
+      const novoVd: any = { ...vd, video_id: videoNovo, image_url: th.url };
+      delete novoVd.image_hash;
+      if (legendaNova) novoVd.message = legendaNova;
+      const novoSpec = { ...cb.object_story_spec, video_data: novoVd };
+
+      return {
+        path: `/${conta}/ads`,
+        body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+        criativo: { modo: "novo_adcreative_peca_nova", path: `/${conta}/adcreatives`,
+          body: { name: `${nome} - creative`, object_story_spec: JSON.stringify(novoSpec),
+                  ...(urlTags ? { url_tags: urlTags } : {}) } as Record<string, string> },
+        peca_nova: { meta_video_id: videoNovo, thumbnail: th, link_herdado_do_molde: linkMolde,
+          legenda_substituida: !!legendaNova, creative_molde: creativeMolde },
+      };
+    }
 
     return {
       path: `/${conta}/ads`,
@@ -267,6 +377,16 @@ async function espelhar(
         status: statusMeta.toUpperCase(),                 // ads = MAIUSCULO
         criado_pelo_sistema: true,
         criado_por_approval_id: approvalId,
+        // v4.4 (GT-13): PROCEDENCIA DO TEXTO. Sem isso, um anuncio criado pelo sistema fica
+        // indistinguivel de um sincronizado, e a pergunta "quem escreveu esta legenda" nao tem
+        // resposta no banco - so no card, que expira. legenda_fonte vem da verificacao
+        // (pedido_de_anuncio_completo), nao de palpite daqui; ausente = nao declarada, e nulo
+        // e a resposta honesta. compliance_verificado_em e o instante do veredito que LIBEROU
+        // o card, nao o da execucao: o que foi avaliado foi o texto, antes de existir anuncio.
+        ...(p?.legenda ? { body: String(p.legenda) } : {}),
+        ...(p?.legenda_fonte ? { legenda_fonte: String(p.legenda_fonte) } : {}),
+        ...(p?.legenda_referencias ? { legenda_referencias: p.legenda_referencias } : {}),
+        ...(p?.compliance?.validado_em ? { compliance_verificado_em: String(p.compliance.validado_em) } : {}),
       }, { onConflict: "provider,external_id" });
       return error ? { ok: false, erro: error.message, tabela: "ads" } : { ok: true, tabela: "ads" };
     }
@@ -352,13 +472,14 @@ Deno.serve(async (req) => {
       if (conf.dry_run) {
         await audit(r.company_id, sistema, "meta_action_dry_run", r.id, {
           SIMULADO: true, acao, conta, criaria_em: pl.path, com_body: pl.body,
-          criativo: pl.criativo ?? null, molde_lido: pl.molde_lido ?? null,
+          criativo: pl.criativo ?? null, molde_lido: pl.molde_lido ?? null, peca_nova: pl.peca_nova ?? null,
           flags_permitiriam: { master: conf.master_enabled, flag_acao: conf.action_flags?.[acao] === true, rate_ok: rateOk },
           nota: "dry_run=true: NADA foi criado na Meta; executed_at NÃO preenchido",
         });
         resultados.push({ id: r.id, acao, resultado: "SIMULADO", conta, criaria_em: pl.path,
           nome_novo: pl.body?.name, status_inicial: pl.body?.status,
           criativo_modo: pl.criativo?.modo ?? null, criativo_aviso: pl.criativo?.aviso ?? null,
+          peca_nova: pl.peca_nova ?? null,
           flags_permitiriam: flagsOk && rateOk });
         continue;
       }
@@ -373,7 +494,9 @@ Deno.serve(async (req) => {
       // Passo previo: criar adcreative novo (so no caso do anuncio com object_story_spec).
       const bodyFinal: Record<string, string> = { ...pl.body };
       let creativeCriado: any = null;
-      if (pl.criativo?.modo === "novo_adcreative") {
+      // v4.4: cobre "novo_adcreative" (replicacao com UTM nova) e "novo_adcreative_peca_nova"
+      // (spec do molde com a midia trocada). Os dois criam adcreative antes do anuncio.
+      if (String(pl.criativo?.modo ?? "").startsWith("novo_adcreative")) {
         const cc = await g(pl.criativo.path, "POST", pl.criativo.body);
         if (cc.status !== 200 || !(cc.body as any)?.id) {
           await audit(r.company_id, sistema, "meta_action_failed", r.id, { motivo: "falha ao criar adcreative", resposta_meta: cc, acao });
@@ -395,6 +518,7 @@ Deno.serve(async (req) => {
       await audit(r.company_id, sistema, sucesso ? "meta_action_executed" : "meta_action_failed", r.id, {
         acao, conta, criado_em: pl.path, body_enviado: bodyFinal, adcreative_criado: creativeCriado,
         resposta_meta: exec, objeto_criado: depois.body, criativo_aviso: pl.criativo?.aviso ?? null,
+        peca_nova: pl.peca_nova ?? null,
       });
 
       if (sucesso) {
@@ -413,6 +537,7 @@ Deno.serve(async (req) => {
           executed_at: new Date().toISOString(),
           execution_result: { ok: true, id_criado: novoId, objeto: depois.body,
             adcreative_criado: creativeCriado, aviso: pl.criativo?.aviso ?? null,
+            peca_nova: pl.peca_nova ?? null,
             espelho_gravado: esp.ok, espelho_tabela: esp.tabela ?? null, espelho_erro: esp.erro ?? null,
             lembrete: "Objeto criado PAUSADO (v4.3). A aprovacao CRIOU o objeto e NAO iniciou entrega nem gasto. Para comecar a entregar, o gestor precisa ATIVAR manualmente no Gerenciador - conferindo a arvore inteira antes." },
         }).eq("id", r.id);
@@ -494,6 +619,6 @@ Deno.serve(async (req) => {
   }
 
   // v3: nao ha "modo" unico - cada card foi avaliado sob a config da sua empresa.
-  return json({ ok: true, versao: "meta-actions-v4.3.1", processados: resultados.length, resultados,
+  return json({ ok: true, versao: "meta-actions-v4.4", processados: resultados.length, resultados,
     nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); cada resultado acima foi avaliado sob a config da empresa do proprio card" });
 });
