@@ -83,7 +83,12 @@ const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 // 'assistant' veio depois. Isso sobrevive a trocar de conversa, F5 e outra aba —
 // o que estado local nunca cobriria. A edge grava a resposta antes de responder
 // ao HTTP, então o trabalho não se perde ao navegar.
-const TIMEOUT_TURNO_MS = 3 * 60 * 1000; // acima disso é falha, não "analisando"
+// Governa APENAS o caminho síncrono (traffic-chat), onde a resposta vem no próprio HTTP e
+// passar de 3 min significa que a requisição não voltou. NÃO vale para análise profunda: lá o
+// veredito é do banco (`chat_jobs`), e job passar de 3 min é rotina — dos 15 jobs medidos em
+// 05/08, 6 passaram de 180 s e a média é 196 s. Por isso o aviso derivado deste literal é
+// renderizado sob `!jobAtivo`.
+const TIMEOUT_TURNO_MS = 3 * 60 * 1000;
 const JANELA_STATUS_MS = 30 * 60 * 1000; // recorte para varrer a lista de conversas
 
 // Análise profunda: a edge traffic-agent-job roda subagentes em background e
@@ -693,32 +698,6 @@ export function OperacaoChat() {
     return out;
   }, [messages.data]);
 
-  // Job de análise profunda em andamento nesta conversa. Vem do state (quem
-  // enviou) ou do banco (quem só abriu a conversa / voltou depois) — mesmo
-  // princípio do indicador síncrono: o estado é derivado, não presumido.
-  const jobDb = useQuery({
-    queryKey: ["chat-job-ativo", activeId],
-    enabled: !!activeId,
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("chat_jobs")
-        .select("id, message, status")
-        .eq("conversation_id", activeId!)
-        .in("status", ["queued", "running"])
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (error) throw error;
-      return data;
-    },
-  });
-  const jobAtivo =
-    job && job.convId === activeId
-      ? job
-      : jobDb.data
-        ? { convId: activeId!, jobId: jobDb.data.id, texto: jobDb.data.message ?? "" }
-        : null;
-
   // Estado da conversa ABERTA: derivado das mensagens carregadas (não do recorte
   // de 30 min da lista) — assim uma conversa órfã antiga também é reconhecida ao
   // ser aberta, mostrando falha em vez de "analisando" para sempre.
@@ -729,6 +708,38 @@ export function OperacaoChat() {
       : null;
   const processandoAtiva = idadeAtiva !== null && idadeAtiva < TIMEOUT_TURNO_MS;
   const falhouAtiva = idadeAtiva !== null && idadeAtiva >= TIMEOUT_TURNO_MS;
+  // Sem resposta do assistente depois da última pergunta: é o que delimita até quando faz
+  // sentido mostrar o desfecho de um job. Chegou resposta, o card sai de cena.
+  const aguardandoResposta = idadeAtiva !== null;
+
+  // Job de análise profunda desta conversa. Vem do state (quem enviou) ou do banco (quem só
+  // abriu a conversa / voltou depois) — mesmo princípio do indicador síncrono: o estado é
+  // derivado, não presumido.
+  // GT-16: 'error' entra na busca. Sem ele, job marcado pelo `expira-chat-jobs` sumia do card
+  // ao reabrir a conversa e caía no aviso genérico de 3 min abaixo, que atribui a falha ao
+  // "limite de tempo do servidor" — motivo inventado, quando o banco tem o motivo real.
+  const jobDb = useQuery({
+    queryKey: ["chat-job-ativo", activeId],
+    enabled: !!activeId,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("chat_jobs")
+        .select("id, message, status")
+        .eq("conversation_id", activeId!)
+        .in("status", ["queued", "running", "error"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+  });
+  const jobAtivo =
+    job && job.convId === activeId
+      ? job
+      : jobDb.data && (jobDb.data.status !== "error" || aguardandoResposta)
+        ? { convId: activeId!, jobId: jobDb.data.id, texto: jobDb.data.message ?? "" }
+        : null;
 
   // Com o Realtime, a pergunta gravada pela edge chega à thread durante o envio.
   // Sem isto, a bolha otimista apareceria duplicada com a do banco.
@@ -903,7 +914,14 @@ export function OperacaoChat() {
               {jobAtivo && (
                 <JobProgressCard
                   jobId={jobAtivo.jobId}
-                  onDone={() => setJob(null)}
+                  onDone={() => {
+                    setJob(null);
+                    // O job terminou: busca a resposta no banco em vez de esperar o Realtime
+                    // de chat_messages. Se aquele evento se perdesse, o turno ficaria sem
+                    // resposta na tela mesmo tendo concluído no servidor.
+                    void qc.invalidateQueries({ queryKey: ["chat-messages", jobAtivo.convId] });
+                    void qc.invalidateQueries({ queryKey: ["chat-job-ativo", jobAtivo.convId] });
+                  }}
                   onResend={() => {
                     setJob(null);
                     send(jobAtivo.texto);
@@ -919,7 +937,11 @@ export function OperacaoChat() {
                 </div>
               )}
 
-              {falhouAtiva && !sending && (
+              {/* GT-16: `!jobAtivo` é obrigatório aqui. Este aviso é do caminho SÍNCRONO;
+                  sem a guarda ele aparecia embaixo do card de progresso aos 3 min, dizendo que
+                  o turno não foi concluído enquanto o card girava logo acima — e job de 3 min é
+                  normal: dos 15 jobs medidos em 05/08, 6 passaram de 180 s. */}
+              {falhouAtiva && !jobAtivo && !sending && (
                 <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
                   <div className="text-sm font-medium">A resposta não chegou</div>
                   <p className="mt-1 text-xs text-muted-foreground">

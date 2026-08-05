@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
-import { Loader2, Check, Microscope, RefreshCw, AlertTriangle } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Loader2, Check, Microscope, RefreshCw, AlertTriangle, Clock } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { useAgora } from "@/hooks/use-agora";
 import { cn } from "@/lib/utils";
 
 // Fases emitidas pela edge traffic-agent-job, na ordem em que acontecem.
@@ -22,14 +23,65 @@ const ESPECIALISTAS: Record<string, string> = {
   conhecimento: "Base técnica",
 };
 
-// A UI desiste antes do cron que expira jobs presos (15 min), para não deixar
-// o card girando indefinidamente.
-const TIMEOUT_UI_MS = 7 * 60 * 1000;
+// GT-16: a tela NÃO decide por tempo decorrido. Quem diz se o job morreu é a linha em
+// `chat_jobs` — `status` e `erro`, escritos pelo worker ou pelo `expira-chat-jobs`.
+//
+// O relógio anterior (7 min) reprovava job vivo. Medição de 05/08 sobre os 15 jobs
+// existentes, do `created_at` ao `finished_at` (que é o tempo que o gestor sente, já que o
+// POST devolve 202 na hora): média 196 s, p95 440 s, máximo 542 s. O teto de 420 s ficava no
+// meio da distribuição, com o p95 do lado errado dele, e 1 job em 15 o cruzava — e nesse caso
+// o job seguia rodando e terminava com sucesso no servidor enquanto a tela já dizia que
+// falhou. Falso negativo na tela, não timeout curto.
+//
+// Sobre medir do `created_at` e não do `started_at`: em job de 2 segmentos o `started_at` é
+// reescrito no início do segmento 2, então `finished_at - started_at` mede só o último trecho
+// (máximo 201 s) e esconde o tempo real. Os três jobs mais longos de 30/07 são todos
+// `segmento = 2`.
+
+// Intervalo da releitura da linha. Não é duração de job: é a frequência com que a tela
+// reconfere o banco caso o Realtime perca um UPDATE.
+const RELEITURA_MS = 20 * 1000;
+
+// Rede de segurança, NÃO veredito. Cobre só a janela em que o worker morreu e o banco ainda
+// não sabe: o `expira-chat-jobs` roda de hora em hora (hh:08) e só marca job com mais de
+// 15 min, então a linha pode dizer 'running' sobre um job morto por até uma hora.
+// Dimensionada sobre o máximo observado (542 s) com folga — nenhum dos 15 jobs passou de
+// 900 s. Conta silêncio (tempo sem a linha avançar), não tempo total: job que segue emitindo
+// fase está vivo por mais que demore.
+const SILENCIO_MS = 15 * 60 * 1000;
+
+const minutos = (ms: number) => Math.floor(ms / 60000);
 
 type Passo = { fase?: string; detalhe?: string; em?: string };
+type Linha = {
+  status?: string;
+  progresso?: unknown;
+  erro?: string | null;
+  created_at?: string;
+  started_at?: string | null;
+};
 
 function passos(progresso: unknown): Passo[] {
   return Array.isArray(progresso) ? (progresso as Passo[]) : [];
+}
+
+const instante = (iso?: string | null): number | null => {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  return Number.isFinite(t) ? t : null;
+};
+
+// Quando a linha avançou pela última vez, segundo a PRÓPRIA linha. Usar o momento em que o
+// componente montou seria errado ao reabrir uma conversa cujo job já estava silencioso: o
+// relógio zeraria e o silêncio acumulado desapareceria da tela.
+function carimboDoAvanco(row: Linha): number {
+  const ps = passos(row.progresso);
+  return (
+    instante(ps[ps.length - 1]?.em) ??
+    instante(row.started_at) ??
+    instante(row.created_at) ??
+    Date.now()
+  );
 }
 
 // "especialistas: whatsapp_waba, criativos" → ["WhatsApp", "Criativos"]
@@ -55,44 +107,76 @@ export function JobProgressCard({
   const [status, setStatus] = useState<string>("queued");
   const [lista, setLista] = useState<Passo[]>([]);
   const [erro, setErro] = useState<string | null>(null);
-  const [estourou, setEstourou] = useState(false);
+  const [ultimoAvanco, setUltimoAvanco] = useState(() => Date.now());
+
+  // `onDone` é recriado a cada render do pai, que tem relógio de 15 s. Com ele nas
+  // dependências, o canal do Realtime era desfeito e refeito a cada tique.
+  const onDoneRef = useRef(onDone);
+  useEffect(() => {
+    onDoneRef.current = onDone;
+  }, [onDone]);
 
   useEffect(() => {
     let vivo = true;
-    const aplicar = (row: { status?: string; progresso?: unknown; erro?: string | null }) => {
+    let releitura: ReturnType<typeof setInterval> | null = null;
+    const pararReleitura = () => {
+      if (releitura) clearInterval(releitura);
+      releitura = null;
+    };
+
+    // Assinatura da linha: só conta como AVANÇO quando algo de fato mudou. Sem isto a
+    // releitura periódica zeraria o relógio de silêncio a cada consulta bem-sucedida e a
+    // rede de segurança nunca dispararia.
+    let assinatura = "";
+    const aplicar = (row: Linha) => {
       if (!vivo) return;
+      const nova = `${row.status ?? ""}|${passos(row.progresso).length}|${row.erro ?? ""}`;
+      if (nova !== assinatura) {
+        assinatura = nova;
+        setUltimoAvanco(carimboDoAvanco(row));
+      }
       if (row.status) setStatus(row.status);
       if (row.progresso !== undefined) setLista(passos(row.progresso));
       if (row.erro !== undefined) setErro(row.erro ?? null);
+      if (row.status === "done" || row.status === "error") pararReleitura();
       // done: a mensagem final chega (ou já chegou) pelo Realtime de chat_messages.
-      if (row.status === "done") onDone();
+      if (row.status === "done") onDoneRef.current();
+    };
+
+    const ler = async () => {
+      const { data } = await supabase
+        .from("chat_jobs")
+        .select("status, progresso, erro, created_at, started_at")
+        .eq("id", jobId)
+        .maybeSingle();
+      if (data) aplicar(data);
     };
 
     // Estado inicial: o job pode já ter avançado antes de assinarmos.
-    supabase
-      .from("chat_jobs")
-      .select("status, progresso, erro")
-      .eq("id", jobId)
-      .maybeSingle()
-      .then(({ data }) => data && aplicar(data));
+    void ler();
+    // Lastro do Realtime: se o socket cair ou perder um UPDATE, a tela ainda converge para o
+    // que a linha diz. É o que garante que job longo termine em sucesso sem intervenção.
+    releitura = setInterval(() => void ler(), RELEITURA_MS);
 
     const canal = supabase
       .channel(`chat-job-${jobId}`)
       .on(
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "chat_jobs", filter: `id=eq.${jobId}` },
-        (payload) =>
-          aplicar(payload.new as { status?: string; progresso?: unknown; erro?: string | null }),
+        (payload) => aplicar(payload.new as Linha),
       )
       .subscribe();
 
-    const t = setTimeout(() => vivo && setEstourou(true), TIMEOUT_UI_MS);
     return () => {
       vivo = false;
-      clearTimeout(t);
+      pararReleitura();
       supabase.removeChannel(canal);
     };
-  }, [jobId, onDone]);
+  }, [jobId]);
+
+  // Relógio só enquanto há o que esperar — e só para MEDIR silêncio, nunca para reprovar.
+  const aguardando = status !== "done" && status !== "error";
+  const agora = useAgora(aguardando);
 
   const ultimo = lista[lista.length - 1];
   const faseAtual = ultimo?.fase ?? "planner";
@@ -102,18 +186,22 @@ export function JobProgressCard({
   );
   const especialistas = lista.flatMap((p) => nomesEspecialistas(p.detalhe ?? ""));
 
-  if (status === "error" || (estourou && status !== "done")) {
-    const msg =
-      status === "error"
-        ? (erro ?? "A análise falhou antes de concluir.")
-        : "Está demorando mais que o normal.";
+  // Concluído: o card sai de cena por conta própria. O pai também o remove ao receber a
+  // resposta, mas depender só disso deixaria o card girando "em andamento" sobre um job já
+  // pronto caso o evento de chat_messages se perdesse.
+  if (status === "done") return null;
+
+  // Falha é o que o BANCO diz. O motivo vem de `erro` — inclusive o texto do
+  // `expira-chat-jobs`, que explica a expiração melhor do que "tempo esgotado" explicaria.
+  if (status === "error") {
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
         <div className="flex items-center gap-2 text-sm font-medium">
-          <AlertTriangle className="h-4 w-4 text-destructive" />
-          {status === "error" ? "A análise não foi concluída" : "Está demorando mais que o normal"}
+          <AlertTriangle className="h-4 w-4 text-destructive" />A análise não foi concluída
         </div>
-        <p className="mt-1 text-xs text-muted-foreground">{msg}</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {erro ?? "A análise falhou antes de concluir."}
+        </p>
         <Button size="sm" variant="outline" className="mt-2" onClick={onResend}>
           <RefreshCw className="mr-1 h-3.5 w-3.5" />
           Reenviar
@@ -121,6 +209,9 @@ export function JobProgressCard({
       </div>
     );
   }
+
+  const silencio = agora - ultimoAvanco;
+  const emSilencio = silencio >= SILENCIO_MS;
 
   return (
     <div className="rounded-md border border-border bg-muted/40 p-3">
@@ -173,6 +264,21 @@ export function JobProgressCard({
 
       {ultimo?.detalhe && !ultimo.detalhe.startsWith("especialistas:") && (
         <div className="mt-2 text-[11px] text-muted-foreground">{ultimo.detalhe}</div>
+      )}
+
+      {/* Rede de segurança: informa silêncio e oferece saída, sem afirmar que o job falhou —
+          ele pode estar terminando neste instante. O veredito continua sendo do banco. */}
+      {emSilencio && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-border pt-2">
+          <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <Clock className="h-3.5 w-3.5" />
+            Ainda processando; sem resposta do servidor há {minutos(silencio)} min.
+          </span>
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px]" onClick={onResend}>
+            <RefreshCw className="mr-1 h-3 w-3" />
+            Reenviar
+          </Button>
+        </div>
       )}
     </div>
   );
