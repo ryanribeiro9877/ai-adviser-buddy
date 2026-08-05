@@ -37,6 +37,7 @@
 // =============================================================================
 
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -138,9 +139,8 @@ async function metaUploadVideo(account: string, nome: string, bytes: Uint8Array,
 // ---------------- Handler ----------------
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST apenas" }, 405);
-  const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
-  const auth = req.headers.get("x-mcp-key") ?? (req.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
-  if (!cfg?.api_key || auth !== cfg.api_key) return json({ error: "nao autorizado" }, 401);
+  const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-or-bearer"));
+  if (!auth.ok) return json({ error: "nao autorizado", motivo: auth.motivo }, 401);
 
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }

@@ -10,6 +10,7 @@
 // Auth: x-mcp-key. Tokens redigidos de toda saida.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -31,9 +32,8 @@ function json(obj: unknown, status = 200) {
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  const provided = (req.headers.get("x-mcp-key") ?? "").trim();
-  const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
-  if (!cfg?.api_key || provided !== cfg.api_key) return json({ error: "unauthorized" }, 401);
+  const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-only"));
+  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
 
   let body: any = {}; try { body = await req.json(); } catch { /* vazio ok */ }
   const acao = String(body?.acao ?? "descobrir");

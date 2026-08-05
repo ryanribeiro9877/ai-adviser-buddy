@@ -45,6 +45,7 @@
 // Auth: Bearer <mcp_config.api_key> (ou x-mcp-key). verify_jwt=false. Idempotente.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -347,16 +348,8 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
-  const authz = req.headers.get("authorization") ?? "";
-  const bearer = authz.toLowerCase().startsWith("bearer ") ? authz.slice(7).trim() : "";
-  const provided = bearer || (req.headers.get("x-mcp-key") ?? "").trim();
-  const { data: cfg, error: cfgErr } = await supa
-    .from("mcp_config")
-    .select("api_key")
-    .eq("id", 1)
-    .maybeSingle();
-  if (cfgErr) return json({ error: "config_read_failed", detail: cfgErr.message }, 500);
-  if (!cfg?.api_key || provided !== cfg.api_key) return json({ error: "unauthorized" }, 401);
+  const auth = await mcpKeyValida(supa, chaveMcpDe(req, "bearer-or-header"));
+  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
 
   const { data: sec } = await supa
     .from("integration_secrets")

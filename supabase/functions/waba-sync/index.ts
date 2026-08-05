@@ -27,6 +27,7 @@
 // Idempotente (upserts). Janela de analytics: últimos 30 dias.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -81,12 +82,8 @@ Deno.serve(async (req) => {
   const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
   // ---- auth (mesmo padrão do windsor-sync) ----
-  const authz = req.headers.get("authorization") ?? "";
-  const bearer = authz.toLowerCase().startsWith("bearer ") ? authz.slice(7).trim() : "";
-  const provided = bearer || (req.headers.get("x-mcp-key") ?? "").trim();
-  const { data: cfg, error: cfgErr } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
-  if (cfgErr) return json({ error: "config_read_failed" }, 500);
-  if (!cfg?.api_key || provided !== cfg.api_key) return json({ error: "unauthorized" }, 401);
+  const auth = await mcpKeyValida(supa, chaveMcpDe(req, "bearer-or-header"));
+  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
 
   const token = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
   if (!token) return json({ error: "missing_WHATSAPP_ACCESS_TOKEN", hint: "cadastre em Edge Function Secrets" }, 400);

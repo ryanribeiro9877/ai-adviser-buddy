@@ -1,4 +1,7 @@
-project_id = "ghlitpgdwurrwbsmkagb"
+# Projeto canônico do Gestor de Tráfego IA. O valor anterior (ghlitpgdwurrwbsmkagb)
+# apontava para um projeto fora desta org (não é Gestor nem JurisAI) — deploy sem
+# --project-ref ia para lá. Hipótese Lovable permanece não verificada.
+project_id = "gzjwnjdpxpbmdhcyefvs"
 
 # 04/08/2026 (GT-13) - upload-midia estava com verify_jwt=true no projeto e um deploy meu com
 # --no-verify-jwt mudou isso para false. O flag da CLI so sabe DESLIGAR; sem uma declaracao aqui

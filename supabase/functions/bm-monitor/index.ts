@@ -12,6 +12,7 @@
 // Auth: x-mcp-key. Token: META_ADS_TOKEN (redigido). Cron diário recomendado 09:20 UTC.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -45,9 +46,8 @@ async function upsertAlert(companyId: string, severity: string, title: string, d
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   if (!TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
-  const provided = (req.headers.get("x-mcp-key") ?? "").trim();
-  const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
-  if (!cfg?.api_key || provided !== cfg.api_key) return json({ error: "unauthorized" }, 401);
+  const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-only"));
+  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
 
   const { data: comp } = await supa.from("companies").select("id").ilike("name", "%legal%").limit(1).maybeSingle();
   if (!comp) return json({ error: "empresa não encontrada" }, 500);

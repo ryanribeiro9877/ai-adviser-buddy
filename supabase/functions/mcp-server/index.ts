@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const db = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -30,13 +31,8 @@ function toolText(data: unknown, isError = false) {
 }
 
 async function checkAuth(req: Request): Promise<boolean> {
-  const auth = req.headers.get("authorization") ?? "";
-  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const provided = (req.headers.get("x-mcp-key") ?? bearer).trim();
-  if (!provided) return false;
-  const { data, error } = await db.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
-  if (error || !data) return false;
-  return provided === data.api_key;
+  const auth = await mcpKeyValida(db, chaveMcpDe(req, "header-or-bearer"));
+  return auth.ok;
 }
 
 function derive(r: Record<string, unknown>) {

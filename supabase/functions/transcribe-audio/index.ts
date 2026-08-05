@@ -22,6 +22,7 @@
 // Auth: Bearer <user JWT> OU x-mcp-key.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -149,15 +150,20 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
-  const authz = req.headers.get("authorization") ?? "";
-  const bearer = authz.toLowerCase().startsWith("bearer ") ? authz.slice(7).trim() : "";
-  const provided = (req.headers.get("x-mcp-key") ?? "").trim() || bearer;
-  const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
+  const xKey = (req.headers.get("x-mcp-key") ?? "").trim();
+  const bearer = bearerDe(req);
   let authed = false;
-  if (cfg?.api_key && provided === cfg.api_key) authed = true;
-  else if (bearer) {
+  if (xKey) {
+    const v = await mcpKeyValida(supa, xKey);
+    if (!v.ok) return json({ error: "unauthorized", motivo: v.motivo }, 401);
+    authed = true;
+  } else if (bearer) {
     const { data: u } = await supa.auth.getUser(bearer);
     if (u?.user) authed = true;
+    else {
+      const v = await mcpKeyValida(supa, bearer);
+      if (v.ok) authed = true;
+    }
   }
   if (!authed) return json({ error: "unauthorized" }, 401);
 
