@@ -1,0 +1,18 @@
+---
+description: Sempre commit na main e redeploy Supabase após alterações
+alwaysApply: true
+---
+
+# Commit + Deploy (padrão do projeto)
+
+Ao concluir qualquer alteração neste repositório:
+
+1. **Commit direto na `main`** — sem pedir autorização, sem branch/PR.
+2. **Push para `origin/main`** — dispara o deploy Vercel automaticamente.
+3. **Redeploy no Supabase** de tudo que mudou:
+   - Edge Functions alteradas: `supabase functions deploy <nome> --project-ref gzjwnjdpxpbmdhcyefvs`
+   - Nunca omitir `--project-ref gzjwnjdpxpbmdhcyefvs` (`config.toml` aponta para outro projeto).
+   - Migrações: aplicar no projeto `gzjwnjdpxpbmdhcyefvs` e espelhar via RPC `espelhos_de_migracao`, nunca à mão.
+4. **Conferir** após o deploy: `functions list` (version + sha) e, se aplicável, sonda comportamental.
+
+Não deixar alteração só no disco local.
