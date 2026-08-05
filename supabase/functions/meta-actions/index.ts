@@ -90,19 +90,30 @@ const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 function redact(s: string): string {
   if (!TOKEN) return s;
-  return s.split(TOKEN).join("[TOKEN-REDACTED]").replace(/access_token=[A-Za-z0-9]+/g, "access_token=[TOKEN-REDACTED]");
+  return s
+    .split(TOKEN)
+    .join("[TOKEN-REDACTED]")
+    .replace(/access_token=[A-Za-z0-9]+/g, "access_token=[TOKEN-REDACTED]");
 }
 function json(obj: unknown, status = 200) {
-  return new Response(redact(JSON.stringify(obj)), { status, headers: { "content-type": "application/json" } });
+  return new Response(redact(JSON.stringify(obj)), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 async function g(path: string, method = "GET", body?: Record<string, string>) {
   const form = new URLSearchParams({ ...(body ?? {}), access_token: TOKEN });
   const sep = path.includes("?") ? "&" : "?";
-  const r = method === "GET"
-    ? await fetch(`${GRAPH}${path}${sep}${form.toString()}`)
-    : await fetch(`${GRAPH}${path}`, { method, body: form });
+  const r =
+    method === "GET"
+      ? await fetch(`${GRAPH}${path}${sep}${form.toString()}`)
+      : await fetch(`${GRAPH}${path}`, { method, body: form });
   const t = await r.text();
-  try { return { status: r.status, body: JSON.parse(redact(t)) }; } catch { return { status: r.status, body: redact(t.slice(0, 300)) }; }
+  try {
+    return { status: r.status, body: JSON.parse(redact(t)) };
+  } catch {
+    return { status: r.status, body: redact(t.slice(0, 300)) };
+  }
 }
 // v4.4 (04/08/2026) - GT-13: a thumbnail do video_data e OBRIGATORIA na Meta, e ela nao vem de
 // graca: o quadro do molde e o do video ANTIGO. Os quadros do video novo saem de
@@ -114,50 +125,88 @@ async function g(path: string, method = "GET", body?: Record<string, string>) {
 // SEM PESO MENSURAVEL A FUNCAO RECUSA. Escolher por posicao seria escolher no escuro e entregar
 // como se fosse critério; quem precisar de capa especifica passa thumbnail_url no payload.
 async function escolherThumbnail(
-  videoId: string, urlExplicita: string,
-): Promise<{ url?: string; erro?: string; indice?: number; bytes?: number; total?: number; criterio?: string }> {
-  if (urlExplicita) return { url: urlExplicita, criterio: "url informada no payload (nao foi escolhida por peso)" };
+  videoId: string,
+  urlExplicita: string,
+): Promise<{
+  url?: string;
+  erro?: string;
+  indice?: number;
+  bytes?: number;
+  total?: number;
+  criterio?: string;
+}> {
+  if (urlExplicita)
+    return { url: urlExplicita, criterio: "url informada no payload (nao foi escolhida por peso)" };
 
   const r = await g(`/${videoId}/thumbnails?fields=id,uri,width,height,is_preferred`);
   if (r.status !== 200) {
-    return { erro: `a Meta nao devolveu os quadros do video ${videoId} (HTTP ${r.status}). Sem quadro nao ha capa, e a Meta exige capa em video_data.` };
+    return {
+      erro: `a Meta nao devolveu os quadros do video ${videoId} (HTTP ${r.status}). Sem quadro nao ha capa, e a Meta exige capa em video_data.`,
+    };
   }
   const lista: any[] = Array.isArray((r.body as any)?.data) ? (r.body as any).data : [];
   if (!lista.length) {
-    return { erro: `o video ${videoId} nao tem quadro gerado pela Meta ainda. A geracao acontece na ingestao e pode nao ter terminado - tente de novo, ou passe thumbnail_url no payload.` };
+    return {
+      erro: `o video ${videoId} nao tem quadro gerado pela Meta ainda. A geracao acontece na ingestao e pode nao ter terminado - tente de novo, ou passe thumbnail_url no payload.`,
+    };
   }
 
   const medidos: { i: number; uri: string; bytes: number | null }[] = [];
   for (let i = 0; i < lista.length; i++) {
     const uri = String(lista[i]?.uri ?? "");
-    if (!uri) { medidos.push({ i, uri, bytes: null }); continue; }
+    if (!uri) {
+      medidos.push({ i, uri, bytes: null });
+      continue;
+    }
     let bytes: number | null = null;
     try {
       const h = await fetch(uri, { method: "HEAD" });
       const cl = h.headers.get("content-length");
       bytes = h.ok && cl ? Number(cl) : null;
-    } catch { bytes = null; }
+    } catch {
+      bytes = null;
+    }
     medidos.push({ i, uri, bytes });
   }
   const comPeso = medidos.filter((m) => typeof m.bytes === "number" && (m.bytes as number) > 0);
   if (!comPeso.length) {
-    return { erro: `nenhum dos ${lista.length} quadros do video ${videoId} respondeu ao HEAD com content-length, entao NAO ha como escolher por densidade visual. Escolher por posicao seria escolher no escuro. Passe thumbnail_url no payload se quiser uma capa especifica.` };
+    return {
+      erro: `nenhum dos ${lista.length} quadros do video ${videoId} respondeu ao HEAD com content-length, entao NAO ha como escolher por densidade visual. Escolher por posicao seria escolher no escuro. Passe thumbnail_url no payload se quiser uma capa especifica.`,
+    };
   }
   comPeso.sort((a, b) => (b.bytes as number) - (a.bytes as number));
   const melhor = comPeso[0];
-  return { url: melhor.uri, indice: melhor.i, bytes: melhor.bytes as number, total: lista.length,
-    criterio: `quadro mais pesado entre os ${comPeso.length} de ${lista.length} que responderam ao HEAD (peso = proxy de densidade visual; is_preferred da Meta foi IGNORADO de proposito)` };
+  return {
+    url: melhor.uri,
+    indice: melhor.i,
+    bytes: melhor.bytes as number,
+    total: lista.length,
+    criterio: `quadro mais pesado entre os ${comPeso.length} de ${lista.length} que responderam ao HEAD (peso = proxy de densidade visual; is_preferred da Meta foi IGNORADO de proposito)`,
+  };
 }
 
-async function audit(companyId: string, userId: string, action: string, approvalId: string, details: unknown) {
+async function audit(
+  companyId: string,
+  userId: string,
+  action: string,
+  approvalId: string,
+  details: unknown,
+) {
   await supa.from("audit_log").insert({
-    company_id: companyId, user_id: userId, action, target_type: "approval_request", target_id: approvalId,
+    company_id: companyId,
+    user_id: userId,
+    action,
+    target_type: "approval_request",
+    target_id: approvalId,
     details: JSON.parse(redact(JSON.stringify(details))),
   });
 }
 // v2: normaliza act_123 e 123 para o mesmo formato, porque integrations guarda sem prefixo
 // e a lista branca guarda com prefixo.
-const actId = (v: string) => { const s = String(v ?? "").trim(); return s.startsWith("act_") ? s : `act_${s}`; };
+const actId = (v: string) => {
+  const s = String(v ?? "").trim();
+  return s.startsWith("act_") ? s : `act_${s}`;
+};
 
 // v2: monta o corpo de criacao lendo o molde quando necessario. Retorna o path de colecao,
 // o body do POST e, opcionalmente, um passo previo (criacao de adcreative).
@@ -170,10 +219,10 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
       body: {
         name: nome,
         objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
-        status: "PAUSED",                                  // v4.3: aprovar CRIA; ativar e ato do gestor no Gerenciador
-        special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]),  // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
+        status: "PAUSED", // v4.3: aprovar CRIA; ativar e ato do gestor no Gerenciador
+        special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]), // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
         buying_type: "AUCTION",
-        is_adset_budget_sharing_enabled: "false",           // v4: exigido pela Meta em ABO; false = sem compartilhamento de orcamento entre conjuntos
+        is_adset_budget_sharing_enabled: "false", // v4: exigido pela Meta em ABO; false = sem compartilhamento de orcamento entre conjuntos
       } as Record<string, string>,
     };
   }
@@ -183,12 +232,26 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
     const campanha = String(p?.campanha_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
     const reais = Number(p?.orcamento_diario_reais ?? 0);
-    if (!molde || !campanha || !nome) return { erro: "payload incompleto (molde_external_id, campanha_destino_external_id, nome_novo)" };
+    if (!molde || !campanha || !nome)
+      return {
+        erro: "payload incompleto (molde_external_id, campanha_destino_external_id, nome_novo)",
+      };
     if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
-    if (reais > tetoSanidade) return { erro: `orcamento ${reais} acima do teto de sanidade ${tetoSanidade}` };
+    if (reais > tetoSanidade)
+      return { erro: `orcamento ${reais} acima do teto de sanidade ${tetoSanidade}` };
 
-    const campos = ["optimization_goal", "billing_event", "bid_strategy", "targeting", "promoted_object",
-      "destination_type", "attribution_spec", "bid_amount", "dsa_beneficiary", "dsa_payor"].join(",");
+    const campos = [
+      "optimization_goal",
+      "billing_event",
+      "bid_strategy",
+      "targeting",
+      "promoted_object",
+      "destination_type",
+      "attribution_spec",
+      "bid_amount",
+      "dsa_beneficiary",
+      "dsa_payor",
+    ].join(",");
     const m = await g(`/${molde}?fields=${campos}`);
     if (m.status !== 200) return { erro: "falha ao ler o conjunto molde na Meta", detalhe: m.body };
     const mb: any = m.body ?? {};
@@ -196,8 +259,8 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
     const body: Record<string, string> = {
       name: nome,
       campaign_id: campanha,
-      daily_budget: String(Math.round(reais * 100)),   // centavos
-      status: "PAUSED",                                 // v4.3: aprovar CRIA; ativar e ato do gestor
+      daily_budget: String(Math.round(reais * 100)), // centavos
+      status: "PAUSED", // v4.3: aprovar CRIA; ativar e ato do gestor
     };
     // Replica apenas o que o molde realmente tem - nada e inventado.
     if (mb.optimization_goal) body.optimization_goal = String(mb.optimization_goal);
@@ -219,12 +282,15 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
     const adset = String(p?.conjunto_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
     const urlTags = String(p?.url_tags ?? "").trim();
-    const videoNovo = String(p?.meta_video_id ?? "").trim();   // v4.4: peca nova
+    const videoNovo = String(p?.meta_video_id ?? "").trim(); // v4.4: peca nova
     const legendaNova = String(p?.legenda ?? "").trim();
-    if (!creativeMolde || !adset || !nome) return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
+    if (!creativeMolde || !adset || !nome)
+      return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
 
     // Le o creative do molde para tentar recria-lo com as UTMs novas.
-    const c = await g(`/${creativeMolde}?fields=object_story_spec,url_tags,name,degrees_of_freedom_spec`);
+    const c = await g(
+      `/${creativeMolde}?fields=object_story_spec,url_tags,name,degrees_of_freedom_spec`,
+    );
     const cb: any = c.body ?? {};
     const temStorySpec = c.status === 200 && cb.object_story_spec;
 
@@ -239,23 +305,32 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
     // ninguem notar, gastando. Por isso cada pre-requisito ausente RECUSA, com nome proprio.
     if (videoNovo) {
       if (!temStorySpec) {
-        return { erro: "molde_sem_object_story_spec",
-          detalhe: `O anuncio molde (creative ${creativeMolde}) nao expoe object_story_spec - tipico de criativo flexivel/Advantage+, onde midia, textos e link vivem no asset_feed_spec. Sem o spec nao ha de onde copiar page_id, link de destino e CTA, e este caminho NAO reusa o criativo do molde: reusar publicaria a peca ANTIGA num card que pede a peca NOVA. Escolha um molde que exponha o spec (na conta da Legal e Viver os CREATIVE_LPV2_Reel* expoem) ou monte o anuncio no Gerenciador.` };
+        return {
+          erro: "molde_sem_object_story_spec",
+          detalhe: `O anuncio molde (creative ${creativeMolde}) nao expoe object_story_spec - tipico de criativo flexivel/Advantage+, onde midia, textos e link vivem no asset_feed_spec. Sem o spec nao ha de onde copiar page_id, link de destino e CTA, e este caminho NAO reusa o criativo do molde: reusar publicaria a peca ANTIGA num card que pede a peca NOVA. Escolha um molde que exponha o spec (na conta da Legal e Viver os CREATIVE_LPV2_Reel* expoem) ou monte o anuncio no Gerenciador.`,
+        };
       }
       const vd: any = cb.object_story_spec?.video_data ?? null;
       if (!vd) {
-        return { erro: "molde_sem_video_data",
-          detalhe: `O molde expoe object_story_spec, mas sem video_data (chaves presentes: ${Object.keys(cb.object_story_spec ?? {}).join(", ") || "nenhuma"}). Trocar a midia de um spec de imagem por video mudaria o formato do anuncio, nao so a peca - e isso nao e replicar molde. Use como molde um anuncio de VIDEO.` };
+        return {
+          erro: "molde_sem_video_data",
+          detalhe: `O molde expoe object_story_spec, mas sem video_data (chaves presentes: ${Object.keys(cb.object_story_spec ?? {}).join(", ") || "nenhuma"}). Trocar a midia de um spec de imagem por video mudaria o formato do anuncio, nao so a peca - e isso nao e replicar molde. Use como molde um anuncio de VIDEO.`,
+        };
       }
       if (!cb.object_story_spec?.page_id) {
-        return { erro: "molde_sem_page_id",
-          detalhe: "O object_story_spec do molde nao traz page_id, e a Meta recusa adcreative sem pagina. Nao ha default seguro: publicar por outra pagina mudaria o emissor do anuncio." };
+        return {
+          erro: "molde_sem_page_id",
+          detalhe:
+            "O object_story_spec do molde nao traz page_id, e a Meta recusa adcreative sem pagina. Nao ha default seguro: publicar por outra pagina mudaria o emissor do anuncio.",
+        };
       }
       // §7 do briefing: a URL de destino nao existe em tabela nenhuma - ela vem do molde ou nao vem.
       const linkMolde = vd?.call_to_action?.value?.link ?? vd?.link ?? null;
       if (!linkMolde) {
-        return { erro: "molde_sem_link_de_destino",
-          detalhe: `O video_data do molde nao traz link de destino (chaves: ${Object.keys(vd).join(", ")}). A URL de destino nao esta em nenhuma tabela do sistema, so dentro do spec do molde - e nao sera inventada. Escolha um molde que carregue o link.` };
+        return {
+          erro: "molde_sem_link_de_destino",
+          detalhe: `O video_data do molde nao traz link de destino (chaves: ${Object.keys(vd).join(", ")}). A URL de destino nao esta em nenhuma tabela do sistema, so dentro do spec do molde - e nao sera inventada. Escolha um molde que carregue o link.`,
+        };
       }
       const th = await escolherThumbnail(videoNovo, String(p?.thumbnail_url ?? ""));
       if (th.erro) {
@@ -271,23 +346,44 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
       return {
         path: `/${conta}/ads`,
         body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
-        criativo: { modo: "novo_adcreative_peca_nova", path: `/${conta}/adcreatives`,
-          body: { name: `${nome} - creative`, object_story_spec: JSON.stringify(novoSpec),
-                  ...(urlTags ? { url_tags: urlTags } : {}) } as Record<string, string> },
-        peca_nova: { meta_video_id: videoNovo, thumbnail: th, link_herdado_do_molde: linkMolde,
-          legenda_substituida: !!legendaNova, creative_molde: creativeMolde },
+        criativo: {
+          modo: "novo_adcreative_peca_nova",
+          path: `/${conta}/adcreatives`,
+          body: {
+            name: `${nome} - creative`,
+            object_story_spec: JSON.stringify(novoSpec),
+            ...(urlTags ? { url_tags: urlTags } : {}),
+          } as Record<string, string>,
+        },
+        peca_nova: {
+          meta_video_id: videoNovo,
+          thumbnail: th,
+          link_herdado_do_molde: linkMolde,
+          legenda_substituida: !!legendaNova,
+          creative_molde: creativeMolde,
+        },
       };
     }
 
     return {
       path: `/${conta}/ads`,
-      body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,  // v4.3: anuncio nasce pausado - a entrega so comeca quando o gestor ativar
+      body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>, // v4.3: anuncio nasce pausado - a entrega so comeca quando o gestor ativar
       criativo: temStorySpec
-        ? { modo: "novo_adcreative", path: `/${conta}/adcreatives`,
-            body: { name: `${nome} - creative`, object_story_spec: JSON.stringify(cb.object_story_spec),
-                    ...(urlTags ? { url_tags: urlTags } : {}) } as Record<string, string> }
-        : { modo: "reusar_creative_id", creative_id: creativeMolde,
-            aviso: "O criativo do molde nao expoe object_story_spec (tipico de Advantage+ com asset_feed_spec), entao o anuncio novo REUSA o criativo original e herda as UTMs dele - a utm_campaign pedida NAO sera aplicada. Ajustar manualmente no Gerenciador se a rastreabilidade for necessaria." },
+        ? {
+            modo: "novo_adcreative",
+            path: `/${conta}/adcreatives`,
+            body: {
+              name: `${nome} - creative`,
+              object_story_spec: JSON.stringify(cb.object_story_spec),
+              ...(urlTags ? { url_tags: urlTags } : {}),
+            } as Record<string, string>,
+          }
+        : {
+            modo: "reusar_creative_id",
+            creative_id: creativeMolde,
+            aviso:
+              "O criativo do molde nao expoe object_story_spec (tipico de Advantage+ com asset_feed_spec), entao o anuncio novo REUSA o criativo original e herda as UTMs dele - a utm_campaign pedida NAO sera aplicada. Ajustar manualmente no Gerenciador se a rastreabilidade for necessaria.",
+          },
     };
   }
 
@@ -307,8 +403,15 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
 // FALHA DE ESPELHO NAO DERRUBA A EXECUCAO: o objeto JA existe na Meta nesse ponto. Mas tambem
 // nao e silenciosa - vai para o audit_log e para o execution_result do card.
 async function espelhar(
-  acao: string, novoId: string, objeto: any, p: any, conta: string,
-  companyId: string, approvalId: string, moldeLido: any, creativeUsado: string | null,
+  acao: string,
+  novoId: string,
+  objeto: any,
+  p: any,
+  conta: string,
+  companyId: string,
+  approvalId: string,
+  moldeLido: any,
+  creativeUsado: string | null,
   statusEnviado: string,
 ): Promise<{ ok: boolean; erro?: string; tabela?: string }> {
   const contaSemPrefixo = conta.replace(/^act_/, "");
@@ -321,75 +424,99 @@ async function espelhar(
   const statusMeta = String(objeto?.status ?? statusEnviado ?? "PAUSED") || "PAUSED";
   try {
     if (acao === "criar_campanha") {
-      const { error } = await supa.from("campaigns").upsert({
-        company_id: companyId,
-        provider: "meta_ads",
-        name: String(objeto?.name ?? p?.nome_novo ?? ""),
-        objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
-        status: statusMeta.toLowerCase(),                 // campaigns = minusculo
-        daily_budget: 0,                                  // ABO: orcamento vive no conjunto
-        external_id: novoId,
-        external_account_id: contaSemPrefixo,
-        special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"],
-        criado_pelo_sistema: true,
-        criado_por_approval_id: approvalId,
-      }, { onConflict: "provider,external_id" });
-      return error ? { ok: false, erro: error.message, tabela: "campaigns" } : { ok: true, tabela: "campaigns" };
+      const { error } = await supa.from("campaigns").upsert(
+        {
+          company_id: companyId,
+          provider: "meta_ads",
+          name: String(objeto?.name ?? p?.nome_novo ?? ""),
+          objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
+          status: statusMeta.toLowerCase(), // campaigns = minusculo
+          daily_budget: 0, // ABO: orcamento vive no conjunto
+          external_id: novoId,
+          external_account_id: contaSemPrefixo,
+          special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"],
+          criado_pelo_sistema: true,
+          criado_por_approval_id: approvalId,
+        },
+        { onConflict: "provider,external_id" },
+      );
+      return error
+        ? { ok: false, erro: error.message, tabela: "campaigns" }
+        : { ok: true, tabela: "campaigns" };
     }
 
     if (acao === "criar_conjunto_a_partir_de") {
       // ad_sets.campaign_id e o uuid INTERNO, nao o id da Meta - precisa resolver.
-      const { data: camp } = await supa.from("campaigns").select("id")
-        .eq("provider", "meta_ads").eq("external_id", String(p?.campanha_destino_external_id ?? ""))
+      const { data: camp } = await supa
+        .from("campaigns")
+        .select("id")
+        .eq("provider", "meta_ads")
+        .eq("external_id", String(p?.campanha_destino_external_id ?? ""))
         .maybeSingle();
-      const { error } = await supa.from("ad_sets").upsert({
-        company_id: companyId,
-        provider: "meta_ads",
-        account_id: contaSemPrefixo,
-        campaign_id: camp?.id ?? null,                    // null e aceito (FK ON DELETE SET NULL)
-        external_id: novoId,
-        name: String(objeto?.name ?? p?.nome_novo ?? ""),
-        status: statusMeta.toUpperCase(),                 // ad_sets = MAIUSCULO
-        daily_budget: Math.round(Number(p?.orcamento_diario_reais ?? 0) * 100),  // centavos
-        bid_strategy: moldeLido?.bid_strategy ?? null,
-        targeting: moldeLido?.targeting ?? null,
-        criado_pelo_sistema: true,
-        criado_por_approval_id: approvalId,
-      }, { onConflict: "provider,external_id" });
-      const aviso = camp?.id ? undefined : "conjunto gravado SEM vinculo de campanha: a campanha destino nao esta no espelho";
-      return error ? { ok: false, erro: error.message, tabela: "ad_sets" }
-                   : { ok: true, tabela: "ad_sets", ...(aviso ? { erro: aviso } : {}) };
+      const { error } = await supa.from("ad_sets").upsert(
+        {
+          company_id: companyId,
+          provider: "meta_ads",
+          account_id: contaSemPrefixo,
+          campaign_id: camp?.id ?? null, // null e aceito (FK ON DELETE SET NULL)
+          external_id: novoId,
+          name: String(objeto?.name ?? p?.nome_novo ?? ""),
+          status: statusMeta.toUpperCase(), // ad_sets = MAIUSCULO
+          daily_budget: Math.round(Number(p?.orcamento_diario_reais ?? 0) * 100), // centavos
+          bid_strategy: moldeLido?.bid_strategy ?? null,
+          targeting: moldeLido?.targeting ?? null,
+          criado_pelo_sistema: true,
+          criado_por_approval_id: approvalId,
+        },
+        { onConflict: "provider,external_id" },
+      );
+      const aviso = camp?.id
+        ? undefined
+        : "conjunto gravado SEM vinculo de campanha: a campanha destino nao esta no espelho";
+      return error
+        ? { ok: false, erro: error.message, tabela: "ad_sets" }
+        : { ok: true, tabela: "ad_sets", ...(aviso ? { erro: aviso } : {}) };
     }
 
     if (acao === "criar_anuncio_a_partir_de") {
       // Sobe pelo conjunto para achar a campanha - o anuncio guarda as duas referencias.
-      const { data: aset } = await supa.from("ad_sets").select("campaign_id")
-        .eq("provider", "meta_ads").eq("external_id", String(p?.conjunto_destino_external_id ?? ""))
+      const { data: aset } = await supa
+        .from("ad_sets")
+        .select("campaign_id")
+        .eq("provider", "meta_ads")
+        .eq("external_id", String(p?.conjunto_destino_external_id ?? ""))
         .maybeSingle();
-      const { error } = await supa.from("ads").upsert({
-        company_id: companyId,
-        provider: "meta_ads",
-        account_id: contaSemPrefixo,
-        campaign_id: aset?.campaign_id ?? null,
-        adset_external_id: String(p?.conjunto_destino_external_id ?? ""),
-        external_id: novoId,
-        name: String(objeto?.name ?? p?.nome_novo ?? ""),
-        creative_id: creativeUsado,
-        status: statusMeta.toUpperCase(),                 // ads = MAIUSCULO
-        criado_pelo_sistema: true,
-        criado_por_approval_id: approvalId,
-        // v4.4 (GT-13): PROCEDENCIA DO TEXTO. Sem isso, um anuncio criado pelo sistema fica
-        // indistinguivel de um sincronizado, e a pergunta "quem escreveu esta legenda" nao tem
-        // resposta no banco - so no card, que expira. legenda_fonte vem da verificacao
-        // (pedido_de_anuncio_completo), nao de palpite daqui; ausente = nao declarada, e nulo
-        // e a resposta honesta. compliance_verificado_em e o instante do veredito que LIBEROU
-        // o card, nao o da execucao: o que foi avaliado foi o texto, antes de existir anuncio.
-        ...(p?.legenda ? { body: String(p.legenda) } : {}),
-        ...(p?.legenda_fonte ? { legenda_fonte: String(p.legenda_fonte) } : {}),
-        ...(p?.legenda_referencias ? { legenda_referencias: p.legenda_referencias } : {}),
-        ...(p?.compliance?.validado_em ? { compliance_verificado_em: String(p.compliance.validado_em) } : {}),
-      }, { onConflict: "provider,external_id" });
-      return error ? { ok: false, erro: error.message, tabela: "ads" } : { ok: true, tabela: "ads" };
+      const { error } = await supa.from("ads").upsert(
+        {
+          company_id: companyId,
+          provider: "meta_ads",
+          account_id: contaSemPrefixo,
+          campaign_id: aset?.campaign_id ?? null,
+          adset_external_id: String(p?.conjunto_destino_external_id ?? ""),
+          external_id: novoId,
+          name: String(objeto?.name ?? p?.nome_novo ?? ""),
+          creative_id: creativeUsado,
+          status: statusMeta.toUpperCase(), // ads = MAIUSCULO
+          criado_pelo_sistema: true,
+          criado_por_approval_id: approvalId,
+          // v4.4 (GT-13): PROCEDENCIA DO TEXTO. Sem isso, um anuncio criado pelo sistema fica
+          // indistinguivel de um sincronizado, e a pergunta "quem escreveu esta legenda" nao tem
+          // resposta no banco - so no card, que expira. legenda_fonte vem da verificacao
+          // (pedido_de_anuncio_completo), nao de palpite daqui; ausente = nao declarada, e nulo
+          // e a resposta honesta. compliance_verificado_em e o instante do veredito que LIBEROU
+          // o card, nao o da execucao: o que foi avaliado foi o texto, antes de existir anuncio.
+          ...(p?.legenda ? { body: String(p.legenda) } : {}),
+          ...(p?.legenda_fonte ? { legenda_fonte: String(p.legenda_fonte) } : {}),
+          ...(p?.legenda_referencias ? { legenda_referencias: p.legenda_referencias } : {}),
+          ...(p?.compliance?.validado_em
+            ? { compliance_verificado_em: String(p.compliance.validado_em) }
+            : {}),
+        },
+        { onConflict: "provider,external_id" },
+      );
+      return error
+        ? { ok: false, erro: error.message, tabela: "ads" }
+        : { ok: true, tabela: "ads" };
     }
 
     return { ok: false, erro: `acao sem regra de espelho: ${acao}` };
@@ -404,18 +531,33 @@ Deno.serve(async (req) => {
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-only"));
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
 
-  let body: any = {}; try { body = await req.json(); } catch { /* */ }
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch {
+    /* */
+  }
   const onlyId: string | null = body?.approval_id ?? null;
 
   // v3: a config NAO e mais lida aqui. Cada card carrega a da sua propria empresa, dentro do
   // loop - uma leitura global voltaria a aplicar a configuracao de uma empresa a outra.
 
-  let q = supa.from("approval_requests").select("*").eq("status", "approved").is("executed_at", null);
+  let q = supa
+    .from("approval_requests")
+    .select("*")
+    .eq("status", "approved")
+    .is("executed_at", null);
   if (onlyId) q = q.eq("id", onlyId);
   const { data: fila } = await q.order("created_at", { ascending: true }).limit(10);
-  if (!fila?.length) return json({ ok: true, processados: 0, nota: "fila vazia (nenhum aprovado pendente de execução)" });
+  if (!fila?.length)
+    return json({
+      ok: true,
+      processados: 0,
+      nota: "fila vazia (nenhum aprovado pendente de execução)",
+    });
 
-  const { count: naHora } = await supa.from("audit_log")
+  const { count: naHora } = await supa
+    .from("audit_log")
     .select("id", { count: "exact", head: true })
     .eq("action", "meta_action_executed")
     .gte("created_at", new Date(Date.now() - 3600e3).toISOString());
@@ -429,13 +571,22 @@ Deno.serve(async (req) => {
     const sistema = r.reviewed_by ?? r.requested_by;
 
     // v3: config DA EMPRESA DESTE CARD. Sem linha propria, nada executa.
-    const { data: conf } = await supa.from("meta_execution_config")
-      .select("*").eq("company_id", r.company_id).maybeSingle();
+    const { data: conf } = await supa
+      .from("meta_execution_config")
+      .select("*")
+      .eq("company_id", r.company_id)
+      .maybeSingle();
     if (!conf) {
-      await audit(r.company_id, sistema, "meta_action_blocked", r.id,
-        { motivo: "empresa sem configuracao de execucao propria", acao });
-      resultados.push({ id: r.id, acao, resultado: "bloqueado",
-        motivo: "empresa sem configuracao de execucao - nada e executado sem config propria" });
+      await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+        motivo: "empresa sem configuracao de execucao propria",
+        acao,
+      });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: "bloqueado",
+        motivo: "empresa sem configuracao de execucao - nada e executado sem config propria",
+      });
       continue;
     }
     const contasOk: string[] = (conf.contas_permitidas_criacao ?? []).map((x: string) => actId(x));
@@ -448,22 +599,39 @@ Deno.serve(async (req) => {
       // v2: expiracao - cards vencidos ja viram 'rejected' pelo cron, mas checamos de novo
       // porque aprovacao antiga executando contra conta mudada e o risco que motivou o prazo.
       if (r.expires_at && new Date(r.expires_at) < new Date()) {
-        await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo: "pedido expirado", acao, prazo: r.expires_at });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo: "pedido expirado (24h)" });
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: "pedido expirado",
+          acao,
+          prazo: r.expires_at,
+        });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo: "pedido expirado (24h)",
+        });
         continue;
       }
 
       const conta = actId(String(r.payload?.conta_destino ?? ""));
       if (!contasOk.length || !contasOk.includes(conta)) {
         const motivo = `conta de destino ${conta || "(vazia)"} nao esta na lista de contas permitidas para criacao`;
-        await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao, contas_permitidas: contasOk });
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          acao,
+          contas_permitidas: contasOk,
+        });
         resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo });
         continue;
       }
 
       const plano = await montarCriacao(acao, r.payload, conta, tetoSanidade);
       if ((plano as any).erro) {
-        await audit(r.company_id, sistema, "meta_action_failed", r.id, { motivo: (plano as any).erro, detalhe: (plano as any).detalhe ?? null, acao });
+        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+          motivo: (plano as any).erro,
+          detalhe: (plano as any).detalhe ?? null,
+          acao,
+        });
         resultados.push({ id: r.id, acao, resultado: "falha", motivo: (plano as any).erro });
         continue;
       }
@@ -471,21 +639,43 @@ Deno.serve(async (req) => {
 
       if (conf.dry_run) {
         await audit(r.company_id, sistema, "meta_action_dry_run", r.id, {
-          SIMULADO: true, acao, conta, criaria_em: pl.path, com_body: pl.body,
-          criativo: pl.criativo ?? null, molde_lido: pl.molde_lido ?? null, peca_nova: pl.peca_nova ?? null,
-          flags_permitiriam: { master: conf.master_enabled, flag_acao: conf.action_flags?.[acao] === true, rate_ok: rateOk },
+          SIMULADO: true,
+          acao,
+          conta,
+          criaria_em: pl.path,
+          com_body: pl.body,
+          criativo: pl.criativo ?? null,
+          molde_lido: pl.molde_lido ?? null,
+          peca_nova: pl.peca_nova ?? null,
+          flags_permitiriam: {
+            master: conf.master_enabled,
+            flag_acao: conf.action_flags?.[acao] === true,
+            rate_ok: rateOk,
+          },
           nota: "dry_run=true: NADA foi criado na Meta; executed_at NÃO preenchido",
         });
-        resultados.push({ id: r.id, acao, resultado: "SIMULADO", conta, criaria_em: pl.path,
-          nome_novo: pl.body?.name, status_inicial: pl.body?.status,
-          criativo_modo: pl.criativo?.modo ?? null, criativo_aviso: pl.criativo?.aviso ?? null,
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "SIMULADO",
+          conta,
+          criaria_em: pl.path,
+          nome_novo: pl.body?.name,
+          status_inicial: pl.body?.status,
+          criativo_modo: pl.criativo?.modo ?? null,
+          criativo_aviso: pl.criativo?.aviso ?? null,
           peca_nova: pl.peca_nova ?? null,
-          flags_permitiriam: flagsOk && rateOk });
+          flags_permitiriam: flagsOk && rateOk,
+        });
         continue;
       }
 
       if (!flagsOk || !rateOk) {
-        const motivo = !conf.master_enabled ? "master_enabled=false" : (conf.action_flags?.[acao] !== true ? `flag ${acao}=false` : "rate limit atingido");
+        const motivo = !conf.master_enabled
+          ? "master_enabled=false"
+          : conf.action_flags?.[acao] !== true
+            ? `flag ${acao}=false`
+            : "rate limit atingido";
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao });
         resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo });
         continue;
@@ -499,8 +689,18 @@ Deno.serve(async (req) => {
       if (String(pl.criativo?.modo ?? "").startsWith("novo_adcreative")) {
         const cc = await g(pl.criativo.path, "POST", pl.criativo.body);
         if (cc.status !== 200 || !(cc.body as any)?.id) {
-          await audit(r.company_id, sistema, "meta_action_failed", r.id, { motivo: "falha ao criar adcreative", resposta_meta: cc, acao });
-          resultados.push({ id: r.id, acao, resultado: "falha_meta", etapa: "adcreative", detalhe: cc.body });
+          await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+            motivo: "falha ao criar adcreative",
+            resposta_meta: cc,
+            acao,
+          });
+          resultados.push({
+            id: r.id,
+            acao,
+            resultado: "falha_meta",
+            etapa: "adcreative",
+            detalhe: cc.body,
+          });
           continue;
         }
         creativeCriado = (cc.body as any).id;
@@ -513,53 +713,113 @@ Deno.serve(async (req) => {
       const novoId = (exec.body as any)?.id ?? null;
       const sucesso = exec.status === 200 && !!novoId;
       // Confere o estado do que nasceu: o status (PAUSED desde a v4.3) e verificado, nao assumido.
-      const depois = sucesso ? await g(`/${novoId}?fields=name,status,effective_status`) : { status: 0, body: null };
+      const depois = sucesso
+        ? await g(`/${novoId}?fields=name,status,effective_status`)
+        : { status: 0, body: null };
 
-      await audit(r.company_id, sistema, sucesso ? "meta_action_executed" : "meta_action_failed", r.id, {
-        acao, conta, criado_em: pl.path, body_enviado: bodyFinal, adcreative_criado: creativeCriado,
-        resposta_meta: exec, objeto_criado: depois.body, criativo_aviso: pl.criativo?.aviso ?? null,
-        peca_nova: pl.peca_nova ?? null,
-      });
+      await audit(
+        r.company_id,
+        sistema,
+        sucesso ? "meta_action_executed" : "meta_action_failed",
+        r.id,
+        {
+          acao,
+          conta,
+          criado_em: pl.path,
+          body_enviado: bodyFinal,
+          adcreative_criado: creativeCriado,
+          resposta_meta: exec,
+          objeto_criado: depois.body,
+          criativo_aviso: pl.criativo?.aviso ?? null,
+          peca_nova: pl.peca_nova ?? null,
+        },
+      );
 
       if (sucesso) {
         executadasNaHora++;
         // v4.2: espelha ANTES de fechar o card, para que o proximo turno do agente ja veja.
-        const esp = await espelhar(acao, novoId, depois.body, r.payload, conta,
-          r.company_id, r.id, pl.molde_lido ?? null,
-          creativeCriado ?? (pl.criativo?.creative_id ?? null),
-          String(bodyFinal.status ?? ""));
+        const esp = await espelhar(
+          acao,
+          novoId,
+          depois.body,
+          r.payload,
+          conta,
+          r.company_id,
+          r.id,
+          pl.molde_lido ?? null,
+          creativeCriado ?? pl.criativo?.creative_id ?? null,
+          String(bodyFinal.status ?? ""),
+        );
         if (!esp.ok) {
-          await audit(r.company_id, sistema, "meta_action_espelho_falhou", r.id,
-            { acao, id_criado: novoId, tabela: esp.tabela ?? null, erro: esp.erro,
-              nota: "O OBJETO EXISTE NA META. Falhou apenas a gravacao no espelho local - o sistema ficara cego para este objeto ate o proximo sync." });
+          await audit(r.company_id, sistema, "meta_action_espelho_falhou", r.id, {
+            acao,
+            id_criado: novoId,
+            tabela: esp.tabela ?? null,
+            erro: esp.erro,
+            nota: "O OBJETO EXISTE NA META. Falhou apenas a gravacao no espelho local - o sistema ficara cego para este objeto ate o proximo sync.",
+          });
         }
-        await supa.from("approval_requests").update({
-          executed_at: new Date().toISOString(),
-          execution_result: { ok: true, id_criado: novoId, objeto: depois.body,
-            adcreative_criado: creativeCriado, aviso: pl.criativo?.aviso ?? null,
-            peca_nova: pl.peca_nova ?? null,
-            espelho_gravado: esp.ok, espelho_tabela: esp.tabela ?? null, espelho_erro: esp.erro ?? null,
-            lembrete: "Objeto criado PAUSADO (v4.3). A aprovacao CRIOU o objeto e NAO iniciou entrega nem gasto. Para comecar a entregar, o gestor precisa ATIVAR manualmente no Gerenciador - conferindo a arvore inteira antes." },
-        }).eq("id", r.id);
+        await supa
+          .from("approval_requests")
+          .update({
+            executed_at: new Date().toISOString(),
+            execution_result: {
+              ok: true,
+              id_criado: novoId,
+              objeto: depois.body,
+              adcreative_criado: creativeCriado,
+              aviso: pl.criativo?.aviso ?? null,
+              peca_nova: pl.peca_nova ?? null,
+              espelho_gravado: esp.ok,
+              espelho_tabela: esp.tabela ?? null,
+              espelho_erro: esp.erro ?? null,
+              lembrete:
+                "Objeto criado PAUSADO (v4.3). A aprovacao CRIOU o objeto e NAO iniciou entrega nem gasto. Para comecar a entregar, o gestor precisa ATIVAR manualmente no Gerenciador - conferindo a arvore inteira antes.",
+            },
+          })
+          .eq("id", r.id);
       }
-      resultados.push({ id: r.id, acao, resultado: sucesso ? "CRIADO" : "falha_meta",
-        id_criado: novoId, status: (depois.body as any)?.status ?? null,
-        aviso: pl.criativo?.aviso ?? null, detalhe: sucesso ? null : exec.body });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: sucesso ? "CRIADO" : "falha_meta",
+        id_criado: novoId,
+        status: (depois.body as any)?.status ?? null,
+        aviso: pl.criativo?.aviso ?? null,
+        detalhe: sucesso ? null : exec.body,
+      });
       continue;
     }
 
     // ==================== CAMINHO v1: MODIFICAR EXISTENTE ====================
     if (!EXECUTAVEIS.includes(acao)) {
-      resultados.push({ id: r.id, acao, resultado: "pulado", motivo: "ação não automatizada (decisão manual)" });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: "pulado",
+        motivo: "ação não automatizada (decisão manual)",
+      });
       continue;
     }
     if (!alvoExt) {
-      resultados.push({ id: r.id, acao, resultado: "falha", motivo: "payload sem target_external_id" });
-      await audit(r.company_id, sistema, "meta_action_failed", r.id, { motivo: "sem target_external_id", acao });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: "falha",
+        motivo: "payload sem target_external_id",
+      });
+      await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+        motivo: "sem target_external_id",
+        acao,
+      });
       continue;
     }
     if (r.expires_at && new Date(r.expires_at) < new Date()) {
-      await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo: "pedido expirado", acao, prazo: r.expires_at });
+      await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+        motivo: "pedido expirado",
+        acao,
+        prazo: r.expires_at,
+      });
       resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo: "pedido expirado (24h)" });
       continue;
     }
@@ -571,14 +831,26 @@ Deno.serve(async (req) => {
     if (acao === "alterar_orcamento") {
       const reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
       if (!(reais > 0)) {
-        resultados.push({ id: r.id, acao, resultado: "falha", motivo: "novo_orcamento_diario_reais ausente/inválido" });
-        await audit(r.company_id, sistema, "meta_action_failed", r.id, { motivo: "orcamento invalido", payload: r.payload });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "falha",
+          motivo: "novo_orcamento_diario_reais ausente/inválido",
+        });
+        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+          motivo: "orcamento invalido",
+          payload: r.payload,
+        });
         continue;
       }
       // v2: teto de sanidade tambem na alteracao - a confusao reais/centavos vale aqui igual.
       if (reais > tetoSanidade) {
         const motivo = `orcamento ${reais} acima do teto de sanidade ${tetoSanidade}`;
-        await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao, payload: r.payload });
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          acao,
+          payload: r.payload,
+        });
         resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo });
         continue;
       }
@@ -587,38 +859,91 @@ Deno.serve(async (req) => {
 
     if (conf.dry_run) {
       await audit(r.company_id, sistema, "meta_action_dry_run", r.id, {
-        SIMULADO: true, acao, alvo: alvoNome, alvo_external_id: alvoExt,
-        chamaria: post, estado_atual_meta: antes.body,
-        flags_permitiriam: { master: conf.master_enabled, flag_acao: conf.action_flags?.[acao] === true, rate_ok: rateOk },
+        SIMULADO: true,
+        acao,
+        alvo: alvoNome,
+        alvo_external_id: alvoExt,
+        chamaria: post,
+        estado_atual_meta: antes.body,
+        flags_permitiriam: {
+          master: conf.master_enabled,
+          flag_acao: conf.action_flags?.[acao] === true,
+          rate_ok: rateOk,
+        },
         nota: "dry_run=true: NADA foi enviado à Meta; executed_at NÃO preenchido",
       });
-      resultados.push({ id: r.id, acao, alvo: alvoNome, resultado: "SIMULADO", chamaria: post, estado_atual: (antes.body as any)?.status, flags_permitiriam: flagsOk && rateOk });
+      resultados.push({
+        id: r.id,
+        acao,
+        alvo: alvoNome,
+        resultado: "SIMULADO",
+        chamaria: post,
+        estado_atual: (antes.body as any)?.status,
+        flags_permitiriam: flagsOk && rateOk,
+      });
       continue;
     }
 
     if (!flagsOk || !rateOk) {
-      const motivo = !conf.master_enabled ? "master_enabled=false" : (conf.action_flags?.[acao] !== true ? `flag ${acao}=false` : "rate limit atingido");
-      await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao, alvo: alvoNome });
+      const motivo = !conf.master_enabled
+        ? "master_enabled=false"
+        : conf.action_flags?.[acao] !== true
+          ? `flag ${acao}=false`
+          : "rate limit atingido";
+      await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+        motivo,
+        acao,
+        alvo: alvoNome,
+      });
       resultados.push({ id: r.id, acao, alvo: alvoNome, resultado: "bloqueado", motivo });
       continue;
     }
     const exec = await g(`/${alvoExt}`, "POST", post!);
     const depois = await g(`/${alvoExt}?fields=name,status,effective_status,daily_budget`);
     const sucesso = exec.status === 200;
-    await audit(r.company_id, sistema, sucesso ? "meta_action_executed" : "meta_action_failed", r.id, {
-      acao, alvo: alvoNome, alvo_external_id: alvoExt, chamada: post, resposta_meta: exec, antes: antes.body, depois: depois.body,
-    });
+    await audit(
+      r.company_id,
+      sistema,
+      sucesso ? "meta_action_executed" : "meta_action_failed",
+      r.id,
+      {
+        acao,
+        alvo: alvoNome,
+        alvo_external_id: alvoExt,
+        chamada: post,
+        resposta_meta: exec,
+        antes: antes.body,
+        depois: depois.body,
+      },
+    );
     if (sucesso) {
       executadasNaHora++;
-      await supa.from("approval_requests").update({
-        executed_at: new Date().toISOString(),
-        execution_result: { ok: true, antes: antes.body, depois: depois.body },
-      }).eq("id", r.id);
+      await supa
+        .from("approval_requests")
+        .update({
+          executed_at: new Date().toISOString(),
+          execution_result: { ok: true, antes: antes.body, depois: depois.body },
+        })
+        .eq("id", r.id);
     }
-    resultados.push({ id: r.id, acao, alvo: alvoNome, resultado: sucesso ? "EXECUTADO" : "falha_meta", antes: (antes.body as any)?.status, depois: (depois.body as any)?.status });
+    resultados.push({
+      id: r.id,
+      acao,
+      alvo: alvoNome,
+      resultado: sucesso ? "EXECUTADO" : "falha_meta",
+      antes: (antes.body as any)?.status,
+      depois: (depois.body as any)?.status,
+    });
   }
 
   // v3: nao ha "modo" unico - cada card foi avaliado sob a config da sua empresa.
-  return json({ ok: true, versao: "meta-actions-v4.4", processados: resultados.length, resultados,
-    nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); cada resultado acima foi avaliado sob a config da empresa do proprio card" });
+  return json({
+    ok: true,
+    versao: "meta-actions-v4.5",
+    mcp_chamador: auth.chamador,
+    mcp_chave_legada: auth.legado,
+    processados: resultados.length,
+    resultados,
+    nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); cada resultado acima foi avaliado sob a config da empresa do proprio card",
+  });
 });

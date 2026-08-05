@@ -1,6 +1,11 @@
-// GT-15 / briefing CODE: auth das edges via mcp_key_valida (VOLATILE).
-// A chave legada continua válida; a RPC registra chamador/uso em mcp_api_keys.
-// Nunca passar JWT de usuário para esta RPC.
+// Auth das edges via public.mcp_key_valida (VOLATILE — grava evidencia de uso).
+// A chave legada continua valida; a RPC registra chamador/uso em mcp_api_keys.
+// Nunca passar JWT de usuario para esta RPC.
+//
+// GT-15 / briefing CODE 1.5 (05/08): comparacao local contra mcp_config.api_key foi
+// aposentada. Quem ainda le mcp_config.api_key o faz so para CASCATEAR a chave legada
+// a outra edge (compliance-check, etc.) — nao para autenticar a entrada. Crons
+// continuam em get_mcp_api_key() ate mcp_keys_prontidao() mostrar o validador no caminho.
 
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -18,7 +23,7 @@ export function bearerDe(req: Request): string {
   return authz.toLowerCase().startsWith("bearer ") ? authz.slice(7).trim() : "";
 }
 
-/** header-only = padrão A; header-or-bearer = B (e meta-campaign-status alinhado ao cron). */
+/** header-only = padrao A; header-or-bearer = B (e meta-campaign-status alinhado ao cron). */
 export function chaveMcpDe(
   req: Request,
   modo: "header-only" | "header-or-bearer" | "bearer-or-header" = "header-or-bearer",
@@ -30,10 +35,7 @@ export function chaveMcpDe(
   return x || b;
 }
 
-export async function mcpKeyValida(
-  supa: SupabaseClient,
-  chave: string,
-): Promise<McpAuthResult> {
+export async function mcpKeyValida(supa: SupabaseClient, chave: string): Promise<McpAuthResult> {
   const p = (chave ?? "").trim();
   if (!p) return { ok: false, motivo: "chave_ausente_ou_curta" };
   const { data, error } = await supa.rpc("mcp_key_valida", { p_chave: p });

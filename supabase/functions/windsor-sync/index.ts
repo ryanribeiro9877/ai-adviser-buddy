@@ -42,7 +42,7 @@
 // RECOMENDAÇÃO DE CRON: diário com {skip_wide:true}; wide em job semanal separado.
 //
 // NÍVEIS: campanha (snapshots diários) + conjunto (ad_sets) + anúncio (ads) + ad-snapshots.
-// Auth: Bearer <mcp_config.api_key> (ou x-mcp-key). verify_jwt=false. Idempotente.
+// Auth: Bearer ou x-mcp-key via mcp_key_valida (nao mcp_config.api_key). verify_jwt=false. Idempotente.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
@@ -556,6 +556,8 @@ Deno.serve(async (req) => {
 
   return json({
     ok: true,
+    mcp_chamador: auth.chamador,
+    mcp_chave_legada: auth.legado,
     window: soJanelaAmpla
       ? { skipped: true, motivo: "wide_only" }
       : dateFrom

@@ -1,6 +1,7 @@
-# Projeto canônico do Gestor de Tráfego IA. O valor anterior (ghlitpgdwurrwbsmkagb)
-# apontava para um projeto fora desta org (não é Gestor nem JurisAI) — deploy sem
-# --project-ref ia para lá. Hipótese Lovable permanece não verificada.
+# 05/08/2026 (CODE 1.1): era "ghlitpgdwurrwbsmkagb" — projeto que NAO e o Gestor nem o
+# JurisAI e nao aparece na org deste login. Deploy sem --project-ref ia para la. Hipotese
+# Lovable (ai-adviser-buddy / build-your-dreams-153) nao verificada; o projeto nao esta
+# na lista desta conta. O valor abaixo e o unico certo: gestao_marketing.
 project_id = "gzjwnjdpxpbmdhcyefvs"
 
 # 04/08/2026 (GT-13) - upload-midia estava com verify_jwt=true no projeto e um deploy meu com

@@ -42,7 +42,7 @@
 // inflavam a contagem que o agente reporta. Para contas que o token nao acessa, aplica
 // regra de INATIVIDADE (sem gasto ha mais de 45 dias => paused) e reporta isso como
 // inferencia, nao como status oficial da Meta.
-// SOMENTE leitura na Meta + UPDATE local. Auth: x-mcp-key.
+// SOMENTE leitura na Meta + UPDATE local. Auth: x-mcp-key via mcp_key_valida.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
@@ -225,6 +225,8 @@ function destinoDoCriativo(
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   if (!TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+  // Cron manda x-mcp-key; bearer tambem aceito. A RPC grava o chamador — evidencia
+  // que autoriza revogar a chave legada depois (CODE 1.5).
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-or-bearer"));
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
 
@@ -530,7 +532,8 @@ Deno.serve(async (req) => {
 
   return json({
     ok: true,
-    contas_no_sistema: contas.length,
+    mcp_chamador: auth.chamador,
+    mcp_chave_legada: auth.legado,
     contas_acessiveis: acessiveis.length,
     contas_inacessiveis: inacessiveis,
     campanhas_lidas_na_meta: reais.size,
