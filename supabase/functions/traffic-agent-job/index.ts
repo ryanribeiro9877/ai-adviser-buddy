@@ -321,11 +321,29 @@ function cortarLista(obj: Record<string, unknown>, campo: string, teto = TETO_TO
   }
   return out;
 }
-async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, pagina = 1) {
+async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, pagina = 1, buscaNome = "") {
   // v2: p_company_id obrigatorio (isolamento). v2.1: paginacao - cada pagina de 20 cabe no
   // teto de payload da ferramenta; restantes>0 diz ao subagente que a lista continua.
+  // v2.10: p_busca_nome na sobrecarga de 5 args (mesma da traffic-chat) para achar molde sem folhear.
   const TAM_PAGINA = 20;
   const off = (Math.max(1, pagina) - 1) * TAM_PAGINA;
+  if (buscaNome) {
+    const { data, error } = await supa.rpc("get_criativos_conteudo", {
+      p_somente_ativas: somenteAtivas, p_company_id: companyId,
+      p_offset: off, p_limit: TAM_PAGINA, p_busca_nome: buscaNome,
+    });
+    if (error) return { erro: `falha ao buscar criativo por nome: ${error.message}` };
+    if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo (busca)" };
+    const obj = data as Record<string, unknown>;
+    const cortado = cortarLista(obj, "anuncios", 9000) as Record<string, unknown>;
+    const nadaCasou = Number(obj.total_que_casam_com_a_busca ?? 0) === 0;
+    const avisoUniverso = nadaCasou && somenteAtivas
+      ? "ATENCAO: zero aqui significa 'nenhum anuncio ATIVO com esse nome', NAO 'o anuncio nao existe'. Repita com somente_ativas=false antes de concluir ausencia."
+      : undefined;
+    return { ...cortado, somente_campanhas_ativas: somenteAtivas, pagina,
+      ...(avisoUniverso ? { aviso_universo_da_busca: avisoUniverso } : {}),
+      nota_busca: "Recorte por NOME (campo anuncios). Sem busca_nome a listagem usa criativos + legendas_unicas." };
+  }
   const { data, error } = await supa.rpc("get_criativos_conteudo", { p_somente_ativas: somenteAtivas, p_company_id: companyId, p_offset: off, p_limit: TAM_PAGINA });
   if (error) return { erro: `falha ao ler conteudo dos criativos: ${error.message}` };
   if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo" };
@@ -490,10 +508,16 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       case "decidir_sobre_conjunto": return await t_rpc("decidir_sobre_conjunto", { p_company_id: ctx.companyId, p_adset_external_id: String(args?.adset_external_id ?? "") });
       case "avaliar_escala": return await t_rpc("avaliar_escala", { p_company_id: ctx.companyId, p_adset_external_id: String(args?.adset_external_id ?? "") });
       case "avaliar_pacing": return await t_rpc("avaliar_pacing", { p_company_id: ctx.companyId, p_meta_leads_dia: args?.meta_leads_dia == null ? null : Number(args.meta_leads_dia) });
+      case "validar_pedido_contra_contrato": return await t_rpc("validar_pedido_contra_contrato", { p_acao: String(args?.acao ?? ""), p_pedido: args?.pedido ?? {} });
       case "get_funnel": return await t_funnel(ctx.companyId, args?.date_from, args?.date_to);
       case "get_ads_ranking": return await t_ads_ranking(ctx.companyId, Number(args?.days ?? 7));
       case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
-      case "get_criativos_conteudo": return await t_criativos_conteudo(args?.somente_ativas === false ? false : true, ctx.companyId, Number(args?.pagina ?? 1));
+      case "get_criativos_conteudo": {
+        const buscaNome = String(args?.busca_nome ?? "").trim();
+        const informouAtivas = typeof args?.somente_ativas === "boolean";
+        const somenteAtivas = informouAtivas ? args.somente_ativas === true : !buscaNome;
+        return await t_criativos_conteudo(somenteAtivas, ctx.companyId, Number(args?.pagina ?? 1), buscaNome);
+      }
       case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
       case "get_drive_criativos": return await t_drive_criativos(ctx.companyId);
       case "get_analise_visual_drive": {
@@ -528,10 +552,11 @@ const DEF: Record<string, any> = {
   decidir_sobre_conjunto: { type: "function", function: { name: "decidir_sobre_conjunto", description: "Decide manter, maturar, trocar criativo ou preparar reversao usando custo, volume e tendencia. Exige company_id do job e adset_external_id. A guarda do unico conjunto entregando sobrescreve pausa; sem regua de IDEAL separada do teto, nao prescreve escala.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
   avaliar_escala: { type: "function", function: { name: "avaliar_escala", description: "Avalia escala por duplicacao com no maximo +20%, usando arvore, custo ate 80% do teto, volume e espera. Exige company_id do job e adset_external_id. Nao cobre CBO sem orcamento proprio; a espera ve apenas escalas registradas pelo sistema.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
   avaliar_pacing: { type: "function", function: { name: "avaliar_pacing", description: "Calcula capacidade diaria e, com meta_leads_dia opcional, o PISO de verba ao custo atual. Exige company_id do job. Nao ha meta registrada e a projecao nao e estimativa: escalar tende a elevar o custo, entao a verba real pode ser maior.", parameters: { type: "object", properties: { meta_leads_dia: { type: "number" } } } } },
+  validar_pedido_contra_contrato: { type: "function", function: { name: "validar_pedido_contra_contrato", description: "Valida pedido jsonb contra contrato_de_execucao. Assinatura: (acao, pedido). contrato_desconhecido se acao sem linhas; recusa obrigatorios faltantes; extras nao invalidam. Lacunas: contrato de anuncio veio do codigo montarCriacao; url_tags opcional no adcreative; NAO substitui pedido_de_anuncio_completo.", parameters: { type: "object", properties: { acao: { type: "string" }, pedido: { type: "object" } }, required: ["acao", "pedido"] } } },
   get_funnel: { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "RECORTE por custo MEDIO (Breakdown Effect: serve p/ ENTENDER, proibido prescrever pausa so por isto).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
   get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria 14d de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
-  get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios, PAGINADO por gasto (paginas de 20). O retorno traz total/exibidos/restantes: se restantes > 0 a lista NAO acabou - chame de novo com pagina+1 ate cobrir o que o seu foco exige. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, pagina: { type: "integer", description: "Pagina de 20 criativos, comecando em 1. Use restantes>0 do retorno anterior." } } } } },
+  get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios. Sem busca_nome: PAGINADO por gasto (20). Com busca_nome: sobrecarga (somente_ativas, company, offset, limit, busca_nome) para achar molde sem folhear; default somente_ativas=false quando busca. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, busca_nome: { type: "string", description: "Parte do nome do anuncio (ex.: LPV2_A2_Reel02 ou TESTE-GT02 no molde)." }, pagina: { type: "integer", description: "Pagina de 20, comecando em 1." } } } } },
   get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto.", parameters: { type: "object", properties: {} } } },
   check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL).", parameters: { type: "object", properties: { legenda: { type: "string" } }, required: ["legenda"] } } },
   get_conhecimento: { type: "function", function: { name: "get_conhecimento", description: "Base tecnica: politicas Meta, metricas, otimizacao, criativo. Use 'secao' p/ temas extensos.", parameters: { type: "object", properties: { tema: { type: "string" }, secao: { type: "string" } }, required: ["tema"] } } },
@@ -549,9 +574,9 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Respeitar literalmente lacunas e guardas das RPCs; ranking medio isolado nunca prescreve pausa.",
   },
   criativos: {
-    tools: ["get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { get_criativos_conteudo: 4, get_conhecimento: 3 }, maxToolsTotal: 7,
-    missao: "CONTEUDO REAL DAS PECAS em operacao: legendas, titulos, CTAs, gasto e formularios por legenda distinta, hooks e formatos (fundamentar na base de conhecimento de criativo). NAO faz auditoria de compliance (dominio do especialista compliance) nem analisa metricas de campanha (dominio do desempenho_campanhas).",
+    tools: ["get_criativos_conteudo", "get_conhecimento", "validar_pedido_contra_contrato"],
+    maxPorTool: { get_criativos_conteudo: 4, get_conhecimento: 3, validar_pedido_contra_contrato: 2 }, maxToolsTotal: 8,
+    missao: "CONTEUDO REAL DAS PECAS em operacao: legendas, titulos, CTAs, gasto e formularios por legenda distinta, hooks e formatos (fundamentar na base de conhecimento de criativo). Pode validar pedido contra contrato_de_execucao antes de propor criacao. NAO faz auditoria de compliance (dominio do especialista compliance) nem analisa metricas de campanha (dominio do desempenho_campanhas).",
   },
   compliance: {
     tools: ["check_compliance", "checar_par_texto_e_peca", "get_criativos_conteudo", "get_conhecimento"],
