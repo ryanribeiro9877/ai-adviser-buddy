@@ -12,3 +12,7 @@ project_id = "gzjwnjdpxpbmdhcyefvs"
 # que nao tenha sido eu que mudei.
 [functions.upload-midia]
 verify_jwt = true
+
+# ESP-12: chamada interna pelo cron usa x-mcp-key e a propria edge valida via mcp_key_valida.
+[functions.drive-audio-transcribe]
+verify_jwt = false

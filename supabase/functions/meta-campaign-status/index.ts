@@ -1,4 +1,9 @@
-// supabase/functions/meta-campaign-status/index.ts (v5)
+// supabase/functions/meta-campaign-status/index.ts (v6)
+// v6 (06/08/2026) - ESP-13: historico diario de status do anuncio e saude da conta.
+//   effective_status, issues_info e os campos da conta sao sondados isoladamente. A chave so
+//   entra no snapshot quando a Graph realmente a devolveu; []/null retornado continua sendo uma
+//   leitura, mas campo ausente nao e fabricado. Upsert pela chave diaria torna a corrida idempotente.
+//   Conta inacessivel nao gera snapshot. A fonte da saude fica explicitamente `graph`.
 // v5 (05/08/2026) - ESPELHO DE OBJETO DO ANUNCIO. `ads.last_synced_at` ficou parado de 27/07 a
 //   05/08 nas tres contas, no mesmo microssegundo, enquanto campaigns e ad_metric_snapshots
 //   avancavam todo dia. Causa medida, em duas partes:
@@ -76,7 +81,7 @@ type ConfigCampanha = {
 };
 
 type LeituraCampo = {
-  nivel: "anuncio" | "criativo";
+  nivel: "anuncio" | "criativo" | "conta";
   campo: string;
   solicitados: number;
   respostas: number;
@@ -142,7 +147,7 @@ function exemploSeguro(v: unknown): unknown {
 // invalido derrube a leitura dos demais.
 async function lerCampoPorIds(
   ids: string[],
-  nivel: "anuncio" | "criativo",
+  nivel: "anuncio" | "criativo" | "conta",
   campo: string,
 ): Promise<ResultadoCampo> {
   const valores = new Map<string, unknown>();
@@ -366,6 +371,25 @@ Deno.serve(async (req) => {
   const trackingSpecs = await lerCampoPorIds(adIds, "anuncio", "tracking_specs");
   diagnosticoCampos.push(trackingSpecs.diagnostico);
 
+  // ESP-13: status configurado e status efetivo sao fatos distintos. Cada campo e consultado
+  // sozinho; `issues_info` ausente nunca vira [].
+  const adStatus = await lerCampoPorIds(adIds, "anuncio", "status");
+  diagnosticoCampos.push(adStatus.diagnostico);
+  const adEffectiveStatus = await lerCampoPorIds(adIds, "anuncio", "effective_status");
+  diagnosticoCampos.push(adEffectiveStatus.diagnostico);
+  const adIssuesInfo = await lerCampoPorIds(adIds, "anuncio", "issues_info");
+  diagnosticoCampos.push(adIssuesInfo.diagnostico);
+
+  const accountGraphIds = acessiveis.map((id) => `act_${id}`);
+  const accountStatus = await lerCampoPorIds(accountGraphIds, "conta", "account_status");
+  diagnosticoCampos.push(accountStatus.diagnostico);
+  const accountDisableReason = await lerCampoPorIds(accountGraphIds, "conta", "disable_reason");
+  diagnosticoCampos.push(accountDisableReason.diagnostico);
+  const accountSpendCap = await lerCampoPorIds(accountGraphIds, "conta", "spend_cap");
+  diagnosticoCampos.push(accountSpendCap.diagnostico);
+  const accountCapabilities = await lerCampoPorIds(accountGraphIds, "conta", "capabilities");
+  diagnosticoCampos.push(accountCapabilities.diagnostico);
+
   const camposCriativo = new Map<string, Map<string, unknown>>();
   for (const campo of [
     "url_tags",
@@ -381,7 +405,7 @@ Deno.serve(async (req) => {
 
   const { data: adsLocais } = await supa
     .from("ads")
-    .select("id, external_id, creative_id, account_id")
+    .select("id, company_id, external_id, creative_id, account_id")
     .in("external_id", adIds.length ? adIds : ["__nenhum__"]);
   const graphPorAd = new Map(anunciosGraph.map((a) => [a.id, a]));
   let urlTagsGravadas = 0;
@@ -391,6 +415,80 @@ Deno.serve(async (req) => {
   let anunciosSemCampoDestino = 0;
   const errosEscritaAds: string[] = [];
   const agoraAds = new Date().toISOString();
+
+  // Snapshot diario ESP-13. Objetos variam de chaves de proposito: chave ausente na resposta
+  // Graph tambem fica ausente do payload PostgREST, em vez de ser convertida em null/[].
+  let statusSnapshotsGravados = 0;
+  let healthSnapshotsGravados = 0;
+  const errosSnapshots: string[] = [];
+  for (const ad of anunciosGraph) {
+    const patch: Record<string, unknown> = {
+      company_id: null,
+      account_id: ad.account_id,
+      ad_external_id: ad.id,
+      snapshot_date: agoraAds.slice(0, 10),
+      coletado_em: agoraAds,
+    };
+    if (adStatus.valores.has(ad.id)) patch.status = adStatus.valores.get(ad.id);
+    if (adEffectiveStatus.valores.has(ad.id)) {
+      patch.effective_status = adEffectiveStatus.valores.get(ad.id);
+    }
+    if (adIssuesInfo.valores.has(ad.id)) patch.issues_info = adIssuesInfo.valores.get(ad.id);
+
+    // company_id vem do anuncio local: a Graph nao conhece nosso tenant.
+    const local = (adsLocais ?? []).find((x: any) => String(x.external_id) === ad.id);
+    if (!local?.company_id) {
+      errosSnapshots.push(`${ad.id}: company_id nao resolvido`);
+      continue;
+    }
+    patch.company_id = local.company_id;
+    const { error } = await supa.from("ad_status_snapshots").upsert(patch, {
+      onConflict: "company_id,ad_external_id,snapshot_date",
+    });
+    if (error) errosSnapshots.push(`${ad.id}: ${error.message}`);
+    else statusSnapshotsGravados++;
+  }
+
+  for (const accountGraphId of accountGraphIds) {
+    const accountId = accountGraphId.replace(/^act_/, "");
+    const bruto: Record<string, unknown> = {};
+    const patch: Record<string, unknown> = {
+      account_id: accountId,
+      snapshot_date: agoraAds.slice(0, 10),
+      fonte: "graph",
+      coletado_em: agoraAds,
+    };
+    if (accountStatus.valores.has(accountGraphId)) {
+      bruto.account_status = accountStatus.valores.get(accountGraphId);
+      patch.account_status = bruto.account_status;
+    }
+    if (accountDisableReason.valores.has(accountGraphId)) {
+      bruto.disable_reason = accountDisableReason.valores.get(accountGraphId);
+      patch.disable_reason = bruto.disable_reason;
+    }
+    if (accountSpendCap.valores.has(accountGraphId)) {
+      bruto.spend_cap = accountSpendCap.valores.get(accountGraphId);
+      patch.spend_cap = centavos(bruto.spend_cap);
+    }
+    if (accountCapabilities.valores.has(accountGraphId)) {
+      bruto.capabilities = accountCapabilities.valores.get(accountGraphId);
+      patch.capabilities = bruto.capabilities;
+    }
+    // Nenhum candidato retornado = nenhuma linha. Isso declara cegueira, nao saude vazia.
+    if (Object.keys(bruto).length === 0) continue;
+    const local = (adsLocais ?? []).find((x: any) => String(x.account_id) === accountId);
+    if (!local?.company_id) {
+      errosSnapshots.push(`${accountId}: company_id nao resolvido`);
+      continue;
+    }
+    patch.company_id = local.company_id;
+    patch.bruto = bruto;
+    const { error } = await supa.from("account_health_snapshots").upsert(patch, {
+      onConflict: "company_id,account_id,snapshot_date",
+    });
+    if (error) errosSnapshots.push(`${accountId}: ${error.message}`);
+    else healthSnapshotsGravados++;
+  }
 
   for (const loc of adsLocais ?? []) {
     const adId = String(loc.external_id);
@@ -564,6 +662,23 @@ Deno.serve(async (req) => {
       sonda: diagnosticoCampos,
       nota: "com_chave=0 significa que a Graph nao devolveu o campo e a respectiva marca de coleta nao foi gravada. Destino: uma URL inequívoca = unica; mais de uma = ambigua com candidatas cruas e destino_url NULL; nenhuma em spec retornado = ausente. template_url_spec e link_destination_display_url sao apenas sondados ate a forma real ser provada.",
     },
-    versao: "meta-campaign-status-v5",
+    esp13: {
+      ad_status_snapshots_gravados: statusSnapshotsGravados,
+      account_health_snapshots_gravados: healthSnapshotsGravados,
+      erros_escrita: errosSnapshots,
+      sonda: diagnosticoCampos.filter((d) =>
+        [
+          "status",
+          "effective_status",
+          "issues_info",
+          "account_status",
+          "disable_reason",
+          "spend_cap",
+          "capabilities",
+        ].includes(d.campo),
+      ),
+      nota: "com_chave=0 significa campo nao retornado: a coluna nao entra no upsert. Array vazio ou null com chave presente e uma leitura e e preservado. Conta inacessivel nao gera linha.",
+    },
+    versao: "meta-campaign-status-v6",
   });
 });
