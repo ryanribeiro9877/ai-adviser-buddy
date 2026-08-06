@@ -1,4 +1,13 @@
-// supabase/functions/meta-actions/index.ts (v4.4)
+// supabase/functions/meta-actions/index.ts (v5)
+// v5 (06/08/2026) - DRIVER DE ESCRITA Pipeboard. So o ULTIMO passo muda.
+//   driver_escrita vem de meta_execution_config (o mesmo campo que pode_executar_acao devolve).
+//   Default e 'graph': com ele o comportamento das chamadas Meta permanece o de hoje.
+//   'pipeboard' chama o MCP hospedado (tools/call), NUNCA com access_token preenchido.
+//   dry_run nativo do conector so existe em create_campaign/update_campaign — nos demais
+//   niveis o dry_run local continua e o card declara a lacuna. Depois de escrita real,
+//   reconciliacao pela Graph e obrigatoria (o Pipeboard nao expoe log exportavel).
+//   Monitor de token_status da conexao (login pessoal) entra em toda corrida com token.
+//   Nenhuma action_flag e ligada por este card.
 // v4.4 (04/08/2026) - GT-13: a executora aceita PECA NOVA. criar_anuncio_a_partir_de passa a ler
 //   payload.meta_video_id e, quando ele existe, COPIA o object_story_spec do molde e TROCA a
 //   midia (video_id + capa), em vez de replicar o criativo inteiro. Duas coisas sao inegociaveis
@@ -77,8 +86,21 @@
 //   escalar_criativo segue NAO automatizado (pulado com nota — decisão manual).
 // Token: META_ADS_TOKEN (redigido de qualquer saída). Auth: x-mcp-key.
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import {
+  argsAdDeGraph,
+  argsAdsetDeGraph,
+  argsCampanhaDeGraph,
+  argsCreativeDeGraph,
+  compararPedidoComGraph,
+  driverDe,
+  monitorConexaoPipeboard,
+  pipeboardCall,
+  pipeboardToken,
+  type ConexaoPipeboard,
+  type DriverEscrita,
+} from "../_shared/pipeboard.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -114,6 +136,226 @@ async function g(path: string, method = "GET", body?: Record<string, string>) {
   } catch {
     return { status: r.status, body: redact(t.slice(0, 300)) };
   }
+}
+
+async function segredoIntegracao(nome: string): Promise<string> {
+  const { data } = await supa
+    .from("integration_secrets")
+    .select("value")
+    .eq("name", nome)
+    .maybeSingle();
+  return String(data?.value ?? "");
+}
+
+type ResultadoEscrita = {
+  status: number;
+  body: any;
+  id: string | null;
+  driver: DriverEscrita;
+  ferramenta?: string;
+  dry_run_nativo?: boolean | null;
+  nota_dry_run?: string | null;
+  erro?: string;
+  ok?: boolean;
+};
+
+// Ultimo passo: Graph (inalterado) ou Pipeboard. Travas, montarCriacao e espelhar ficam fora.
+async function escreverCriacao(
+  driver: DriverEscrita,
+  acao: string,
+  conta: string,
+  path: string,
+  body: Record<string, string>,
+  pbToken: string,
+  opts?: { dry_run?: boolean },
+): Promise<ResultadoEscrita> {
+  if (driver !== "pipeboard") {
+    const exec = await g(path, "POST", body);
+    const id = (exec.body as any)?.id ?? null;
+    return {
+      status: exec.status,
+      body: exec.body,
+      id,
+      driver: "graph",
+      dry_run_nativo: null,
+      ok: exec.status === 200 && !!id,
+    };
+  }
+
+  if (opts?.dry_run && acao !== "criar_campanha") {
+    // dry_run nativo so documentado em create_campaign/update_campaign. Nos demais niveis
+    // nao inventamos: simulamos localmente e declaramos a lacuna (lacuna 5.1 do briefing).
+    return {
+      status: 200,
+      body: { simulado_local: true, path, body },
+      id: null,
+      driver: "pipeboard",
+      dry_run_nativo: false,
+      nota_dry_run:
+        "Pipeboard nao expoe dry_run nativo neste nivel (so create_campaign/update_campaign). Simulacao local; nada foi persistido.",
+      ok: true,
+    };
+  }
+
+  let tool = "";
+  let args: Record<string, unknown> = {};
+  if (acao === "criar_campanha") {
+    tool = "create_campaign";
+    args = argsCampanhaDeGraph(conta, body, { dry_run: !!opts?.dry_run });
+  } else if (acao === "criar_conjunto_a_partir_de") {
+    tool = "create_adset";
+    args = argsAdsetDeGraph(conta, body);
+  } else {
+    return {
+      status: 0,
+      body: null,
+      id: null,
+      driver: "pipeboard",
+      erro: `acao sem mapeamento Pipeboard: ${acao}`,
+      ok: false,
+    };
+  }
+
+  const r = await pipeboardCall(tool, args, pbToken);
+  return {
+    status: r.status || (r.ok ? 200 : 502),
+    body: r.body,
+    id: r.id,
+    driver: "pipeboard",
+    ferramenta: tool,
+    dry_run_nativo: opts?.dry_run ? true : null,
+    erro: r.erro,
+    ok: opts?.dry_run ? r.ok || r.dry_run === true || !r.erro : r.ok && !!r.id,
+  };
+}
+
+async function escreverCreative(
+  driver: DriverEscrita,
+  conta: string,
+  path: string,
+  body: Record<string, string>,
+  pbToken: string,
+): Promise<ResultadoEscrita> {
+  if (driver !== "pipeboard") {
+    const cc = await g(path, "POST", body);
+    const id = (cc.body as any)?.id ?? null;
+    return {
+      status: cc.status,
+      body: cc.body,
+      id,
+      driver: "graph",
+      ok: cc.status === 200 && !!id,
+    };
+  }
+  const r = await pipeboardCall("create_ad_creative", argsCreativeDeGraph(conta, body), pbToken);
+  return {
+    status: r.status || (r.ok ? 200 : 502),
+    body: r.body,
+    id: r.id,
+    driver: "pipeboard",
+    ferramenta: "create_ad_creative",
+    erro: r.erro,
+    ok: r.ok && !!r.id,
+  };
+}
+
+async function escreverAd(
+  driver: DriverEscrita,
+  conta: string,
+  path: string,
+  body: Record<string, string>,
+  creativeId: string,
+  pbToken: string,
+): Promise<ResultadoEscrita> {
+  if (driver !== "pipeboard") {
+    const exec = await g(path, "POST", body);
+    const id = (exec.body as any)?.id ?? null;
+    return {
+      status: exec.status,
+      body: exec.body,
+      id,
+      driver: "graph",
+      ok: exec.status === 200 && !!id,
+    };
+  }
+  const r = await pipeboardCall("create_ad", argsAdDeGraph(conta, body, creativeId), pbToken);
+  return {
+    status: r.status || (r.ok ? 200 : 502),
+    body: r.body,
+    id: r.id,
+    driver: "pipeboard",
+    ferramenta: "create_ad",
+    erro: r.erro,
+    ok: r.ok && !!r.id,
+  };
+}
+
+async function escreverUpdate(
+  driver: DriverEscrita,
+  acao: string,
+  alvoExt: string,
+  post: Record<string, string>,
+  pbToken: string,
+  opts?: { dry_run?: boolean },
+): Promise<ResultadoEscrita> {
+  if (driver !== "pipeboard") {
+    const exec = await g(`/${alvoExt}`, "POST", post);
+    return {
+      status: exec.status,
+      body: exec.body,
+      id: alvoExt,
+      driver: "graph",
+      dry_run_nativo: null,
+      ok: exec.status === 200,
+    };
+  }
+
+  let tool = "update_ad";
+  if (acao === "pausar_campanha") tool = "update_campaign";
+  if (acao === "alterar_orcamento") tool = "update_adset";
+
+  if (opts?.dry_run && tool !== "update_campaign") {
+    return {
+      status: 200,
+      body: { simulado_local: true, alvo: alvoExt, post },
+      id: alvoExt,
+      driver: "pipeboard",
+      dry_run_nativo: false,
+      nota_dry_run:
+        "Pipeboard nao expoe dry_run nativo neste nivel (so create_campaign/update_campaign). Simulacao local; nada foi persistido.",
+      ok: true,
+    };
+  }
+
+  const args: Record<string, unknown> = { ...post };
+  if (tool === "update_campaign") args.campaign_id = alvoExt;
+  else if (tool === "update_adset") args.adset_id = alvoExt;
+  else args.ad_id = alvoExt;
+  if (post.daily_budget) args.daily_budget = Number(post.daily_budget);
+  if (opts?.dry_run) args.dry_run = true;
+
+  const r = await pipeboardCall(tool, args, pbToken);
+  return {
+    status: r.status || (r.ok ? 200 : 502),
+    body: r.body,
+    id: alvoExt,
+    driver: "pipeboard",
+    ferramenta: tool,
+    dry_run_nativo:
+      opts?.dry_run && tool === "update_campaign" ? true : opts?.dry_run ? false : null,
+    erro: r.erro,
+    ok: r.ok,
+  };
+}
+
+async function reconciliarAposEscrita(
+  novoId: string,
+  pedido: Record<string, unknown>,
+  campos = "name,status,effective_status,daily_budget,objective",
+) {
+  const depois = await g(`/${novoId}?fields=${campos}`);
+  const cmp = compararPedidoComGraph(pedido, depois.body);
+  return { graph: depois, reconciliacao: cmp };
 }
 // v4.4 (04/08/2026) - GT-13: a thumbnail do video_data e OBRIGATORIA na Meta, e ela nao vem de
 // graca: o quadro do molde e o do video ANTIGO. Os quadros do video novo saem de
@@ -542,6 +784,12 @@ Deno.serve(async (req) => {
   // v3: a config NAO e mais lida aqui. Cada card carrega a da sua propria empresa, dentro do
   // loop - uma leitura global voltaria a aplicar a configuracao de uma empresa a outra.
 
+  // v5: monitor de conexao Pipeboard (login pessoal). Roda quando ha token; alerta se
+  // token_status != active. Nao bloqueia o caminho graph.
+  const pbToken = await pipeboardToken(segredoIntegracao);
+  let pipeboardMonitor: ConexaoPipeboard | null = null;
+  if (pbToken) pipeboardMonitor = await monitorConexaoPipeboard(pbToken);
+
   let q = supa
     .from("approval_requests")
     .select("*")
@@ -554,6 +802,17 @@ Deno.serve(async (req) => {
       ok: true,
       processados: 0,
       nota: "fila vazia (nenhum aprovado pendente de execução)",
+      pipeboard_conexao: pipeboardMonitor ?? {
+        ok: false,
+        token_status: null,
+        connection_id: null,
+        alerta:
+          "PIPEBOARD_API_TOKEN ausente — monitor e driver pipeboard indisponiveis ate cadastrar o Edge Secret",
+        erro: "token_ausente",
+      },
+      versao: "meta-actions-v5",
+      mcp_chamador: auth.chamador,
+      mcp_chave_legada: auth.legado,
     });
 
   const { count: naHora } = await supa
@@ -593,6 +852,9 @@ Deno.serve(async (req) => {
     const tetoSanidade = Number(conf.teto_sanidade_orcamento_diario ?? 5000);
     const flagsOk = conf.master_enabled === true && conf.action_flags?.[acao] === true;
     const rateOk = executadasNaHora < conf.max_actions_per_hour;
+    // v5: driver vem da config da empresa — o mesmo campo que pode_executar_acao devolve.
+    // Diz por ONDE o ultimo passo sai, nunca SE sai.
+    const driver = driverDe(conf);
 
     // ==================== CAMINHO DE CRIACAO (v2) ====================
     if (CRIACAO.includes(acao)) {
@@ -603,12 +865,14 @@ Deno.serve(async (req) => {
           motivo: "pedido expirado",
           acao,
           prazo: r.expires_at,
+          driver_escrita: driver,
         });
         resultados.push({
           id: r.id,
           acao,
           resultado: "bloqueado",
           motivo: "pedido expirado (24h)",
+          driver_escrita: driver,
         });
         continue;
       }
@@ -620,8 +884,43 @@ Deno.serve(async (req) => {
           motivo,
           acao,
           contas_permitidas: contasOk,
+          driver_escrita: driver,
         });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+        continue;
+      }
+
+      if (driver === "pipeboard" && pipeboardMonitor && !pipeboardMonitor.ok) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: "pipeboard_conexao_inativa",
+          alerta: pipeboardMonitor.alerta,
+          token_status: pipeboardMonitor.token_status,
+          acao,
+          driver_escrita: driver,
+        });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo: pipeboardMonitor.alerta ?? "pipeboard_conexao_inativa",
+          driver_escrita: driver,
+        });
+        continue;
+      }
+      if (driver === "pipeboard" && !pbToken) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: "PIPEBOARD_API_TOKEN ausente",
+          acao,
+          driver_escrita: driver,
+        });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo:
+            "PIPEBOARD_API_TOKEN ausente — cadastre o Edge Secret antes de usar driver pipeboard",
+          driver_escrita: driver,
+        });
         continue;
       }
 
@@ -631,22 +930,46 @@ Deno.serve(async (req) => {
           motivo: (plano as any).erro,
           detalhe: (plano as any).detalhe ?? null,
           acao,
+          driver_escrita: driver,
         });
-        resultados.push({ id: r.id, acao, resultado: "falha", motivo: (plano as any).erro });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "falha",
+          motivo: (plano as any).erro,
+          driver_escrita: driver,
+        });
         continue;
       }
       const pl: any = plano;
 
       if (conf.dry_run) {
+        // v5: com pipeboard + dry_run, campanha chega ao conector (dry_run nativo).
+        // Demais niveis: simulacao local + lacuna declarada (5.1).
+        let ensaioPipeboard: ResultadoEscrita | null = null;
+        if (driver === "pipeboard" && acao === "criar_campanha") {
+          ensaioPipeboard = await escreverCriacao(driver, acao, conta, pl.path, pl.body, pbToken, {
+            dry_run: true,
+          });
+        }
         await audit(r.company_id, sistema, "meta_action_dry_run", r.id, {
           SIMULADO: true,
           acao,
           conta,
+          driver_escrita: driver,
           criaria_em: pl.path,
           com_body: pl.body,
           criativo: pl.criativo ?? null,
           molde_lido: pl.molde_lido ?? null,
           peca_nova: pl.peca_nova ?? null,
+          pipeboard_dry_run_nativo: ensaioPipeboard?.dry_run_nativo ?? null,
+          pipeboard_resposta: ensaioPipeboard?.body ?? null,
+          pipeboard_nota:
+            ensaioPipeboard?.nota_dry_run ??
+            (driver === "pipeboard" && acao !== "criar_campanha"
+              ? "dry_run nativo so em create_campaign/update_campaign; neste nivel a simulacao e local"
+              : null),
+          pipeboard_conexao: pipeboardMonitor,
           flags_permitiriam: {
             master: conf.master_enabled,
             flag_acao: conf.action_flags?.[acao] === true,
@@ -659,6 +982,7 @@ Deno.serve(async (req) => {
           acao,
           resultado: "SIMULADO",
           conta,
+          driver_escrita: driver,
           criaria_em: pl.path,
           nome_novo: pl.body?.name,
           status_inicial: pl.body?.status,
@@ -666,6 +990,7 @@ Deno.serve(async (req) => {
           criativo_aviso: pl.criativo?.aviso ?? null,
           peca_nova: pl.peca_nova ?? null,
           flags_permitiriam: flagsOk && rateOk,
+          pipeboard_dry_run_nativo: ensaioPipeboard?.dry_run_nativo ?? null,
         });
         continue;
       }
@@ -676,8 +1001,12 @@ Deno.serve(async (req) => {
           : conf.action_flags?.[acao] !== true
             ? `flag ${acao}=false`
             : "rate limit atingido";
-        await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo });
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          acao,
+          driver_escrita: driver,
+        });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
         continue;
       }
 
@@ -687,35 +1016,80 @@ Deno.serve(async (req) => {
       // v4.4: cobre "novo_adcreative" (replicacao com UTM nova) e "novo_adcreative_peca_nova"
       // (spec do molde com a midia trocada). Os dois criam adcreative antes do anuncio.
       if (String(pl.criativo?.modo ?? "").startsWith("novo_adcreative")) {
-        const cc = await g(pl.criativo.path, "POST", pl.criativo.body);
-        if (cc.status !== 200 || !(cc.body as any)?.id) {
+        const cc = await escreverCreative(
+          driver,
+          conta,
+          pl.criativo.path,
+          pl.criativo.body,
+          pbToken,
+        );
+        if (cc.status !== 200 || !cc.id) {
           await audit(r.company_id, sistema, "meta_action_failed", r.id, {
             motivo: "falha ao criar adcreative",
-            resposta_meta: cc,
+            resposta: cc,
             acao,
+            driver_escrita: driver,
           });
           resultados.push({
             id: r.id,
             acao,
             resultado: "falha_meta",
             etapa: "adcreative",
+            driver_escrita: driver,
             detalhe: cc.body,
           });
           continue;
         }
-        creativeCriado = (cc.body as any).id;
+        creativeCriado = cc.id;
         bodyFinal.creative = JSON.stringify({ creative_id: creativeCriado });
       } else if (pl.criativo?.modo === "reusar_creative_id") {
         bodyFinal.creative = JSON.stringify({ creative_id: pl.criativo.creative_id });
       }
 
-      const exec = await g(pl.path, "POST", bodyFinal);
-      const novoId = (exec.body as any)?.id ?? null;
-      const sucesso = exec.status === 200 && !!novoId;
+      // Timeout / resposta ambigua: antes de repetir, a protecao continua sendo
+      // executed_at null + varredura. Em pipeboard, se a resposta nao trouxer id, nao
+      // marcamos sucesso — a proxima corrida pode conferir na Graph se o objeto nasceu.
+      let exec: ResultadoEscrita;
+      if (acao === "criar_anuncio_a_partir_de") {
+        const creativeId =
+          creativeCriado ??
+          (pl.criativo?.modo === "reusar_creative_id" ? pl.criativo.creative_id : null);
+        if (!creativeId) {
+          await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+            motivo: "sem creative_id para criar anuncio",
+            acao,
+            driver_escrita: driver,
+          });
+          resultados.push({
+            id: r.id,
+            acao,
+            resultado: "falha",
+            motivo: "sem creative_id",
+            driver_escrita: driver,
+          });
+          continue;
+        }
+        exec = await escreverAd(driver, conta, pl.path, bodyFinal, String(creativeId), pbToken);
+      } else {
+        exec = await escreverCriacao(driver, acao, conta, pl.path, bodyFinal, pbToken);
+      }
+      const novoId = exec.id;
+      const sucesso = !!novoId && !exec.erro && (exec.status === 200 || exec.ok === true);
       // Confere o estado do que nasceu: o status (PAUSED desde a v4.3) e verificado, nao assumido.
-      const depois = sucesso
-        ? await g(`/${novoId}?fields=name,status,effective_status`)
-        : { status: 0, body: null };
+      // v5: reconciliacao pela Graph e obrigatoria apos escrita real (unica forma de saber o
+      // que o Pipeboard fez — nao ha log exportavel do conector).
+      let depois: any = { status: 0, body: null };
+      let reconciliacao: any = null;
+      if (sucesso && novoId) {
+        const rec = await reconciliarAposEscrita(novoId, {
+          name: bodyFinal.name,
+          status: bodyFinal.status,
+          daily_budget: bodyFinal.daily_budget,
+          objective: bodyFinal.objective ?? r.payload?.objetivo,
+        });
+        depois = rec.graph;
+        reconciliacao = rec.reconciliacao;
+      }
 
       await audit(
         r.company_id,
@@ -725,13 +1099,17 @@ Deno.serve(async (req) => {
         {
           acao,
           conta,
+          driver_escrita: driver,
+          ferramenta_pipeboard: exec.ferramenta ?? null,
           criado_em: pl.path,
           body_enviado: bodyFinal,
           adcreative_criado: creativeCriado,
-          resposta_meta: exec,
+          resposta: exec,
           objeto_criado: depois.body,
+          reconciliacao,
           criativo_aviso: pl.criativo?.aviso ?? null,
           peca_nova: pl.peca_nova ?? null,
+          pipeboard_conexao: driver === "pipeboard" ? pipeboardMonitor : null,
         },
       );
 
@@ -740,7 +1118,7 @@ Deno.serve(async (req) => {
         // v4.2: espelha ANTES de fechar o card, para que o proximo turno do agente ja veja.
         const esp = await espelhar(
           acao,
-          novoId,
+          novoId!,
           depois.body,
           r.payload,
           conta,
@@ -756,7 +1134,16 @@ Deno.serve(async (req) => {
             id_criado: novoId,
             tabela: esp.tabela ?? null,
             erro: esp.erro,
+            driver_escrita: driver,
             nota: "O OBJETO EXISTE NA META. Falhou apenas a gravacao no espelho local - o sistema ficara cego para este objeto ate o proximo sync.",
+          });
+        }
+        if (reconciliacao && !reconciliacao.ok) {
+          await audit(r.company_id, sistema, "meta_action_reconciliacao_divergente", r.id, {
+            acao,
+            id_criado: novoId,
+            divergencias: reconciliacao.divergencias,
+            driver_escrita: driver,
           });
         }
         await supa
@@ -773,6 +1160,8 @@ Deno.serve(async (req) => {
               espelho_gravado: esp.ok,
               espelho_tabela: esp.tabela ?? null,
               espelho_erro: esp.erro ?? null,
+              driver_escrita: driver,
+              reconciliacao,
               lembrete:
                 "Objeto criado PAUSADO (v4.3). A aprovacao CRIOU o objeto e NAO iniciou entrega nem gasto. Para comecar a entregar, o gestor precisa ATIVAR manualmente no Gerenciador - conferindo a arvore inteira antes.",
             },
@@ -786,7 +1175,9 @@ Deno.serve(async (req) => {
         id_criado: novoId,
         status: (depois.body as any)?.status ?? null,
         aviso: pl.criativo?.aviso ?? null,
-        detalhe: sucesso ? null : exec.body,
+        detalhe: sucesso ? null : (exec.body ?? exec.erro),
+        driver_escrita: driver,
+        reconciliacao,
       });
       continue;
     }
@@ -819,8 +1210,48 @@ Deno.serve(async (req) => {
         motivo: "pedido expirado",
         acao,
         prazo: r.expires_at,
+        driver_escrita: driver,
       });
-      resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo: "pedido expirado (24h)" });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: "bloqueado",
+        motivo: "pedido expirado (24h)",
+        driver_escrita: driver,
+      });
+      continue;
+    }
+
+    if (driver === "pipeboard" && pipeboardMonitor && !pipeboardMonitor.ok) {
+      await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+        motivo: "pipeboard_conexao_inativa",
+        alerta: pipeboardMonitor.alerta,
+        token_status: pipeboardMonitor.token_status,
+        acao,
+        driver_escrita: driver,
+      });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: "bloqueado",
+        motivo: pipeboardMonitor.alerta ?? "pipeboard_conexao_inativa",
+        driver_escrita: driver,
+      });
+      continue;
+    }
+    if (driver === "pipeboard" && !pbToken) {
+      await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+        motivo: "PIPEBOARD_API_TOKEN ausente",
+        acao,
+        driver_escrita: driver,
+      });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: "bloqueado",
+        motivo: "PIPEBOARD_API_TOKEN ausente",
+        driver_escrita: driver,
+      });
       continue;
     }
 
@@ -836,10 +1267,12 @@ Deno.serve(async (req) => {
           acao,
           resultado: "falha",
           motivo: "novo_orcamento_diario_reais ausente/inválido",
+          driver_escrita: driver,
         });
         await audit(r.company_id, sistema, "meta_action_failed", r.id, {
           motivo: "orcamento invalido",
           payload: r.payload,
+          driver_escrita: driver,
         });
         continue;
       }
@@ -850,21 +1283,37 @@ Deno.serve(async (req) => {
           motivo,
           acao,
           payload: r.payload,
+          driver_escrita: driver,
         });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
         continue;
       }
       post = { daily_budget: String(Math.round(reais * 100)) };
     }
 
     if (conf.dry_run) {
+      let ensaioPipeboard: ResultadoEscrita | null = null;
+      if (driver === "pipeboard" && acao === "pausar_campanha" && post) {
+        ensaioPipeboard = await escreverUpdate(driver, acao, alvoExt, post, pbToken, {
+          dry_run: true,
+        });
+      }
       await audit(r.company_id, sistema, "meta_action_dry_run", r.id, {
         SIMULADO: true,
         acao,
         alvo: alvoNome,
         alvo_external_id: alvoExt,
+        driver_escrita: driver,
         chamaria: post,
         estado_atual_meta: antes.body,
+        pipeboard_dry_run_nativo: ensaioPipeboard?.dry_run_nativo ?? null,
+        pipeboard_resposta: ensaioPipeboard?.body ?? null,
+        pipeboard_nota:
+          ensaioPipeboard?.nota_dry_run ??
+          (driver === "pipeboard" && acao !== "pausar_campanha"
+            ? "dry_run nativo so em create_campaign/update_campaign; neste nivel a simulacao e local"
+            : null),
+        pipeboard_conexao: pipeboardMonitor,
         flags_permitiriam: {
           master: conf.master_enabled,
           flag_acao: conf.action_flags?.[acao] === true,
@@ -880,6 +1329,8 @@ Deno.serve(async (req) => {
         chamaria: post,
         estado_atual: (antes.body as any)?.status,
         flags_permitiriam: flagsOk && rateOk,
+        driver_escrita: driver,
+        pipeboard_dry_run_nativo: ensaioPipeboard?.dry_run_nativo ?? null,
       });
       continue;
     }
@@ -894,13 +1345,30 @@ Deno.serve(async (req) => {
         motivo,
         acao,
         alvo: alvoNome,
+        driver_escrita: driver,
       });
-      resultados.push({ id: r.id, acao, alvo: alvoNome, resultado: "bloqueado", motivo });
+      resultados.push({
+        id: r.id,
+        acao,
+        alvo: alvoNome,
+        resultado: "bloqueado",
+        motivo,
+        driver_escrita: driver,
+      });
       continue;
     }
-    const exec = await g(`/${alvoExt}`, "POST", post!);
+    const exec = await escreverUpdate(driver, acao, alvoExt, post!, pbToken);
     const depois = await g(`/${alvoExt}?fields=name,status,effective_status,daily_budget`);
-    const sucesso = exec.status === 200;
+    const sucesso = exec.status === 200 || exec.ok === true;
+    const reconciliacao = sucesso
+      ? compararPedidoComGraph(
+          {
+            status: post?.status,
+            daily_budget: post?.daily_budget,
+          },
+          depois.body,
+        )
+      : null;
     await audit(
       r.company_id,
       sistema,
@@ -910,19 +1378,37 @@ Deno.serve(async (req) => {
         acao,
         alvo: alvoNome,
         alvo_external_id: alvoExt,
+        driver_escrita: driver,
+        ferramenta_pipeboard: exec.ferramenta ?? null,
         chamada: post,
-        resposta_meta: exec,
+        resposta: exec,
         antes: antes.body,
         depois: depois.body,
+        reconciliacao,
+        pipeboard_conexao: driver === "pipeboard" ? pipeboardMonitor : null,
       },
     );
     if (sucesso) {
       executadasNaHora++;
+      if (reconciliacao && !reconciliacao.ok) {
+        await audit(r.company_id, sistema, "meta_action_reconciliacao_divergente", r.id, {
+          acao,
+          alvo_external_id: alvoExt,
+          divergencias: reconciliacao.divergencias,
+          driver_escrita: driver,
+        });
+      }
       await supa
         .from("approval_requests")
         .update({
           executed_at: new Date().toISOString(),
-          execution_result: { ok: true, antes: antes.body, depois: depois.body },
+          execution_result: {
+            ok: true,
+            antes: antes.body,
+            depois: depois.body,
+            driver_escrita: driver,
+            reconciliacao,
+          },
         })
         .eq("id", r.id);
     }
@@ -933,17 +1419,28 @@ Deno.serve(async (req) => {
       resultado: sucesso ? "EXECUTADO" : "falha_meta",
       antes: (antes.body as any)?.status,
       depois: (depois.body as any)?.status,
+      driver_escrita: driver,
+      reconciliacao,
     });
   }
 
   // v3: nao ha "modo" unico - cada card foi avaliado sob a config da sua empresa.
   return json({
     ok: true,
-    versao: "meta-actions-v4.5",
+    versao: "meta-actions-v5",
     mcp_chamador: auth.chamador,
     mcp_chave_legada: auth.legado,
     processados: resultados.length,
     resultados,
-    nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); cada resultado acima foi avaliado sob a config da empresa do proprio card",
+    pipeboard_conexao: pipeboardMonitor ?? {
+      ok: false,
+      token_status: null,
+      connection_id: null,
+      alerta: pbToken
+        ? null
+        : "PIPEBOARD_API_TOKEN ausente — monitor e driver pipeboard indisponiveis ate cadastrar o Edge Secret",
+      erro: pbToken ? undefined : "token_ausente",
+    },
+    nota: "configuracao de execucao e por empresa (meta_execution_config.company_id); driver_escrita diz por onde o ultimo passo sai (graph|pipeboard), nunca SE sai. Nenhuma action_flag foi alterada por este deploy.",
   });
 });
