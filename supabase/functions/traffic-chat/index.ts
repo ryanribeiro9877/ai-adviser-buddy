@@ -450,9 +450,9 @@ async function t_recos(companyId: string) {
     .eq("company_id", companyId).eq("status", "new").order("created_at", { ascending: false }).limit(20);
   return { recomendacoes_pendentes: data ?? [], nota: "regua destas recomendacoes e custo de MIDIA, nao contrato pago. Antes de aprovar escala, cruze com get_funil_credito." };
 }
-async function t_targets(companyId: string) {
-  const { data } = await supa.from("targets").select("metric,valor,fonte,updated_at").eq("company_id", companyId).eq("active", true).is("campaign_id", null);
-  return { metas_tetos: (data ?? []).map((t) => ({ metrica: t.metric, teto: brl(Number(t.valor)), fonte: t.fonte })) };
+async function t_rpc(nome: string, parametros: Record<string, unknown>) {
+  const { data, error } = await supa.rpc(nome, parametros);
+  return error ? { erro: `falha ao chamar ${nome}: ${error.message}` } : data;
 }
 async function t_funnel(companyId: string, date_from?: string, date_to?: string) {
   let q = supa.from("metric_snapshots").select("snapshot_date,spend,impressions,clicks,link_clicks,form_leads,messaging_started").eq("company_id", companyId);
@@ -1076,7 +1076,12 @@ const TOOLS = [
   { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real da Meta), gasto e resultados dos ultimos 7 dias, com dias_com_dado para checar cobertura.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema (CPL, entrega, BM/politica, cobranca, WABA).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_recommendations", description: "Recomendacoes pendentes da IA (regua = custo de midia, nao contrato pago).", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "get_targets", description: "Metas e tetos de custo vigentes.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "teto_vigente", description: "FONTE PRIORITARIA para julgar teto vigente. Exige o company_id da conversa e uma metrica. Devolve qual regua governa, valor, denominador, autor/data/citacao da meta de negocio, consistencia historica, aspiracao e divergencias/avisos. A tabela targets isolada NAO decide teto vigente.", parameters: { type: "object", properties: { metric: { type: "string", description: "Metrica exata, por exemplo custo_por_formulario, custo_por_conversa ou custo_por_lead_lp." } }, required: ["metric"] } } },
+  { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia o PAR legenda + peca pela concatenacao do texto disponivel. Exige company_id da conversa, legenda e drive_file_id. Devolve veredito, leituras separadas, cobertura e lacunas; e deteccao por padroes, NAO aprovacao. Audio sem transcricao permanece explicitamente nao lido.", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
+  { type: "function", function: { name: "saude_das_integracoes", description: "Mede a saude das integracoes Meta desta empresa por evidencia de ads, snapshots, breakdown e tres relogios. Exige company_id da conversa. Declara divergencias contra status/estado_operacional sem alterar nenhum deles; nao promete diagnosticar provedores fora desse retorno.", parameters: { type: "object", properties: { dias_tolerancia: { type: "integer", description: "Opcional; padrao da RPC = 3 dias." } } } } },
+  { type: "function", function: { name: "custo_llm_periodo", description: "Calcula em USD o custo derivado dos tokens gravados de chat e jobs no periodo para o company_id da conversa. Declara premissa de modelos e lacunas: cache pode ser cobrado como teto, ha subagentes sem tokens, visao e compliance-check ficam invisiveis. Nao e custo faturado.", parameters: { type: "object", properties: { de: { type: "string", description: "Data inicial YYYY-MM-DD." }, ate: { type: "string", description: "Data final YYYY-MM-DD." } }, required: ["de", "ate"] } } },
+  { type: "function", function: { name: "panorama_utm_anuncios", description: "Mostra, para o company_id da conversa, coleta de url_tags e destino dos anuncios: nunca lido, lido sem/com rotulo, rotulos, ambiguidades e URLs. Distingue ausencia configurada de nao coleta quando o retorno permite. Limite: nao mede desempenho/leads por UTM e o token alcanca apenas parte das contas.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "nota_visual_da_peca", description: "Retorna a nota visual textual completa de UMA peca do Drive no company_id da conversa: revisao aberta, base, produto, aproveitabilidade, risco, motivo e divergencia de produto. Ausencia de leitura nao e ausencia de risco; a nota informa e nao substitui decisao nem e veredito de compliance.", parameters: { type: "object", properties: { drive_file_id: { type: "string" } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real (dias efetivamente com dado). Nao contem proposta/contrato.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   { type: "function", function: { name: "get_ads_ranking", description: "RECORTE de criativos por custo MEDIO de midia numa janela de dias. ATENCAO - este e um recorte (breakdown) e serve para ENTENDER, nunca para PRESCREVER: a Meta aloca verba por custo MARGINAL (do proximo resultado), entao um criativo com media mais alta pode estar segurando o custo total. E PROIBIDO propor pausar ou reduzir um criativo com base apenas nesta ordenacao; prescricao exige teste isolado ou tendencia temporal. Para decidir escala ou corte, cruze com get_funil_credito (contrato pago por criativo) e consulte get_conhecimento(tema=otimizacao).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
@@ -1169,19 +1174,29 @@ function prioridadeTool(nome: string, pedido: string): number {
   const pedeCriativo = /criativ|legenda|compliance|anuncio|peca|texto|copy|oferta/.test(p);
   const pedeReceita = /receita|contrato|cac|retorno|vende|vendas|funil|proposta|lucro/.test(p);
   const pedeEstrutura = /cbo|abo|conjunto|estrutura|publico|targeting|lance|orcamento/.test(p);
+  const pedeUtm = /utm|teste a\/b|teste a b|teste abc|teste a\/b\/c|variante|rastreio|rotulo/.test(p);
+  const pedeCustoLlm = /custo.*agente|agente.*cust|custo.*llm|token/.test(p);
+  const pedeSaudeIntegracao = /conta.*conect|integrac|trazendo dado|coletor/.test(p);
+  const pedeTeto = /teto|regua|meta de custo|escal|vencedor/.test(p);
   const pedeConhecimento = /como funciona|por que|explique|conceito|politica|regra da meta|categoria especial|hook|formato|fadiga|aprendizado|learning|breakdown|metrica|historic|sazonal|sugira|briefing/.test(p);
   // v28.6: pergunta sobre estado de card/aprovacao/criacao tem prioridade MAXIMA. Era
   // justamente esse tipo de pergunta que o agente respondia de cabeca por nao ter a fila.
   const pedeFila = /card|aprova|pendente|aprovado|criou|criad|emiti|executou|executad|fila|sino|notificac|subiu|apareceu/.test(p);
   if (pedeFila && nome === "get_aprovacoes") return 0;
+  if (pedeUtm && nome === "panorama_utm_anuncios") return 0;
+  if (pedeCustoLlm && nome === "custo_llm_periodo") return 0;
+  if (pedeSaudeIntegracao && nome === "saude_das_integracoes") return 0;
+  if (pedeTeto && nome === "teto_vigente") return 0;
   if (pedeConhecimento && nome === "get_conhecimento") return 0;
-  if (pedeCriativo && (nome === "get_criativos_conteudo" || nome === "check_compliance")) return 0;
+  if (pedeCriativo && (nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
   const base: Record<string, number> = {
     get_aprovacoes: 1, propose_action: 1, get_overview: 2, get_funil_credito: 3, get_alerts: 4,
     get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
-    get_estrutura_conjuntos: 9, get_conhecimento: 9, get_targets: 10, get_recommendations: 11,
+    teto_vigente: 2, checar_par_texto_e_peca: 2, custo_llm_periodo: 2, panorama_utm_anuncios: 2,
+    nota_visual_da_peca: 3, saude_das_integracoes: 3,
+    get_estrutura_conjuntos: 9, get_conhecimento: 9, get_recommendations: 11,
   };
   return base[nome] ?? 12;
 }
@@ -1288,7 +1303,12 @@ async function runTool(name: string, args: any, ctx: any) {
       case "get_overview": return await t_overview(ctx.companyId);
       case "get_alerts": return await t_alerts(ctx.companyId);
       case "get_recommendations": return await t_recos(ctx.companyId);
-      case "get_targets": return await t_targets(ctx.companyId);
+      case "teto_vigente": return await t_rpc("teto_vigente", { p_company_id: ctx.companyId, p_metric: String(args?.metric ?? "") });
+      case "checar_par_texto_e_peca": return await t_rpc("checar_par_texto_e_peca", { p_company_id: ctx.companyId, p_legenda: String(args?.legenda ?? ""), p_drive_file_id: String(args?.drive_file_id ?? "") });
+      case "saude_das_integracoes": return await t_rpc("saude_das_integracoes", { p_company_id: ctx.companyId, p_dias_tolerancia: Number(args?.dias_tolerancia ?? 3) });
+      case "custo_llm_periodo": return await t_rpc("custo_llm_periodo", { p_company_id: ctx.companyId, p_de: String(args?.de ?? ""), p_ate: String(args?.ate ?? "") });
+      case "panorama_utm_anuncios": return await t_rpc("panorama_utm_anuncios", { p_company_id: ctx.companyId });
+      case "nota_visual_da_peca": return await t_rpc("nota_visual_da_peca", { p_company_id: ctx.companyId, p_drive_file_id: String(args?.drive_file_id ?? "") });
       case "get_funnel": return await t_funnel(ctx.companyId, args?.date_from, args?.date_to);
       case "get_ads_ranking": return await t_ads_ranking(ctx.companyId, Number(args?.days ?? 7));
       case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
@@ -1335,7 +1355,7 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
 == HIERARQUIA DE PRIORIDADES (quando duas coisas boas se contradizem, esta ordem decide) ==
 1. Nao causar dano irreversivel: conta de anuncios, qualidade de numero de WhatsApp, ativo organico, exposicao regulatoria.
 2. Verdade sobre o dado: lacuna declarada vale mais que numero bonito - e declarar lacuna onde NAO ha lacuna tambem e dano (confira antes de dizer "nao temos").
-3. Proteger o custo: teto (derivado do historico e congelado na data do calculo - nao e meta de negocio), protecao de custo no conjunto, gasto sob controle.
+3. Proteger o custo: teto resolvido por teto_vigente (meta de negocio governa quando existir; historico e apenas consistencia), protecao de custo no conjunto, gasto sob controle.
 4. Volume e escala - depois das tres acima.
 5. Elegancia da analise - nunca acima de nenhuma.
 
@@ -1345,7 +1365,7 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
 - Uma decisao por leitura. Escolha a janela ANTES de olhar o resultado; se duas janelas discordam, mostre as duas e diga qual decide.
 - Sazonalidade: a Legal anuncia consignado INSS E consignado CLT - calendarios diferentes. Declare o produto da campanha antes de invocar sazonalidade; produto nao identificado = nao invoque.
 - Voce nao e o unico ator: antes de atribuir causa a criativo/publico, verifique o historico de alteracoes de configuracao (foto diaria - declare a granularidade).
-- Teto de custo: ao usar, diga que deriva do proprio historico e a DATA do calculo. "Dentro do teto" = "sem desvio do proprio passado", nunca "da retorno".
+- Teto de custo: chame teto_vigente e use SOMENTE a regua que o retorno disser que governa. Cite autor/data quando houver meta de negocio e declare divergencias/avisos. Nunca leia targets diretamente nem trate consistencia historica como veredito de negocio.
 - Criacao em lote e degrau, nao rajada: proponha em etapas com leitura entre elas (motivo documentavel: limite de chamada e reinicio de aprendizado - nao invoque teoria de deteccao de automacao).
 - Divergencia persistente se registra, nao se vence: se o gestor sobrepor sem novo dado, declare a divergencia, registre a evidencia e execute a decisao dele.
 - Atribuicao com canais fora do sistema e DISPUTADA, nao apenas conservadora: outro canal pode ter originado o contato. Nao use atribuicao de canal unico como base para escalar.
@@ -1366,6 +1386,17 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
 - FERRAMENTA QUE FALHOU NAO E ATO. Se a ferramenta retornou erro, recusa ou lista vazia, isso
   NAO e sucesso: relate a falha e o motivo. Card recusado na emissao nao esta "pendente de
   aprovacao" - ele nao existe.
+- TESTE A/B/C, VARIANTE, UTM OU RASTREIO: chame panorama_utm_anuncios antes de dizer se o teste
+  e legivel ou se existe vencedora. Campanha vazia e uma causa possivel, mas NAO substitui a
+  leitura dos rotulos. Sem desempenho por rotulo, nao invente vencedor.
+- PECA ESPECIFICA DO DRIVE: antes de recomendar, classificar ou listar uma peca como candidata,
+  chame nota_visual_da_peca com o drive_file_id atual. get_analise_visual_drive serve para
+  inventario/triagem; nao autoriza repetir classificacao antiga. Se nao houver espaco para ler
+  as notas das candidatas, nao recomende nenhuma pelo nome. Em especial, nunca recomende o
+  video 19 sem sua nota vigente, que declara aparencia de credito empresarial e incerteza.
+- COMPLIANCE DE LEGENDA + PECA: existe caminho conjunto e ele e checar_par_texto_e_peca. Quando
+  legenda e drive_file_id estiverem disponiveis, chame-o e repasse cobertura/lacunas; nunca diga
+  que o par nao e avaliado. Se um dos dois nao veio, peca o dado faltante sem negar a capacidade.
 - Voce nao gasta nem publica por conta propria: toda acao real passa por card aprovado por humano, e as travas por acao sao dele. CONTRATO VIGENTE DESDE 03/08/2026: aprovar o card CRIA o objeto na Meta, PAUSADO - e a criacao NAO inicia entrega nem gasto. A ativacao e um SEGUNDO ATO, MANUAL, do gestor no Gerenciador, para ele conferir a arvore inteira antes de qualquer verba sair. Diga isso com todas as letras ao propor: aprovar cria e nao gasta; quem liga a entrega e ele. Entre 31/07 e 03/08 vigorou o contrato oposto (aprovar = ativar) - se voce encontrar texto afirmando isso, esta VENCIDO. Voce continua sem nenhum caminho para ativar, pausar ou gastar sem card aprovado. Trava fechada = explique o que falta e entregue o plano; nunca contorne.
 - Categoria especial (Produtos e servicos financeiros, a antiga Credito): nas campanhas criadas PELO SISTEMA ela e GRAVADA por construcao na criacao - diga isso. Nas campanhas antigas ou criadas fora, o campo nao e coletado e a conferencia continua humana, no Gerenciador. Nunca afirme conformidade de campanha que o sistema nao criou.
 - Conta em quarentena e somente leitura e VENCE a flag da empresa. Conta sem dono declarado nao existe para voce. Conta nao operacional (nunca teve campanha/gasto) e invisivel para analise.

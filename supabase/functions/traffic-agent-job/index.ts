@@ -241,9 +241,9 @@ async function t_recos(companyId: string) {
     .eq("company_id", companyId).eq("status", "new").order("created_at", { ascending: false }).limit(20);
   return { recomendacoes_pendentes: data ?? [], nota: "regua destas recomendacoes e custo de MIDIA, nao contrato pago." };
 }
-async function t_targets(companyId: string) {
-  const { data } = await supa.from("targets").select("metric,valor,fonte,updated_at").eq("company_id", companyId).eq("active", true).is("campaign_id", null);
-  return { metas_tetos: (data ?? []).map((t) => ({ metrica: t.metric, teto: brl(Number(t.valor)), fonte: t.fonte })) };
+async function t_rpc(nome: string, parametros: Record<string, unknown>) {
+  const { data, error } = await supa.rpc(nome, parametros);
+  return error ? { erro: `falha ao chamar ${nome}: ${error.message}` } : data;
 }
 async function t_funnel(companyId: string, date_from?: string, date_to?: string) {
   let q = supa.from("metric_snapshots").select("snapshot_date,spend,impressions,clicks,link_clicks,form_leads,messaging_started").eq("company_id", companyId);
@@ -478,7 +478,12 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       case "get_overview": return await t_overview(ctx.companyId);
       case "get_alerts": return await t_alerts(ctx.companyId);
       case "get_recommendations": return await t_recos(ctx.companyId);
-      case "get_targets": return await t_targets(ctx.companyId);
+      case "teto_vigente": return await t_rpc("teto_vigente", { p_company_id: ctx.companyId, p_metric: String(args?.metric ?? "") });
+      case "checar_par_texto_e_peca": return await t_rpc("checar_par_texto_e_peca", { p_company_id: ctx.companyId, p_legenda: String(args?.legenda ?? ""), p_drive_file_id: String(args?.drive_file_id ?? "") });
+      case "saude_das_integracoes": return await t_rpc("saude_das_integracoes", { p_company_id: ctx.companyId, p_dias_tolerancia: Number(args?.dias_tolerancia ?? 3) });
+      case "custo_llm_periodo": return await t_rpc("custo_llm_periodo", { p_company_id: ctx.companyId, p_de: String(args?.de ?? ""), p_ate: String(args?.ate ?? "") });
+      case "panorama_utm_anuncios": return await t_rpc("panorama_utm_anuncios", { p_company_id: ctx.companyId });
+      case "nota_visual_da_peca": return await t_rpc("nota_visual_da_peca", { p_company_id: ctx.companyId, p_drive_file_id: String(args?.drive_file_id ?? "") });
       case "get_funnel": return await t_funnel(ctx.companyId, args?.date_from, args?.date_to);
       case "get_ads_ranking": return await t_ads_ranking(ctx.companyId, Number(args?.days ?? 7));
       case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
@@ -505,7 +510,12 @@ const DEF: Record<string, any> = {
   get_overview: { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real), gasto/resultados 7d, dias_com_dado.", parameters: { type: "object", properties: {} } } },
   get_alerts: { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema.", parameters: { type: "object", properties: {} } } },
   get_recommendations: { type: "function", function: { name: "get_recommendations", description: "Recomendacoes pendentes da IA (regua = custo de midia).", parameters: { type: "object", properties: {} } } },
-  get_targets: { type: "function", function: { name: "get_targets", description: "Metas e tetos de custo vigentes.", parameters: { type: "object", properties: {} } } },
+  teto_vigente: { type: "function", function: { name: "teto_vigente", description: "FONTE PRIORITARIA para teto vigente. Exige company_id do job e metrica; declara regua governante, denominador, autor/data/citacao, historico, aspiracao e divergencias. Targets isolado NAO e veredito de negocio.", parameters: { type: "object", properties: { metric: { type: "string" } }, required: ["metric"] } } },
+  checar_par_texto_e_peca: { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia legenda + peca juntas no company_id do job. Devolve PAR, leituras separadas, cobertura e lacunas. E deteccao por texto, NAO aprovacao; audio sem transcricao fica declarado como nao lido.", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
+  saude_das_integracoes: { type: "function", function: { name: "saude_das_integracoes", description: "Mede integracoes Meta do company_id por ads, snapshots, breakdown e relogios; declara divergencias com status sem altera-lo. Nao cobre alem do retorno.", parameters: { type: "object", properties: { dias_tolerancia: { type: "integer" } } } } },
+  custo_llm_periodo: { type: "function", function: { name: "custo_llm_periodo", description: "Custo derivado em USD dos tokens gravados de chat/jobs do company_id no periodo. Nao e fatura; declara modelos presumidos, cache-teto, tokens ausentes e visao/compliance invisiveis.", parameters: { type: "object", properties: { de: { type: "string" }, ate: { type: "string" } }, required: ["de", "ate"] } } },
+  panorama_utm_anuncios: { type: "function", function: { name: "panorama_utm_anuncios", description: "Panorama do company_id para url_tags e destino: nunca lido, sem/com rotulo, rotulos e ambiguidades. Nao mede leads por UTM; token cobre so parte das contas.", parameters: { type: "object", properties: {} } } },
+  nota_visual_da_peca: { type: "function", function: { name: "nota_visual_da_peca", description: "Nota textual de uma peca no company_id: revisao, base, produto, aproveitabilidade, risco, motivo e divergencia. Informa, nao aprova; ausencia de leitura nao e ausencia de risco.", parameters: { type: "object", properties: { drive_file_id: { type: "string" } }, required: ["drive_file_id"] } } },
   get_funnel: { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "RECORTE por custo MEDIO (Breakdown Effect: serve p/ ENTENDER, proibido prescrever pausa so por isto).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
   get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria 14d de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
@@ -522,9 +532,9 @@ const DEF: Record<string, any> = {
 // especialista nao atende fora do proprio dominio, recusa e registra em LACUNAS).
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
-    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_targets"],
+    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "teto_vigente", "panorama_utm_anuncios"],
     maxPorTool: { get_campaign_detail: 3 }, maxToolsTotal: 9,
-    missao: "NUMEROS DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, conversas, custos vs tetos, ranking de criativos por custo (recorte, nunca prescricao de pausa - Breakdown Effect), series diarias e cobertura de dados. Todo numero com fonte, janela e dias_com_dado.",
+    missao: "NUMEROS DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, conversas, custos vs teto_vigente, UTM, ranking de criativos por custo (recorte, nunca prescricao de pausa - Breakdown Effect), series diarias e cobertura. Para teto, a regua governante vem de teto_vigente; targets isolado nunca decide.",
   },
   criativos: {
     tools: ["get_criativos_conteudo", "get_conhecimento"],
@@ -532,9 +542,9 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "CONTEUDO REAL DAS PECAS em operacao: legendas, titulos, CTAs, gasto e formularios por legenda distinta, hooks e formatos (fundamentar na base de conhecimento de criativo). NAO faz auditoria de compliance (dominio do especialista compliance) nem analisa metricas de campanha (dominio do desempenho_campanhas).",
   },
   compliance: {
-    tools: ["check_compliance", "get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { check_compliance: 8, get_criativos_conteudo: 3, get_conhecimento: 2 }, maxToolsTotal: 13,
-    missao: "AUDITORIA DE COMPLIANCE: pegar legendas_unicas em get_criativos_conteudo e validar CADA legenda distinta em check_compliance (uma chamada por legenda, ATE COBRIR TODAS). Reportar veredito por legenda, violacoes FIN/CRI/LGL e riscos de Categoria Especial de Credito.",
+    tools: ["check_compliance", "checar_par_texto_e_peca", "get_criativos_conteudo", "get_conhecimento"],
+    maxPorTool: { check_compliance: 8, checar_par_texto_e_peca: 8, get_criativos_conteudo: 3, get_conhecimento: 2 }, maxToolsTotal: 13,
+    missao: "AUDITORIA DE COMPLIANCE: validar o PAR legenda+peca quando houver drive_file_id, declarando exatamente a cobertura e lacunas; para acervo em operacao, validar cada legenda distinta. Deteccao automatica nao e aprovacao.",
   },
   estrutura_conta: {
     tools: ["get_estrutura_conjuntos", "get_conhecimento"],
@@ -547,18 +557,18 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "CANAL WHATSAPP: tier de envio dos numeros (caminho para o TIER_UNLIMITED), qualidade GREEN/YELLOW/RED, envios, entregas, leituras e CLIQUES por template com taxa de clique. Declarar que o recorte por numero ainda nao e coletado quando relevante.",
   },
   alertas_recomendacoes: {
-    tools: ["get_alerts", "get_recommendations"],
-    maxPorTool: { get_alerts: 1, get_recommendations: 1 }, maxToolsTotal: 2,
-    missao: "PENDENCIAS DO SISTEMA: alertas ativos (severidade, motivo) e recomendacoes aguardando decisao do gestor. Reportar sem re-analisar os dominios dos outros especialistas.",
+    tools: ["get_alerts", "get_recommendations", "saude_das_integracoes", "custo_llm_periodo"],
+    maxPorTool: { get_alerts: 1, get_recommendations: 1, saude_das_integracoes: 1, custo_llm_periodo: 2 }, maxToolsTotal: 4,
+    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes, saude das integracoes por evidencia e custo LLM derivado dos tokens. Repetir as divergencias, premissas e lacunas declaradas pelos retornos.",
   },
   analise_visual_drive: {
     tools: [], maxPorTool: {}, maxToolsTotal: 0,  // pipeline codificado - nao usa loop de tools
     missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive (pixels da miniatura em alta resolucao): produto detectado, texto visivel, riscos de compliance visiveis e veredito aproveitavel/nao/incerto por peca, persistido em banco. Use quando o gestor pedir para CLASSIFICAR/ANALISAR O CONTEUDO das pecas (nao apenas inventariar). Limite declarado: de video se ve UM FRAME.",
   },
   criativos_drive: {
-    tools: ["get_drive_criativos", "get_analise_visual_drive", "get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { get_drive_criativos: 2, get_analise_visual_drive: 1, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 6,
-    missao: "CRIATIVOS NOVOS NO GOOGLE DRIVE (pasta compartilhada, somente leitura): inventariar os arquivos com caminho (1o nivel=formato, 2o nivel=eixo de mensagem), tipo, data e thumbnail; cruzar os EIXOS encontrados com as legendas que ja performaram na conta (via conteudo dos anuncios) e classificar cada grupo como EIXO JA VALIDADO (existe vencedora medida) ou EIXO NOVO/HIPOTESE (sem dado de custo); indicar a qual tipo de teste cada grupo serviria. DECLARAR SEMPRE o limite: video foi avaliado por thumbnail+nome+caminho, nao pelo conteudo interno. NAO analisa metricas de campanha nem faz compliance.",
+    tools: ["get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "get_criativos_conteudo", "get_conhecimento"],
+    maxPorTool: { get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 8,
+    missao: "CRIATIVOS NOVOS NO DRIVE: inventariar e, antes de recomendar uma peca especifica, ler nota_visual_da_peca para obter criterio vigente, motivo, revisao e divergencia. A nota informa e nao aprova. Declarar limites de video e nunca substituir risco ausente por aprovacao.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],

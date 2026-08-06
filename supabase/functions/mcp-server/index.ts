@@ -59,11 +59,22 @@ const TOOLS = [
   { name: "list_approvals", description: "Lista solicitacoes de alteracao na fila de aprovacao. Por padrao as pendentes.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, status: { type: "string" } } } },
   { name: "list_recommendations", description: "Lista recomendacoes de IA registradas.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, status: { type: "string" } } } },
   { name: "list_integrations", description: "Lista integracoes de contas de anuncio e status de conexao (meta_ads, google_ads, ga4, gsc, gtm).", inputSchema: { type: "object", properties: { company_id: { type: "string" } } } },
+  { name: "teto_vigente", description: "FONTE PRIORITARIA para teto vigente. Exige company_id e metric. Declara qual regua governa, valor, denominador, autor/data/citacao da meta de negocio, consistencia historica, aspiracao e divergencias/avisos. Targets isolado NAO e veredito de negocio.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, metric: { type: "string" } }, required: ["company_id", "metric"] } },
+  { name: "checar_par_texto_e_peca", description: "Avalia legenda + peca juntas no company_id pela concatenacao do texto disponivel. Devolve PAR, leituras separadas, cobertura e lacunas. E deteccao por padroes, NAO aprovacao; audio sem transcricao fica explicitamente nao lido.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, legenda: { type: "string" }, drive_file_id: { type: "string" } }, required: ["company_id", "legenda", "drive_file_id"] } },
+  { name: "saude_das_integracoes", description: "Mede integracoes Meta do company_id por evidencia de ads, snapshots, breakdown e tres relogios. Declara divergencias com status/estado_operacional sem altera-los; nao promete diagnosticar provedores fora do retorno.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, dias_tolerancia: { type: "integer", description: "Opcional; padrao 3." } }, required: ["company_id"] } },
+  { name: "custo_llm_periodo", description: "Calcula em USD o custo derivado dos tokens gravados de chat e jobs do company_id no periodo. Nao e fatura. Declara premissa de modelos e lacunas: cache-teto, subagentes sem tokens e visao/compliance-check invisiveis.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, de: { type: "string", description: "YYYY-MM-DD" }, ate: { type: "string", description: "YYYY-MM-DD" } }, required: ["company_id", "de", "ate"] } },
+  { name: "panorama_utm_anuncios", description: "Mostra no company_id a coleta de url_tags e destino: nunca lido, lido sem/com rotulo, rotulos, ambiguidades e URLs. Distingue ausencia configurada de nao coleta quando o retorno permite. Nao mede leads por UTM; token alcanca so parte das contas.", inputSchema: { type: "object", properties: { company_id: { type: "string" } }, required: ["company_id"] } },
+  { name: "nota_visual_da_peca", description: "Retorna nota visual textual de uma peca no company_id: revisao aberta, base, produto, aproveitabilidade, risco, motivo e divergencia. Informa, nao aprova; ausencia de leitura nao e ausencia de risco.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, drive_file_id: { type: "string" } }, required: ["company_id", "drive_file_id"] } },
   { name: "create_approval_request", description: "PROPOE uma alteracao (campaign|budget|ad|audience|config). Entra na fila como pending. NADA e executado ate um humano aprovar no painel.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, entity_type: { type: "string", enum: ["campaign", "budget", "ad", "audience", "config"] }, action: { type: "string" }, summary: { type: "string" }, payload: { type: "object" } }, required: ["company_id", "entity_type", "action", "summary"] } },
   { name: "create_alert_rule", description: "Cria uma regra de alerta com threshold (ex.: CPL > 50 na janela de 7 dias).", inputSchema: { type: "object", properties: { company_id: { type: "string" }, name: { type: "string" }, metric: { type: "string" }, comparator: { type: "string", enum: [">", "<", ">=", "<=", "pct_change_up", "pct_change_down"] }, threshold: { type: "number" }, window_days: { type: "number" }, severity: { type: "string", enum: ["low", "medium", "high", "critical"] } }, required: ["company_id", "name", "metric", "comparator", "threshold"] } },
   { name: "resolve_alert", description: "Marca um alerta como resolvido.", inputSchema: { type: "object", properties: { alert_id: { type: "string" } }, required: ["alert_id"] } },
   { name: "execute_change", description: "Executa na plataforma de anuncios (via Windsor) uma alteracao JA aprovada. AINDA NAO HABILITADO — stub proposital ate ter aprovacao humana + chave Windsor.", inputSchema: { type: "object", properties: { approval_id: { type: "string" } }, required: ["approval_id"] } },
 ];
+
+async function callRpc(name: string, params: Record<string, unknown>) {
+  const { data, error } = await db.rpc(name, params);
+  return error ? toolText(`Falha ao chamar ${name}: ${error.message}`, true) : toolText(data);
+}
 
 // deno-lint-ignore no-explicit-any
 async function callTool(name: string, args: any) {
@@ -133,6 +144,18 @@ async function callTool(name: string, args: any) {
         const { data, error } = await q.order("provider");
         return error ? toolText(error.message, true) : toolText(data);
       }
+      case "teto_vigente":
+        return await callRpc("teto_vigente", { p_company_id: args.company_id, p_metric: args.metric });
+      case "checar_par_texto_e_peca":
+        return await callRpc("checar_par_texto_e_peca", { p_company_id: args.company_id, p_legenda: args.legenda, p_drive_file_id: args.drive_file_id });
+      case "saude_das_integracoes":
+        return await callRpc("saude_das_integracoes", { p_company_id: args.company_id, p_dias_tolerancia: Number(args.dias_tolerancia ?? 3) });
+      case "custo_llm_periodo":
+        return await callRpc("custo_llm_periodo", { p_company_id: args.company_id, p_de: args.de, p_ate: args.ate });
+      case "panorama_utm_anuncios":
+        return await callRpc("panorama_utm_anuncios", { p_company_id: args.company_id });
+      case "nota_visual_da_peca":
+        return await callRpc("nota_visual_da_peca", { p_company_id: args.company_id, p_drive_file_id: args.drive_file_id });
       case "create_approval_request": {
         const { data, error } = await db.from("approval_requests").insert({
           company_id: args.company_id, entity_type: args.entity_type, action: args.action,
