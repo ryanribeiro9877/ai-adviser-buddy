@@ -16,3 +16,7 @@ verify_jwt = true
 # ESP-12: chamada interna pelo cron usa x-mcp-key e a propria edge valida via mcp_key_valida.
 [functions.drive-audio-transcribe]
 verify_jwt = false
+
+# Fase A: cron autentica por mcp_key_valida dentro da edge.
+[functions.pipeboard-metrics-sync]
+verify_jwt = false
