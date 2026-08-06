@@ -890,6 +890,45 @@ Deno.serve(async (req) => {
         continue;
       }
 
+      // v28.11 (06/08/2026) - PECA EM REVISAO DE COMPLIANCE E IMPEDIMENTO, TAMBEM AQUI.
+      // pedido_de_anuncio_completo passou a recusar antes de existir card, mas este gate existe
+      // porque tres caminhos furam o de cima: card emitido ANTES desta correcao, pedido montado
+      // por fora do traffic-chat, e peca escalada DEPOIS da aprovacao e antes da execucao. O
+      // ultimo passo e o que gasta, e e o unico lugar onde nada mais vem depois.
+      // Vale inclusive em dry_run, de proposito: gate que a simulacao atravessa nao e gate, e o
+      // dry_run e justamente onde se conferiria que ele pega.
+      // A doutrina fica na RPC (peca_bloqueada_por_revisao), a mesma que a verificacao do pedido
+      // usa - reescreve-la aqui seria a mesma regra em dois lugares, divergindo com o tempo.
+      if (acao === "criar_anuncio_a_partir_de") {
+        const { data: bloq, error: bloqErr } = await supa.rpc("peca_bloqueada_por_revisao", {
+          p_company_id: r.company_id,
+          p_drive_file_id: r.payload?.drive_file_id ?? null,
+          p_meta_video_id: r.payload?.meta_video_id ?? null,
+        });
+        // Verificador que nao respondeu nao liberou nada: sem resposta, nao executa.
+        const indisponivel = !!bloqErr || !bloq;
+        if (indisponivel || (bloq as any).bloqueada === true) {
+          const motivo = indisponivel
+            ? `verificacao_de_peca_em_revisao_indisponivel (${bloqErr?.message ?? "resposta vazia"})`
+            : "peca_em_revisao_bloqueia_uso";
+          await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+            motivo,
+            acao,
+            driver_escrita: driver,
+            dry_run: conf.dry_run === true,
+            peca_em_revisao: bloq ?? null,
+          });
+          resultados.push({
+            id: r.id,
+            acao,
+            resultado: "bloqueado",
+            motivo: (bloq as any)?.mensagem ?? motivo,
+            driver_escrita: driver,
+          });
+          continue;
+        }
+      }
+
       if (driver === "pipeboard" && pipeboardMonitor && !pipeboardMonitor.ok) {
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
           motivo: "pipeboard_conexao_inativa",
