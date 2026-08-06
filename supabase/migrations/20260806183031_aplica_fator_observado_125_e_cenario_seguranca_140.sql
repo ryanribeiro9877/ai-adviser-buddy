@@ -1,3 +1,10 @@
+-- ESPELHO DE MIGRACAO APLICADA
+-- version: 20260806183031
+-- name: aplica_fator_observado_125_e_cenario_seguranca_140
+-- projeto: gzjwnjdpxpbmdhcyefvs (Gestor de Trafego IA)
+-- aplicada por: Claude via MCP apply_migration
+-- espelho gerado a partir de supabase_migrations.schema_migrations - NAO transcrito a mao
+
 -- Ryan escolheu em 06/08/2026:
 -- 1,25 = fator observado; 1,40 = margem interna de seguranca separada.
 -- A funcao e transformada a partir da definicao viva para evitar transcricao divergente.

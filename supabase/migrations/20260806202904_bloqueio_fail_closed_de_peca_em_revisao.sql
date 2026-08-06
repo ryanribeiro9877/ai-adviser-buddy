@@ -1,3 +1,9 @@
+﻿-- ESPELHO DE MIGRACAO APLICADA
+-- version: 20260806202904
+-- name: bloqueio_fail_closed_de_peca_em_revisao
+-- projeto: gzjwnjdpxpbmdhcyefvs (Gestor de Trafego IA)
+-- aplicada por: Claude via MCP apply_migration
+-- espelho gerado a partir de supabase_migrations.schema_migrations - NAO transcrito a mao
 -- PROBLEMA QUE ISSO RESOLVE (provado em 06/08/2026): pecas_em_revisao.bloqueia_uso=true so
 -- existia como TEXTO. nota_visual_da_peca escrevia "IMPEDIMENTO", mas pedido_de_anuncio_completo
 -- devolvia completo=true, o card era emitido, aprovado, o gatilho chamava a executora e o pedido
