@@ -298,6 +298,7 @@ export type Database = {
           reviewed_by: string | null
           status: Database["public"]["Enums"]["approval_status"]
           summary: string
+          ultima_falha: Json | null
         }
         Insert: {
           action: string
@@ -317,6 +318,7 @@ export type Database = {
           reviewed_by?: string | null
           status?: Database["public"]["Enums"]["approval_status"]
           summary: string
+          ultima_falha?: Json | null
         }
         Update: {
           action?: string
@@ -336,6 +338,7 @@ export type Database = {
           reviewed_by?: string | null
           status?: Database["public"]["Enums"]["approval_status"]
           summary?: string
+          ultima_falha?: Json | null
         }
         Relationships: [
           {

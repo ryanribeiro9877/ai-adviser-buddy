@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Check, X, ShieldCheck, Clock } from "lucide-react";
 import { toast } from "sonner";
+import { FalhaDaExecucao, type UltimaFalha } from "@/components/action-card";
 
 export const Route = createFileRoute("/_authenticated/aprovacoes")({
   component: Aprovacoes,
@@ -72,6 +73,13 @@ function Aprovacoes() {
             <pre className="mt-2 text-xs bg-muted rounded p-2 max-w-xl overflow-x-auto">
               {JSON.stringify(r.payload, null, 2)}
             </pre>
+          )}
+          {/* A falha da execução mora no card; sem ela e sem executed_at, segue "aguardando". */}
+          {r.ultima_falha && <FalhaDaExecucao falha={r.ultima_falha as unknown as UltimaFalha} />}
+          {r.status === "approved" && !r.ultima_falha && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              {r.executed_at ? `Executado em ${new Date(r.executed_at).toLocaleString("pt-BR")}.` : "Aprovado — aguardando execução."}
+            </p>
           )}
         </div>
         {reviewable && (

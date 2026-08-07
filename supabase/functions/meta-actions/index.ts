@@ -1606,6 +1606,54 @@ Deno.serve(async (req) => {
         }
       }
 
+      // v5.5 (07/08/2026) - PAR LEGENDA+PECA REPROVADO E IMPEDIMENTO, TAMBEM AQUI. Espelha o gate
+      // de peca em revisao logo acima e pela mesma razao: pedido_de_anuncio_completo passou a CHAMAR
+      // checar_par_texto_e_peca na emissao e recusar em reprova, mas tres caminhos furam o de cima -
+      // card emitido ANTES desta correcao, pedido montado por fora do traffic-chat, e legenda ou peca
+      // trocada DEPOIS da aprovacao. O ultimo passo e o que gasta. So bloqueia quando existem OS DOIS
+      // lados (legenda e peca com texto lido) e o veredito e 'reprova'; falta de um lado NAO bloqueia
+      // aqui (nao se inventa recusa por ausencia). A doutrina fica na RPC - a mesma que a emissao usa.
+      if (
+        acao === "criar_anuncio_a_partir_de" &&
+        r.payload?.drive_file_id &&
+        String(r.payload?.legenda ?? "").trim()
+      ) {
+        const { data: par, error: parErr } = await supa.rpc("checar_par_texto_e_peca", {
+          p_company_id: r.company_id,
+          p_legenda: String(r.payload.legenda),
+          p_drive_file_id: String(r.payload.drive_file_id),
+        });
+        const cob = (par as any)?.cobertura ?? {};
+        const doisLados = cob?.peca_encontrada === true && cob?.texto_da_peca_lido === true;
+        // Verificador que nao respondeu nao liberou nada: fail-closed, como o gate de revisao.
+        if (parErr || !par) {
+          const motivo = `verificacao_do_par_texto_e_peca_indisponivel (${parErr?.message ?? "resposta vazia"})`;
+          await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+            motivo,
+            acao,
+            driver_escrita: driver,
+            dry_run: conf.dry_run === true,
+          });
+          resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+          continue;
+        }
+        if (doisLados && (par as any).veredito === "reprova") {
+          const motivo = "par_texto_e_peca_reprova";
+          const detalhe =
+            "O PAR legenda+peca reprovou no compliance de texto: a peca MOSTRA valor/taxa/prazo na tela e a legenda da publicacao nao traz o CET. O card NAO foi executado - uma peca liberada sob condicao viraria anuncio com a condicao nao cumprida. Para liberar, a legenda da publicacao precisa trazer o CET.";
+          await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+            motivo,
+            detalhe,
+            acao,
+            driver_escrita: driver,
+            dry_run: conf.dry_run === true,
+            par_texto_e_peca: par,
+          });
+          resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo: detalhe, driver_escrita: driver });
+          continue;
+        }
+      }
+
       if (driver === "pipeboard" && pipeboardMonitor && !pipeboardMonitor.ok) {
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
           motivo: "pipeboard_conexao_inativa",

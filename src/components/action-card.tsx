@@ -11,6 +11,8 @@ import {
   Clock,
   MessagesSquare,
   Lock,
+  AlertTriangle,
+  RotateCcw,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAgora } from "@/hooks/use-agora";
@@ -18,6 +20,19 @@ import { expirado as jaExpirou, textoExpiracao } from "@/lib/notificacoes";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+
+/** ultima_falha: veredito da ÚLTIMA tentativa de execução que falhou. Escrita pela edge
+ *  meta-actions (marcarFalhaNoCard). NULL = nenhuma tentativa falhou. Ortogonal a executed_at. */
+export type UltimaFalha = {
+  em?: string | null;
+  etapa?: string | null;
+  recusa?: string | null;
+  motivo_para_o_gestor?: string | null;
+  detalhe_tecnico?: string | null;
+  tentativa?: number | null;
+  re_executavel?: boolean | null;
+  driver_escrita?: string | null;
+};
 
 export type Approval = {
   id: string;
@@ -34,6 +49,10 @@ export type Approval = {
   conversation_id: string | null;
   /** Padrão do banco: now() + 24h. Sem decisão, o pedido é rejeitado com nota. */
   expires_at?: string | null;
+  /** Estado real da execução — o card conta a verdade, não um palpite otimista. */
+  executed_at?: string | null;
+  execution_result?: { ok?: boolean; [k: string]: unknown } | null;
+  ultima_falha?: UltimaFalha | null;
 };
 
 export type Decision = "approved" | "rejected";
@@ -64,6 +83,36 @@ const STATUS_META: Record<string, { label: string; className: string }> = {
 
 const fmtWhen = (iso: string) =>
   new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+
+/** Mostra a falha da última tentativa de execução: motivo em linguagem de gestor, quando
+ *  aconteceu e se dá para tentar de novo. Só aparece quando o banco tem ultima_falha — nunca
+ *  inventa estado. Compartilhada entre o ActionCard e a página de aprovações. */
+export function FalhaDaExecucao({ falha }: { falha: UltimaFalha }) {
+  const motivo = falha.motivo_para_o_gestor?.trim();
+  return (
+    <div className="mt-2 space-y-1 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs">
+      <div className="flex items-center gap-1.5 font-medium text-destructive">
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        A última tentativa de execução falhou
+      </div>
+      {motivo && <p className="text-foreground">{motivo}</p>}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+        {falha.em && <span>Quando: {fmtWhen(falha.em)}</span>}
+        {typeof falha.tentativa === "number" && <span>Tentativa {falha.tentativa}</span>}
+        <span className="inline-flex items-center gap-1">
+          {falha.re_executavel !== false ? (
+            <>
+              <RotateCcw className="h-3 w-3" />
+              Pode tentar de novo
+            </>
+          ) : (
+            "Não é possível re-executar (houve escrita parcial)"
+          )}
+        </span>
+      </div>
+    </div>
+  );
+}
 
 // Chama a RPC. O backend valida (só admin, só de pending). Retorna a msg de erro.
 export async function decideApproval(
@@ -221,10 +270,27 @@ export function ActionCard({
             </Link>
           )}
 
-          {approval.status === "approved" && (
-            <p className="mt-2 text-xs text-muted-foreground">
-              Nesta fase a mudança é aplicada manualmente no Gerenciador.
-            </p>
+          {/* A falha mora no CARD (ultima_falha), não só no audit_log: é aqui que o gestor olha.
+              Aparece só quando o banco tem a falha — card sem ela e sem executed_at segue "aguardando". */}
+          {approval.ultima_falha && <FalhaDaExecucao falha={approval.ultima_falha} />}
+
+          {approval.status === "approved" && !approval.ultima_falha && (
+            approval.executed_at ? (
+              approval.execution_result && approval.execution_result.ok === false ? (
+                <p className="mt-2 text-xs text-destructive">
+                  A execução terminou com escrita parcial em {fmtWhen(approval.executed_at)} — confira no
+                  Gerenciador antes de tentar de novo.
+                </p>
+              ) : (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Executado em {fmtWhen(approval.executed_at)}.
+                </p>
+              )
+            ) : (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Aprovado — aguardando execução.
+              </p>
+            )
           )}
           {approval.status === "rejected" && approval.review_note && (
             <p className="mt-2 text-xs text-muted-foreground">

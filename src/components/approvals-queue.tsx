@@ -8,7 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ActionCard, decideApproval, type Approval, type Decision } from "@/components/action-card";
 
 export const APPROVAL_SELECT =
-  "id, action, entity_type, summary, payload, status, review_note, reviewed_at, requested_by, reviewed_by, created_at, conversation_id, expires_at";
+  "id, action, entity_type, summary, payload, status, review_note, reviewed_at, requested_by, reviewed_by, created_at, conversation_id, expires_at, executed_at, execution_result, ultima_falha";
 
 const STATUS_RANK: Record<string, number> = { pending: 0, approved: 1, rejected: 1 };
 
