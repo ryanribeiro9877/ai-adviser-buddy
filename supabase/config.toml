@@ -17,6 +17,11 @@ verify_jwt = true
 [functions.drive-audio-transcribe]
 verify_jwt = false
 
+# ditado do chat (Bearer do usuario) E chamada interna da drive-audio-transcribe (x-mcp-key,
+# sem Authorization). Precisa continuar com o gateway aberto - a propria edge autentica.
+[functions.transcribe-audio]
+verify_jwt = false
+
 # Fase A: cron autentica por mcp_key_valida dentro da edge.
 [functions.pipeboard-metrics-sync]
 verify_jwt = false

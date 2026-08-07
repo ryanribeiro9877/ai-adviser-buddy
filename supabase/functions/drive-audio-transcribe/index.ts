@@ -1,30 +1,41 @@
-// ESP-12 (06/08/2026) — orquestrador Drive -> transcribe-audio -> drive_midia_analises.
+// drive-audio-transcribe (v2, 07/08/2026) — orquestrador Drive -> transcribe-audio ->
+// drive_midia_analises, agora AUTONOMO e capaz de ler 100% dos videos.
 //
-// A edge transcribe-audio NAO e alterada: ela continua sendo o ditado do chat. Esta edge apenas
-// seleciona uma peca de video ainda nao tentada na base visual vigente, mede o arquivo no Drive,
-// chama a edge existente e persiste a transcricao. Uma peca por chamada mantem download, base64
-// e transcricao dentro do teto de parede; o cron diario converge o backlog e depois vira no-op.
+// MUDANCA AUTORIZADA PELO RYAN (07/08): o teto de 15MB deixou de "abandonar" o video.
+// Antes, arquivo grande virava `transcricao_fonte='nao_transcrito: acima do teto...'` e
+// nunca mais era tentado. Agora, para qualquer video, extraimos SO A FAIXA DE AUDIO do
+// container MP4 (demux via mp4box, sem reencode e sem ffmpeg) — um .mp4 de audio de ~1MB
+// mesmo para um video de 40MB — e mandamos so o audio ao transcribe-audio por multipart.
+// Medido em campo: video 18 = 22,7MB -> audio 1,03MB -> OpenAI 200, 485 chars.
 //
-// Contrato de ausencia:
-// - acima de 15 MB: transcricao_audio e transcricao_em seguem NULL; transcricao_fonte explica;
-// - resposta vazia: nunca vira ""; fica NULL e a fonte declara que nao houve transcricao;
-// - erro transitorio: nenhuma coluna e tocada, para a proxima corrida tentar novamente.
+// AUTONOMIA / IDEMPOTENCIA:
+// - A selecao reprocessa pendentes em toda corrida: pega linhas sem transcricao_audio cujo
+//   transcricao_fonte e NULL ou comeca com 'nao_transcrito:' / 'pendente_'. Assim os antigos
+//   'acima do teto de 15MB' entram de novo. NUNCA toca linha que ja tem texto.
+// - Falha real e honesta e marcada como permanente ('sem_audio_ou_corrompido:' /
+//   'sem_fala_detectada:') e sai do conjunto de retry — nunca fingimos sucesso.
+// - Erro transitorio (Drive/transcriber 5xx) NAO marca a linha: a proxima corrida repete.
+// - Processa um lote por chamada (limit, padrao 6) com orcamento de parede; o cron diario
+//   converge o backlog e depois vira no-op.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import * as MP4BoxNS from "https://esm.sh/mp4box@0.5.2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
-const MAX_BYTES = 15 * 1024 * 1024;
+// Teto do endpoint da OpenAI. Acima disso e sem faixa de audio extraivel, e falha honesta.
+const OPENAI_MAX_BYTES = 25 * 1024 * 1024;
+const LIMIT_PADRAO = 6;
+const ORCAMENTO_MS = 130_000;
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+// deno-lint-ignore no-explicit-any
+const MB: any = (MP4BoxNS as any).createFile ? (MP4BoxNS as any) : (MP4BoxNS as any).default;
 
 function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
 let cachedToken: { token: string; exp: number } | null = null;
@@ -105,13 +116,142 @@ async function driveDownload(fileId: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer());
 }
 
-function b64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk) as any);
+// Demux da faixa de audio de um MP4 para um MP4 fragmentado so-de-audio (sem reencode).
+// mp4box parsa o container, isola o track 'soun' e re-segmenta so ele; init segment + media
+// segments concatenados = um .mp4 valido que o ffmpeg da OpenAI le sem problema.
+function extrairAudio(input: Uint8Array): { out: Uint8Array | null; codec: string | null; erro: string | null } {
+  const mp4 = MB.createFile();
+  const parts: Uint8Array[] = [];
+  let audioId = -1;
+  let codec: string | null = null;
+  let erro: string | null = null;
+  mp4.onError = (e: unknown) => { erro = String(e); };
+  // deno-lint-ignore no-explicit-any
+  mp4.onReady = (info: any) => {
+    const a = info.tracks?.find((t: any) => t.type === "audio" || String(t.codec || "").startsWith("mp4a"));
+    if (!a) { erro = "sem faixa de audio"; return; }
+    audioId = a.id;
+    codec = String(a.codec ?? "");
+    mp4.setSegmentOptions(a.id, null, { nbSamples: 10_000_000 });
+    const init = mp4.initializeSegmentation();
+    for (const s of init) parts.push(new Uint8Array(s.buffer));
+    mp4.start();
+  };
+  mp4.onSegment = (_id: number, _u: unknown, buffer: ArrayBuffer) => { parts.push(new Uint8Array(buffer)); };
+  const ab = input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength) as ArrayBuffer & { fileStart?: number };
+  ab.fileStart = 0;
+  try {
+    mp4.appendBuffer(ab);
+    mp4.flush();
+  } catch (e) {
+    return { out: null, codec, erro: erro ?? `mp4box_throw: ${String(e)}` };
   }
-  return btoa(binary);
+  if (erro) return { out: null, codec, erro };
+  if (audioId === -1) return { out: null, codec, erro: "faixa de audio nao isolada" };
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  if (total === 0) return { out: null, codec, erro: "segmentacao de audio vazia" };
+  const out = new Uint8Array(total);
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return { out, codec, erro: null };
+}
+
+async function transcrever(key: string, bytes: Uint8Array, mime: string, nomeArquivo: string) {
+  const form = new FormData();
+  form.append("file", new File([bytes], nomeArquivo, { type: mime }));
+  form.append("mime", mime);
+  const resp = await fetch(`${SUPABASE_URL}/functions/v1/transcribe-audio`, {
+    method: "POST",
+    headers: { "x-mcp-key": key },
+    body: form,
+  });
+  const raw = await resp.text();
+  let parsed: any = null;
+  try { parsed = JSON.parse(raw); } catch { /* */ }
+  return { ok: resp.ok && !!parsed?.ok, status: resp.status, parsed, raw };
+}
+
+type ResultadoPeca = {
+  peca: string;
+  drive_file_id: string;
+  transcrito: boolean;
+  metodo?: string;
+  caracteres?: number;
+  tamanho_video?: number;
+  tamanho_audio?: number;
+  transcricao_fonte?: string;
+  erro?: string;
+};
+
+// Processa uma linha. Retorna o resultado e se foi um erro transitorio (que NAO marca a linha).
+async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPeca; transitorio: boolean }> {
+  const fileId = String(row.drive_file_id);
+  let meta: any;
+  try { meta = await driveMeta(fileId); }
+  catch (e) { return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: `drive_meta: ${String(e)}` }, transitorio: true }; }
+  const sizeVideo = Number(meta.size ?? 0);
+
+  let bytes: Uint8Array;
+  try { bytes = await driveDownload(fileId); }
+  catch (e) { return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, erro: `drive_download: ${String(e)}` }, transitorio: true }; }
+
+  const mimeVideo = String(meta.mimeType ?? row.mime ?? "video/mp4");
+  const ehVideo = mimeVideo.toLowerCase().startsWith("video") || mimeVideo.toLowerCase().includes("mp4");
+
+  let payload: Uint8Array = bytes;
+  let payloadMime = mimeVideo;
+  let nomeArquivo = "audio.mp4";
+  let metodo = "video-inteiro";
+  let audioLen: number | undefined;
+
+  if (ehVideo) {
+    const ex = extrairAudio(bytes);
+    if (ex.out && !ex.erro) {
+      payload = ex.out;
+      payloadMime = "audio/mp4";
+      nomeArquivo = "audio.mp4";
+      metodo = `mp4box-audio-only${ex.codec ? ` (${ex.codec})` : ""}`;
+      audioLen = ex.out.byteLength;
+    } else if (bytes.byteLength <= OPENAI_MAX_BYTES) {
+      // Extracao falhou mas o video inteiro cabe no teto da OpenAI: mandamos o video.
+      metodo = `video-inteiro (extracao falhou: ${ex.erro ?? "?"})`;
+      payloadMime = mimeVideo;
+      nomeArquivo = "video.mp4";
+    } else {
+      // Grande demais e sem audio extraivel: falha honesta e PERMANENTE.
+      const fonte = `sem_audio_ou_corrompido: extracao de audio falhou e arquivo acima de 25MB (${bytes.byteLength} bytes): ${ex.erro ?? "erro desconhecido"}`;
+      await supa.from("drive_midia_analises").update({ transcricao_fonte: fonte }).eq("id", row.id);
+      return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, transcricao_fonte: fonte }, transitorio: false };
+    }
+  }
+
+  if (payload.byteLength > OPENAI_MAX_BYTES) {
+    const fonte = `sem_audio_ou_corrompido: payload de ${payload.byteLength} bytes acima do teto de 25MB da OpenAI`;
+    await supa.from("drive_midia_analises").update({ transcricao_fonte: fonte }).eq("id", row.id);
+    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, transcricao_fonte: fonte }, transitorio: false };
+  }
+
+  const t = await transcrever(key, payload, payloadMime, nomeArquivo);
+  if (!t.ok) {
+    // Erro do transcriber: nao marca a linha, deixa para a proxima corrida.
+    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, metodo, erro: `transcribe-audio ${t.status}: ${JSON.stringify(t.parsed ?? t.raw).slice(0, 220)}` }, transitorio: true };
+  }
+  const text = String(t.parsed?.text ?? "").trim();
+  if (!text) {
+    const fonte = `sem_fala_detectada: resposta vazia de transcribe-audio (${t.parsed?.provider ?? "fonte desconhecida"}) via ${metodo}`;
+    await supa.from("drive_midia_analises").update({ transcricao_fonte: fonte }).eq("id", row.id);
+    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, metodo, transcricao_fonte: fonte }, transitorio: false };
+  }
+
+  const fonte = `transcribe-audio / ${t.parsed?.provider ?? "desconhecido"} / ${t.parsed?.model ?? "modelo nao informado"} (via ${metodo})`;
+  const now = new Date().toISOString();
+  const { error: writeError } = await supa
+    .from("drive_midia_analises")
+    .update({ transcricao_audio: text, transcricao_em: now, transcricao_fonte: fonte })
+    .eq("id", row.id);
+  if (writeError) return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: `gravacao: ${writeError.message}` }, transitorio: true };
+
+  return { res: { peca: row.nome, drive_file_id: fileId, transcrito: true, metodo, caracteres: text.length, tamanho_video: sizeVideo, tamanho_audio: audioLen, transcricao_fonte: fonte }, transitorio: false };
 }
 
 Deno.serve(async (req) => {
@@ -121,148 +261,58 @@ Deno.serve(async (req) => {
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
 
   let body: any = {};
-  try {
-    body = await req.json();
-  } catch {
-    // body vazio = proxima peca pendente
-  }
+  try { body = await req.json(); } catch { /* body vazio = lote de pendentes */ }
   const requestedId = String(body?.drive_file_id ?? "").trim();
+  const limit = Math.max(1, Math.min(20, Number(body?.limit ?? LIMIT_PADRAO)));
 
+  // Conjunto de retry: sem texto e ainda "aberto" (fonte nula, teto antigo, ou pendente_*).
+  // NUNCA inclui linhas com transcricao_audio preenchida (idempotente).
   let query = supa
     .from("drive_midia_analises")
     .select("id,drive_file_id,nome,mime,base_da_analise")
     .like("mime", "video%")
     .like("base_da_analise", "%criterio%")
     .is("transcricao_audio", null)
-    .is("transcricao_fonte", null)
+    .or("transcricao_fonte.is.null,transcricao_fonte.like.nao_transcrito:*,transcricao_fonte.like.pendente_*")
     .order("nome")
-    .limit(1);
+    .limit(requestedId ? 1 : limit);
   if (requestedId) query = query.eq("drive_file_id", requestedId);
+
   const { data: rows, error: readError } = await query;
   if (readError) return json({ error: "leitura_falhou", detalhe: readError.message }, 500);
-  const row = rows?.[0];
-  if (!row) {
-    return json({
-      ok: true,
-      processados: 0,
-      nota: requestedId ? "peca nao encontrada ou ja tentada" : "nenhum video pendente",
-    });
+  if (!rows || rows.length === 0) {
+    return json({ ok: true, processados: 0, transcritos: 0, nota: requestedId ? "peca nao encontrada ou ja transcrita" : "nenhum video pendente" });
   }
 
-  let meta: any;
-  try {
-    meta = await driveMeta(String(row.drive_file_id));
-  } catch (error) {
-    return json({ error: "drive_meta_falhou", detalhe: String(error), peca: row.nome }, 502);
-  }
-  const size = Number(meta.size ?? 0);
-  if (!(size > 0)) {
-    return json(
-      { error: "drive_sem_tamanho", peca: row.nome, drive_file_id: row.drive_file_id },
-      502,
-    );
-  }
-  if (size > MAX_BYTES) {
-    const fonte = `nao_transcrito: acima do teto de 15MB (${size} bytes)`;
-    const { error } = await supa
-      .from("drive_midia_analises")
-      .update({ transcricao_fonte: fonte })
-      .eq("id", row.id);
-    if (error) return json({ error: "gravacao_falhou", detalhe: error.message }, 500);
-    return json({
-      ok: true,
-      processados: 1,
-      transcrito: false,
-      peca: row.nome,
-      tamanho_bytes: size,
-      transcricao_audio: null,
-      transcricao_em: null,
-      transcricao_fonte: fonte,
-    });
+  const inicio = Date.now();
+  const resultados: ResultadoPeca[] = [];
+  let transcritos = 0;
+  for (const row of rows) {
+    if (Date.now() - inicio > ORCAMENTO_MS) break;
+    try {
+      const { res } = await processarPeca(row, key);
+      resultados.push(res);
+      if (res.transcrito) transcritos++;
+    } catch (e) {
+      resultados.push({ peca: row.nome, drive_file_id: String(row.drive_file_id), transcrito: false, erro: `excecao: ${String(e)}` });
+    }
   }
 
-  let bytes: Uint8Array;
-  try {
-    bytes = await driveDownload(String(row.drive_file_id));
-  } catch (error) {
-    return json({ error: "drive_download_falhou", detalhe: String(error), peca: row.nome }, 502);
-  }
-  if (bytes.byteLength > MAX_BYTES) {
-    const fonte = `nao_transcrito: acima do teto de 15MB (${bytes.byteLength} bytes medidos)`;
-    const { error } = await supa
-      .from("drive_midia_analises")
-      .update({ transcricao_fonte: fonte })
-      .eq("id", row.id);
-    if (error) return json({ error: "gravacao_falhou", detalhe: error.message }, 500);
-    return json({
-      ok: true,
-      processados: 1,
-      transcrito: false,
-      peca: row.nome,
-      transcricao_fonte: fonte,
-    });
-  }
-
-  const response = await fetch(`${SUPABASE_URL}/functions/v1/transcribe-audio`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-mcp-key": key },
-    body: JSON.stringify({ audio_base64: b64(bytes), mime: String(meta.mimeType ?? row.mime) }),
-  });
-  const raw = await response.text();
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    parsed = null;
-  }
-  if (!response.ok || !parsed?.ok) {
-    // Erro transitorio fica sem marca para a proxima corrida repetir.
-    return json(
-      {
-        error: "transcribe_audio_falhou",
-        status: response.status,
-        detalhe: parsed ?? raw.slice(0, 300),
-        peca: row.nome,
-      },
-      502,
-    );
-  }
-  const text = String(parsed.text ?? "").trim();
-  if (!text) {
-    const fonte = `nao_transcrito: resposta vazia de transcribe-audio (${parsed.provider ?? "fonte desconhecida"})`;
-    const { error } = await supa
-      .from("drive_midia_analises")
-      .update({ transcricao_fonte: fonte })
-      .eq("id", row.id);
-    if (error) return json({ error: "gravacao_falhou", detalhe: error.message }, 500);
-    return json({
-      ok: true,
-      processados: 1,
-      transcrito: false,
-      peca: row.nome,
-      transcricao_fonte: fonte,
-    });
-  }
-
-  const fonte = `transcribe-audio / ${parsed.provider ?? "desconhecido"} / ${parsed.model ?? "modelo nao informado"}`;
-  const now = new Date().toISOString();
-  const { error: writeError } = await supa
+  // Quantos pendentes ainda restam (para o cron/observabilidade saber se convergiu).
+  const { count: restantes } = await supa
     .from("drive_midia_analises")
-    .update({
-      transcricao_audio: text,
-      transcricao_em: now,
-      transcricao_fonte: fonte,
-    })
-    .eq("id", row.id);
-  if (writeError) return json({ error: "gravacao_falhou", detalhe: writeError.message }, 500);
+    .select("id", { count: "exact", head: true })
+    .like("mime", "video%")
+    .like("base_da_analise", "%criterio%")
+    .is("transcricao_audio", null)
+    .or("transcricao_fonte.is.null,transcricao_fonte.like.nao_transcrito:*,transcricao_fonte.like.pendente_*");
 
   return json({
     ok: true,
-    processados: 1,
-    transcrito: true,
-    peca: row.nome,
-    caracteres: text.length,
-    transcricao_fonte: fonte,
+    processados: resultados.length,
+    transcritos,
+    pendentes_restantes: restantes ?? null,
+    resultados,
     mcp_chamador: auth.chamador,
   });
 });

@@ -1,24 +1,15 @@
-// supabase/functions/transcribe-audio/index.ts (v3)
-// v3 - TROCA DO MOTOR DE TRANSCRICAO: google/gemini-2.5-flash -> openai/gpt-4o-mini-transcribe.
-//   MOTIVO DA MUDANCA DE ENDPOINT (nao e so trocar a string do modelo): os modelos de
-//   transcricao da OpenAI NAO vivem em /chat/completions. Eles ficam em
-//   api.openai.com/v1/audio/transcriptions, que usa multipart/form-data e nao aceita
-//   base64 em JSON. Por isso esta versao fala DIRETO com a OpenAI, sem passar pelo
-//   OpenRouter, e o audio vai como arquivo binario.
-//   VANTAGENS praticas do endpoint dedicado:
-//     - modelo especializado em transcricao (nao paga por capacidade conversacional)
-//     - parametro 'language' fixa portugues e melhora precisao
-//     - parametro 'prompt' funciona como GLOSSARIO: melhora a grafia de termos de trafego
-//       (CPL, CTR, ROAS, CBO/ABO, Click-to-WhatsApp, consignado) sem pos-processamento
-//   CHAVE: lida de OPENAI_API_KEY (env) e, se ausente, de integration_secrets.openai_api_key
-//   (tabela com RLS ativa e zero policies: so service_role le). Assim a chave pode ser
-//   movida para Edge Secret depois sem tocar no codigo.
-//   FALLBACK: se nao houver chave da OpenAI, cai no caminho antigo (Gemini via OpenRouter).
-//   Isso mantem o ditado funcionando em qualquer cenario e permite deploy sem coordenacao.
-//   O retorno traz 'provider' para dar para conferir qual motor rodou de fato.
-// v2: CORS - preflight OPTIONS + Access-Control-Allow-Origin em TODAS as respostas.
-// v1: {audio_base64,mime} -> transcricao -> {text}. O texto volta pro FRONT preencher o
-//     input EDITAVEL - nunca envia sozinho.
+// supabase/functions/transcribe-audio/index.ts (v4)
+// v4 - CAPTURA DE AUDIO GRANDE (autorizado pelo Ryan em 07/08/2026): alem do corpo JSON
+//   {audio_base64,mime} (ditado do chat, mantido intacto), a edge agora aceita tambem
+//   multipart/form-data com um campo 'file'. Isso permite que a drive-audio-transcribe
+//   mande a FAIXA DE AUDIO ja extraida do video (ou o video inteiro, quando cabe) SEM
+//   inflar em base64 dentro de um JSON. Pelo caminho multipart o teto sobe para 25MB, que
+//   e o limite do endpoint de transcricao da OpenAI; o caminho base64/JSON continua em
+//   15MB para nao estourar o corpo da requisicao. O motor de transcricao e identico nos
+//   dois caminhos: OpenAI /v1/audio/transcriptions com fallback Gemini/OpenRouter.
+// v3 - motor OpenAI gpt-4o-mini-transcribe (endpoint dedicado /v1/audio/transcriptions).
+// v2 - CORS.
+// v1 - {audio_base64,mime} -> {text}.
 // Auth: Bearer <user JWT> OU x-mcp-key.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -28,11 +19,13 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
 const OPENAI_KEY_ENV = (Deno.env.get("OPENAI_API_KEY") ?? "").trim();
-// v3: modelo de transcricao da OpenAI. gpt-4o-mini-transcribe e o mais barato da familia
-// e supera o whisper-1 em portugues. Trocavel por env sem redeploy de codigo.
 const OPENAI_AUDIO_MODEL = (Deno.env.get("OPENAI_AUDIO_MODEL") ?? "gpt-4o-mini-transcribe").trim();
-// Fallback legado (apenas se nao houver chave OpenAI).
 const AUDIO_MODEL_FALLBACK = (Deno.env.get("OPENROUTER_AUDIO_MODEL") ?? "google/gemini-2.5-flash").trim();
+
+// Tetos: OpenAI aceita 25MB no arquivo. Pelo multipart chegamos perto disso sem base64;
+// pelo JSON o base64 infla ~33% o corpo, entao mantemos 15MB de audio decodificado.
+const MAX_BYTES_MULTIPART = 25 * 1024 * 1024;
+const MAX_MB_JSON = 15;
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
@@ -57,7 +50,6 @@ function extFromMime(mime: string): string {
   if (m.includes("flac")) return "flac";
   return "webm";
 }
-// Formato aceito pelo caminho legado (chat/completions com input_audio).
 function fmtFromMime(mime: string): string {
   const m = mime.toLowerCase();
   if (m.includes("webm")) return "webm";
@@ -74,10 +66,15 @@ function b64ToU8(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
   return u8;
 }
+function u8ToB64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk) as unknown as number[]);
+  }
+  return btoa(binary);
+}
 
-// v3: glossario de dominio. No endpoint de transcricao, 'prompt' nao e instrucao - e dica
-// de vocabulario. Listar os termos faz o modelo grafa-los certo em vez de foneticamente
-// ("cê pê ele" -> "CPL"). Sem isso, sigla de trafego sai errada com frequencia.
 const GLOSSARIO =
   "Contexto: gestao de trafego pago para credito consignado no Brasil. " +
   "Termos que podem aparecer e devem ser grafados corretamente: CPL, CPA, CTR, CPM, ROAS, CAC, " +
@@ -104,7 +101,7 @@ async function transcreverOpenAI(key: string, bytes: Uint8Array, mime: string) {
 
   const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
-    headers: { authorization: `Bearer ${key}` }, // sem content-type: o FormData define o boundary
+    headers: { authorization: `Bearer ${key}` },
     body: form,
   });
   const raw = await resp.text();
@@ -118,8 +115,9 @@ async function transcreverOpenAI(key: string, bytes: Uint8Array, mime: string) {
 }
 
 // ---------- fallback legado: Gemini via OpenRouter ----------
-async function transcreverFallback(b64: string, mime: string) {
+async function transcreverFallback(bytes: Uint8Array, mime: string) {
   if (!OPENROUTER_KEY) return { erro: "missing_openrouter_key" };
+  const b64 = u8ToB64(bytes);
   const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` },
@@ -146,6 +144,32 @@ async function transcreverFallback(b64: string, mime: string) {
   }
 }
 
+// Le a entrada em bytes, aceitando tanto multipart/form-data (campo 'file') quanto o
+// corpo JSON {audio_base64,mime}. Retorna erro amigavel se o teto do caminho for excedido.
+async function lerEntrada(req: Request): Promise<{ bytes?: Uint8Array; mime?: string; erro?: string; status?: number }> {
+  const ct = (req.headers.get("content-type") ?? "").toLowerCase();
+  if (ct.includes("multipart/form-data")) {
+    let fd: FormData;
+    try { fd = await req.formData(); } catch { return { erro: "multipart_invalido", status: 400 }; }
+    const file = fd.get("file");
+    if (!(file instanceof File)) return { erro: "campo 'file' obrigatório no multipart", status: 400 };
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.byteLength === 0) return { erro: "arquivo vazio", status: 400 };
+    if (bytes.byteLength > MAX_BYTES_MULTIPART)
+      return { erro: "audio_grande_demais", status: 413 };
+    const mime = (String(fd.get("mime") ?? "") || file.type || "audio/mp4").toString();
+    return { bytes, mime };
+  }
+  let body: any = {};
+  try { body = await req.json(); } catch { /* */ }
+  const b64 = String(body?.audio_base64 ?? "");
+  const mime = String(body?.mime ?? "audio/webm");
+  if (!b64) return { erro: "audio_base64 obrigatório", status: 400 };
+  const sizeMb = (b64.length * 3) / 4 / 1048576;
+  if (sizeMb > MAX_MB_JSON) return { erro: "audio_grande_demais", status: 413 };
+  return { bytes: b64ToU8(b64), mime };
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
@@ -167,27 +191,22 @@ Deno.serve(async (req) => {
   }
   if (!authed) return json({ error: "unauthorized" }, 401);
 
-  let body: any = {};
-  try { body = await req.json(); } catch { /* */ }
-  const b64 = String(body?.audio_base64 ?? "");
-  const mime = String(body?.mime ?? "audio/webm");
-  if (!b64) return json({ error: "audio_base64 obrigatório" }, 400);
-  const sizeMb = (b64.length * 3) / 4 / 1048576;
-  // Teto mantido em 15MB: a OpenAI aceita 25MB no arquivo, mas o base64 chega dentro do
-  // corpo JSON da requisicao e inflar isso arrisca estourar o limite de body da edge.
-  if (sizeMb > 15) return json({ error: "audio_grande_demais", detail: "limite ~15MB (≈10 min em opus)" }, 413);
+  const entrada = await lerEntrada(req);
+  if (entrada.erro || !entrada.bytes) {
+    return json({ error: entrada.erro ?? "entrada_invalida" }, entrada.status ?? 400);
+  }
+  const bytes = entrada.bytes;
+  const mime = entrada.mime ?? "audio/webm";
 
   const openaiKey = await getOpenAIKey();
 
   if (openaiKey) {
-    const r = await transcreverOpenAI(openaiKey, b64ToU8(b64), mime);
+    const r = await transcreverOpenAI(openaiKey, bytes, mime);
     if (!r.erro) {
       return json({ ok: true, text: r.texto, model: OPENAI_AUDIO_MODEL, provider: "openai",
         tokens_in: null, tokens_out: null });
     }
-    // v3: se a OpenAI falhar (chave invalida, modelo indisponivel, formato recusado), nao
-    // deixamos o gestor sem ditado - tentamos o motor antigo e declaramos o desvio.
-    const f = await transcreverFallback(b64, mime);
+    const f = await transcreverFallback(bytes, mime);
     if (!f.erro) {
       return json({ ok: true, text: f.texto, model: AUDIO_MODEL_FALLBACK, provider: "openrouter_fallback",
         aviso: `OpenAI falhou (${r.erro}); transcrito pelo motor anterior.`,
@@ -197,8 +216,7 @@ Deno.serve(async (req) => {
     return json({ error: r.erro, detail: r.detalhe, fallback_error: f.erro }, 502);
   }
 
-  // Sem chave da OpenAI: caminho legado integral.
-  const f = await transcreverFallback(b64, mime);
+  const f = await transcreverFallback(bytes, mime);
   if (f.erro) return json({ error: f.erro, detail: f.detalhe }, 502);
   return json({ ok: true, text: f.texto, model: AUDIO_MODEL_FALLBACK, provider: "openrouter",
     aviso: "chave da OpenAI ausente (env OPENAI_API_KEY ou integration_secrets.openai_api_key)",
