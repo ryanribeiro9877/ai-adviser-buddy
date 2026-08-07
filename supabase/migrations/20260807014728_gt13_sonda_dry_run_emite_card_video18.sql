@@ -1,0 +1,12 @@
+-- ESPELHO DE MIGRACAO APLICADA
+-- version: 20260807014728
+-- name: gt13_sonda_dry_run_emite_card_video18
+-- projeto: gzjwnjdpxpbmdhcyefvs (Gestor de Trafego IA)
+-- aplicada por: Claude via MCP apply_migration
+-- espelho gerado a partir de supabase_migrations.schema_migrations - NAO transcrito a mao
+
+insert into public.approval_requests (company_id, requested_by, entity_type, entity_id, action, summary, payload, status) values ('ded20b38-f42e-4c71-800c-31b97ea48bcf','f902483a-72b5-4d12-b37f-9b14c6fb6f36','ad','37ac6636-3d4e-49b2-8377-9614b327af7e','criar_anuncio_a_partir_de','[GT-13 SONDA DRY-RUN] video 18 dry_run APAGAR', jsonb_build_object('nome_novo','[GT-13] primeiro anuncio real - APAGAR','creative_id','1481348239583700','conjunto_destino_external_id','120254208284780191','conta_destino','act_3302001729967572','status_inicial','PAUSED','tipo_de_pedido','peca_nova','drive_file_id','1df4A7wE6dSSK1DCmCdkB3wACM0ehv9ps','meta_video_id','1561865932398658','legenda','Carteira assinada CLT? Voce sabia que pode acessar credito consignado privado com taxas competitivas? Sujeito a analise de credito e margem. Saiba mais com a Legal E Viver.','legenda_fonte','herdada_do_molde','proposto_por','gt13-sonda-dry-run','justificativa','sonda GT-13 dry_run video 18','reversa','rejeitar card apos prova','metrica_sucesso','audit SIMULADO; 0 ads novos'),'pending');
+
+insert into public.approval_requests (company_id, requested_by, entity_type, entity_id, action, summary, payload, status) values ('ded20b38-f42e-4c71-800c-31b97ea48bcf','f902483a-72b5-4d12-b37f-9b14c6fb6f36','ad','37ac6636-3d4e-49b2-8377-9614b327af7e','criar_anuncio_a_partir_de','[GT-13 SONDA] peca 22 bloqueio defense-in-depth APAGAR', jsonb_build_object('nome_novo','[GT-13] peca 22 bloqueada - APAGAR','creative_id','1481348239583700','conjunto_destino_external_id','120254208284780191','conta_destino','act_3302001729967572','status_inicial','PAUSED','tipo_de_pedido','peca_nova','drive_file_id','1JhSckmJb7NF9P4oSdwjFGej_ugnm-J0v','meta_video_id','926814049730973','legenda','texto sonda peca 22','legenda_fonte','herdada_do_molde','proposto_por','gt13-sonda-bloqueio','justificativa','prova meta_action_blocked','reversa','rejeitar','metrica_sucesso','meta_action_blocked'),'pending');
+
+select id, left(summary,60) as summary, status from public.approval_requests where summary like '[GT-13 SONDA%' and status='pending' order by created_at desc;

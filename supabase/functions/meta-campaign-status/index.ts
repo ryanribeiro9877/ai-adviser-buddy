@@ -1,4 +1,8 @@
-// supabase/functions/meta-campaign-status/index.ts (v6)
+// supabase/functions/meta-campaign-status/index.ts (v7)
+// v7 (06/08/2026) - VARREDURA DE ORFAOS. Depois que a Graph devolve a lista da conta, o que
+//   esta no espelho e nao veio e marcado DELETED + ausente_na_graph_em (RPC
+//   marcar_orfaos_ausentes_na_graph). Nao apaga linha nem metrica. Conta inacessivel nao marca
+//   orfao (seria falso positivo). Inclui adsets na leitura para cobrir TESTE-GT02 e pares.
 // v6 (06/08/2026) - ESP-13: historico diario de status do anuncio e saude da conta.
 //   effective_status, issues_info e os campos da conta sao sondados isoladamente. A chave so
 //   entra no snapshot quando a Graph realmente a devolveu; []/null retornado continua sendo uma
@@ -259,6 +263,9 @@ Deno.serve(async (req) => {
     campaign_external_id: string | null;
   };
   const anunciosPorConta = new Map<string, AnuncioGraph[]>();
+  const adsetsPorConta = new Map<string, string[]>(); // account_id -> external_ids
+  const campanhasPorConta = new Map<string, string[]>(); // account_id -> campaign external_ids
+  const orfaosPorConta: Record<string, unknown> = {};
 
   const CAMPOS = [
     "name",
@@ -287,10 +294,13 @@ Deno.serve(async (req) => {
         break;
       }
       okConta = true;
+      const campIds = campanhasPorConta.get(c) ?? [];
       for (const x of p?.data ?? []) {
         reais.set(String(x.id), String(x.effective_status ?? ""));
         config.set(String(x.id), lerConfig(x));
+        campIds.push(String(x.id));
       }
+      campanhasPorConta.set(c, campIds);
       url = p?.paging?.next ?? "";
       pag++;
     }
@@ -299,6 +309,28 @@ Deno.serve(async (req) => {
     // GT-12: a lista de anuncios e estado da conta, como a configuracao de campanha. So tenta
     // esta ponta quando a conta respondeu na Graph; conta inacessivel permanece nunca_lido.
     if (okConta) {
+      // v7: conjuntos da conta — sem isso o espelho nao marca orfao de adset (ex.: TESTE-GT02).
+      const adsetIds: string[] = [];
+      let urlSets = `${GRAPH}/act_${c}/adsets?fields=id&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
+      let pagSets = 0;
+      while (urlSets && pagSets < 5) {
+        const r = await fetch(urlSets);
+        const t = await r.text();
+        if (!r.ok) break;
+        let p: any;
+        try {
+          p = JSON.parse(t);
+        } catch {
+          break;
+        }
+        for (const x of p?.data ?? []) {
+          if (x?.id) adsetIds.push(String(x.id));
+        }
+        urlSets = p?.paging?.next ?? "";
+        pagSets++;
+      }
+      adsetsPorConta.set(c, adsetIds);
+
       const anuncios: AnuncioGraph[] = [];
       const CAMPOS_ADS = "id,name,effective_status,adset_id,campaign_id,creative{id}";
       let urlAds = `${GRAPH}/act_${c}/ads?fields=${CAMPOS_ADS}&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
@@ -362,6 +394,33 @@ Deno.serve(async (req) => {
     }));
     const { data, error } = await supa.rpc("espelhar_ads_da_graph", { p: linhas });
     espelhoAds = error ? { erro: error.message } : data;
+  }
+
+  // v7: orfaos — so em conta que a Graph respondeu. Lista vazia com conta ok = tudo orfao.
+  for (const c of acessiveis) {
+    const adsIds = (anunciosPorConta.get(c) ?? []).map((a) => a.id);
+    const setIds = adsetsPorConta.get(c) ?? [];
+    const campIds = [...new Set(campanhasPorConta.get(c) ?? [])];
+    const rAds = await supa.rpc("marcar_orfaos_ausentes_na_graph", {
+      p_nivel: "ads",
+      p_account_id: c,
+      p_ids_presentes: adsIds,
+    });
+    const rSets = await supa.rpc("marcar_orfaos_ausentes_na_graph", {
+      p_nivel: "ad_sets",
+      p_account_id: c,
+      p_ids_presentes: setIds,
+    });
+    const rCamps = await supa.rpc("marcar_orfaos_ausentes_na_graph", {
+      p_nivel: "campaigns",
+      p_account_id: c,
+      p_ids_presentes: campIds,
+    });
+    orfaosPorConta[c] = {
+      ads: rAds.error ? { erro: rAds.error.message } : rAds.data,
+      ad_sets: rSets.error ? { erro: rSets.error.message } : rSets.data,
+      campaigns: rCamps.error ? { erro: rCamps.error.message } : rCamps.data,
+    };
   }
 
   const diagnosticoCampos: LeituraCampo[] = [];
@@ -650,6 +709,10 @@ Deno.serve(async (req) => {
       resultado: espelhoAds,
       nota: "inseridos = anuncio que existia na Graph e nao no espelho (a rota do Windsor nao o traz porque descarta objeto sem entrega). Metrica de anuncio novo e a soma de ad_metric_snapshots, nao um zero inventado; anuncio existente nao tem metrica tocada aqui - quem a mantem e o windsor-sync na janela ampla. last_synced_at avanca para todo anuncio lido na Graph.",
     },
+    orfaos_ausentes_na_graph: {
+      por_conta: orfaosPorConta,
+      nota: "Apos lista Graph ok, o que esta no espelho e nao veio e marcado status=DELETED + ausente_na_graph_em. Conta inacessivel nao entra (falso positivo). Nao apaga metrica. Rodar de novo depois que Ryan apagar TESTE-* na Meta.",
+    },
     gt12: {
       anuncios_lidos_na_meta: adIds.length,
       criativos_identificados: creativeIds.length,
@@ -679,6 +742,6 @@ Deno.serve(async (req) => {
       ),
       nota: "com_chave=0 significa campo nao retornado: a coluna nao entra no upsert. Array vazio ou null com chave presente e uma leitura e e preservado. Conta inacessivel nao gera linha.",
     },
-    versao: "meta-campaign-status-v6",
+    versao: "meta-campaign-status-v7",
   });
 });

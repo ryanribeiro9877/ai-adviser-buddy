@@ -889,12 +889,22 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
   // -------- criar_anuncio_a_partir_de (compliance BLOQUEANTE) --------
   if (action === "criar_anuncio_a_partir_de") {
     const nomeNovo = String(params?.nome_novo ?? "").trim();
-    const conjuntoDestino = String(params?.conjunto_destino ?? "").trim();
+    // Nome do conjunto na fala do agente (ou id). O nome CANONICO no pedido/card/executor e
+    // conjunto_destino_external_id — o que montarCriacao consome. Alias conjunto_destino so
+    // resolve o objeto aqui; a RPC e o payload usam o external_id.
+    const conjuntoDestino = String(
+      params?.conjunto_destino ?? params?.conjunto_destino_external_id ?? "",
+    ).trim();
     const utmCampaign = String(params?.utm_campaign ?? "").trim();
     const driveFileId = String(params?.drive_file_id ?? "").trim();   // v28.10 (GT-13): peca nova
     if (!nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar" };
     if (!nomeNovo) return { erro: "params.nome_novo obrigatorio (nome do anuncio que vai nascer)" };
-    if (!conjuntoDestino) return { erro: "params.conjunto_destino obrigatorio (conjunto que vai receber o anuncio)" };
+    if (!conjuntoDestino) {
+      return {
+        erro:
+          "params.conjunto_destino (nome) ou params.conjunto_destino_external_id obrigatorio — conjunto que recebe o anuncio",
+      };
+    }
     if (!utmCampaign) return { erro: "params.utm_campaign obrigatorio: e o valor que aparece no Dash como identificacao da campanha (ex.: AGOSTO26). Pergunte ao gestor se nao souber." };
 
     const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id").eq("company_id", companyId);
@@ -903,7 +913,9 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel replicar sem upload de midia, que nao esta implementado.` };
 
     const { data: sets } = await supa.from("ad_sets").select("id,name,external_id").eq("company_id", companyId);
-    const dest = (sets ?? []).find((x) => norm(x.name) === norm(conjuntoDestino)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(conjuntoDestino)))[0];
+    const dest = (sets ?? []).find((x) => x.external_id === conjuntoDestino)
+      ?? (sets ?? []).find((x) => norm(x.name) === norm(conjuntoDestino))
+      ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(conjuntoDestino)))[0];
     if (!dest) return { erro: `conjunto de destino '${conjuntoDestino}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro.` };
 
     // v28.10 (GT-13) - DOIS PEDIDOS, UMA FONTE. Existem dois anuncios diferentes com o mesmo nome
@@ -923,7 +935,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       legenda = String(molde.body ?? "").trim();
     }
 
-    const pedido: Record<string, unknown> = { nome_novo: nomeNovo, conjunto_destino: dest.name, molde: molde.name };
+    const pedido: Record<string, unknown> = {
+      nome_novo: nomeNovo,
+      conjunto_destino_external_id: dest.external_id,
+      molde: molde.name,
+    };
     if (driveFileId) {
       pedido.drive_file_id = driveFileId;
       pedido.legenda = legenda;
