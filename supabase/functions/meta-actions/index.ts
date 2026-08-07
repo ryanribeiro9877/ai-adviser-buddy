@@ -1,4 +1,11 @@
-// supabase/functions/meta-actions/index.ts (v5)
+// supabase/functions/meta-actions/index.ts (v5.1)
+// v5.1 (07/08/2026) - CARROSSEL E FOTO PARAM DE FALHAR EM SILENCIO. montarCriacao ignorava
+//   child_attachments e meta_image_hash: o pedido caia no ramo de replicacao pura e a Meta
+//   publicava o criativo do MOLDE. O gestor aprovava "sobe o carrossel novo", a peca antiga ia
+//   ao ar, o dinheiro saia. Era o oposto da rota de video, que desde a v4.4 recusa com nome.
+//   Agora os dois campos recusam por nome (carrossel_nao_suportado / foto_nao_suportada) antes
+//   de ler o molde. O contrato fecha o outro lado (contrato_de_execucao.suportado=false), entao
+//   o card nem chega a aprovacao - este gate e o ULTIMO, nao o unico.
 // v5 (06/08/2026) - DRIVER DE ESCRITA Pipeboard. So o ULTIMO passo muda.
 //   driver_escrita vem de meta_execution_config (o mesmo campo que pode_executar_acao devolve).
 //   Default e 'graph': com ele o comportamento das chamadas Meta permanece o de hoje.
@@ -450,9 +457,25 @@ const actId = (v: string) => {
   return s.startsWith("act_") ? s : `act_${s}`;
 };
 
+// v5.1: espelho EXATO de public.campo_presente_no_pedido(jsonb, text). Os dois lados do portao
+// (contrato/verificacao no banco e executor aqui) precisam recusar o MESMO conjunto de pedidos:
+// se um considerar "" ou [] presente e o outro nao, volta a existir completo=true com o executor
+// recusando - o padrao que a PO-17 v2 proibe. Vazio nao e pedido: string em branco, array vazio
+// e objeto vazio contam como ausentes nos dois lugares.
+export function campoPresente(v: unknown): boolean {
+  if (v === null || v === undefined) return false;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === "string") return v.trim() !== "";
+  if (typeof v === "object") return Object.keys(v as Record<string, unknown>).length > 0;
+  return true;
+}
+
 // v2: monta o corpo de criacao lendo o molde quando necessario. Retorna o path de colecao,
 // o body do POST e, opcionalmente, um passo previo (criacao de adcreative).
-async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: number) {
+// v5.1: exportada para que as recusas nomeadas sejam verificaveis fora de uma execucao real. Sem
+// isso, a unica forma de provar que carrossel recusa era emitir um card de verdade - caro demais
+// para uma prova que precisa ser repetida a cada mudanca de contrato.
+export async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: number) {
   if (acao === "criar_campanha") {
     const nome = String(p?.nome_novo ?? "").trim();
     if (!nome) return { erro: "payload sem nome_novo" };
@@ -528,6 +551,31 @@ async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: 
     const legendaNova = String(p?.legenda ?? "").trim();
     if (!creativeMolde || !adset || !nome)
       return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
+
+    // ============ v5.1: FORMATOS SEM CAMINHO RECUSAM POR NOME, ANTES DE LER O MOLDE ============
+    // Ate aqui, child_attachments e meta_image_hash nao eram lidos por ramo nenhum: o pedido
+    // atravessava intacto e terminava na replicacao pura, publicando o criativo do MOLDE. Isso e
+    // pior que erro - e acerto aparente. O card volta "CRIADO", o espelho grava, e o que foi ao ar
+    // e a peca ANTIGA, gastando. A rota de video ja tinha essa licao aprendida na v4.4 (recusa com
+    // molde_sem_video_data, molde_sem_link_de_destino); estes dois formatos ficaram de fora.
+    // Vem ANTES da leitura do molde de proposito: nao ha por que consultar a Graph para um pedido
+    // que nao tem execucao possivel. Suportar carrossel exige montar child_attachments com peca,
+    // link e CTA por cartao; suportar foto exige trocar video_data por image_hash e mudar o
+    // formato do anuncio - as duas coisas sao trabalho novo, nao ajuste, e nenhuma sera adivinhada.
+    if (campoPresente(p?.child_attachments)) {
+      return {
+        erro: "carrossel_nao_suportado",
+        detalhe:
+          "O pedido traz child_attachments (carrossel) e esta executora NAO monta carrossel: ela replica o criativo do molde ou troca a midia de um video_data. Antes desta versao o campo era ignorado em silencio e a Meta publicava o CRIATIVO DO MOLDE - a peca antiga no ar, com o gestor achando que aprovou o carrossel novo. Monte o carrossel no Gerenciador, ou peca o suporte a carrossel como trabalho declarado.",
+      };
+    }
+    if (campoPresente(p?.meta_image_hash)) {
+      return {
+        erro: "foto_nao_suportada",
+        detalhe:
+          "O pedido traz meta_image_hash (foto) e esta executora so publica peca nova em VIDEO: a rota da v4.4 copia o object_story_spec do molde e troca video_id, e um molde de video nao vira anuncio de imagem trocando um campo - muda o formato do anuncio, nao so a peca. Antes desta versao o campo era ignorado em silencio e ia ao ar o criativo do molde. Publique a foto pelo Gerenciador, ou peca o suporte a imagem como trabalho declarado.",
+      };
+    }
 
     // Le o creative do molde para tentar recria-lo com as UTMs novas.
     const c = await g(

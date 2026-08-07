@@ -64,6 +64,26 @@ function extrairTextoMcp(result: any): string {
     .join("\n");
 }
 
+// DUPLA CODIFICACAO DO PIPEBOARD (medido 06-07/08/2026). O texto do content do MCP ja e um JSON e,
+// dentro dele, `result` vem como OUTRA string JSON com o corpo real. Ate 07/08 o desembrulho vivia
+// so no monitor de conexao, e o resto do wrapper lia o envelope: extrairId devolvia null porque
+// {result: "..."} nao tem id, e escreverCreative/escreverAd pontuam ok = r.ok && !!r.id. Uma
+// criacao BEM-SUCEDIDA no Pipeboard virava meta_action_failed - sem executed_at, sem espelho, card
+// re-executavel - e a varredura seguinte criava o anuncio DE NOVO. Por isso o desembrulho e da
+// raiz, nao do monitor. Idempotente de proposito: quem ja desembrulha depois (o parseResult do
+// pipeboard-metrics-sync) recebe um objeto sem `result` string e nao faz nada. Limite de
+// profundidade porque envelope aninhado sem fim e resposta corrompida, nao dado.
+function desembrulharResult(body: any, profundidade = 0): any {
+  if (profundidade >= 3) return body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  if (typeof body.result !== "string") return body;
+  try {
+    return desembrulharResult(JSON.parse(body.result), profundidade + 1);
+  } catch {
+    return body;
+  }
+}
+
 function extrairId(obj: any): string | null {
   if (!obj || typeof obj !== "object") return null;
   for (const k of ["id", "campaign_id", "adset_id", "ad_id", "creative_id"]) {
@@ -177,6 +197,7 @@ export async function pipeboardCall(
     }
   }
   if (!corpo) corpo = parsed.result ?? parsed;
+  corpo = desembrulharResult(corpo);
 
   const sucesso =
     corpo?.success === true || (!!extrairId(corpo) && corpo?.success !== false && !corpo?.error);
@@ -201,19 +222,6 @@ export type ConexaoPipeboard = {
   erro?: string;
 };
 
-// Desembrulha SO o envelope {result: "<json>"}, e so quando o conteudo de fato e JSON. Fica local
-// ao monitor de proposito: mexer no retorno de pipeboardCall mudaria tambem o que o
-// pipeboard-metrics-sync recebe, e aquele coletor ja esta provado em producao com o formato atual.
-function desembrulharResult(body: any): any {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
-  if (typeof body.result !== "string") return body;
-  try {
-    return JSON.parse(body.result);
-  } catch {
-    return body;
-  }
-}
-
 export async function monitorConexaoPipeboard(token: string): Promise<ConexaoPipeboard> {
   if (!token) {
     return {
@@ -235,12 +243,11 @@ export async function monitorConexaoPipeboard(token: string): Promise<ConexaoPip
       bruto: r.bruto ?? r.body,
     };
   }
-  // O list_meta_connections do Pipeboard vem com DUPLA codificacao: o texto do content ja e um
-  // JSON e, dentro dele, `result` e OUTRA string JSON com summary/connections. Sem desembrulhar,
-  // `lista` caia no ramo `[r.body]` e a primeira "conexao" era o envelope {result: "..."}, que nao
-  // tem token_status - e o monitor anunciava "token_status=desconhecido, login pode ter expirado"
-  // enquanto o Pipeboard respondia "active". Alarme falso justamente no portao da Fase C.
-  const corpo = desembrulharResult(r.body);
+  // O desembrulho da dupla codificacao (que aqui evitava anunciar "token_status=desconhecido,
+  // login pode ter expirado" com o Pipeboard respondendo "active") saiu daqui na v5.1 e passou a
+  // ser feito por pipeboardCall, para todos os chamadores. Nada de desembrulhar de novo: r.body
+  // ja chega com summary/connections a vista.
+  const corpo = r.body;
   const lista = Array.isArray(corpo)
     ? corpo
     : Array.isArray(corpo?.connections)
