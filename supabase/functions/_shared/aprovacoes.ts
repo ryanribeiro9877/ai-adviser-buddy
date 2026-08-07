@@ -114,9 +114,14 @@ export function situacaoDoCard(r: LinhaAprovacao): SituacaoDoCard {
   // Falha POS-escrita parcial: o card ja foi fechado de proposito (nao repete para nao duplicar
   // objeto orfao). Retry aqui exige card novo - decisao humana.
   if (r.executed_at && er.ok === false) {
+    // `motivo` e `nota` sao onde os cards fechados ADMINISTRATIVAMENTE guardam a explicacao
+    // (card superseded, pedido de teste neutralizado). Ignora-los fazia sete cards desta base
+    // responderem "a execucao falhou na etapa desconhecida" tendo a razao escrita ao lado.
     const motivo =
       er.motivo_para_o_gestor ??
       uf?.motivo_para_o_gestor ??
+      er.motivo ??
+      er.nota ??
       `a execucao falhou na etapa ${er.etapa ?? "desconhecida"}`;
     return {
       estado: "execucao_falhou",
@@ -200,7 +205,9 @@ const ASSINATURAS: {
     // Medido 07/08/2026 no card b5e2f338: create_adset recusado pelo Pipeboard.
     quando: /budget conflict|already has a daily_budget|already has a lifetime_budget|campaign budget optimization|budgets at both the campaign and ad set/i,
     frase:
-      "conflito de orcamento: a campanha de destino usa orcamento no NIVEL DA CAMPANHA (CBO), e a Meta nao aceita orcamento na campanha e no conjunto ao mesmo tempo. Ou o orcamento vive na campanha e os conjuntos herdam, ou cada conjunto tem o seu e a campanha fica sem. Escolha uma campanha sem orcamento proprio, ou peca o conjunto sem orcamento para ele herdar o da campanha.",
+      // Nao ofereca "peca o conjunto sem orcamento": orcamento_diario_reais e obrigatorio no
+      // contrato e o executor recusa valor zero, entao esse caminho termina em segunda recusa.
+      "conflito de orcamento: a campanha de destino usa orcamento no NIVEL DA CAMPANHA (CBO), e a Meta nao aceita orcamento na campanha e no conjunto ao mesmo tempo. Ou o orcamento vive na campanha e os conjuntos herdam, ou cada conjunto tem o seu e a campanha fica sem. Para seguir, escolha uma campanha de destino sem orcamento proprio: criar conjunto SEM orcamento ainda nao e suportado por este sistema.",
   },
   {
     recusa: "conjunto_destino_criativo_dinamico",
