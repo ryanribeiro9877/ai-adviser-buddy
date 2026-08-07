@@ -1,4 +1,8 @@
-// supabase/functions/meta-actions/index.ts (v5.1)
+// supabase/functions/meta-actions/index.ts (v5.2)
+// v5.2 (07/08/2026) - DESTINO DYNAMIC CREATIVE RECUSA ANTES DE QUALQUER ESCRITA. A Graph nao
+//   aceita create_ad avulso em adset com is_dynamic_creative=true. Antes, montarCriacao criava o
+//   adcreative e so descobria isso no POST /ads, deixando creative orfao. Agora le o conjunto
+//   destino primeiro e recusa por nome; contrato/pedido fecham o card antes da aprovacao.
 // v5.1 (07/08/2026) - CARROSSEL E FOTO PARAM DE FALHAR EM SILENCIO. montarCriacao ignorava
 //   child_attachments e meta_image_hash: o pedido caia no ramo de replicacao pura e a Meta
 //   publicava o criativo do MOLDE. O gestor aprovava "sobe o carrossel novo", a peca antiga ia
@@ -577,6 +581,29 @@ export async function montarCriacao(acao: string, p: any, conta: string, tetoSan
         erro: "foto_nao_suportada",
         detalhe:
           "O pedido traz meta_image_hash (foto) e esta executora so publica peca nova em VIDEO: a rota da v4.4 copia o object_story_spec do molde e troca video_id, e um molde de video nao vira anuncio de imagem trocando um campo - muda o formato do anuncio, nao so a peca. Antes desta versao o campo era ignorado em silencio e ia ao ar o criativo do molde. Publique a foto pelo Gerenciador, ou peca o suporte a imagem como trabalho declarado.",
+      };
+    }
+
+    // ============ v5.2: ESTADO DO DESTINO, ANTES DO ADCREATIVE ============
+    // is_dynamic_creative nao e campo do pedido: e estado do conjunto na Graph. Por isso nao cabe
+    // no eixo contrato_de_execucao.suportado. A leitura e legitima; qualquer escrita antes dela
+    // deixa creative orfao quando create_ad recusa o conjunto Dynamic Creative.
+    const destino = await g(`/${adset}?fields=is_dynamic_creative`);
+    if (destino.status !== 200) {
+      return {
+        erro: "falha_ao_verificar_conjunto_destino",
+        detalhe:
+          "Nao consegui confirmar se o conjunto de destino aceita um anuncio avulso. Nao vou criar a peca antes dessa confirmacao, porque uma falha posterior deixaria um item orfao. Tente novamente quando a consulta ao conjunto estiver disponivel.",
+      };
+    }
+    const dynamicCreative =
+      (destino.body as any)?.is_dynamic_creative === true ||
+      String((destino.body as any)?.is_dynamic_creative ?? "").toLowerCase() === "true";
+    if (dynamicCreative) {
+      return {
+        erro: "conjunto_destino_criativo_dinamico",
+        detalhe:
+          "Nao emiti o anuncio porque o conjunto de destino esta configurado para Criativo Dinamico. Esse tipo de conjunto nao aceita a criacao de um anuncio avulso. Escolha um conjunto com Criativo Dinamico desativado ou crie um novo conjunto a partir do molde; as replicas criadas pelo sistema nascem com essa opcao desativada.",
       };
     }
 
