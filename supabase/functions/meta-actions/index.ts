@@ -358,7 +358,10 @@ async function escreverUpdate(
 async function reconciliarAposEscrita(
   novoId: string,
   pedido: Record<string, unknown>,
-  campos = "name,status,effective_status,daily_budget,objective",
+  // Ads NAO tem daily_budget/objective (sao do adset/campanha). Pedir esses campos no GET
+  // do anuncio devolve OAuthException 100 e a reconciliacao marca divergencia falsa
+  // (evidencia 07/08 no ad 120254319507370191). Campos default seguros para anuncio.
+  campos = "id,name,status,effective_status,adset_id,creative{id}",
 ) {
   const depois = await g(`/${novoId}?fields=${campos}`);
   const cmp = compararPedidoComGraph(pedido, depois.body);
@@ -1255,6 +1258,28 @@ Deno.serve(async (req) => {
           })
           .eq("id", r.id);
       }
+      // Falha DEPOIS de criar adcreative deixa o card re-executavel (executed_at null) e a
+      // proxima corrida cria OUTRO creative orfao. Evidencia 07/08: card e4dd146d gerou
+      // 2635490320208656 e 1023859480523471 no mesmo conjunto DC. Fecha o card com ok=false
+      // quando ja houve escrita parcial; retry exige card novo (decisao humana).
+      if (!sucesso && creativeCriado) {
+        await supa
+          .from("approval_requests")
+          .update({
+            executed_at: new Date().toISOString(),
+            execution_result: {
+              ok: false,
+              etapa: "create_ad",
+              adcreative_criado: creativeCriado,
+              id_criado: null,
+              detalhe: exec.body ?? exec.erro ?? null,
+              driver_escrita: driver,
+              nota:
+                "Escrita parcial: adcreative nasceu na Meta/Pipeboard, create_ad falhou. Card fechado para nao duplicar creative. Limpar orfao no Gerenciador se necessario.",
+            },
+          })
+          .eq("id", r.id);
+      }
       resultados.push({
         id: r.id,
         acao,
@@ -1265,6 +1290,7 @@ Deno.serve(async (req) => {
         detalhe: sucesso ? null : (exec.body ?? exec.erro),
         driver_escrita: driver,
         reconciliacao,
+        adcreative_orfao: !sucesso && creativeCriado ? creativeCriado : null,
       });
       continue;
     }

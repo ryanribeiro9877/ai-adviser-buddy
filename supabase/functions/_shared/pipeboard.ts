@@ -325,6 +325,12 @@ export function argsAdsetDeGraph(
   return out;
 }
 
+// Pipeboard create_ad_creative NAO aceita object_story_spec Graph cru como fonte de midia.
+// Evidencia 07/08/2026: POST com object_story_spec.video_data.video_id devolveu
+// "No media provided. Specify 'image_hash', 'image_hashes', 'video_id', 'videos', 'images',
+// or 'object_story_id'." — o conector exige os campos PLANOS (video_id/page_id/link_url/...).
+// Esta funcao desembrulha o spec Graph (o que montarCriacao ja monta) para o schema do
+// conector. Nunca preenche access_token.
 export function argsCreativeDeGraph(
   conta: string,
   body: Record<string, string>,
@@ -333,8 +339,49 @@ export function argsCreativeDeGraph(
     account_id: conta,
     name: body.name,
   };
-  if (body.object_story_spec) out.object_story_spec = parseMaybeJson(body.object_story_spec);
   if (body.url_tags) out.url_tags = body.url_tags;
+
+  const spec: any = body.object_story_spec ? parseMaybeJson(body.object_story_spec) : null;
+  if (spec && typeof spec === "object") {
+    if (spec.page_id) out.page_id = String(spec.page_id);
+    const ig = spec.instagram_user_id ?? spec.instagram_actor_id;
+    if (ig) out.instagram_actor_id = String(ig);
+
+    const vd: any = spec.video_data ?? null;
+    if (vd && typeof vd === "object") {
+      if (vd.video_id) out.video_id = String(vd.video_id);
+      if (vd.message) out.message = String(vd.message);
+      if (vd.image_url) out.thumbnail_url = String(vd.image_url);
+      const cta: any = vd.call_to_action ?? null;
+      if (cta?.type) out.call_to_action_type = String(cta.type);
+      const link = cta?.value?.link ?? vd.link ?? null;
+      if (link) out.link_url = String(link);
+      return out;
+    }
+
+    const ld: any = spec.link_data ?? null;
+    if (ld && typeof ld === "object") {
+      if (ld.image_hash) out.image_hash = String(ld.image_hash);
+      if (ld.message) out.message = String(ld.message);
+      if (ld.name) out.headline = String(ld.name);
+      if (ld.description) out.description = String(ld.description);
+      if (ld.link) out.link_url = String(ld.link);
+      const cta: any = ld.call_to_action ?? null;
+      if (cta?.type) out.call_to_action_type = String(cta.type);
+      const linkCta = cta?.value?.link;
+      if (linkCta && !out.link_url) out.link_url = String(linkCta);
+      return out;
+    }
+  }
+
+  // Fallback: se o body ja vier no vocabulario plano do Pipeboard, repassa.
+  if (body.video_id) out.video_id = body.video_id;
+  if (body.image_hash) out.image_hash = body.image_hash;
+  if (body.page_id) out.page_id = body.page_id;
+  if (body.link_url) out.link_url = body.link_url;
+  if (body.message) out.message = body.message;
+  if (body.thumbnail_url) out.thumbnail_url = body.thumbnail_url;
+  if (body.call_to_action_type) out.call_to_action_type = body.call_to_action_type;
   if (body.asset_feed_spec) out.asset_feed_spec = parseMaybeJson(body.asset_feed_spec);
   return out;
 }
