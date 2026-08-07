@@ -1204,6 +1204,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "get_acervo_para_anuncio", description: "ACERVO DO DRIVE PRONTO PARA VIRAR ANUNCIO NOVO. Esta e a ferramenta certa quando o gestor pede para MONTAR anuncio novo, ESCOLHER peca ou saber quais pecas do acervo servem para um produto - NAO use get_criativos_conteudo para isso (aquela le SO os anuncios ja no ar em public.ads e por isso nunca propoe peca nova). Deduplicada por arquivo e filtravel por produto (ex.: 'CLT'). Por peca: nome, drive_file_id, o que a peca DIZ (o_que_diz_no_audio = transcricao real do video; texto_visivel para imagem), analise visual, se esta na biblioteca da Meta (apta), se esta bloqueada por compliance (bloqueada_por_compliance, SEMPRE marcada quando ha revisao aberta) e se ja foi usada em anuncio antes. Honestidade embutida: produto de video e INFERIDO (produto_fonte); peca sem transcricao vem com transcricao_ausente=true. Antes de emitir o card de uma candidata, ainda leia nota_visual_da_peca.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional. Filtra por produto detectado, casa por pedaco insensivel a caso (ex.: 'CLT' acha 'consignado CLT'). Sem este campo devolve o acervo inteiro." }, incluir_inaptas: { type: "boolean", description: "Padrao true: inclui as bloqueadas e as fora da biblioteca, MARCADAS, para nao omitir nada. false = so as aptas agora." } } } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.utm_campaign e o conjunto que recebe o anuncio OBRIGATORIOS - o conjunto vai em params.conjunto_destino_external_id, e params.conjunto_destino aceita o nome dele quando voce so tem o nome). EXISTEM DOIS PEDIDOS DE ANUNCIO, e eles exigem coisas diferentes: (a) REPLICACAO PURA - escalar para outro conjunto um anuncio que ja funciona; nao passe params.drive_file_id, e a legenda NAO e sua: vem do molde. (b) PECA NOVA do acervo do Drive - passe params.drive_file_id (o id vem de get_drive_criativos ou get_analise_visual_drive, nunca o nome do arquivo), params.legenda e params.legenda_fonte, que e 'humano' se o gestor escreveu, 'herdada_do_molde' se ele autorizou usar o texto do molde, ou 'agente' se voce escreveu - e nesse caso params.legenda_referencias com os anuncios que serviram de base e OBRIGATORIO. So proponha peca nova cujo ja_enviada_para_meta seja true. NAO invente legenda para o pedido passar: se o gestor nao disse de onde vem o texto, PERGUNTE. Tudo que e criado nasce PAUSADO, com categoria especial de credito, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha). SO no anuncio com peca nova: drive_file_id, legenda, legenda_fonte ('humano' | 'herdada_do_molde' | 'agente') e legenda_referencias (array, obrigatorio quando a fonte e 'agente')" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
@@ -1305,14 +1306,14 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeSaudeIntegracao && nome === "saude_das_integracoes") return 0;
   if (pedeTeto && nome === "teto_vigente") return 0;
   if (pedeConhecimento && nome === "get_conhecimento") return 0;
-  if (pedeCriativo && (nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
+  if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
   const base: Record<string, number> = {
     get_aprovacoes: 1, propose_action: 1, get_overview: 2, get_funil_credito: 3, get_alerts: 4,
     get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
     teto_vigente: 2, checar_par_texto_e_peca: 2, custo_llm_periodo: 2, panorama_utm_anuncios: 2,
-    nota_visual_da_peca: 3, saude_das_integracoes: 3,
+    nota_visual_da_peca: 3, saude_das_integracoes: 3, get_acervo_para_anuncio: 3,
     get_estrutura_conjuntos: 9, get_conhecimento: 9, get_recommendations: 11,
   };
   return base[nome] ?? 12;
@@ -1461,6 +1462,15 @@ async function runTool(name: string, args: any, ctx: any) {
         const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
         return error ? { erro: error.message } : data;
       }
+      case "get_acervo_para_anuncio": {
+        const produto = String(args?.produto ?? "").trim();
+        const { data, error } = await supa.rpc("get_acervo_para_anuncio", {
+          p_company_id: ctx.companyId,
+          p_produto: produto || null,
+          p_incluir_inaptas: args?.incluir_inaptas === false ? false : true,
+        });
+        return error ? { erro: error.message } : data;
+      }
       case "get_estrutura_conjuntos":
         return await t_estrutura_conjuntos(ctx.companyId, Number(args?.pagina ?? 1));
       case "get_aprovacoes": return await t_aprovacoes(ctx.companyId, args?.apenas_abertos === false ? false : true);
@@ -1513,11 +1523,21 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
 - TESTE A/B/C, VARIANTE, UTM OU RASTREIO: chame panorama_utm_anuncios antes de dizer se o teste
   e legivel ou se existe vencedora. Campanha vazia e uma causa possivel, mas NAO substitui a
   leitura dos rotulos. Sem desempenho por rotulo, nao invente vencedor.
+- MONTAR ANUNCIO NOVO / ESCOLHER PECA DO ACERVO: quando o gestor pedir para atribuir criativos,
+  montar anuncio novo ou perguntar quais pecas do acervo servem para um produto, a fonte e
+  get_acervo_para_anuncio (filtre por produto, ex.: 'CLT'). NUNCA responda essa pergunta por
+  get_criativos_conteudo: aquela le SO os anuncios JA no ar (public.ads) e por isso arrasta o
+  gestor a repetir criativo em uso (foi o que aconteceu em 07/08, quando o R06 ja no ar foi
+  proposto no lugar de peca nova do acervo). get_acervo_para_anuncio devolve o que esta apto a
+  VIRAR anuncio: pecas do Drive na biblioteca da Meta, com o que cada uma diz (transcricao),
+  bloqueio de compliance MARCADO e se ja foi usada antes. Peca do acervo NAO tem metrica por
+  definicao - nao a compare com anuncio em operacao nem a preterira por "lastro".
 - PECA ESPECIFICA DO DRIVE: antes de recomendar, classificar ou listar uma peca como candidata,
-  chame nota_visual_da_peca com o drive_file_id atual. get_analise_visual_drive serve para
-  inventario/triagem; nao autoriza repetir classificacao antiga. Se nao houver espaco para ler
-  as notas das candidatas, nao recomende nenhuma pelo nome. Em especial, nunca recomende o
-  video 19 sem sua nota vigente, que declara aparencia de credito empresarial e incerteza.
+  chame nota_visual_da_peca com o drive_file_id atual (o id vem de get_acervo_para_anuncio ou
+  get_analise_visual_drive). get_analise_visual_drive serve para inventario/triagem; nao autoriza
+  repetir classificacao antiga. Se nao houver espaco para ler as notas das candidatas, nao
+  recomende nenhuma pelo nome. Em especial, nunca recomende o video 19 sem sua nota vigente, que
+  declara aparencia de credito empresarial e incerteza.
 - COMPLIANCE DE LEGENDA + PECA: existe caminho conjunto e ele e checar_par_texto_e_peca. Quando
   legenda e drive_file_id estiverem disponiveis, chame-o e repasse cobertura/lacunas; nunca diga
   que o par nao e avaliado. Se um dos dois nao veio, peca o dado faltante sem negar a capacidade.

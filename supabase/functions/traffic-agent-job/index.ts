@@ -524,6 +524,15 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
         const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
         return error ? { erro: error.message } : data;
       }
+      case "get_acervo_para_anuncio": {
+        const produto = String(args?.produto ?? "").trim();
+        const { data, error } = await supa.rpc("get_acervo_para_anuncio", {
+          p_company_id: ctx.companyId,
+          p_produto: produto || null,
+          p_incluir_inaptas: args?.incluir_inaptas === false ? false : true,
+        });
+        return error ? { erro: error.message } : data;
+      }
       case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.mcpKey);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       case "get_waba_status": return await t_waba_status(ctx.companyId);
@@ -537,6 +546,7 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
 const DEF: Record<string, any> = {
   get_analise_visual_drive: { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Leitura instantanea - nao repete a visao. Se total_analisados < inventario, pecas novas ainda nao passaram pela visao: declare, nao invente.", parameters: { type: "object", properties: {} } } },
   get_drive_criativos: { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, tamanho, data e thumbnail (um frame/preview) de cada arquivo, com resumo por formato e por eixo. Pode vir truncado: leia aviso_corte e nunca trate item omitido como inexistente. LIMITE: video e analisado por thumbnail+nome+caminho, nao pelo conteudo interno.", parameters: { type: "object", properties: {} } } },
+  get_acervo_para_anuncio: { type: "function", function: { name: "get_acervo_para_anuncio", description: "ACERVO DO DRIVE PRONTO PARA VIRAR ANUNCIO NOVO, deduplicado por arquivo e filtravel por produto (ex.: 'CLT'). Use para MONTAR anuncio novo/escolher peca - NAO use get_criativos_conteudo, que le so os anuncios ja no ar. Por peca: nome, drive_file_id, o que a peca DIZ (o_que_diz_no_audio = transcricao; texto_visivel em imagem), analise visual, se esta na biblioteca da Meta (apta), bloqueio de compliance SEMPRE marcado (bloqueada_por_compliance) e se ja foi usada em anuncio. Video: produto INFERIDO (produto_fonte); sem transcricao vem transcricao_ausente=true. Antes de emitir card, leia nota_visual_da_peca.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional; casa por pedaco insensivel a caso (ex.: 'CLT')." }, incluir_inaptas: { type: "boolean", description: "Padrao true: inclui bloqueadas e fora da biblioteca, marcadas. false = so aptas." } } } } },
   get_overview: { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real), gasto/resultados 7d, dias_com_dado.", parameters: { type: "object", properties: {} } } },
   get_alerts: { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema.", parameters: { type: "object", properties: {} } } },
   get_recommendations: { type: "function", function: { name: "get_recommendations", description: "Recomendacoes pendentes da IA (regua = custo de midia).", parameters: { type: "object", properties: {} } } },
@@ -603,9 +613,9 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive (pixels da miniatura em alta resolucao): produto detectado, texto visivel, riscos de compliance visiveis e veredito aproveitavel/nao/incerto por peca, persistido em banco. Use quando o gestor pedir para CLASSIFICAR/ANALISAR O CONTEUDO das pecas (nao apenas inventariar). Limite declarado: de video se ve UM FRAME.",
   },
   criativos_drive: {
-    tools: ["get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 8,
-    missao: "CRIATIVOS NOVOS NO DRIVE: inventariar e, antes de recomendar uma peca especifica, ler nota_visual_da_peca para obter criterio vigente, motivo, revisao e divergencia. A nota informa e nao aprova. Declarar limites de video e nunca substituir risco ausente por aprovacao.",
+    tools: ["get_acervo_para_anuncio", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "get_criativos_conteudo", "get_conhecimento"],
+    maxPorTool: { get_acervo_para_anuncio: 2, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 8,
+    missao: "CRIATIVOS NOVOS NO DRIVE: para montar anuncio novo ou escolher peca por produto, comece por get_acervo_para_anuncio (acervo apto a virar anuncio, filtravel por produto) - nunca por get_criativos_conteudo, que so ve os anuncios ja no ar. Antes de recomendar uma peca especifica, ler nota_visual_da_peca para obter criterio vigente, motivo, revisao e divergencia. A nota informa e nao aprova. Declarar limites de video e nunca substituir risco ausente por aprovacao.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],
