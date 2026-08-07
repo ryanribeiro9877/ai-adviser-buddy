@@ -201,6 +201,19 @@ export type ConexaoPipeboard = {
   erro?: string;
 };
 
+// Desembrulha SO o envelope {result: "<json>"}, e so quando o conteudo de fato e JSON. Fica local
+// ao monitor de proposito: mexer no retorno de pipeboardCall mudaria tambem o que o
+// pipeboard-metrics-sync recebe, e aquele coletor ja esta provado em producao com o formato atual.
+function desembrulharResult(body: any): any {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+  if (typeof body.result !== "string") return body;
+  try {
+    return JSON.parse(body.result);
+  } catch {
+    return body;
+  }
+}
+
 export async function monitorConexaoPipeboard(token: string): Promise<ConexaoPipeboard> {
   if (!token) {
     return {
@@ -222,14 +235,20 @@ export async function monitorConexaoPipeboard(token: string): Promise<ConexaoPip
       bruto: r.bruto ?? r.body,
     };
   }
-  const lista = Array.isArray(r.body)
-    ? r.body
-    : Array.isArray(r.body?.connections)
-      ? r.body.connections
-      : Array.isArray(r.body?.data)
-        ? r.body.data
-        : r.body
-          ? [r.body]
+  // O list_meta_connections do Pipeboard vem com DUPLA codificacao: o texto do content ja e um
+  // JSON e, dentro dele, `result` e OUTRA string JSON com summary/connections. Sem desembrulhar,
+  // `lista` caia no ramo `[r.body]` e a primeira "conexao" era o envelope {result: "..."}, que nao
+  // tem token_status - e o monitor anunciava "token_status=desconhecido, login pode ter expirado"
+  // enquanto o Pipeboard respondia "active". Alarme falso justamente no portao da Fase C.
+  const corpo = desembrulharResult(r.body);
+  const lista = Array.isArray(corpo)
+    ? corpo
+    : Array.isArray(corpo?.connections)
+      ? corpo.connections
+      : Array.isArray(corpo?.data)
+        ? corpo.data
+        : corpo
+          ? [corpo]
           : [];
   const primeira = lista[0] ?? null;
   const status = primeira
@@ -244,7 +263,7 @@ export async function monitorConexaoPipeboard(token: string): Promise<ConexaoPip
     alerta: ativo
       ? null
       : `Pipeboard token_status=${status ?? "desconhecido"} — login pessoal pode ter expirado; reconectar em pipeboard.co/connections antes de escrever`,
-    bruto: r.body,
+    bruto: corpo,
   };
 }
 
