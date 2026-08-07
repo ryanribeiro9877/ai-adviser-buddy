@@ -411,8 +411,18 @@ export function argsAdDeGraph(
 // conjunto, e a campanha 120254323578040191 - correta na Meta - foi reportada como divergente.
 export type NivelMeta = "campanha" | "conjunto" | "anuncio";
 
+// ORCAMENTO DE CAMPANHA ENTROU EM 07/08/2026, e entrou por evidencia. A campanha
+// 120254323578040191 foi criada com um corpo SEM daily_budget e SEM bid_strategy, e a Graph
+// devolve daily_budget=1000 e bid_strategy=LOWEST_COST_WITHOUT_CAP: o conector Pipeboard injetou
+// orcamento de campanha (CBO) por conta propria. As campanhas TESTE-A/B/C, criadas com o MESMO
+// corpo pelo driver Graph, estao sem orcamento - o driver e a unica variavel. A reconciliacao de
+// campanha conferia objective, status e name e nao olhava dinheiro, entao o objeto nasceu
+// diferente do pedido e ninguem soube ate um create_adset ser recusado dias depois.
+// daily_budget/lifetime_budget sao campos VALIDOS no nivel de campanha (meta-campaign-status ja
+// os le assim ha dias), entao nao ha risco do #100 que motivou a v5.3.
 const CAMPOS_DE_RECONCILIACAO: Record<NivelMeta, string> = {
-  campanha: "id,name,status,effective_status,objective,special_ad_categories,buying_type",
+  campanha:
+    "id,name,status,effective_status,objective,special_ad_categories,buying_type,daily_budget,lifetime_budget",
   conjunto: "id,name,status,effective_status,daily_budget,campaign_id,bid_strategy,targeting",
   anuncio: "id,name,status,effective_status,adset_id,creative{id}",
 };
@@ -504,7 +514,7 @@ export function reconciliacaoNivelDesconhecido(acao: string): Reconciliacao {
 export function compararPedidoComGraph(
   pedido: Record<string, unknown>,
   lido: any,
-  opts?: { http_status?: number; campos?: string },
+  opts?: { http_status?: number; campos?: string; exigir_ausentes?: string[] },
 ): Reconciliacao {
   const camposPedidos = opts?.campos ?? null;
   const falha = descreverFalhaDeLeitura(lido, opts?.http_status);
@@ -522,6 +532,23 @@ export function compararPedidoComGraph(
 
   const divergencias: string[] = [];
   const comparados: string[] = [];
+
+  // CAMPO QUE NAO FOI PEDIDO E QUE VOLTOU COM VALOR. Comparar so o que esta no pedido deixa passar
+  // o defeito inverso: o objeto nasce com ALGO A MAIS que ninguem pediu, e o silencio parece
+  // acerto. Foi assim que a campanha 120254323578040191 nasceu CBO - o corpo nao tinha orcamento,
+  // o conector pos R$ 10,00/dia, e a conferencia nao tinha o que comparar porque o pedido era
+  // vazio naquele campo. Zero e ausencia contam como "nao tem"; qualquer valor positivo e uma
+  // divergencia real, e cara, porque muda quem manda no dinheiro.
+  for (const campo of opts?.exigir_ausentes ?? []) {
+    const obtido = (lido as Record<string, unknown>)[campo];
+    if (obtido === undefined || obtido === null || obtido === "") continue;
+    const n = Number(obtido);
+    if (Number.isFinite(n) && n === 0) continue;
+    comparados.push(campo);
+    divergencias.push(
+      `${campo}: NAO foi pedido (a executora nao enviou este campo) graph=${String(obtido)} — o objeto nasceu com valor que ninguem pediu`,
+    );
+  }
   // Campo que nao pertence ao nivel nao entra no pedido e portanto nao e comparado: divergencia
   // falsa pelo lado do PEDIDO (objective num conjunto, daily_budget num anuncio) e o mesmo defeito
   // visto do outro angulo.

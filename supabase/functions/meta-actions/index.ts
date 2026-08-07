@@ -1,4 +1,36 @@
-// supabase/functions/meta-actions/index.ts (v5.3)
+// supabase/functions/meta-actions/index.ts (v5.4)
+// v5.4 (07/08/2026) - TRES DEFEITOS DA MESMA FAMILIA: o sistema sabia da falha e nao contava.
+//   (1) FALHA INVISIVEL NO CARD. Card b5e2f338: aprovado 20:55:58, create_adset recusado pelo
+//       Pipeboard 20:56:01 por conflito de orcamento, e o card ficou status=approved /
+//       executed_at=NULL / execution_result=NULL. get_aprovacoes leu esse estado e devolveu
+//       "aprovado, ainda NAO executado"; o agente completou a lacuna e disse ao gestor "aguarde
+//       alguns instantes, o conjunto esta sendo criado". A falha so existia no audit_log.
+//       Agora TODA saida por meta_action_failed/meta_action_blocked marca approval_requests
+//       .ultima_falha - com nome da recusa, motivo em linguagem de gestor, tentativa e se o card
+//       segue re-executavel. A marcacao esta pendurada em audit(), nao em cada `continue`: sao 12
+//       saidas nos dois caminhos, e marcar uma a uma garante que a proxima nasca invisivel.
+//       executed_at NAO mudou de significado - continua sendo "a escrita terminou e o card esta
+//       fechado", que e do que dependem a varredura (executed_at is null) e o fechamento apos
+//       escrita PARCIAL. ultima_falha e eixo novo, ortogonal, e some no sucesso.
+//   (2) CBO x ABO RECUSA ANTES DE CHAMAR A META. Mesmo padrao do gate de Dynamic Creative da
+//       v5.2: le o orcamento da campanha PAI e recusa por nome (campanha_usa_orcamento_proprio_cbo)
+//       em vez de descobrir pelo texto de erro da plataforma depois de gastar a aprovacao do
+//       gestor. Falha de leitura recusa - nao ha default seguro entre "a campanha manda no
+//       dinheiro" e "o conjunto manda no dinheiro". contrato_de_estado_execucao fecha o outro
+//       lado, entao o card nem chega a aprovacao.
+//   (3) A CAMPANHA NASCEU DIFERENTE DO PEDIDO E A CONFERENCIA NAO OLHAVA. MEDIDO: o corpo enviado
+//       em create_campaign nao tinha daily_budget nem bid_strategy; a Graph devolve, para
+//       120254323578040191, daily_budget=1000 (R$ 10,00/dia) e bid_strategy=
+//       LOWEST_COST_WITHOUT_CAP. As campanhas TESTE-A/B/C foram criadas com o MESMO corpo -
+//       inclusive is_adset_budget_sharing_enabled "false" - porem pelo driver GRAPH, e estao sem
+//       orcamento. A unica variavel e o DRIVER: o conector Pipeboard INJETA orcamento de campanha
+//       quando create_campaign nao traz um. O erro do Pipeboard estava certo; a campanha e CBO de
+//       verdade, e ninguem pediu isso. A reconciliacao de campanha passa a pedir daily_budget/
+//       lifetime_budget e a tratar CAMPO NAO PEDIDO QUE VOLTOU COM VALOR como divergencia
+//       (exigir_ausentes) - antes o comparador so olhava campo presente no pedido, e o pedido era
+//       vazio justamente ali. O espelho tambem para de gravar o literal daily_budget=0, que era um
+//       palpite ("ABO: orcamento vive no conjunto") apresentado como fato e que ficou dias dizendo
+//       o contrario da Meta.
 // v5.3 (07/08/2026) - A CONFERENCIA POS-ESCRITA ESTAVA CONFERINDO O NIVEL ERRADO, E CHAMAVA
 //   CEGUEIRA DE DIVERGENCIA. Dois defeitos, um em cima do outro.
 //   (1) CAMPOS POR NIVEL. reconciliarAposEscrita tinha um parametro `campos` com default fixo -
@@ -139,6 +171,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import { traduzirFalha } from "../_shared/aprovacoes.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
   argsAdDeGraph,
@@ -427,6 +460,11 @@ async function reconciliarAposEscrita(
     reconciliacao: compararPedidoComGraph(pedido, depois.body, {
       http_status: depois.status,
       campos,
+      // A executora NUNCA envia orcamento ao criar campanha (montarCriacao monta ABO por
+      // contrato). Se a Graph devolver orcamento de campanha, alguem no caminho o colocou - e em
+      // 07/08/2026 esse alguem foi o conector Pipeboard. Sem esta linha a divergencia e invisivel,
+      // porque o comparador so olha campo presente no pedido e o pedido e vazio aqui.
+      exigir_ausentes: nivel === "campanha" ? ["daily_budget", "lifetime_budget"] : undefined,
     }),
   };
 }
@@ -813,7 +851,80 @@ async function audit(
     target_id: approvalId,
     details: JSON.parse(redact(JSON.stringify(details))),
   });
+
+  // v5.4: o audit_log deixa de ser o UNICO lugar onde a falha aparece. As duas acoes que
+  // significam "esta tentativa acabou mal" tambem marcam o card, que e onde os leitores olham.
+  // As demais (executed, espelho_falhou, reconciliacao_*) NAO marcam: nelas o objeto existe.
+  if (action === "meta_action_failed" || action === "meta_action_blocked") {
+    const d: any = details ?? {};
+    await marcarFalhaNoCard(approvalId, {
+      etapa: action === "meta_action_blocked" ? "bloqueio" : String(d.etapa ?? "execucao"),
+      recusa: d.motivo ? String(d.motivo) : null,
+      mensagem: d.detalhe ? String(d.detalhe) : null,
+      bruto: d.resposta ?? d.detalhe ?? d.motivo ?? null,
+      driver: d.driver_escrita ?? null,
+      bloqueado: action === "meta_action_blocked",
+    });
+  }
 }
+// ==================== v5.4: TODA TENTATIVA QUE TERMINA MAL MARCA O CARD ====================
+// O card b5e2f338 ficou status=approved / executed_at=NULL / execution_result=NULL depois de o
+// Pipeboard recusar create_adset. Quem lesse esse card - e o agente leu - so podia concluir
+// "ainda nao executou". A falha estava no audit_log, e get_aprovacoes nao olha o audit_log.
+// Daqui em diante nenhum `continue` deste executor sai sem dizer no CARD o que aconteceu.
+// NAO mexemos em executed_at de proposito: ele continua significando "a escrita terminou e o card
+// esta fechado", que e o que a varredura (executed_at is null) e o fechamento pos-escrita-parcial
+// dependem. ultima_falha e o eixo novo: "a ultima tentativa acabou, e acabou assim".
+// POR QUE ISTO PENDURA NO audit() E NAO EM CADA `continue`: sao 12 saidas de falha/bloqueio so
+// neste arquivo, nos dois caminhos (criacao e modificacao). Marcar uma a uma garante que a
+// proxima saida nova nasca invisivel de novo - que e literalmente a historia deste bug. Toda
+// saida ja chama audit(); pendurar aqui e o unico ponto por onde TODAS passam.
+async function marcarFalhaNoCard(
+  cardId: string,
+  dados: {
+    etapa: string;
+    recusa?: string | null;
+    mensagem?: string | null;
+    bruto?: unknown;
+    driver?: string | null;
+    re_executavel?: boolean;
+    bloqueado?: boolean;
+  },
+) {
+  const t = dados.bloqueado
+    ? {
+        recusa: String(dados.recusa ?? "bloqueado_por_trava_do_sistema"),
+        motivo_para_o_gestor: `a execucao NAO foi tentada porque uma trava do sistema barrou o pedido: ${String(dados.recusa ?? "motivo nao registrado")}. Nada foi enviado a Meta. Enquanto a trava estiver assim, aprovar de novo nao muda o resultado.`,
+      }
+    : traduzirFalha(dados.bruto ?? dados.recusa ?? dados.etapa, dados.recusa, dados.mensagem);
+
+  const { data: atual } = await supa
+    .from("approval_requests")
+    .select("ultima_falha")
+    .eq("id", cardId)
+    .maybeSingle();
+
+  await supa
+    .from("approval_requests")
+    .update({
+      ultima_falha: {
+        em: new Date().toISOString(),
+        etapa: dados.etapa,
+        recusa: t.recusa,
+        motivo_para_o_gestor: t.motivo_para_o_gestor,
+        detalhe_tecnico: redact(
+          typeof dados.bruto === "string" ? dados.bruto : JSON.stringify(dados.bruto ?? null),
+        ).slice(0, 1000),
+        tentativa: Number((atual as any)?.ultima_falha?.tentativa ?? 0) + 1,
+        // Falha ANTES de qualquer escrita mantem o card elegivel para nova tentativa, de
+        // proposito. Isso NAO significa "esta sendo processado": a tentativa terminou.
+        re_executavel: dados.re_executavel !== false,
+        driver_escrita: dados.driver ?? null,
+      },
+    })
+    .eq("id", cardId);
+}
+
 // v2: normaliza act_123 e 123 para o mesmo formato, porque integrations guarda sem prefixo
 // e a lista branca guarda com prefixo.
 const actId = (v: string) => {
@@ -868,6 +979,39 @@ export async function montarCriacao(acao: string, p: any, conta: string, tetoSan
     if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
     if (reais > tetoSanidade)
       return { erro: `orcamento ${reais} acima do teto de sanidade ${tetoSanidade}` };
+
+    // ============ v5.4: ORCAMENTO DA CAMPANHA PAI, ANTES DE ESCREVER ============
+    // Mesmo padrao do gate de Dynamic Creative da v5.2: le o estado do objeto PAI e recusa por
+    // nome, em vez de descobrir pelo texto de erro da plataforma depois de gastar a aprovacao.
+    // EVIDENCIA (07/08/2026, card b5e2f338): create_adset com daily_budget foi recusado porque a
+    // campanha 120254323578040191 tem daily_budget proprio (CBO) - e ela tem esse orcamento sem
+    // que ninguem o tenha pedido, porque o conector Pipeboard o injetou na criacao. Enquanto essa
+    // injecao existir, campanha criada pelo sistema pode nascer CBO, e este gate e o que impede o
+    // conjunto de morrer na Meta depois da aprovacao do gestor.
+    // A leitura vem da Graph com o token proprio (nao do espelho): o espelho pode estar velho, e
+    // aqui estamos a um passo da escrita. Falha de leitura RECUSA - nao ha default seguro entre
+    // "a campanha manda no dinheiro" e "o conjunto manda no dinheiro".
+    const orc = await g(`/${campanha}?fields=daily_budget,lifetime_budget`);
+    if (orc.status !== 200) {
+      return {
+        erro: "falha_ao_verificar_campanha_destino",
+        detalhe:
+          "Nao consegui ler o orcamento da campanha de destino, e sem isso nao da para saber se definir R$/dia neste conjunto vai conflitar com a campanha. Nao vou criar o conjunto sem essa confirmacao: se a campanha tiver orcamento proprio, a Meta recusa a criacao e a aprovacao do gestor e gasta a toa. Tente de novo quando a consulta a campanha estiver disponivel.",
+      };
+    }
+    const ob: any = orc.body ?? {};
+    const cbo = Number(ob.daily_budget ?? 0) > 0 || Number(ob.lifetime_budget ?? 0) > 0;
+    if (cbo) {
+      return {
+        erro: "campanha_usa_orcamento_proprio_cbo",
+        // A saida "peca o conjunto SEM orcamento" saiu daqui de proposito: ela nao existe. O
+        // contrato torna orcamento_diario_reais obrigatorio e este mesmo bloco recusa reais <= 0
+        // logo acima, entao o gestor que seguisse o conselho bateria numa segunda recusa.
+        detalhe:
+          "Nao criei o conjunto porque a campanha de destino ja tem orcamento PROPRIO (Otimizacao de Orcamento de Campanha, o CBO), e a Meta nao aceita orcamento na campanha e no conjunto ao mesmo tempo. Ou o dinheiro vive na CAMPANHA e ela distribui entre os conjuntos, ou vive em CADA CONJUNTO e a campanha fica sem. Para seguir: escolha uma campanha de destino SEM orcamento proprio, e ai o R$/dia deste conjunto vale. Criar conjunto SEM orcamento, herdando o da campanha, ainda NAO e suportado por este sistema - o orcamento diario e obrigatorio no pedido -, entao nao adianta pedir assim.",
+        campanha_orcamento_centavos: Number(ob.daily_budget ?? 0) || Number(ob.lifetime_budget ?? 0),
+      };
+    }
 
     const campos = [
       "optimization_goal",
@@ -1108,7 +1252,14 @@ async function espelhar(
           name: String(objeto?.name ?? p?.nome_novo ?? ""),
           objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
           status: statusMeta.toLowerCase(), // campaigns = minusculo
-          daily_budget: 0, // ABO: orcamento vive no conjunto
+          // v5.4: o literal `0` que estava aqui era um PALPITE apresentado como fato ("ABO:
+          // orcamento vive no conjunto"). Em 07/08/2026 ele gravou 0 para uma campanha que a Meta
+          // criou com R$ 10,00/dia, e o espelho passou dias afirmando o contrario do real. Agora
+          // segue o objeto lido na Graph; sem leitura, NULO - que e o valor que
+          // avaliar_estado_destino_execucao trata como "nao verificado" e recusa fechado, em vez
+          // de um numero que finge conhecimento.
+          daily_budget: objeto?.daily_budget != null ? Number(objeto.daily_budget) : null,
+          lifetime_budget: objeto?.lifetime_budget != null ? Number(objeto.lifetime_budget) : null,
           external_id: novoId,
           external_account_id: contaSemPrefixo,
           special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"],
@@ -1419,6 +1570,10 @@ Deno.serve(async (req) => {
         await audit(r.company_id, sistema, "meta_action_failed", r.id, {
           motivo: (plano as any).erro,
           detalhe: (plano as any).detalhe ?? null,
+          // "recusa_do_proprio_sistema" distingue, no card, o "nao" que NOS demos - antes de
+          // qualquer chamada - do "nao" que veio da plataforma. Os dois sao falha; so um deles
+          // significa que a Meta chegou a ser consultada.
+          etapa: "recusa_do_proprio_sistema",
           acao,
           driver_escrita: driver,
         });
@@ -1516,6 +1671,7 @@ Deno.serve(async (req) => {
         if (cc.status !== 200 || !cc.id) {
           await audit(r.company_id, sistema, "meta_action_failed", r.id, {
             motivo: "falha ao criar adcreative",
+            etapa: "create_ad_creative",
             resposta: cc,
             acao,
             driver_escrita: driver,
@@ -1547,6 +1703,9 @@ Deno.serve(async (req) => {
         if (!creativeId) {
           await audit(r.company_id, sistema, "meta_action_failed", r.id, {
             motivo: "sem creative_id para criar anuncio",
+            etapa: "create_ad",
+            detalhe:
+              "Nao criei o anuncio porque nao havia criativo para associar a ele. Nada foi criado na Meta.",
             acao,
             driver_escrita: driver,
           });
@@ -1591,6 +1750,7 @@ Deno.serve(async (req) => {
         {
           acao,
           conta,
+          etapa: acao === "criar_conjunto_a_partir_de" ? "create_adset" : "escrita_na_meta",
           driver_escrita: driver,
           ferramenta_pipeboard: exec.ferramenta ?? null,
           criado_em: pl.path,
@@ -1659,6 +1819,9 @@ Deno.serve(async (req) => {
           .from("approval_requests")
           .update({
             executed_at: new Date().toISOString(),
+            // Sucesso APAGA a falha anterior: card que deu certo depois de uma tentativa ruim nao
+            // pode continuar exibindo o erro velho como se fosse o estado atual.
+            ultima_falha: null,
             execution_result: {
               ok: true,
               id_criado: novoId,
@@ -1684,23 +1847,42 @@ Deno.serve(async (req) => {
       // proxima corrida cria OUTRO creative orfao. Evidencia 07/08: card e4dd146d gerou
       // 2635490320208656 e 1023859480523471 no mesmo conjunto DC. Fecha o card com ok=false
       // quando ja houve escrita parcial; retry exige card novo (decisao humana).
-      if (!sucesso && creativeCriado) {
-        await supa
-          .from("approval_requests")
-          .update({
-            executed_at: new Date().toISOString(),
-            execution_result: {
-              ok: false,
-              etapa: "create_ad",
-              adcreative_criado: creativeCriado,
-              id_criado: null,
-              detalhe: exec.body ?? exec.erro ?? null,
-              driver_escrita: driver,
-              nota:
-                "Escrita parcial: adcreative nasceu na Meta/Pipeboard, create_ad falhou. Card fechado para nao duplicar creative. Limpar orfao no Gerenciador se necessario.",
-            },
-          })
-          .eq("id", r.id);
+      if (!sucesso) {
+        const t = traduzirFalha(exec.body ?? exec.erro ?? null);
+        if (creativeCriado) {
+          await supa
+            .from("approval_requests")
+            .update({
+              executed_at: new Date().toISOString(),
+              execution_result: {
+                ok: false,
+                etapa: "create_ad",
+                adcreative_criado: creativeCriado,
+                id_criado: null,
+                detalhe: exec.body ?? exec.erro ?? null,
+                recusa: t.recusa,
+                motivo_para_o_gestor: t.motivo_para_o_gestor,
+                driver_escrita: driver,
+                nota:
+                  "Escrita parcial: adcreative nasceu na Meta/Pipeboard, create_ad falhou. Card fechado para nao duplicar creative. Limpar orfao no Gerenciador se necessario.",
+              },
+              ultima_falha: {
+                em: new Date().toISOString(),
+                etapa: "create_ad",
+                recusa: t.recusa,
+                motivo_para_o_gestor: t.motivo_para_o_gestor,
+                detalhe_tecnico: redact(JSON.stringify(exec.body ?? exec.erro ?? null)).slice(0, 1000),
+                tentativa: Number(r.ultima_falha?.tentativa ?? 0) + 1,
+                re_executavel: false,
+                driver_escrita: driver,
+              },
+            })
+            .eq("id", r.id);
+        }
+        // Sem creativeCriado, NADA foi escrito na Meta: o card segue elegivel para nova tentativa
+        // e executed_at continua nulo, de proposito. Esse e o caso do b5e2f338, e ele ja saiu
+        // marcado pelo audit("meta_action_failed") logo acima - o unico caminho que, antes desta
+        // versao, nao deixava rastro nenhum no card.
       }
       resultados.push({
         id: r.id,
@@ -1964,6 +2146,7 @@ Deno.serve(async (req) => {
         .from("approval_requests")
         .update({
           executed_at: new Date().toISOString(),
+          ultima_falha: null, // sucesso apaga a falha da tentativa anterior
           execution_result: {
             ok: true,
             antes: antes.body,

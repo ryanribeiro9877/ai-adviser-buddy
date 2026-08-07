@@ -1,5 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import { situacaoDoCard } from "../_shared/aprovacoes.ts";
 
 const db = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -136,7 +137,29 @@ async function callTool(name: string, args: any) {
         let q = db.from("approval_requests").select("*").eq("status", args.status ?? "pending");
         if (args.company_id) q = q.eq("company_id", args.company_id);
         const { data, error } = await q.order("created_at", { ascending: false });
-        return error ? toolText(error.message, true) : toolText(data);
+        if (error) return toolText(error.message, true);
+        // O `select *` devolvia executed_at e execution_result crus e deixava a interpretacao para
+        // quem lesse - que e como "executed_at nulo" virou "esta sendo processado" em 07/08/2026.
+        // A situacao vem da MESMA funcao que o traffic-chat usa; nenhum leitor deriva a sua.
+        const comEstado = (data ?? []).map((r: any) => {
+          const s = situacaoDoCard(r);
+          return {
+            ...r,
+            estado: s.estado,
+            situacao: s.situacao,
+            id_criado_na_meta: s.id_criado_na_meta,
+            motivo_da_falha: s.motivo_da_falha,
+            falhou_em: s.falhou_em,
+            tentativas_de_execucao: s.tentativas,
+            erro_da_plataforma: s.detalhe_tecnico_da_falha,
+            pode_ser_retentado: s.re_executavel,
+          };
+        });
+        return toolText({
+          total: comEstado.length,
+          aprovacoes: comEstado,
+          nota: "Leia o campo `estado`. A execucao e SINCRONA com a aprovacao (trigger trg_executar_aprovacao): nao existe fila amadurecendo, e aguardando_execucao deve durar segundos. Card aprovado sem id_criado_na_meta ou FALHOU (veja motivo_da_falha) ou nao rodou - nunca 'esta sendo processado'.",
+        });
       }
       case "list_recommendations": {
         let q = db.from("ai_recommendations").select("*");

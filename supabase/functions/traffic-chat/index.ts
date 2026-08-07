@@ -1,4 +1,17 @@
-// supabase/functions/traffic-chat/index.ts (v28.11)
+// supabase/functions/traffic-chat/index.ts (v28.12)
+// v28.12 (07/08/2026) - get_aprovacoes PARA DE CHAMAR FALHA DE "ainda nao executado".
+//   A derivacao de situacao vivia AQUI e usava `falhou = !!executed_at && ok === false`. Falha
+//   ANTES de qualquer escrita deixa executed_at nulo de proposito (o card segue re-executavel),
+//   entao ela caia no ramo final, "aprovado, ainda NAO executado" - indistinguivel de um card que
+//   nunca rodou. Em 07/08 as 20:57 o agente leu exatamente isso para o card b5e2f338, cuja criacao
+//   tinha falhado as 20:56:01, e disse ao gestor "aguarde alguns instantes, o conjunto esta sendo
+//   criado". Ele NAO inventou o estado - inventou a causalidade, porque o estado era ambiguo.
+//   A situacao passa a vir de _shared/aprovacoes.ts (situacaoDoCard), a MESMA funcao que o
+//   mcp-server usa, e o retorno ganha `estado` legivel por maquina (executado | execucao_falhou |
+//   aguardando_execucao | aguardando_decisao | recusado), motivo_da_falha em linguagem de gestor,
+//   tentativas e pode_ser_retentado. A nota da ferramenta declara que a execucao e SINCRONA com a
+//   aprovacao e proibe as frases de espera - a doutrina tambem esta em agent_context, que e onde
+//   ela pode ser revogada sem deploy.
 // v28.11 (07/08/2026) - O RETORNO DA FERRAMENTA PASSA A SOBREVIVER A REQUISICAO, e pedido
 //   longo de ANALISE deixa de precisar de costura. Dois consertos, uma causa medida.
 //   EVIDENCIA (conversa 5b08d921-9fa9-4d20-b63e-3db71dbcb8cc, 07/08/2026): a 1a requisicao
@@ -366,6 +379,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import { situacaoDoCard } from "../_shared/aprovacoes.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -1131,27 +1145,32 @@ async function t_check_compliance(legenda: string, imgAtts: { mime: string; b64:
 // e expoe o erro da plataforma, que era invisivel para ele.
 async function t_aprovacoes(companyId: string, apenasAbertos: boolean) {
   let q = supa.from("approval_requests")
-    .select("id,action,summary,status,created_at,expires_at,reviewed_at,executed_at,execution_result")
+    .select("id,action,summary,status,created_at,expires_at,reviewed_at,executed_at,execution_result,ultima_falha")
     .eq("company_id", companyId).order("created_at", { ascending: false }).limit(25);
   if (apenasAbertos) q = q.in("status", ["pending", "approved"]);
   const { data, error } = await q;
   if (error) return { erro: `falha ao ler a fila de pedidos: ${error.message}` };
   const pedidos = (data ?? []).map((r: any) => {
+    // v28.12: a situacao NAO e derivada aqui. Ela vem de situacaoDoCard, a mesma funcao que o
+    // mcp-server usa - porque em 07/08/2026 esta funcao tinha a regra `falhou = !!executed_at &&
+    // ok === false`, e uma falha ANTES de qualquer escrita (executed_at nulo) caia no ramo
+    // "aprovado, ainda NAO executado". Foi essa frase que o agente leu antes de dizer ao gestor
+    // que o conjunto estava sendo criado, tres segundos depois de a criacao ter falhado.
+    const s = situacaoDoCard(r);
     const er = r.execution_result ?? {};
-    const falhou = !!r.executed_at && er.ok === false;
-    let situacao: string;
-    if (r.status === "pending") situacao = "aguardando decisao do administrador";
-    else if (r.status === "rejected") situacao = "recusado ou expirado sem decisao";
-    else if (r.executed_at && er.ok === true) situacao = "aprovado e EXECUTADO na Meta";
-    else if (falhou) situacao = "aprovado, mas a execucao FALHOU";
-    else situacao = "aprovado, ainda NAO executado";
     return {
-      id: r.id, acao: r.action, resumo: r.summary, situacao,
+      id: r.id, acao: r.action, resumo: r.summary,
+      estado: s.estado,
+      situacao: s.situacao,
       criado_em: r.created_at, expira_em: r.expires_at ?? null,
       decidido_em: r.reviewed_at ?? null, executado_em: r.executed_at ?? null,
-      id_criado_na_meta: er.id_criado ?? null,
+      id_criado_na_meta: s.id_criado_na_meta,
       espelho_gravado: er.espelho_gravado ?? null,
-      erro_da_plataforma: falhou ? String(er.erro ?? er.detalhe ?? JSON.stringify(er)).slice(0, 300) : null,
+      motivo_da_falha: s.motivo_da_falha,
+      falhou_em: s.falhou_em,
+      tentativas_de_execucao: s.tentativas,
+      pode_ser_retentado: s.re_executavel,
+      erro_da_plataforma: s.detalhe_tecnico_da_falha,
       aviso: er.aviso ?? null,
     };
   });
@@ -1159,7 +1178,7 @@ async function t_aprovacoes(companyId: string, apenasAbertos: boolean) {
     total: pedidos.length,
     filtro: apenasAbertos ? "somente pendentes e aprovados" : "ultimos 25 de qualquer situacao",
     pedidos,
-    nota: "Esta e a fila REAL do banco desta empresa. Se um pedido NAO aparece aqui, ele NAO existe - jamais afirme ter emitido um card que nao esta nesta lista. 'aprovado e EXECUTADO na Meta' significa que o objeto foi criado e o identificador esta em id_criado_na_meta. Quando houver erro_da_plataforma, relate o motivo ao gestor em linguagem de negocio.",
+    nota: "Esta e a fila REAL do banco desta empresa. Se um pedido NAO aparece aqui, ele NAO existe - jamais afirme ter emitido um card que nao esta nesta lista. LEIA O CAMPO `estado`, nao deduza pelo resto: executado = o objeto existe e id_criado_na_meta traz o identificador; execucao_falhou = a tentativa TERMINOU e falhou, e motivo_da_falha diz por que (relate ao gestor nessa linguagem); aguardando_execucao = nenhuma tentativa foi registrada ainda. A EXECUCAO E SINCRONA COM A APROVACAO: aprovar dispara a execucao no ato, entao aguardando_execucao deve durar segundos e NAO existe fila amadurecendo. E PROIBIDO dizer ao gestor 'aguarde alguns instantes', 'esta sendo criado' ou 'esta sendo processado' - nenhum desses estados existe neste sistema. Card aprovado sem identificador ou FALHOU ou nao rodou. pode_ser_retentado=true significa apenas que um novo disparo e possivel, NAO que algo esta acontecendo agora.",
   };
 }
 
