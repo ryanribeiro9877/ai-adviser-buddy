@@ -400,34 +400,174 @@ export function argsAdDeGraph(
   };
 }
 
+// ==================== RECONCILIACAO POS-ESCRITA ====================
+// A LISTA DE CAMPOS E DERIVADA DO NIVEL DO OBJETO, NUNCA DE UM DEFAULT GLOBAL.
+// A Graph NAO ignora campo que nao existe no nivel consultado: ela derruba a consulta INTEIRA com
+// OAuthException #100 "Tried accessing nonexisting field (X)". Uma unica chave errada na lista
+// apaga a resposta toda - por isso "uma lista que serve para todos" nao existe neste dominio.
+// E a mesma licao do GT-12, quando pedir url_tags no nivel de anuncio derrubou a coleta completa
+// com o mesmo #100. A licao ficou na coleta e nao chegou na reconciliacao: em 07/08 um default
+// global com os campos DO ANUNCIO (adset_id, creative{id}) foi usado tambem para campanha e
+// conjunto, e a campanha 120254323578040191 - correta na Meta - foi reportada como divergente.
+export type NivelMeta = "campanha" | "conjunto" | "anuncio";
+
+const CAMPOS_DE_RECONCILIACAO: Record<NivelMeta, string> = {
+  campanha: "id,name,status,effective_status,objective,special_ad_categories,buying_type",
+  conjunto: "id,name,status,effective_status,daily_budget,campaign_id,bid_strategy,targeting",
+  anuncio: "id,name,status,effective_status,adset_id,creative{id}",
+};
+
+/** Nivel do objeto que a acao toca. null = desconhecido, e desconhecido NAO recebe palpite. */
+export function nivelDaAcao(acao: string): NivelMeta | null {
+  switch (acao) {
+    case "criar_campanha":
+    case "pausar_campanha":
+      return "campanha";
+    case "criar_conjunto_a_partir_de":
+    case "alterar_orcamento":
+      return "conjunto";
+    case "criar_anuncio_a_partir_de":
+    case "pausar_criativo":
+      return "anuncio";
+    default:
+      return null;
+  }
+}
+
+export function camposDeReconciliacao(nivel: NivelMeta): string {
+  return CAMPOS_DE_RECONCILIACAO[nivel];
+}
+
+// "conferido" = eu OLHEI o objeto na Graph. Só nesse estado `ok` fala sobre o objeto.
+// Os outros dois dizem que NAO houve leitura - nada foi concluido sobre valor nenhum.
+export type EstadoReconciliacao = "conferido" | "leitura_falhou" | "nivel_desconhecido";
+
 export type Reconciliacao = {
   ok: boolean;
+  estado: EstadoReconciliacao;
   divergencias: string[];
+  erro_leitura: string | null;
+  campos_pedidos: string | null;
+  campos_comparados: string[];
   lido: unknown;
 };
 
-export function compararPedidoComGraph(pedido: Record<string, unknown>, lido: any): Reconciliacao {
+// Centavos dos dois lados (o pedido grava String(Math.round(reais*100)) e a Graph devolve string).
+// Comparar como TEXTO faria "7200" divergir de 7200 - falso positivo por tipo, no campo em que uma
+// divergencia real custa dinheiro.
+const CAMPOS_NUMERICOS = new Set(["daily_budget", "lifetime_budget", "bid_amount"]);
+const CAMPOS_COMPARAVEIS = [
+  "name",
+  "status",
+  "objective",
+  "daily_budget",
+  "campaign_id",
+  "adset_id",
+];
+
+function descreverFalhaDeLeitura(lido: any, httpStatus?: number): string | null {
+  const httpRuim = typeof httpStatus === "number" && httpStatus !== 0 && httpStatus !== 200;
+  const e = lido && typeof lido === "object" && !Array.isArray(lido) ? (lido as any).error : null;
+  if (e) {
+    const partes = [
+      String(e.type ?? "graph_error"),
+      e.code != null ? `#${e.code}` : "",
+      String(e.message ?? "").trim() || "(sem mensagem)",
+      e.fbtrace_id ? `fbtrace_id=${e.fbtrace_id}` : "",
+    ].filter(Boolean);
+    return `a Graph respondeu ERRO em vez do objeto: ${partes.join(" ")}${httpRuim ? ` (HTTP ${httpStatus})` : ""}`;
+  }
+  if (httpRuim) return `a Graph respondeu HTTP ${httpStatus} sem corpo de objeto`;
+  if (!lido || typeof lido !== "object" || Array.isArray(lido)) {
+    return "a Graph nao devolveu um objeto (resposta vazia ou em formato inesperado)";
+  }
+  return null;
+}
+
+/** Reconciliacao de acao cujo nivel nao se conhece: declara, nao adivinha. Nao le a Graph. */
+export function reconciliacaoNivelDesconhecido(acao: string): Reconciliacao {
+  return {
+    ok: false,
+    estado: "nivel_desconhecido",
+    divergencias: [],
+    erro_leitura: `nivel de objeto desconhecido para a acao "${acao}": sem nivel nao existe lista de campos, e inventar uma lista foi exatamente o defeito de 07/08. Nenhuma leitura foi tentada e nada foi concluido sobre o objeto.`,
+    campos_pedidos: null,
+    campos_comparados: [],
+    lido: null,
+  };
+}
+
+// FALHA DE LEITURA NAO E DIVERGENCIA. "Nao consegui olhar" e "olhei e a Meta tem outro valor" sao
+// fatos diferentes, e colapsa-los foi o que transformou um #100 em alarme de campanha errada.
+// Mesma distincao que o resto do sistema ja faz: UNKNOWN != NULL, coletor parado != conta sem
+// entrega. Quem chama escolhe a acao de auditoria por `estado`, nunca so por `ok`.
+export function compararPedidoComGraph(
+  pedido: Record<string, unknown>,
+  lido: any,
+  opts?: { http_status?: number; campos?: string },
+): Reconciliacao {
+  const camposPedidos = opts?.campos ?? null;
+  const falha = descreverFalhaDeLeitura(lido, opts?.http_status);
+  if (falha) {
+    return {
+      ok: false,
+      estado: "leitura_falhou",
+      divergencias: [],
+      erro_leitura: falha,
+      campos_pedidos: camposPedidos,
+      campos_comparados: [],
+      lido,
+    };
+  }
+
   const divergencias: string[] = [];
-  if (!lido || typeof lido !== "object") {
-    return { ok: false, divergencias: ["objeto_nao_lido_na_graph"], lido };
-  }
-  if (pedido.name != null && String(lido.name ?? "") !== String(pedido.name)) {
-    divergencias.push(`name: pediu=${pedido.name} graph=${lido.name ?? null}`);
-  }
-  if (pedido.status != null) {
-    const a = String(pedido.status).toUpperCase();
-    const b = String(lido.status ?? "").toUpperCase();
-    if (b && a !== b) divergencias.push(`status: pediu=${a} graph=${b}`);
-  }
-  if (pedido.daily_budget != null && lido.daily_budget != null) {
-    if (String(pedido.daily_budget) !== String(lido.daily_budget)) {
-      divergencias.push(`daily_budget: pediu=${pedido.daily_budget} graph=${lido.daily_budget}`);
+  const comparados: string[] = [];
+  // Campo que nao pertence ao nivel nao entra no pedido e portanto nao e comparado: divergencia
+  // falsa pelo lado do PEDIDO (objective num conjunto, daily_budget num anuncio) e o mesmo defeito
+  // visto do outro angulo.
+  for (const campo of CAMPOS_COMPARAVEIS) {
+    const querido = pedido[campo];
+    if (querido == null || querido === "") continue;
+    comparados.push(campo);
+    const obtido = (lido as Record<string, unknown>)[campo];
+    if (obtido === undefined || obtido === null) {
+      divergencias.push(
+        `${campo}: pediu=${String(querido)} graph=ausente (campo estava na lista pedida e a Meta nao o devolveu)`,
+      );
+      continue;
     }
-  }
-  if (pedido.objective != null && lido.objective != null) {
-    if (String(pedido.objective) !== String(lido.objective)) {
-      divergencias.push(`objective: pediu=${pedido.objective} graph=${lido.objective}`);
+    if (CAMPOS_NUMERICOS.has(campo)) {
+      const a = Number(querido);
+      const b = Number(obtido);
+      if (Number.isFinite(a) && Number.isFinite(b)) {
+        if (a !== b) divergencias.push(`${campo}: pediu=${a} graph=${b} (centavos)`);
+      } else if (String(querido) !== String(obtido)) {
+        divergencias.push(`${campo}: pediu=${String(querido)} graph=${String(obtido)}`);
+      }
+      continue;
     }
+    const a = campo === "status" ? String(querido).toUpperCase() : String(querido);
+    const b = campo === "status" ? String(obtido).toUpperCase() : String(obtido);
+    if (a !== b) divergencias.push(`${campo}: pediu=${a} graph=${b}`);
   }
-  return { ok: divergencias.length === 0, divergencias, lido };
+
+  return {
+    ok: divergencias.length === 0,
+    estado: "conferido",
+    divergencias,
+    erro_leitura: null,
+    campos_pedidos: camposPedidos,
+    campos_comparados: comparados,
+    lido,
+  };
+}
+
+/**
+ * Acao de audit_log que a reconciliacao merece. Uma funcao so, usada pelo caminho real E pela
+ * sonda: se a sonda decidisse por conta propria, ela provaria a sonda, nao o executor.
+ */
+export function acaoDeAuditoriaDaReconciliacao(rec: Reconciliacao | null): string | null {
+  if (!rec) return null;
+  if (rec.estado !== "conferido") return "meta_action_reconciliacao_falhou";
+  return rec.ok ? null : "meta_action_reconciliacao_divergente";
 }

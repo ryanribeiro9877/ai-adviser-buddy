@@ -1,4 +1,44 @@
-// supabase/functions/meta-actions/index.ts (v5.2)
+// supabase/functions/meta-actions/index.ts (v5.3)
+// v5.3 (07/08/2026) - A CONFERENCIA POS-ESCRITA ESTAVA CONFERINDO O NIVEL ERRADO, E CHAMAVA
+//   CEGUEIRA DE DIVERGENCIA. Dois defeitos, um em cima do outro.
+//   (1) CAMPOS POR NIVEL. reconciliarAposEscrita tinha um parametro `campos` com default fixo -
+//       "id,name,status,effective_status,adset_id,creative{id}", a lista DO ANUNCIO - e a unica
+//       chamada existente nunca passava nada. Campanha e conjunto eram lidos pedindo adset_id e
+//       creative{id}. A Graph NAO ignora campo inexistente: ela derruba a consulta INTEIRA com
+//       OAuthException #100. A lista agora vem de nivelDaAcao(); nao existe mais default global,
+//       e acao sem nivel mapeado FALHA DECLARANDO em vez de adivinhar lista.
+//       PRECEDENTE: GT-12, quando pedir url_tags no nivel de anuncio derrubou a coleta completa
+//       com o mesmo #100. A licao ficou na coleta e nao chegou na reconciliacao. Pior: o default
+//       do anuncio foi escrito na manha de 07/08 para consertar exatamente esse #100 no anuncio -
+//       consertou um nivel e quebrou os outros dois. Por isso a correcao e derivar do tipo, nao
+//       trocar o palpite. O PEDIDO comparado tambem passou a ser por nivel (pedidoDeReconciliacao):
+//       objective num conjunto ou daily_budget num anuncio e o mesmo defeito pelo outro lado.
+//       daily_budget compara por NUMERO (centavos nos dois lados; texto faria 7200 divergir de
+//       "7200.0").
+//   (2) FALHA DE LEITURA != DIVERGENCIA. Corpo com `error` ou HTTP != 200 nao autoriza nenhuma
+//       conclusao sobre o objeto, e era exatamente isso que acontecia: o `lido` virava envelope de
+//       erro, o comparador lia name=null e anunciava divergencia. Agora ha estado explicito
+//       (conferido | leitura_falhou | nivel_desconhecido) e DUAS acoes de audit_log:
+//       meta_action_reconciliacao_falhou = nao consegui olhar;
+//       meta_action_reconciliacao_divergente = olhei e a Meta tem outro valor.
+//       Mesma distincao que o resto do sistema ja faz (UNKNOWN != NULL, coletor parado != conta sem
+//       entrega). execution_result e o resultado devolvido carregam o estado, nao so um ok.
+//   EVIDENCIA MEDIDA que motivou a versao: campanha 120254323578040191
+//   ([LEV][LP][LEADS][CLT][NOVA-01][AGO26]), criada com sucesso via Pipeboard e PAUSED na Meta,
+//   gerou meta_action_reconciliacao_divergente as 20:03:59Z com
+//   divergencias: ["name: pediu=[LEV][LP][LEADS][CLT][NOVA-01][AGO26] graph=null"] e
+//   objeto_criado: {"error":{"code":100,"message":"(#100) Tried accessing nonexisting field
+//   (adset_id)"}}. As 17:16:45Z o anuncio 120254319507370191 tinha caido igual, com
+//   "nonexisting field (daily_budget)". A campanha e o anuncio estavam CERTOS; a conferencia e que
+//   estava quebrada. Os dois falsos positivos permanecem no audit_log como historia.
+//   O MESMO DEFEITO existia no caminho v1 (modificar existente), que lia
+//   "name,status,effective_status,daily_budget" para qualquer alvo - #100 garantido em
+//   pausar_criativo (nivel de anuncio). Corrigido junto: consertar so a metade de cima deixaria a
+//   de baixo para a proxima execucao real descobrir, que e como este bug chegou aqui.
+//   modo=sonda_reconciliacao: bateria SO DE LEITURA sobre objetos que ja existem, exercitando o
+//   mesmo reconciliarAposEscrita nos tres niveis, com teste negativo (divergencia real ainda
+//   dispara) e casos de falha de leitura. Ela nao emite alarme de verdade - declara o que o
+//   executor emitiria. Sem ela, provar a reconciliacao custava criar objeto na Meta.
 // v5.2 (07/08/2026) - DESTINO DYNAMIC CREATIVE RECUSA ANTES DE QUALQUER ESCRITA. A Graph nao
 //   aceita create_ad avulso em adset com is_dynamic_creative=true. Antes, montarCriacao criava o
 //   adcreative e so descobria isso no POST /ads, deixando creative orfao. Agora le o conjunto
@@ -100,17 +140,23 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import {
+  acaoDeAuditoriaDaReconciliacao,
   argsAdDeGraph,
   argsAdsetDeGraph,
   argsCampanhaDeGraph,
   argsCreativeDeGraph,
+  camposDeReconciliacao,
   compararPedidoComGraph,
   driverDe,
   monitorConexaoPipeboard,
+  nivelDaAcao,
   pipeboardCall,
   pipeboardToken,
+  reconciliacaoNivelDesconhecido,
   type ConexaoPipeboard,
   type DriverEscrita,
+  type NivelMeta,
+  type Reconciliacao,
 } from "../_shared/pipeboard.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -359,17 +405,60 @@ async function escreverUpdate(
   };
 }
 
+// v5.3: a lista de campos vem do NIVEL do objeto (nivelDaAcao), nao de um default de parametro.
+// Nao existe default aqui de proposito: o parametro com valor fixo era o defeito, porque quem
+// chamava nunca passava nada e os tres niveis liam a lista de UM deles.
 async function reconciliarAposEscrita(
   novoId: string,
+  acao: string,
   pedido: Record<string, unknown>,
-  // Ads NAO tem daily_budget/objective (sao do adset/campanha). Pedir esses campos no GET
-  // do anuncio devolve OAuthException 100 e a reconciliacao marca divergencia falsa
-  // (evidencia 07/08 no ad 120254319507370191). Campos default seguros para anuncio.
-  campos = "id,name,status,effective_status,adset_id,creative{id}",
-) {
+): Promise<{ graph: { status: number; body: unknown }; reconciliacao: Reconciliacao }> {
+  const nivel = nivelDaAcao(acao);
+  if (!nivel) {
+    return {
+      graph: { status: 0, body: null },
+      reconciliacao: reconciliacaoNivelDesconhecido(acao),
+    };
+  }
+  const campos = camposDeReconciliacao(nivel);
   const depois = await g(`/${novoId}?fields=${campos}`);
-  const cmp = compararPedidoComGraph(pedido, depois.body);
-  return { graph: depois, reconciliacao: cmp };
+  return {
+    graph: depois,
+    reconciliacao: compararPedidoComGraph(pedido, depois.body, {
+      http_status: depois.status,
+      campos,
+    }),
+  };
+}
+
+// O PEDIDO tambem e por nivel. Mandar objective na comparacao de um conjunto, ou daily_budget na de
+// um anuncio, produz divergencia falsa pelo lado do pedido - o mesmo defeito visto do outro angulo.
+// So entra o que a executora REALMENTE enviou naquele nivel.
+function pedidoDeReconciliacao(
+  acao: string,
+  body: Record<string, string>,
+  payload: any,
+): Record<string, unknown> {
+  const nivel = nivelDaAcao(acao);
+  if (nivel === "campanha") {
+    return {
+      name: body.name,
+      status: body.status,
+      objective: body.objective ?? payload?.objetivo,
+    };
+  }
+  if (nivel === "conjunto") {
+    return {
+      name: body.name,
+      status: body.status,
+      daily_budget: body.daily_budget, // centavos; a comparacao e numerica
+      campaign_id: body.campaign_id, // conjunto no pai errado e caro e silencioso
+    };
+  }
+  if (nivel === "anuncio") {
+    return { name: body.name, status: body.status, adset_id: body.adset_id };
+  }
+  return {};
 }
 // v4.4 (04/08/2026) - GT-13: a thumbnail do video_data e OBRIGATORIA na Meta, e ela nao vem de
 // graca: o quadro do molde e o do video ANTIGO. Os quadros do video novo saem de
@@ -439,6 +528,274 @@ async function escolherThumbnail(
     total: lista.length,
     criterio: `quadro mais pesado entre os ${comPeso.length} de ${lista.length} que responderam ao HEAD (peso = proxy de densidade visual; is_preferred da Meta foi IGNORADO de proposito)`,
   };
+}
+
+// ==================== v5.3: SONDA DE RECONCILIACAO (SOMENTE LEITURA) ====================
+// POR QUE EXISTE: ate aqui a reconciliacao so era exercitada por uma ESCRITA REAL. Provar que ela
+// funciona custava criar objeto na Meta - e foi por isso que os dois falsos positivos de 07/08 so
+// apareceram DEPOIS de a campanha e o anuncio existirem, com dinheiro e evidencia envolvidos.
+// A sonda le objetos que JA existem, chama o MESMO reconciliarAposEscrita e a MESMA
+// acaoDeAuditoriaDaReconciliacao do caminho de execucao, e nao emite POST nenhum na Meta.
+//
+// O PEDIDO VEM DO ESPELHO LOCAL (campaigns/ad_sets/ads), nao da propria Graph: comparar a Graph com
+// ela mesma provaria apenas que a leitura respondeu, nunca que o comparador compara. O espelho e
+// fonte independente, gravada no ato da criacao por espelhar().
+//
+// A SONDA NAO EMITE meta_action_reconciliacao_divergente NEM _falhou DE VERDADE. Alarme fabricado
+// por teste fica indistinguivel de alarme real semanas depois, e o que esta em jogo nesta rodada e
+// justamente poder confiar nesse alarme. Ela DECLARA a acao que o executor emitiria, calculada pela
+// funcao compartilhada, e grava o resultado sob a acao propria meta_action_reconciliacao_sonda.
+type CasoSonda = {
+  nome: string;
+  acao: string;
+  external_id: string;
+  espera: "conferido_ok" | "divergente" | "falhou";
+  pedido: Record<string, unknown>;
+  campos_forcados?: string;
+  nota?: string;
+};
+
+const SONDA_CAMPANHA = "120254323578040191"; // [LEV][LP][LEADS][CLT][NOVA-01][AGO26]
+const SONDA_CONJUNTO_LAL = "120253389922700191"; // molde LAL 1%
+const SONDA_CONJUNTO_AMPLO = "120249671585580191"; // molde amplo BR 18-65
+const SONDA_ANUNCIO = "120254319507370191"; // anuncio de prova do GT-13
+const SONDA_ID_INEXISTENTE = "120000000000000000";
+
+async function pedidoDoEspelho(
+  nivel: NivelMeta,
+  externalId: string,
+): Promise<{ pedido: Record<string, unknown>; fonte: string } | null> {
+  if (nivel === "campanha") {
+    const { data } = await supa
+      .from("campaigns")
+      .select("name,status,objective")
+      .eq("provider", "meta_ads")
+      .eq("external_id", externalId)
+      .maybeSingle();
+    if (!data) return null;
+    // campaigns guarda status em minusculo; o comparador normaliza caixa dos dois lados.
+    return {
+      pedido: { name: data.name, status: data.status, objective: data.objective },
+      fonte: "espelho campaigns",
+    };
+  }
+  if (nivel === "conjunto") {
+    const { data } = await supa
+      .from("ad_sets")
+      .select("name,status,daily_budget,campaign_id")
+      .eq("provider", "meta_ads")
+      .eq("external_id", externalId)
+      .maybeSingle();
+    if (!data) return null;
+    // ad_sets.campaign_id e uuid INTERNO - o id da Meta esta em campaigns.external_id.
+    let campanhaExt: string | null = null;
+    if (data.campaign_id) {
+      const { data: c } = await supa
+        .from("campaigns")
+        .select("external_id")
+        .eq("id", data.campaign_id)
+        .maybeSingle();
+      campanhaExt = c?.external_id ?? null;
+    }
+    return {
+      pedido: {
+        name: data.name,
+        status: data.status,
+        daily_budget: data.daily_budget, // NUMERO no espelho, string na Graph: e o par que a comparacao numerica existe para nao confundir
+        ...(campanhaExt ? { campaign_id: campanhaExt } : {}),
+      },
+      fonte: campanhaExt
+        ? "espelho ad_sets + campaigns.external_id"
+        : "espelho ad_sets (campanha nao resolvida no espelho)",
+    };
+  }
+  const { data } = await supa
+    .from("ads")
+    .select("name,status,adset_external_id")
+    .eq("provider", "meta_ads")
+    .eq("external_id", externalId)
+    .maybeSingle();
+  if (!data) return null;
+  return {
+    pedido: {
+      name: data.name,
+      status: data.status,
+      ...(data.adset_external_id ? { adset_id: data.adset_external_id } : {}),
+    },
+    fonte: "espelho ads",
+  };
+}
+
+async function bateriaDaSonda(): Promise<{ casos: CasoSonda[]; sem_espelho: string[] }> {
+  const casos: CasoSonda[] = [];
+  const sem_espelho: string[] = [];
+  const alvos: { nivel: NivelMeta; acao: string; id: string; apelido: string }[] = [
+    { nivel: "campanha", acao: "criar_campanha", id: SONDA_CAMPANHA, apelido: "campanha_nova01" },
+    {
+      nivel: "conjunto",
+      acao: "criar_conjunto_a_partir_de",
+      id: SONDA_CONJUNTO_LAL,
+      apelido: "conjunto_molde_lal1",
+    },
+    {
+      nivel: "conjunto",
+      acao: "criar_conjunto_a_partir_de",
+      id: SONDA_CONJUNTO_AMPLO,
+      apelido: "conjunto_molde_amplo",
+    },
+    { nivel: "anuncio", acao: "criar_anuncio_a_partir_de", id: SONDA_ANUNCIO, apelido: "anuncio_gt13" },
+  ];
+
+  for (const a of alvos) {
+    const esp = await pedidoDoEspelho(a.nivel, a.id);
+    if (!esp) {
+      sem_espelho.push(`${a.apelido} (${a.id}) nao esta no espelho - sem fonte independente de pedido`);
+      continue;
+    }
+    casos.push({
+      nome: `${a.apelido}_conferido`,
+      acao: a.acao,
+      external_id: a.id,
+      espera: "conferido_ok",
+      pedido: esp.pedido,
+      nota: `pedido vindo do ${esp.fonte}; prova que os campos do nivel ${a.nivel} devolvem OBJETO e batem`,
+    });
+
+    // TESTE NEGATIVO: divergencia REAL tem de continuar disparando. Alarme que parou de tocar nao
+    // prova que o problema acabou - prova que pode ter sido silenciado.
+    if (a.nivel === "conjunto") {
+      const centavos = Number(esp.pedido.daily_budget ?? 0);
+      casos.push({
+        nome: `${a.apelido}_divergencia_real_orcamento`,
+        acao: a.acao,
+        external_id: a.id,
+        espera: "divergente",
+        pedido: { ...esp.pedido, daily_budget: centavos + 1 },
+        nota: "orcamento propositalmente 1 centavo diferente: se isto nao disparar, a conferencia de dinheiro esta cega",
+      });
+      casos.push({
+        nome: `${a.apelido}_orcamento_texto_vs_numero`,
+        acao: a.acao,
+        external_id: a.id,
+        espera: "conferido_ok",
+        pedido: { ...esp.pedido, daily_budget: `${centavos}.0` },
+        nota: "mesmo valor em centavos escrito como texto decimal: comparacao por TEXTO acusaria divergencia falsa, a numerica nao",
+      });
+    } else {
+      casos.push({
+        nome: `${a.apelido}_divergencia_real_nome_e_status`,
+        acao: a.acao,
+        external_id: a.id,
+        espera: "divergente",
+        pedido: {
+          ...esp.pedido,
+          name: `${String(esp.pedido.name ?? "")} [DIVERGENCIA-FORCADA-PELA-SONDA]`,
+          status: "ACTIVE",
+        },
+        nota: "nome e status propositalmente errados contra objeto que existe e foi lido",
+      });
+    }
+  }
+
+  // Falha de leitura 1: objeto que nao existe.
+  casos.push({
+    nome: "leitura_falhou_id_inexistente",
+    acao: "criar_campanha",
+    external_id: SONDA_ID_INEXISTENTE,
+    espera: "falhou",
+    pedido: { name: "nao importa - nada sera lido", status: "PAUSED" },
+    nota: "id inexistente: a Graph responde erro, e erro de leitura NAO e divergencia",
+  });
+  // Falha de leitura 2: o defeito de 07/08 reproduzido de proposito - campos DO ANUNCIO pedidos no
+  // nivel de CAMPANHA. Antes desta versao este caso virava meta_action_reconciliacao_divergente
+  // com "name: pediu=... graph=null". Agora tem de virar _falhou.
+  casos.push({
+    nome: "leitura_falhou_campo_de_outro_nivel",
+    acao: "criar_campanha",
+    external_id: SONDA_CAMPANHA,
+    espera: "falhou",
+    pedido: { name: "[LEV][LP][LEADS][CLT][NOVA-01][AGO26]", status: "PAUSED" },
+    campos_forcados: "id,name,status,effective_status,adset_id,creative{id}",
+    nota: "reproduz o default global de 07/08 (lista do anuncio na campanha): #100 derruba a consulta inteira",
+  });
+  // Nivel desconhecido: falha declarando, sem tentar leitura nenhuma.
+  casos.push({
+    nome: "nivel_desconhecido_declara_em_vez_de_adivinhar",
+    acao: "acao_sem_nivel_conhecido",
+    external_id: SONDA_CAMPANHA,
+    espera: "falhou",
+    pedido: { name: "nao importa - nenhuma leitura e tentada" },
+    nota: "acao sem nivel mapeado nao recebe lista de campos por palpite",
+  });
+
+  return { casos, sem_espelho };
+}
+
+async function rodarSondaReconciliacao(companyId: string) {
+  const { casos, sem_espelho } = await bateriaDaSonda();
+  const detalhes: any[] = [];
+  for (const caso of casos) {
+    let rec: Reconciliacao;
+    let httpStatus = 0;
+    if (caso.campos_forcados) {
+      const lida = await g(`/${caso.external_id}?fields=${caso.campos_forcados}`);
+      httpStatus = lida.status;
+      rec = compararPedidoComGraph(caso.pedido, lida.body, {
+        http_status: lida.status,
+        campos: caso.campos_forcados,
+      });
+    } else {
+      const r = await reconciliarAposEscrita(caso.external_id, caso.acao, caso.pedido);
+      rec = r.reconciliacao;
+      httpStatus = r.graph.status;
+    }
+    const obtido: CasoSonda["espera"] =
+      rec.estado !== "conferido" ? "falhou" : rec.ok ? "conferido_ok" : "divergente";
+    detalhes.push({
+      nome: caso.nome,
+      acao: caso.acao,
+      external_id: caso.external_id,
+      nivel: nivelDaAcao(caso.acao),
+      espera: caso.espera,
+      obtido,
+      veredito: obtido === caso.espera ? "PASSOU" : "FALHOU",
+      acao_de_auditoria_que_o_executor_emitiria: acaoDeAuditoriaDaReconciliacao(rec),
+      estado: rec.estado,
+      ok: rec.ok,
+      http_status: httpStatus,
+      campos_pedidos: rec.campos_pedidos,
+      campos_comparados: rec.campos_comparados,
+      pedido: caso.pedido,
+      divergencias: rec.divergencias,
+      erro_leitura: rec.erro_leitura,
+      lido: rec.lido,
+      nota: caso.nota ?? null,
+    });
+  }
+
+  const resumo = {
+    total: detalhes.length,
+    passou: detalhes.filter((d) => d.veredito === "PASSOU").length,
+    falhou: detalhes.filter((d) => d.veredito === "FALHOU").length,
+    escritas_na_meta: 0,
+    alarmes_gravados_no_audit_log: 0,
+  };
+  const resultado = {
+    versao: "meta-actions-v5.3-sonda-reconciliacao",
+    somente_leitura: true,
+    nota: "Nenhum POST na Meta. As acoes de auditoria sao DECLARADAS pela funcao compartilhada, nao emitidas - alarme de teste nao entra na mesma gaveta do alarme real.",
+    resumo,
+    alvos_sem_espelho: sem_espelho,
+    casos: detalhes,
+  };
+  await supa.from("audit_log").insert({
+    company_id: companyId,
+    action: "meta_action_reconciliacao_sonda",
+    target_type: "sonda_reconciliacao",
+    target_id: SONDA_CAMPANHA,
+    details: JSON.parse(redact(JSON.stringify(resultado))),
+  });
+  return resultado;
 }
 
 async function audit(
@@ -859,6 +1216,22 @@ Deno.serve(async (req) => {
   }
   const onlyId: string | null = body?.approval_id ?? null;
 
+  // v5.3: sonda de reconciliacao. Retorna ANTES de tocar a fila, de proposito: com dry_run=false e
+  // flags ligadas, uma corrida normal executaria cards aprovados - conferir a conferencia nao pode
+  // ter esse efeito colateral.
+  if (body?.modo === "sonda_reconciliacao") {
+    const companyId = String(body?.company_id ?? "").trim();
+    if (!companyId) {
+      return json({ error: "sonda_reconciliacao exige company_id (a evidencia e por empresa)" }, 400);
+    }
+    return json({
+      ok: true,
+      modo: "sonda_reconciliacao",
+      mcp_chamador: auth.chamador,
+      sonda: await rodarSondaReconciliacao(companyId),
+    });
+  }
+
   // v3: a config NAO e mais lida aqui. Cada card carrega a da sua propria empresa, dentro do
   // loop - uma leitura global voltaria a aplicar a configuracao de uma empresa a outra.
 
@@ -1195,18 +1568,20 @@ Deno.serve(async (req) => {
       // Confere o estado do que nasceu: o status (PAUSED desde a v4.3) e verificado, nao assumido.
       // v5: reconciliacao pela Graph e obrigatoria apos escrita real (unica forma de saber o
       // que o Pipeboard fez — nao ha log exportavel do conector).
-      let depois: any = { status: 0, body: null };
-      let reconciliacao: any = null;
+      let depois: { status: number; body: any } = { status: 0, body: null };
+      let reconciliacao: Reconciliacao | null = null;
       if (sucesso && novoId) {
-        const rec = await reconciliarAposEscrita(novoId, {
-          name: bodyFinal.name,
-          status: bodyFinal.status,
-          daily_budget: bodyFinal.daily_budget,
-          objective: bodyFinal.objective ?? r.payload?.objetivo,
-        });
+        const rec = await reconciliarAposEscrita(
+          novoId,
+          acao,
+          pedidoDeReconciliacao(acao, bodyFinal, r.payload),
+        );
         depois = rec.graph;
         reconciliacao = rec.reconciliacao;
       }
+      // Objeto lido SO existe quando a leitura deu certo. Passar um envelope de erro adiante como
+      // se fosse objeto e o que faz erro de leitura virar dado.
+      const objetoLido = reconciliacao?.estado === "conferido" ? depois.body : null;
 
       await audit(
         r.company_id,
@@ -1222,8 +1597,11 @@ Deno.serve(async (req) => {
           body_enviado: bodyFinal,
           adcreative_criado: creativeCriado,
           resposta: exec,
-          objeto_criado: depois.body,
+          // Objeto so quando a leitura deu certo; a resposta crua da Graph (inclusive envelope de
+          // erro) fica em reconciliacao.lido, sem se disfarcar de objeto.
+          objeto_criado: objetoLido,
           reconciliacao,
+          reconciliacao_estado: reconciliacao?.estado ?? null,
           criativo_aviso: pl.criativo?.aviso ?? null,
           peca_nova: pl.peca_nova ?? null,
           pipeboard_conexao: driver === "pipeboard" ? pipeboardMonitor : null,
@@ -1236,7 +1614,7 @@ Deno.serve(async (req) => {
         const esp = await espelhar(
           acao,
           novoId!,
-          depois.body,
+          objetoLido,
           r.payload,
           conta,
           r.company_id,
@@ -1255,12 +1633,26 @@ Deno.serve(async (req) => {
             nota: "O OBJETO EXISTE NA META. Falhou apenas a gravacao no espelho local - o sistema ficara cego para este objeto ate o proximo sync.",
           });
         }
-        if (reconciliacao && !reconciliacao.ok) {
-          await audit(r.company_id, sistema, "meta_action_reconciliacao_divergente", r.id, {
+        // v5.3: DUAS acoes, nao uma. "nao consegui olhar" (falhou) e "olhei e a Meta tem outro
+        // valor" (divergente) sao fatos diferentes, e quem le o audit_log precisa distinguir sem
+        // abrir o details. A escolha e da funcao compartilhada - a sonda usa a MESMA.
+        const acaoRec = acaoDeAuditoriaDaReconciliacao(reconciliacao);
+        if (acaoRec && reconciliacao) {
+          await audit(r.company_id, sistema, acaoRec, r.id, {
             acao,
             id_criado: novoId,
+            estado: reconciliacao.estado,
             divergencias: reconciliacao.divergencias,
+            erro_leitura: reconciliacao.erro_leitura,
+            campos_pedidos: reconciliacao.campos_pedidos,
+            campos_comparados: reconciliacao.campos_comparados,
+            http_status: depois.status,
+            lido: reconciliacao.lido,
             driver_escrita: driver,
+            nota:
+              reconciliacao.estado === "conferido"
+                ? "OLHEI o objeto na Graph e um valor difere do que foi pedido."
+                : "NAO consegui olhar o objeto na Graph. Isto NAO afirma que o objeto esta errado - nada foi concluido sobre valor nenhum. O objeto EXISTE na Meta (a escrita voltou id).",
           });
         }
         await supa
@@ -1270,7 +1662,7 @@ Deno.serve(async (req) => {
             execution_result: {
               ok: true,
               id_criado: novoId,
-              objeto: depois.body,
+              objeto: objetoLido,
               adcreative_criado: creativeCriado,
               aviso: pl.criativo?.aviso ?? null,
               peca_nova: pl.peca_nova ?? null,
@@ -1279,6 +1671,9 @@ Deno.serve(async (req) => {
               espelho_erro: esp.erro ?? null,
               driver_escrita: driver,
               reconciliacao,
+              reconciliacao_estado: reconciliacao?.estado ?? null,
+              reconciliacao_conferida: reconciliacao?.estado === "conferido",
+              reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
               lembrete:
                 "Objeto criado PAUSADO (v4.3). A aprovacao CRIOU o objeto e NAO iniciou entrega nem gasto. Para comecar a entregar, o gestor precisa ATIVAR manualmente no Gerenciador - conferindo a arvore inteira antes.",
             },
@@ -1312,11 +1707,13 @@ Deno.serve(async (req) => {
         acao,
         resultado: sucesso ? "CRIADO" : "falha_meta",
         id_criado: novoId,
-        status: (depois.body as any)?.status ?? null,
+        status: (objetoLido as any)?.status ?? null,
         aviso: pl.criativo?.aviso ?? null,
         detalhe: sucesso ? null : (exec.body ?? exec.erro),
         driver_escrita: driver,
         reconciliacao,
+        reconciliacao_estado: reconciliacao?.estado ?? null,
+        reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
         adcreative_orfao: !sucesso && creativeCriado ? creativeCriado : null,
       });
       continue;
@@ -1395,7 +1792,15 @@ Deno.serve(async (req) => {
       continue;
     }
 
-    const antes = await g(`/${alvoExt}?fields=name,status,effective_status,daily_budget`);
+    // v5.3: mesma lista derivada por nivel do caminho de criacao. A lista fixa que estava aqui
+    // pedia daily_budget SEMPRE - em pausar_criativo (nivel de anuncio) isso derruba o GET inteiro
+    // com #100 e o "antes"/"depois" do card viram envelope de erro. O defeito era o mesmo nos dois
+    // caminhos; consertar so um deixaria a metade de baixo para a proxima execucao real descobrir.
+    const nivelAlvo = nivelDaAcao(acao);
+    const camposAlvo = nivelAlvo ? camposDeReconciliacao(nivelAlvo) : null;
+    const antes: { status: number; body: any } = camposAlvo
+      ? await g(`/${alvoExt}?fields=${camposAlvo}`)
+      : { status: 0, body: null };
 
     let post: Record<string, string> | null = null;
     if (acao === "pausar_criativo" || acao === "pausar_campanha") post = { status: "PAUSED" };
@@ -1498,17 +1903,22 @@ Deno.serve(async (req) => {
       continue;
     }
     const exec = await escreverUpdate(driver, acao, alvoExt, post!, pbToken);
-    const depois = await g(`/${alvoExt}?fields=name,status,effective_status,daily_budget`);
+    const depois: { status: number; body: any } = camposAlvo
+      ? await g(`/${alvoExt}?fields=${camposAlvo}`)
+      : { status: 0, body: null };
     const sucesso = exec.status === 200 || exec.ok === true;
-    const reconciliacao = sucesso
-      ? compararPedidoComGraph(
-          {
-            status: post?.status,
-            daily_budget: post?.daily_budget,
-          },
-          depois.body,
-        )
-      : null;
+    // O pedido de update ja e naturalmente por nivel: post traz status (pausas) ou daily_budget
+    // (orcamento), nunca os dois.
+    const reconciliacao: Reconciliacao | null = !sucesso
+      ? null
+      : camposAlvo
+        ? compararPedidoComGraph(
+            { status: post?.status, daily_budget: post?.daily_budget },
+            depois.body,
+            { http_status: depois.status, campos: camposAlvo },
+          )
+        : reconciliacaoNivelDesconhecido(acao);
+    const alvoLido = reconciliacao?.estado === "conferido" ? depois.body : null;
     await audit(
       r.company_id,
       sistema,
@@ -1525,17 +1935,29 @@ Deno.serve(async (req) => {
         antes: antes.body,
         depois: depois.body,
         reconciliacao,
+        reconciliacao_estado: reconciliacao?.estado ?? null,
         pipeboard_conexao: driver === "pipeboard" ? pipeboardMonitor : null,
       },
     );
     if (sucesso) {
       executadasNaHora++;
-      if (reconciliacao && !reconciliacao.ok) {
-        await audit(r.company_id, sistema, "meta_action_reconciliacao_divergente", r.id, {
+      const acaoRec = acaoDeAuditoriaDaReconciliacao(reconciliacao);
+      if (acaoRec && reconciliacao) {
+        await audit(r.company_id, sistema, acaoRec, r.id, {
           acao,
           alvo_external_id: alvoExt,
+          estado: reconciliacao.estado,
           divergencias: reconciliacao.divergencias,
+          erro_leitura: reconciliacao.erro_leitura,
+          campos_pedidos: reconciliacao.campos_pedidos,
+          campos_comparados: reconciliacao.campos_comparados,
+          http_status: depois.status,
+          lido: reconciliacao.lido,
           driver_escrita: driver,
+          nota:
+            reconciliacao.estado === "conferido"
+              ? "OLHEI o objeto na Graph e um valor difere do que foi pedido."
+              : "NAO consegui olhar o objeto na Graph depois da escrita. Isto NAO afirma que a alteracao falhou - nada foi concluido sobre o valor.",
         });
       }
       await supa
@@ -1545,9 +1967,12 @@ Deno.serve(async (req) => {
           execution_result: {
             ok: true,
             antes: antes.body,
-            depois: depois.body,
+            depois: alvoLido,
             driver_escrita: driver,
             reconciliacao,
+            reconciliacao_estado: reconciliacao?.estado ?? null,
+            reconciliacao_conferida: reconciliacao?.estado === "conferido",
+            reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
           },
         })
         .eq("id", r.id);
@@ -1558,9 +1983,11 @@ Deno.serve(async (req) => {
       alvo: alvoNome,
       resultado: sucesso ? "EXECUTADO" : "falha_meta",
       antes: (antes.body as any)?.status,
-      depois: (depois.body as any)?.status,
+      depois: (alvoLido as any)?.status ?? null,
       driver_escrita: driver,
       reconciliacao,
+      reconciliacao_estado: reconciliacao?.estado ?? null,
+      reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
     });
   }
 
