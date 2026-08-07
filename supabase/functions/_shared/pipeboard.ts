@@ -295,6 +295,18 @@ export function argsCampanhaDeGraph(
   if (body.is_adset_budget_sharing_enabled !== undefined) {
     out.is_adset_budget_sharing_enabled = body.is_adset_budget_sharing_enabled === "true";
   }
+  // ABO REAL PELO PIPEBOARD (medido 07/08/2026, sonda tools/list + teste descartavel controlado).
+  // O create_campaign do conector tem um parametro DEDICADO: use_adset_level_budgets (boolean,
+  // default false). Com false — que era o comportamento ate aqui — e sem daily_budget no corpo, o
+  // conector INJETA daily_budget=1000 (R$ 10,00/dia) e bid_strategy=LOWEST_COST_WITHOUT_CAP, e a
+  // campanha nasce CBO. EXPERIMENTO controlado, mesmo caminho de codigo, so o flag mudando:
+  // [TESTE-ABO-DESCARTAR-01] com true -> Graph sem daily_budget (Pipeboard devolveu
+  // budget_strategy=ad_set_level); [TESTE-ABO-DESCARTAR-02] com false -> Graph daily_budget=1000.
+  // Por isso ABO manda use_adset_level_budgets=true e NAO envia orcamento de campanha nenhum.
+  // Este campo e do CONECTOR, nao da Graph: quem escreve pela Graph (driver graph) NAO o recebe.
+  if (body.use_adset_level_budgets !== undefined) {
+    out.use_adset_level_budgets = body.use_adset_level_budgets === "true";
+  }
   // dry_run nativo so existe em create_campaign / update_campaign (medido 05/08).
   if (opts?.dry_run) out.dry_run = true;
   return out;

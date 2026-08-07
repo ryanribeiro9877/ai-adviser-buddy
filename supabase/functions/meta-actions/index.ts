@@ -1,4 +1,22 @@
-// supabase/functions/meta-actions/index.ts (v5.4)
+// supabase/functions/meta-actions/index.ts (v5.5)
+// v5.5 (07/08/2026) - ABO DE VERDADE PELO PIPEBOARD. O gestor decidiu o regime: ABO (campanha SEM
+//   orcamento, dinheiro em cada conjunto). Ate aqui montarCriacao montava ABO "por construcao"
+//   (corpo sem orcamento), mas o conector Pipeboard INJETAVA daily_budget=1000, e TODA campanha
+//   criada pelo Pipeboard nascia CBO - foi o que aconteceu com a NOVA-01 (120254323578040191).
+//   DESCOBERTA (sonda tools/list do Pipeboard + teste descartavel controlado, 07/08): o
+//   create_campaign do conector tem um parametro DEDICADO, use_adset_level_budgets (boolean,
+//   default false). EXPERIMENTO, mesmo caminho de codigo, so o flag mudando:
+//   [TESTE-ABO-DESCARTAR-01] com use_adset_level_budgets=true -> Graph SEM daily_budget (o conector
+//   respondeu budget_strategy=ad_set_level); [TESTE-ABO-DESCARTAR-02] com false -> Graph
+//   daily_budget=1000. As duas campanhas foram apagadas (effective_status=DELETED). Conserto:
+//   (1) criar_campanha aceita regime_orcamento no pedido; ABO (default) manda
+//       use_adset_level_budgets=true e nenhum orcamento de campanha; regime != 'abo' RECUSA por
+//       nome (regime_orcamento_nao_suportado), e o contrato recusa o MESMO no validador
+//       (contrato_de_execucao.valores_aceitos=['abo']) para preservar a PO-17.
+//   (2) o flag e do CONECTOR: escreverCriacao o remove antes de qualquer POST direto na Graph.
+//   (3) a sonda de reconciliacao passa a provar a captura da injecao: a conferencia "limpa" de
+//       campanha usa TESTE-A (ABO real na Graph), e um caso novo usa a NOVA-01 (ABO pedida, R$10
+//       injetado) exigindo divergencia - antes a v41 usava a propria NOVA-01 como caso "conferido".
 // v5.4 (07/08/2026) - TRES DEFEITOS DA MESMA FAMILIA: o sistema sabia da falha e nao contava.
 //   (1) FALHA INVISIVEL NO CARD. Card b5e2f338: aprovado 20:55:58, create_adset recusado pelo
 //       Pipeboard 20:56:01 por conflito de orcamento, e o card ficou status=approved /
@@ -260,7 +278,13 @@ async function escreverCriacao(
   opts?: { dry_run?: boolean },
 ): Promise<ResultadoEscrita> {
   if (driver !== "pipeboard") {
-    const exec = await g(path, "POST", body);
+    // use_adset_level_budgets e parametro do CONECTOR Pipeboard, nao da Graph. A Graph faz ABO
+    // simplesmente NAO recebendo orcamento de campanha (medido nas TESTE-A/B/C, driver graph, sem
+    // daily_budget). Enviar o flag a Graph arriscaria um erro de parametro desconhecido, entao ele
+    // sai do corpo aqui - o unico ponto por onde o POST direto na Graph passa.
+    const graphBody = { ...body };
+    delete graphBody.use_adset_level_budgets;
+    const exec = await g(path, "POST", graphBody);
     const id = (exec.body as any)?.id ?? null;
     return {
       status: exec.status,
@@ -594,6 +618,12 @@ type CasoSonda = {
 };
 
 const SONDA_CAMPANHA = "120254323578040191"; // [LEV][LP][LEADS][CLT][NOVA-01][AGO26]
+// v5.5: a conferencia "limpa" de campanha precisa de uma campanha SEM orcamento na Graph. NOVA-01
+// nao serve mais: ela nasceu com R$ 10/dia injetados pelo Pipeboard, entao usa-la como caso
+// "conferido_ok" fazia o proprio exigir_ausentes acusar divergencia (a v41 reportava esse caso como
+// FALHOU sem saber). TESTE-A foi criada pelo driver GRAPH, sem orcamento, e continua ABO na Graph.
+const SONDA_CAMPANHA_ABO_LIMPA = "120254137750140191"; // [LEV][LP][LEADS][CLT][TESTE-A][AGO26]
+const SONDA_CAMPANHA_CBO_INJETADA = "120254323578040191"; // NOVA-01: ABO pedida, R$10 injetado
 const SONDA_CONJUNTO_LAL = "120253389922700191"; // molde LAL 1%
 const SONDA_CONJUNTO_AMPLO = "120249671585580191"; // molde amplo BR 18-65
 const SONDA_ANUNCIO = "120254319507370191"; // anuncio de prova do GT-13
@@ -668,7 +698,7 @@ async function bateriaDaSonda(): Promise<{ casos: CasoSonda[]; sem_espelho: stri
   const casos: CasoSonda[] = [];
   const sem_espelho: string[] = [];
   const alvos: { nivel: NivelMeta; acao: string; id: string; apelido: string }[] = [
-    { nivel: "campanha", acao: "criar_campanha", id: SONDA_CAMPANHA, apelido: "campanha_nova01" },
+    { nivel: "campanha", acao: "criar_campanha", id: SONDA_CAMPANHA_ABO_LIMPA, apelido: "campanha_abo_limpa" },
     {
       nivel: "conjunto",
       acao: "criar_conjunto_a_partir_de",
@@ -733,6 +763,29 @@ async function bateriaDaSonda(): Promise<{ casos: CasoSonda[]; sem_espelho: stri
         nota: "nome e status propositalmente errados contra objeto que existe e foi lido",
       });
     }
+  }
+
+  // PROVA v5.5: a reconciliacao de campanha PEGA a injecao de orcamento do Pipeboard. NOVA-01 foi
+  // pedida SEM orcamento (ABO) e a Graph a devolve com daily_budget=1000 que o conector injetou. O
+  // pedido reconstruido do espelho NAO carrega orcamento (a executora nunca envia orcamento de
+  // campanha), e reconciliarAposEscrita aplica exigir_ausentes=[daily_budget,lifetime_budget]: se
+  // isto nao virar divergencia, a conferencia de dinheiro da campanha esta cega - que foi o defeito
+  // ate a v41. Depende de NOVA-01 seguir com o orcamento injetado ate o Ryan decidir (o card manda
+  // deixa-la PAUSED e orfa), e e por isso um caso REAL, nao fabricado.
+  const espInjecao = await pedidoDoEspelho("campanha", SONDA_CAMPANHA_CBO_INJETADA);
+  if (espInjecao) {
+    casos.push({
+      nome: "campanha_abo_injecao_de_orcamento_pega",
+      acao: "criar_campanha",
+      external_id: SONDA_CAMPANHA_CBO_INJETADA,
+      espera: "divergente",
+      pedido: espInjecao.pedido,
+      nota: "campanha ABO (pedido sem orcamento) que a Graph devolve com daily_budget=1000 injetado pelo Pipeboard: exigir_ausentes tem de acusar a divergencia. Fonte do pedido: espelho, que nao guarda orcamento de campanha.",
+    });
+  } else {
+    sem_espelho.push(
+      "NOVA-01 (campanha CBO injetada) nao esta no espelho - nao da para provar a captura da injecao de orcamento",
+    );
   }
 
   // Falha de leitura 1: objeto que nao existe.
@@ -819,7 +872,7 @@ async function rodarSondaReconciliacao(companyId: string) {
     alarmes_gravados_no_audit_log: 0,
   };
   const resultado = {
-    versao: "meta-actions-v5.3-sonda-reconciliacao",
+    versao: "meta-actions-v5.5-sonda-reconciliacao",
     somente_leitura: true,
     nota: "Nenhum POST na Meta. As acoes de auditoria sao DECLARADAS pela funcao compartilhada, nao emitidas - alarme de teste nao entra na mesma gaveta do alarme real.",
     resumo,
@@ -954,6 +1007,26 @@ export async function montarCriacao(acao: string, p: any, conta: string, tetoSan
   if (acao === "criar_campanha") {
     const nome = String(p?.nome_novo ?? "").trim();
     if (!nome) return { erro: "payload sem nome_novo" };
+
+    // ============ v5.5: REGIME DE ORCAMENTO DECLARADO; ABO REAL PELO PIPEBOARD ============
+    // O gestor decide o regime no pedido (regime_orcamento). Hoje o UNICO regime suportado e ABO -
+    // orcamento vive em cada CONJUNTO, a campanha fica SEM orcamento -, que e o desenho de todo o
+    // sistema: o gate campanha_usa_orcamento_proprio_cbo existe justamente para manter conjunto
+    // fora de campanha CBO. Ausente = 'abo' (o default historico e a decisao do gestor). Valor
+    // diferente de 'abo' RECUSA por nome; o contrato (contrato_de_execucao.valores_aceitos=['abo'])
+    // recusa o MESMO conjunto no validador, para nunca haver validador=aceita com executor=recusa.
+    const regime = (String(p?.regime_orcamento ?? "").trim().toLowerCase() || "abo");
+    if (regime !== "abo") {
+      return {
+        erro: "regime_orcamento_nao_suportado",
+        detalhe:
+          `O pedido declara regime_orcamento="${regime}", e este sistema so cria campanha em ABO (orcamento no conjunto, campanha sem orcamento). CBO — orcamento na campanha — nao e suportado: o conjunto so entra em campanha sem orcamento proprio (e o que o gate campanha_usa_orcamento_proprio_cbo garante), entao criar a campanha ja com orcamento fecharia o caminho do conjunto. Peca a campanha em ABO (ou omita o regime, que ja assume ABO).`,
+      };
+    }
+
+    // ABO de verdade: use_adset_level_budgets=true e a chave. Sem ele, o Pipeboard injeta
+    // daily_budget=1000 (provado por teste descartavel controlado em 07/08/2026). Nenhum orcamento
+    // de campanha e enviado. O flag e do CONECTOR; escreverCriacao o remove antes de um POST Graph.
     return {
       path: `/${conta}/campaigns`,
       body: {
@@ -963,7 +1036,9 @@ export async function montarCriacao(acao: string, p: any, conta: string, tetoSan
         special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]), // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
         buying_type: "AUCTION",
         is_adset_budget_sharing_enabled: "false", // v4: exigido pela Meta em ABO; false = sem compartilhamento de orcamento entre conjuntos
+        use_adset_level_budgets: "true", // v5.5: ABO real — impede o Pipeboard de injetar orcamento de campanha (CBO)
       } as Record<string, string>,
+      regime_orcamento: "abo",
     };
   }
 
