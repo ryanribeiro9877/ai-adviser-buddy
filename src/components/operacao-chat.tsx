@@ -69,6 +69,11 @@ type ChatReply = {
   tools_used?: string[];
   // "stop" = completa; começa com "length" = cortada pelo limite de tamanho.
   finish_reason?: string;
+  // A edge pode encaminhar o pedido para a rota assíncrona antes de responder. Nesse caso
+  // não há `reply`: o que volta é o job, e a resposta chega pela conversa (Realtime).
+  async?: boolean;
+  job_id?: string;
+  roteado_para_job?: boolean;
 };
 
 // Costura de respostas longas no FRONT: cada requisição fica dentro dos 150s da
@@ -93,8 +98,14 @@ const JANELA_STATUS_MS = 30 * 60 * 1000; // recorte para varrer a lista de conve
 
 // Análise profunda: a edge traffic-agent-job roda subagentes em background e
 // responde 202 em ~1s; a resposta final só chega por Realtime em chat_messages.
-// Pergunta longa é o caso típico (auditoria ampla), daí o auto-roteamento.
-const LIMITE_AUTO_PROFUNDA = 1500;
+//
+// O roteamento AUTOMÁTICO saiu daqui (v28.11). Ele era `text.length > 1500` e tinha dois
+// defeitos medidos: (a) não pegava o caso real — o pedido que truncou em 07/08 tinha 594
+// caracteres e gastou 9 ferramentas; (b) mandava pedido de AÇÃO para uma rota que não tem
+// `propose_action`, ou seja, trocava um card por card nenhum. Quem decide agora é a edge
+// `traffic-chat`, que enxerga famílias de assunto do pedido, anexos e verbos de ato, e
+// devolve `async + job_id` quando encaminha. Este toggle continua sendo o pedido EXPLÍCITO
+// do gestor e vai direto ao job.
 type ChatJobReply = { ok: boolean; async?: boolean; job_id: string; conversation_id: string };
 
 type PendingFile = {
@@ -501,11 +512,9 @@ export function OperacaoChat() {
     if (reenvio && !text) return;
     const convIdAtSend = activeId;
     const snapshot = reenvio ? [] : attachments;
-    // Roteamento: toggle ligado OU pergunta longa vai para o modo assíncrono.
-    // `autoProfunda` marca o caso em que o usuário não pediu — a bolha ganha um
-    // chip explicando por que a resposta não vem na hora.
-    const autoProfunda = !deepOn && text.length > LIMITE_AUTO_PROFUNDA;
-    const profunda = deepOn || autoProfunda;
+    // Roteamento explícito: o toggle vai direto ao modo assíncrono. O automático é decidido
+    // pela edge e chega como `async` na resposta — `autoProfunda` só é ligado lá.
+    const profunda = deepOn;
     if (!reenvio) setInput("");
     setInterrupted(false);
     setJob(null);
@@ -514,7 +523,7 @@ export function OperacaoChat() {
       text,
       attachments: snapshot.map((a) => ({ name: a.name, mime: a.mime, kb: a.sizeKb })),
       profunda,
-      autoProfunda,
+      autoProfunda: false,
     });
     setSending(true);
     try {
@@ -591,6 +600,28 @@ export function OperacaoChat() {
         toast.error(msg);
         if (!reenvio) setInput(text);
         setPending(null);
+        return;
+      }
+
+      // A edge encaminhou o pedido para a rota assíncrona: não há `reply` nem costura a
+      // fazer. Adotamos a conversa e abrimos o MESMO card de progresso da análise profunda —
+      // o veredito continua sendo o de `chat_jobs` (GT-16), sem relógio nesta tela.
+      if (data?.async && data.job_id) {
+        const convJob = data.conversation_id;
+        setPending((p) => (p ? { ...p, autoProfunda: true } : p));
+        qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
+        if (!convIdAtSend) {
+          await qc.fetchQuery({
+            queryKey: ["chat-messages", convJob],
+            queryFn: () => fetchMessages(convJob),
+          });
+          setActiveId(convJob);
+        } else {
+          await qc.invalidateQueries({ queryKey: ["chat-messages", convJob] });
+        }
+        setJob({ convId: convJob, jobId: data.job_id, texto: text });
+        setPending(null);
+        clearAttachments();
         return;
       }
 

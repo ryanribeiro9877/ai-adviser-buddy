@@ -1,4 +1,59 @@
-// supabase/functions/traffic-chat/index.ts (v28.10)
+// supabase/functions/traffic-chat/index.ts (v28.11)
+// v28.11 (07/08/2026) - O RETORNO DA FERRAMENTA PASSA A SOBREVIVER A REQUISICAO, e pedido
+//   longo de ANALISE deixa de precisar de costura. Dois consertos, uma causa medida.
+//   EVIDENCIA (conversa 5b08d921-9fa9-4d20-b63e-3db71dbcb8cc, 07/08/2026): a 1a requisicao
+//   chamou 9 ferramentas, gastou 133,5s e terminou em finish_reason=length com
+//   tokens_in=193.853. O front pediu a continuacao (MAX_CONTINUATIONS=3) e a 2a requisicao
+//   entrou com tokens_in=47.353 e tools:[]. Nela o agente escreveu "ver retorno abaixo" para
+//   a exposicao de orcamento e nunca entregou o numero (avaliar_pacing tinha devolvido 3
+//   conjuntos entregando / R$ 216,00 por dia), e escreveu "Nao consegui chamar a regua de
+//   teto vigente nesta rodada" - quando teto_vigente FOI chamada e a RPC responde saudavel
+//   (governa R$ 1,60, Roberto, 30/07). Da perspectiva da continuacao aquilo era VERDADE: o
+//   sistema tinha esvaziado o contexto. Nao foi teto (teto_tools=false), nao foi prazo
+//   (deadline_tools=false) e nao foi prompt - a regra de fail-closed agiu certo sobre um
+//   contexto vazio.
+//   CAUSA: o historico era remontado do banco com role+content APENAS. chat_messages.tool_calls
+//   guarda nome e argumentos, nunca o JSON devolvido; os retornos viviam so no array 'messages'
+//   em memoria e morriam com a requisicao.
+//   (1) PERSISTENCIA - coluna NOVA chat_messages.tool_results (migracao
+//       retorno_de_ferramenta_persistido_em_chat_messages). Coluna propria e nao um campo de
+//       'diagnostico' porque diagnostico e telemetria pequena e lida com frequencia por sonda e
+//       auditoria; retorno de ferramenta chega a 14.000 chars POR ferramenta e ate 12 por turno
+//       (~170 KB), e misturar os dois faria toda leitura de telemetria arrastar o payload de
+//       dado. Grava-se o MESMO corte de 14.000 que o modelo viu - persistir menos que isso
+//       criaria uma segunda verdade sobre o que ele leu.
+//   (2) REINJECAO - na remontagem, os retornos dos 2 ultimos turnos de assistente voltam como
+//       bloco DECLARADO antes do texto da resposta (o texto continua sendo a ultima coisa que
+//       o modelo le, para a continuacao retomar no ponto). Nao ha sumarizacao por modelo: o
+//       JSON e achatado em 'caminho = valor' e, quando falta espaco, sai PRIMEIRO o campo sem
+//       numero, depois se declara quantos campos ficaram de fora. Numero nao se resume.
+//       Turno mais antigo nao reinjeta retorno - e diz que nao reinjetou, com os nomes das
+//       ferramentas. Corte silencioso continua proibido (licao do cortarLista / v27.1).
+//       Orcamento: 12.000 chars no bloco inteiro, 1.800 por ferramenta (~3k tokens no pior
+//       caso, contra os 47k que a continuacao ja gastava - e ela gastava sem o dado).
+//   (3) ROTA ASSINCRONA PARA PEDIDO LONGO DE ANALISE. O v27 dizia que ajustar orcamento era o
+//       ultimo recurso e que a saida era o job assincrono; ela agora existe. O criterio e
+//       medido, nao inventado - 20 dias de turnos deste chat (74 com telemetria):
+//         - familias de assunto do pedido (mesmo vocabulario que prioridadeTool ja usa para
+//           ordenar o lote) <= 4: 68 turnos, ZERO truncados, media de 3,5 ferramentas;
+//         - >= 5 familias: 3 turnos, 2 truncados (12 e 9 ferramentas) e o unico "inteiro"
+//           levou 132s, ou seja, encostou no teto de 150s da plataforma;
+//         - tamanho do pedido sozinho NAO serve: um dos truncados tinha 1.404 chars, abaixo
+//           do limite de 1.500 que o front usava. Fica como rede secundaria, nao como regra.
+//       QUATRO GUARDAS, cada uma cobrindo uma capacidade que a rota assincrona nao tem:
+//       continuacao NAO vai (o job replaneja do zero, nao retoma texto cortado); pedido com
+//       ANEXO nao vai (o job nao le anexo); pergunta no MEIO DE UM FIO nao vai (o job recebe
+//       so a pergunta, nao le o historico); e PEDIDO DE ATO nao vai - propose_action nao
+//       existe no traffic-agent-job (ele mesmo declara "Acao continua no chat"), entao
+//       rotear o pedido de criacao de 07/08 para la teria trocado um card truncado por card
+//       NENHUM. Por isso a decisao saiu do front (que roteava so por tamanho, e portanto
+//       mandava pedido de ato para uma rota sem card) e virou uma regra unica aqui.
+//       Na medicao, as guardas nao custam caso verdadeiro: os 3 pedidos que o criterio
+//       roteia sao todos a primeira pergunta do fio, e o unico turno truncado que elas
+//       barram e a continuacao - que a Parte 1 conserta em vez de encaminhar.
+//   Marcador de versao vai a "chat-v28.11". Nota: o v28.10 subiu com o marcador ainda em
+//   "chat-v28.9" - mesmo esquecimento que o v28.1 corrigiu uma vez; agora o literal e uma
+//   constante unica (VERSAO), usada nos tres lugares.
 // v28.10 (04/08/2026) - GT-13: A PONTE DO DRIVE ATE O ANUNCIO. Tres mudancas.
 //   (1) get_drive_criativos e get_analise_visual_drive passam a devolver drive_file_id (a segunda
 //       tambem ja_enviada_para_meta, via join com media_uploads na propria RPC). O id era lido do
@@ -344,7 +399,21 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
+const VERSAO = "chat-v28.11";
 const HIST = 24;
+// v28.11: orcamento da reinjecao de retorno de ferramenta.
+// TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
+// o que ele nunca viu, persistir menos seria perder o que ele viu.
+const TOOLRES_TETO_PERSIST = 14000;
+// So os 2 ultimos turnos de assistente reinjetam retorno. A perda medida em 07/08 foi de UM
+// turno para o seguinte; carregar a conversa inteira recriaria pelo custo o problema que a
+// reinjecao resolve pelo contexto.
+const TOOLRES_TURNOS = 2;
+const TOOLRES_CAP_TOOL = 1800;
+const TOOLRES_CAP_TOTAL = 12000;
+// Listas longas cabem em amostra + contagem declarada; o que nao pode e sumir sem aviso.
+const TOOLRES_ITENS_LISTA = 6;
+const TOOLRES_TEXTO = 400;
 // v27.1: caps do corte de historico. HIST_CAP e o teto por mensagem; a mensagem de USUARIO
 // mais recente tem teto maior porque e a pergunta original que as continuacoes precisam
 // enxergar INTEIRA (o corte em 6000 escondeu os blocos 9-12 do questionario de 28/07).
@@ -1454,7 +1523,7 @@ ESTA FORA DO SEU ESCOPO e voce NAO comenta, analisa nem recomenda: relacao com b
 5. RESPONDA com numero + fonte + ressalva. Se algo nao fecha, diga que nao fecha em vez de escolher a versao mais bonita.
 
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
-R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
+R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os dois limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
 R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. A frase correta e: "conceitualmente funciona assim; confirmar como esta configurado aqui exige checar no Gerenciador".
 R3. Distinga tres coisas diferentes: (a) o dado e ZERO, (b) o dado NAO EXISTE no sistema, (c) o dado NAO FOI COLETADO no periodo (sync/cobertura). Nunca trate (b) ou (c) como (a).
@@ -1516,6 +1585,152 @@ Alem delas: em pedido amplo, consulte o que for necessario e responda bloco a bl
 ${memoria}`;
 }
 
+// ============ v28.11: O RETORNO DA FERRAMENTA ATRAVESSA A REQUISICAO =====================
+// O que se grava por ferramenta executada. 'retorno' e o objeto devolvido; quando o payload
+// passou do teto, e a string ja cortada - o MESMO corte que foi para o modelo, e 'cortado'
+// diz qual dos dois casos e (checar typeof nao serviria: ha tool que devolve string).
+type ToolResult = {
+  tool: string; args: unknown; chars: number; cortado: boolean; retorno: unknown; erro?: string;
+};
+
+// Achata o JSON em linhas 'caminho = valor'. Nao e sumarizacao: nenhum valor escalar e
+// reescrito, so texto muito longo e cortado - e o corte diz quantos chars faltam.
+function achatarRetorno(valor: unknown, prefixo: string, linhas: string[]) {
+  const chave = prefixo || "retorno";
+  if (valor === null || valor === undefined) { linhas.push(`${chave} = null`); return; }
+  if (Array.isArray(valor)) {
+    if (!valor.length) { linhas.push(`${chave} = [] (lista VAZIA - nao e zero nem inexistente)`); return; }
+    const mostrar = Math.min(valor.length, TOOLRES_ITENS_LISTA);
+    for (let i = 0; i < mostrar; i++) achatarRetorno(valor[i], `${chave}[${i}]`, linhas);
+    if (valor.length > mostrar) {
+      linhas.push(`${chave}[...] = ${valor.length - mostrar} de ${valor.length} item(ns) OMITIDOS nesta reinjecao (a lista original tinha ${valor.length}; chame a ferramenta de novo se precisar do resto)`);
+    }
+    return;
+  }
+  if (typeof valor === "object") {
+    const entradas = Object.entries(valor as Record<string, unknown>);
+    if (!entradas.length) { linhas.push(`${chave} = {}`); return; }
+    for (const [k, v] of entradas) achatarRetorno(v, prefixo ? `${prefixo}.${k}` : k, linhas);
+    return;
+  }
+  const s = String(valor);
+  linhas.push(`${chave} = ` + (s.length > TOOLRES_TEXTO
+    ? s.slice(0, TOOLRES_TEXTO) + ` [AVISO: +${s.length - TOOLRES_TEXTO} chars deste texto omitidos]`
+    : s));
+}
+
+const TEM_NUMERO = /\d/;
+// Prioridade de corte: sai primeiro o campo SEM numero. Numero e o que o gestor decide em
+// cima - foi exatamente o R$ 216,00 e a regua de R$ 1,60 que sumiram em 07/08. Rotulo sem
+// valor se pode perder declarando; numero, nao.
+function compactarRetorno(tr: ToolResult, teto: number): string {
+  if (tr.erro) return `NAO EXECUTADA NESTA RODADA: ${tr.erro}`;
+  if (tr.cortado) {
+    const s = String(tr.retorno ?? "");
+    return s.length <= teto ? s
+      : s.slice(0, teto) + `\n[AVISO DO SISTEMA: ${s.length - teto} caracteres deste retorno foram omitidos nesta reinjecao.]`;
+  }
+  const linhas: string[] = [];
+  achatarRetorno(tr.retorno, "", linhas);
+  let texto = linhas.join("\n");
+  if (texto.length <= teto) return texto;
+  const comNumero = linhas.filter((l) => TEM_NUMERO.test(l));
+  const semNumero = linhas.length - comNumero.length;
+  texto = comNumero.join("\n") + (semNumero
+    ? `\n[AVISO DO SISTEMA: ${semNumero} campo(s) SEM numero deste retorno foram omitidos nesta reinjecao por limite de tamanho.]` : "");
+  if (texto.length <= teto) return texto;
+  const mantidas: string[] = [];
+  let usado = 0;
+  for (const l of comNumero) {
+    if (usado + l.length + 1 > teto) break;
+    mantidas.push(l); usado += l.length + 1;
+  }
+  const fora = (comNumero.length - mantidas.length) + semNumero;
+  return mantidas.join("\n") +
+    `\n[AVISO DO SISTEMA: ${fora} campo(s) deste retorno foram omitidos nesta reinjecao por limite de tamanho - chame a ferramenta de novo se precisar deles.]`;
+}
+
+function argsCurtos(args: unknown): string {
+  try {
+    const s = JSON.stringify(args ?? {});
+    if (!s || s === "{}" || s === "null") return "";
+    return s.length > 200 ? s.slice(0, 200) + "…" : s;
+  } catch { return ""; }
+}
+
+// O bloco que volta ao modelo. O cabecalho DECLARA o que estes numeros sao e o que eles NAO
+// autorizam: sao retorno de ferramenta (podem ser citados como apurado, com data), e nao sao
+// licenca para afirmar ATO nesta resposta - a regra do v28.5 continua exigindo chamada com
+// sucesso agora para criar/emitir/alterar/executar.
+function blocoDeRetornos(lista: ToolResult[], quando: string, orcamento: number): { texto: string; usados: number } {
+  if (!lista.length || orcamento <= 400) return { texto: "", usados: 0 };
+  const cabecalho = `[RETORNOS DE FERRAMENTA JA APURADOS EM ${quando}, reinjetados pelo sistema a partir do registro desta conversa - NAO sao memoria sua e NAO foram reconstruidos. Para a regra R1 e para "ato so existe com retorno de ferramenta": os numeros abaixo SAO retorno de ferramenta e podem ser citados como apurados, atribuindo-os a esta data. O que eles NAO autorizam e afirmar ATO nesta resposta - criar, emitir, alterar, executar ou verificar estado continua exigindo chamada com sucesso AGORA. Se precisar de dado mais novo que a data acima, chame a ferramenta de novo. Nao escreva que nao conseguiu consultar algo que esta listado aqui.]`;
+  const partes: string[] = [];
+  let restante = orcamento - cabecalho.length;
+  let usados = 0;
+  for (const tr of lista) {
+    if (restante <= 400) break;
+    const teto = Math.min(TOOLRES_CAP_TOOL, restante - 200);
+    const a = argsCurtos(tr.args);
+    const parte = `>> ${tr.tool}(${a})\n${compactarRetorno(tr, teto)}`;
+    partes.push(parte);
+    restante -= parte.length + 2;
+    usados++;
+  }
+  const sobraram = lista.slice(usados);
+  const rodape = sobraram.length
+    ? `\n[AVISO DO SISTEMA: o retorno de mais ${sobraram.length} ferramenta(s) desta rodada (${[...new Set(sobraram.map((t) => t.tool))].join(", ")}) NAO coube nesta reinjecao. O dado FOI lido naquela rodada - nao o trate como zero, inexistente nem como consulta que falhou; se precisar dele, chame a ferramenta de novo.]`
+    : "";
+  return { texto: `${cabecalho}\n${partes.join("\n\n")}${rodape}`, usados };
+}
+
+function listaDeRetornos(v: unknown): ToolResult[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x) => !!x && typeof x === "object" && typeof (x as any).tool === "string") as ToolResult[];
+}
+
+// ============ v28.11: ROTEAMENTO DE PEDIDO LONGO PARA A ROTA ASSINCRONA ==================
+// Familias de assunto do pedido - MESMO vocabulario que prioridadeTool ja usa para ordenar o
+// lote de ferramentas. Reaproveitado de proposito: contar familias e a aproximacao mais
+// proxima de "quantas ferramentas este pedido vai exigir" que da para calcular ANTES de
+// gastar o turno. Calibragem em 20 dias de turnos deste chat esta no cabecalho do arquivo.
+// Sete termos do vocabulario de prioridadeTool NAO entram aqui - "retorno", "conversa",
+// "metrica", "historic" e "sugira" sao palavras comuns em pedido curto e em meta-linguagem
+// ("de qual retorno de ferramenta", "nesta conversa"), e contar familia por elas roteava
+// pergunta pequena. Ordenar o lote pode errar barato; rotear errado tira o pedido do turno
+// sincrono. Medido: sem esse aperto, uma sonda de 350 chars pontuou 5 familias.
+const FAMILIAS_ASSUNTO: RegExp[] = [
+  /criativ|legenda|compliance|anuncio|peca|texto|copy|oferta/,
+  /receita|contrato|cac|vende|vendas|funil|proposta|lucro/,
+  /cbo|abo|conjunto|estrutura|publico|targeting|lance|orcamento/,
+  /utm|variante|rastreio|rotulo/,
+  /teto|regua|meta de custo|escal|vencedor/,
+  /como funciona|por que|explique|conceito|politica|regra da meta|categoria especial|hook|formato|fadiga|aprendizado|breakdown|sazonal|briefing/,
+  /card|aprova|pendente|aprovado|criou|criad|emiti|executou|executad|fila/,
+  /desempenho|gasto|lead|cpl|ctr|custo por|ranking|pior|melhor|7 dias|ontem/,
+  /whatsapp|waba|template|conversas/,
+  /drive|video|reel|thumb|visual/,
+];
+const ROTA_FAMILIAS_MIN = 5;
+const ROTA_CHARS_MIN = 1500;
+const RE_CONTINUACAO = /^sua resposta anterior foi cortada/;
+const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
+
+function decidirRotaAssincrona(pedido: string, nAnexos: number): { rotear: boolean; motivo: string; familias: number } {
+  const p = deacc(pedido.toLowerCase());
+  const familias = FAMILIAS_ASSUNTO.reduce((a, re) => a + (re.test(p) ? 1 : 0), 0);
+  const porFamilia = familias >= ROTA_FAMILIAS_MIN;
+  const porTamanho = pedido.length >= ROTA_CHARS_MIN;
+  if (!porFamilia && !porTamanho) return { rotear: false, motivo: "cabe no turno sincrono", familias };
+  // As tres guardas abaixo NAO sao cautela generica: cada uma cobre uma capacidade que a rota
+  // assincrona nao tem, e mandar o pedido para la seria perde-la em silencio.
+  if (RE_CONTINUACAO.test(p)) return { rotear: false, motivo: "continuacao: o job replaneja do zero e nao retoma texto cortado", familias };
+  if (nAnexos > 0) return { rotear: false, motivo: "pedido com anexo: o job nao le anexo", familias };
+  if (RE_PEDIDO_DE_ATO.test(p)) return { rotear: false, motivo: "pedido de ato: propose_action nao existe no job e o card seria perdido", familias };
+  return { rotear: true, familias,
+    motivo: porFamilia ? `pedido cobre ${familias} familias de assunto (>= ${ROTA_FAMILIAS_MIN})` : `pedido com ${pedido.length} chars (>= ${ROTA_CHARS_MIN})` };
+}
+
 Deno.serve(async (req) => {
   // v19: cronometro comeca AQUI, nao depois dos anexos. Processar planilha/PDF grande
   // consome segundos que precisam entrar no orcamento, senao o teto de 143s e estourado
@@ -1551,6 +1766,48 @@ Deno.serve(async (req) => {
 
   const company = await resolveCompany(body?.company ? String(body.company) : undefined);
   if (!company) return json({ error: "empresa nao encontrada" }, 400);
+
+  // v28.11: pedido longo de ANALISE nao disputa os 150s da plataforma - vai para o job, que
+  // nao tem esse teto. A decisao acontece AQUI, antes de qualquer chamada ao modelo e antes
+  // de gravar a pergunta (quem grava e o job, senao a pergunta entraria duas vezes).
+  // Se o encaminhamento falhar, NAO se perde o turno: cai no caminho sincrono e a falha vai
+  // declarada na telemetria - rota nova nao pode derrubar o chat.
+  const rota = decidirRotaAssincrona(message, rawAtts.length);
+  let rotaFalhou = "";
+  // Quarta guarda, e a unica que custa uma consulta: o job recebe SO a pergunta - nao le o
+  // historico da conversa. Pergunta feita no meio de um fio ("e agora compare com o que voce
+  // disse") viraria uma resposta sem o fio. Na medicao de 20 dias os 3 pedidos que este
+  // criterio rotearia eram TODOS a primeira pergunta do fio, entao a guarda nao custa nenhum
+  // caso verdadeiro.
+  if (rota.rotear && body?.conversation_id) {
+    const { count } = await supa.from("chat_messages").select("id", { count: "exact", head: true })
+      .eq("conversation_id", String(body.conversation_id)).eq("role", "assistant");
+    if (count) {
+      rota.rotear = false;
+      rota.motivo = "pergunta no meio de um fio: o job responde so a pergunta, sem o historico da conversa";
+    }
+  }
+  if (rota.rotear) {
+    try {
+      const resp = await fetch(`${SUPABASE_URL}/functions/v1/traffic-agent-job`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(xKey ? { "x-mcp-key": xKey } : {}),
+          ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
+        },
+        body: JSON.stringify({ message, conversation_id: body?.conversation_id ?? undefined, company: body?.company ?? undefined }),
+      });
+      const txt = await resp.text();
+      if (resp.ok) {
+        return json({ ...JSON.parse(txt), versao: VERSAO, roteado_para_job: true,
+          motivo_do_roteamento: rota.motivo, familias_de_assunto: rota.familias }, 202);
+      }
+      rotaFalhou = `http_${resp.status}`;
+    } catch (e) {
+      rotaFalhou = String((e as any)?.message ?? e).slice(0, 120);
+    }
+  }
 
   // v26: carrega fatos UNIVERSAIS (company_id null) + fatos DESTA empresa. Nunca de outra.
   const { data: ctxRows } = await supa.from("agent_context")
@@ -1630,7 +1887,10 @@ Deno.serve(async (req) => {
   const msgText = message || "Analise o(s) anexo(s).";
   userContent.unshift({ type: "text", text: msgText + (attNotas.length ? `\n\n[avisos de anexo: ${attNotas.join("; ")}]` : "") });
 
-  const { data: hist } = await supa.from("chat_messages").select("role,content").eq("conversation_id", convId)
+  // v28.11: tool_results entra no SELECT. Sem ele o historico dizia QUAIS ferramentas foram
+  // chamadas (tool_calls) e nunca o que elas responderam - foi essa lacuna que fez a
+  // continuacao de 07/08 declarar honestamente que nao tinha a regua de teto.
+  const { data: hist } = await supa.from("chat_messages").select("role,content,created_at,tool_results").eq("conversation_id", convId)
     .in("role", ["user", "assistant"]).order("created_at", { ascending: false }).limit(HIST);
   // v27.1: corte de historico com DIRECAO CERTA e DECLARADO. O slice(0,6000) uniforme do
   // v15-v27 cortava a CAUDA da pergunta original (os blocos finais de um pedido longo
@@ -1649,28 +1909,56 @@ Deno.serve(async (req) => {
     if (ultimoUserIdx < 0 && cronologico[i].role === "user") ultimoUserIdx = i;
     if (ultimoAssistantIdx >= 0 && ultimoUserIdx >= 0) break;
   }
+  // v28.11: REINJECAO DOS RETORNOS. Os 2 turnos de assistente mais recentes que tenham
+  // tool_results voltam com um bloco de evidencia ANTES do proprio texto - antes, e nao
+  // depois, porque o final da ultima resposta precisa continuar sendo a ultima coisa que o
+  // modelo le (v27.1: e dali que a continuacao retoma). O orcamento e global e vai para os
+  // turnos mais NOVOS primeiro; o que nao couber e declarado, nunca cortado em silencio.
+  const blocosDeRetorno = new Map<number, string>();
+  const declaracoesDeRetorno = new Map<number, string>();
+  let toolresTurnos = 0, toolresFerramentas = 0, toolresChars = 0;
+  let orcamentoRetornos = TOOLRES_CAP_TOTAL;
+  for (let i = cronologico.length - 1; i >= 0; i--) {
+    const m: any = cronologico[i];
+    if (m.role !== "assistant") continue;
+    const lista = listaDeRetornos(m.tool_results);
+    if (!lista.length) continue;
+    if (toolresTurnos < TOOLRES_TURNOS) {
+      const quando = String(m.created_at ?? "").slice(0, 16).replace("T", " ") + " UTC";
+      const b = blocoDeRetornos(lista, quando, orcamentoRetornos);
+      if (b.texto) {
+        blocosDeRetorno.set(i, b.texto);
+        orcamentoRetornos -= b.texto.length;
+        toolresTurnos++; toolresFerramentas += b.usados; toolresChars += b.texto.length;
+        continue;
+      }
+    }
+    declaracoesDeRetorno.set(i, `[AVISO DO SISTEMA: esta resposta consultou ${[...new Set(lista.map((t) => t.tool))].join(", ")}. Os retornos NAO foram reinjetados neste historico (turno antigo, limite de tamanho). O dado FOI lido na epoca - se precisar do numero, chame a ferramenta de novo em vez de reconstrui-lo de memoria.]`);
+  }
   let histMsgsCortadas = 0;
   const history = cronologico.map((m, i) => {
     const c = String(m.content ?? "");
     const cap = (m.role === "user" && i === ultimoUserIdx) ? HIST_CAP_USER_RECENTE : HIST_CAP;
-    if (c.length <= cap) return { role: m.role, content: c };
+    const evidencia = blocosDeRetorno.get(i) ?? declaracoesDeRetorno.get(i) ?? "";
+    const comEvidencia = (corpo: string) => ({ role: m.role, content: evidencia ? evidencia + "\n\n" + corpo : corpo });
+    if (c.length <= cap) return comEvidencia(c);
     histMsgsCortadas++;
     const omitidos = c.length - cap;
     if (m.role === "assistant" && i === ultimoAssistantIdx) {
       // A continuacao precisa do FINAL da ultima resposta, nao do inicio.
-      return { role: m.role, content:
-        `[AVISO DO SISTEMA: o INICIO desta resposta (${omitidos} caracteres) foi omitido do historico por limite de tamanho. O trecho abaixo e o FINAL EXATO da resposta anterior - ao continuar, retome da ultima linha dele, sem reescrever nem resumir o que ja foi entregue.]\n` + c.slice(-cap) };
+      return comEvidencia(
+        `[AVISO DO SISTEMA: o INICIO desta resposta (${omitidos} caracteres) foi omitido do historico por limite de tamanho. O trecho abaixo e o FINAL EXATO da resposta anterior - ao continuar, retome da ultima linha dele, sem reescrever nem resumir o que ja foi entregue.]\n` + c.slice(-cap));
     }
     if (m.role === "user") {
       const cabeca = Math.floor(cap * 0.55);
       const cauda = cap - cabeca;
-      return { role: m.role, content:
+      return comEvidencia(
         c.slice(0, cabeca) +
         `\n[AVISO DO SISTEMA: ${omitidos} caracteres do MEIO desta mensagem foram omitidos do historico por limite de tamanho. O INICIO e o FINAL estao preservados - a mensagem NAO termina neste corte; considere tambem o trecho final abaixo antes de concluir o que foi pedido.]\n` +
-        c.slice(-cauda) };
+        c.slice(-cauda));
     }
-    return { role: m.role, content:
-      c.slice(0, cap) + `\n[AVISO DO SISTEMA: o final desta mensagem (${omitidos} caracteres) foi omitido do historico por limite de tamanho.]` };
+    return comEvidencia(
+      c.slice(0, cap) + `\n[AVISO DO SISTEMA: o final desta mensagem (${omitidos} caracteres) foi omitido do historico por limite de tamanho.]`);
   });
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "user", content: msgText, user_id: userId, attachments: attMeta.length ? attMeta : null });
@@ -1690,6 +1978,8 @@ Deno.serve(async (req) => {
   const messages: any[] = [{ role: "system", content: cacheSystem }, ...history,
     { role: "user", content: userMsgContent }];
   const toolsUsed: any[] = [];
+  // v28.11: o que cada ferramenta DEVOLVEU, para gravar em chat_messages.tool_results.
+  const toolResults: ToolResult[] = [];
   const actionCards: CardInfo[] = [];
   const ctx = { companyId: company.id, convId: convId!, requestedBy: requestedBy!, cards: actionCards, imgAtts, mcpKey: cfg?.api_key ?? "" };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
@@ -1798,6 +2088,7 @@ Deno.serve(async (req) => {
         // e possivel simplesmente pular - devolvemos um resultado que DECLARA o teto, para
         // o modelo nao tratar o dado como zero nem como inexistente (R3).
         const nomeTc = String(tc.function?.name ?? "");
+        let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
         const jaUsou = toolsUsed.filter((t) => t.tool === nomeTc).length;
         const limiteDesta = MAX_POR_FERRAMENTA[nomeTc] ?? MAX_POR_FERRAMENTA_DEFAULT;
         if (toolsUsed.length >= MAX_TOOLS_TURNO || jaUsou >= limiteDesta) {
@@ -1805,12 +2096,21 @@ Deno.serve(async (req) => {
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
             erro: "consulta_nao_realizada_nesta_rodada",
             aviso: "Esta consulta nao foi executada nesta rodada. O dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao gestor, em UMA linha e em linguagem natural, que este item ficou para a proxima. NAO cite nome de ferramenta, numero de limite nem detalhe de implementacao." }) });
+          // v28.11: a consulta NAO feita tambem se registra. Sem isto a continuacao veria a
+          // ausencia do dado e nao saberia distinguir "nao foi lido" de "nao existe" (R3).
+          toolResults.push({ tool: nomeTc, args, chars: 0, cortado: false, retorno: null,
+            erro: "teto de ferramentas do turno - o dado NAO foi lido, nao e zero nem inexistente" });
           continue;
         }
-        let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
         const result = await runTool(tc.function?.name, args, ctx);
         toolsUsed.push({ tool: tc.function?.name, args });
-        messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 14000) });
+        // v28.11: um unico corte, usado nos dois destinos - o que o modelo le e o que fica
+        // gravado sao literalmente a mesma string.
+        const bruto = JSON.stringify(result ?? null);
+        const cortado = bruto.length > TOOLRES_TETO_PERSIST;
+        toolResults.push({ tool: nomeTc, args, chars: bruto.length, cortado,
+          retorno: cortado ? bruto.slice(0, TOOLRES_TETO_PERSIST) : (result ?? null) });
+        messages.push({ role: "tool", tool_call_id: tc.id, content: bruto.slice(0, TOOLRES_TETO_PERSIST) });
       }
       continue;
     }
@@ -1861,20 +2161,28 @@ Deno.serve(async (req) => {
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
     hist_msgs_cortadas: histMsgsCortadas,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: "chat-v28.9" };
+    // v28.11: quanto do contexto anterior a rodada enxergou, e quanto ela deixa para a proxima.
+    toolres_gravados: toolResults.length, toolres_turnos_reinjetados: toolresTurnos,
+    toolres_ferramentas_reinjetadas: toolresFerramentas, toolres_chars_reinjetados: toolresChars,
+    rota_familias: rota.familias, rota_falhou: rotaFalhou || null,
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: VERSAO };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
-    diagnostico,
+    diagnostico, tool_results: toolResults.length ? toolResults : null,
     attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
 
-  return json({ ok: true, versao: "chat-v28.9", conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
+  return json({ ok: true, versao: VERSAO, conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),
     iteracoes_usadas: iteracoes, finish_reason: finishReason, fatos_memoria: (ctxRows ?? []).length,
     preambulos_detectados: preambulos.length, preambulos_recuperados: preambulosUsados,
     deadline_tools: deadlineTools, ms_total: decorrido(),
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead, cache_rejeitado: cacheRejeitado,
     reasoning_rejeitado: reasoningRejeitado, reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
     hist_msgs_cortadas: histMsgsCortadas,
+    toolres_gravados: toolResults.length, toolres_turnos_reinjetados: toolresTurnos,
+    toolres_ferramentas_reinjetadas: toolresFerramentas, toolres_chars_reinjetados: toolresChars,
+    roteado_para_job: false, motivo_do_roteamento: rota.motivo, familias_de_assunto: rota.familias,
+    rota_falhou: rotaFalhou || null,
     tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas, action_cards: actionCards });
 });
