@@ -906,11 +906,13 @@ export function OperacaoChat() {
                     )}
                     {pending!.text && <div className="whitespace-pre-wrap">{pending!.text}</div>}
                     {/* Só quando o roteamento foi automático: explica por que não
-                        veio resposta imediata. Com o toggle ligado o usuário já sabe. */}
+                        veio resposta imediata. Com o toggle ligado o usuário já sabe.
+                        Texto neutro de propósito: aqui o gestor NÃO pediu análise
+                        profunda, quem encaminhou foi a edge. */}
                     {pending!.autoProfunda && (
                       <div className="flex items-center gap-1 pt-0.5 text-[11px] opacity-80">
                         <Microscope className="h-3 w-3" />
-                        análise profunda
+                        preparando resposta completa
                       </div>
                     )}
                   </div>

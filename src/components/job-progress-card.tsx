@@ -197,10 +197,10 @@ export function JobProgressCard({
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
         <div className="flex items-center gap-2 text-sm font-medium">
-          <AlertTriangle className="h-4 w-4 text-destructive" />A análise não foi concluída
+          <AlertTriangle className="h-4 w-4 text-destructive" />A resposta não foi concluída
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          {erro ?? "A análise falhou antes de concluir."}
+          {erro ?? "O processamento parou antes de concluir."}
         </p>
         <Button size="sm" variant="outline" className="mt-2" onClick={onResend}>
           <RefreshCw className="mr-1 h-3.5 w-3.5" />
@@ -215,9 +215,13 @@ export function JobProgressCard({
 
   return (
     <div className="rounded-md border border-border bg-muted/40 p-3">
+      {/* Rótulo neutro: este mesmo card cobre o toggle ligado pelo gestor E o encaminhamento
+          automático decidido pela `traffic-chat` (v72). Dizer "análise profunda" no segundo caso
+          atribuiria ao gestor uma escolha que não foi dele. A linha de `chat_jobs` é idêntica nos
+          dois caminhos, então a tela não tem como distinguir — e não se inventa campo para isso. */}
       <div className="flex items-center gap-2 text-sm font-medium">
         <Microscope className="h-4 w-4 text-primary" />
-        Análise profunda em andamento
+        Preparando a resposta completa
       </div>
 
       <ol className="mt-2 space-y-1.5">
