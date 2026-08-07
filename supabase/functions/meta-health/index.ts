@@ -1,6 +1,7 @@
-// supabase/functions/meta-health/index.ts (v2) — F4.1
+// supabase/functions/meta-health/index.ts (v3) — F4.1 + sonda de pendencias Pipeboard
 // Diagnóstico do token Meta disponível no ambiente: escopos, acesso à ad account da
-// Legal é Viver (act_3302001729967572) e leitura de campanha. NÃO escreve nada.
+// Legal é Viver (act_3302001729967572) e leitura de campanha. NÃO escreve nada no modo
+// diagnóstico padrão.
 // Tokens testados: META_ADS_TOKEN (se existir) senão WHATSAPP_ACCESS_TOKEN.
 // Auth: x-mcp-key / Bearer <mcp_config.api_key>.
 //
@@ -17,6 +18,12 @@
 //
 //   ESTA FUNCAO CONTINUA SEM ESCREVER NADA. O ensaio do Pipeboard usa o dry_run NATIVO do
 //   conector, que existe so em create_campaign/update_campaign, e nunca preenche access_token.
+//
+// v3 (07/08/2026) — SONDA DAS PENDENCIAS DA PRIMEIRA ESCRITA REAL VIA PIPEBOARD.
+//   modo=sonda_pendencias_pipeboard: so GETs (reconciliacao do anuncio de prova, creatives
+//   orfaos, is_dynamic_creative dos conjuntos da conta). Opcionalmente limpar_orfaos=true tenta
+//   DELETE Graph e, se bloquear, Pipeboard — SOMENTE nos dois ids orfaos conhecidos. Resultado
+//   tambem vai para audit_log (meta_health_sonda) para leitura via SQL sem expor token.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
@@ -28,23 +35,49 @@ const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? Deno.env.get("WHATSAPP_ACCESS_T
 const TOKEN_FONTE = Deno.env.get("META_ADS_TOKEN") ? "META_ADS_TOKEN" : "WHATSAPP_ACCESS_TOKEN";
 const AD_ACCOUNT = "act_3302001729967572";
 const GRAPH = "https://graph.facebook.com/v21.0";
+const COMPANY_ID = "ded20b38-f42e-4c71-800c-31b97ea48bcf";
 
 // Escopos que a criacao de anuncio exige. ads_management e o unico realmente inegociavel para
 // escrever; ads_read serve leitura; business_management e o que permite ler papel na conta.
 const ESCOPOS_NECESSARIOS = ["ads_management", "ads_read", "business_management"];
 
+const ORFAOS_PERMITIDOS = new Set(["2635490320208656", "1023859480523471"]);
+const AD_PROVA = "120254319507370191";
+const CREATIVE_PROVA = "1401862435158611";
+const ADSET_PROVA = "120254208284780191";
+const ADSET_MOLDE_C7 = "120251373799340191";
+const CANDIDATOS_72 = [
+  "120253805954390191",
+  "120252394635960191",
+  "120253897605020191",
+  "120253542040290191",
+];
+
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
-const CORS = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, content-type, x-mcp-key", "access-control-allow-methods": "POST, OPTIONS" };
+const CORS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "authorization, content-type, x-mcp-key",
+  "access-control-allow-methods": "POST, OPTIONS",
+};
 function json(obj: unknown, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json", ...CORS } });
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json", ...CORS },
+  });
 }
 
 // O token vai na query porque a Graph aceita assim e esta funcao roda server-side. O valor NUNCA
 // entra na resposta: so ids, nomes e escopos.
-async function g(path: string) {
-  const r = await fetch(`${GRAPH}${path}${path.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(TOKEN)}`);
+async function g(path: string, method = "GET") {
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${GRAPH}${path}${sep}access_token=${encodeURIComponent(TOKEN)}`;
+  const r = await fetch(url, method === "GET" ? undefined : { method });
   const t = await r.text();
-  try { return { status: r.status, body: JSON.parse(t) }; } catch { return { status: r.status, body: t.slice(0, 300) }; }
+  try {
+    return { status: r.status, body: JSON.parse(t) };
+  } catch {
+    return { status: r.status, body: t.slice(0, 300) };
+  }
 }
 
 async function segredoIntegracao(nome: string): Promise<string> {
@@ -52,11 +85,182 @@ async function segredoIntegracao(nome: string): Promise<string> {
   return String(data?.value ?? "");
 }
 
+async function adsDoCreative(creativeId: string) {
+  const filtering = encodeURIComponent(
+    JSON.stringify([{ field: "creative.id", operator: "EQUAL", value: creativeId }]),
+  );
+  return g(
+    `/${AD_ACCOUNT}/ads?fields=id,name,status,adset_id,creative{id}&filtering=${filtering}&limit=25`,
+  );
+}
+
+async function limparOrfao(creativeId: string, pbToken: string) {
+  if (!ORFAOS_PERMITIDOS.has(creativeId)) {
+    return { id: creativeId, ok: false, erro: "id_fora_da_lista_permitida" };
+  }
+  const graphDel = await g(`/${creativeId}`, "DELETE");
+  if (graphDel.status === 200 && (graphDel.body as any)?.success === true) {
+    return { id: creativeId, ok: true, via: "graph_delete", body: graphDel.body };
+  }
+  const tentativas: { tool: string; r: Awaited<ReturnType<typeof pipeboardCall>> }[] = [];
+  for (const tool of ["delete_ad_creative", "delete_creative", "update_ad_creative"]) {
+    const args: Record<string, unknown> =
+      tool === "update_ad_creative"
+        ? { account_id: AD_ACCOUNT, creative_id: creativeId, status: "DELETED" }
+        : { account_id: AD_ACCOUNT, creative_id: creativeId };
+    const r = await pipeboardCall(tool, args, pbToken);
+    tentativas.push({ tool, r: { ok: r.ok, status: r.status, erro: r.erro, body: r.body } as any });
+    if (r.ok) return { id: creativeId, ok: true, via: `pipeboard:${tool}`, body: r.body };
+  }
+  return {
+    id: creativeId,
+    ok: false,
+    via: null,
+    graph_delete: { status: graphDel.status, body: graphDel.body },
+    pipeboard_tentativas: tentativas.map((t) => ({
+      tool: t.tool,
+      ok: t.r.ok,
+      status: t.r.status,
+      erro: t.r.erro,
+      body: t.r.body,
+    })),
+    limpeza_manual_necessaria: true,
+  };
+}
+
+async function sondaPendencias(limparOrfaos: boolean) {
+  const ad = await g(
+    `/${AD_PROVA}?fields=id,name,status,effective_status,adset_id,creative{id,name}`,
+  );
+  const creativeProva = await g(`/${CREATIVE_PROVA}?fields=id,name,status,object_type,account_id`);
+  const adsetProva = await g(
+    `/${ADSET_PROVA}?fields=id,name,status,is_dynamic_creative,daily_budget,campaign_id`,
+  );
+  const moldeC7 = await g(
+    `/${ADSET_MOLDE_C7}?fields=id,name,status,is_dynamic_creative,daily_budget,campaign_id`,
+  );
+
+  const orfaos: Record<string, unknown> = {};
+  for (const id of ORFAOS_PERMITIDOS) {
+    const meta = await g(`/${id}?fields=id,name,status,object_type,account_id`);
+    const ads = await adsDoCreative(id);
+    orfaos[id] = {
+      creative: meta,
+      ads_associados: ads,
+      sem_anuncio:
+        ads.status === 200 && Array.isArray((ads.body as any)?.data) && (ads.body as any).data.length === 0,
+    };
+  }
+
+  // Pagina todos os conjuntos da conta com is_dynamic_creative.
+  const conjuntos: any[] = [];
+  let next: string | null =
+    `/${AD_ACCOUNT}/adsets?fields=id,name,status,effective_status,daily_budget,is_dynamic_creative,campaign_id&limit=100`;
+  while (next) {
+    const page = next.startsWith("http")
+      ? await (async () => {
+          const url = next!.includes("access_token=")
+            ? next!
+            : `${next}${next!.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(TOKEN)}`;
+          const r = await fetch(url);
+          const t = await r.text();
+          try {
+            return { status: r.status, body: JSON.parse(t) };
+          } catch {
+            return { status: r.status, body: t.slice(0, 300) };
+          }
+        })()
+      : await g(next);
+    if (page.status !== 200) {
+      conjuntos.push({ erro_pagina: page });
+      break;
+    }
+    const data = Array.isArray((page.body as any)?.data) ? (page.body as any).data : [];
+    conjuntos.push(...data);
+    next = (page.body as any)?.paging?.next ?? null;
+  }
+
+  const candidatos72: Record<string, unknown> = {};
+  for (const id of CANDIDATOS_72) {
+    candidatos72[id] = await g(
+      `/${id}?fields=id,name,status,effective_status,daily_budget,is_dynamic_creative,campaign_id`,
+    );
+  }
+
+  let limpeza: unknown = null;
+  if (limparOrfaos) {
+    const pbToken = await pipeboardToken(segredoIntegracao);
+    limpeza = {
+      "2635490320208656": await limparOrfao("2635490320208656", pbToken),
+      "1023859480523471": await limparOrfao("1023859480523471", pbToken),
+    };
+  }
+
+  const resultado = {
+    versao: "meta-health-v3-sonda",
+    token_fonte: TOKEN_FONTE,
+    reconciliacao: {
+      ad_graph: ad,
+      creative_graph: creativeProva,
+      adset_destino_graph: adsetProva,
+      esperado: {
+        ad_id: AD_PROVA,
+        status: "PAUSED",
+        adset_id: ADSET_PROVA,
+        creative_id: CREATIVE_PROVA,
+      },
+    },
+    molde_c7_lal: moldeC7,
+    orfaos,
+    conjuntos_conta: conjuntos.map((c: any) => ({
+      id: c.id,
+      name: c.name,
+      status: c.status,
+      effective_status: c.effective_status,
+      daily_budget: c.daily_budget,
+      is_dynamic_creative: c.is_dynamic_creative,
+      campaign_id: c.campaign_id,
+      erro_pagina: c.erro_pagina,
+    })),
+    candidatos_72_dia: candidatos72,
+    limpeza_orfaos: limpeza,
+  };
+
+  await supa.from("audit_log").insert({
+    company_id: COMPANY_ID,
+    action: "meta_health_sonda",
+    target_type: "ad",
+    target_id: AD_PROVA,
+    details: resultado,
+  });
+
+  return resultado;
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-or-bearer"));
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
   if (!TOKEN) return json({ error: "nenhum token Meta no ambiente" }, 500);
+
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch {
+    /* */
+  }
+
+  if (body?.modo === "sonda_pendencias_pipeboard") {
+    const limpar = body?.limpar_orfaos === true;
+    const sonda = await sondaPendencias(limpar);
+    return json({
+      ok: true,
+      modo: "sonda_pendencias_pipeboard",
+      limpar_orfaos: limpar,
+      mcp_chamador: auth.chamador,
+      sonda,
+    });
+  }
 
   const permissoes = await g("/me/permissions");
   const quem = await g("/me?fields=id,name");
@@ -134,7 +338,7 @@ Deno.serve(async (req) => {
   }
 
   return json({
-    versao: "meta-health-v2",
+    versao: "meta-health-v3",
     token_fonte: TOKEN_FONTE,
     identidade: quem,
     app_do_token: {
