@@ -214,7 +214,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
-const EXECUTAVEIS = ["pausar_criativo", "pausar_campanha", "alterar_orcamento"];
+const EXECUTAVEIS = ["pausar_criativo", "pausar_campanha", "alterar_orcamento", "renomear_campanha"];
 const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"];
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
@@ -412,6 +412,11 @@ async function escreverUpdate(
   pbToken: string,
   opts?: { dry_run?: boolean },
 ): Promise<ResultadoEscrita> {
+  // Contrato: renomear campanha usa o update_campaign nativo do Pipeboard, sem fallback Graph.
+  if (acao === "renomear_campanha" && driver !== "pipeboard") {
+    return { status: 409, body: { erro: "renomear_campanha_exige_pipeboard", driver_recebido: driver },
+      id: alvoExt, driver, erro: "renomear_campanha_exige_pipeboard", ok: false };
+  }
   if (driver !== "pipeboard") {
     const exec = await g(`/${alvoExt}`, "POST", post);
     return {
@@ -425,7 +430,7 @@ async function escreverUpdate(
   }
 
   let tool = "update_ad";
-  if (acao === "pausar_campanha") tool = "update_campaign";
+  if (acao === "pausar_campanha" || acao === "renomear_campanha") tool = "update_campaign";
   if (acao === "alterar_orcamento") tool = "update_adset";
 
   if (opts?.dry_run && tool !== "update_campaign") {
@@ -2109,6 +2114,23 @@ Deno.serve(async (req) => {
 
     let post: Record<string, string> | null = null;
     if (acao === "pausar_criativo" || acao === "pausar_campanha") post = { status: "PAUSED" };
+    if (acao === "renomear_campanha") {
+      const novoNome = String(r.payload?.novo_nome ?? "").trim();
+      if (!novoNome) {
+        resultados.push({ id: r.id, acao, resultado: "falha", motivo: "novo_nome ausente/vazio", driver_escrita: driver });
+        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+          motivo: "novo_nome ausente/vazio", payload: r.payload, driver_escrita: driver,
+        });
+        continue;
+      }
+      if (driver !== "pipeboard") {
+        const motivo = `renomear_campanha_exige_pipeboard (driver atual: ${driver})`;
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao, driver_escrita: driver });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+        continue;
+      }
+      post = { name: novoNome };
+    }
     if (acao === "alterar_orcamento") {
       const reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
       if (!(reais > 0)) {
@@ -2143,7 +2165,7 @@ Deno.serve(async (req) => {
 
     if (conf.dry_run) {
       let ensaioPipeboard: ResultadoEscrita | null = null;
-      if (driver === "pipeboard" && acao === "pausar_campanha" && post) {
+      if (driver === "pipeboard" && (acao === "pausar_campanha" || acao === "renomear_campanha") && post) {
         ensaioPipeboard = await escreverUpdate(driver, acao, alvoExt, post, pbToken, {
           dry_run: true,
         });
@@ -2160,7 +2182,7 @@ Deno.serve(async (req) => {
         pipeboard_resposta: ensaioPipeboard?.body ?? null,
         pipeboard_nota:
           ensaioPipeboard?.nota_dry_run ??
-          (driver === "pipeboard" && acao !== "pausar_campanha"
+          (driver === "pipeboard" && acao !== "pausar_campanha" && acao !== "renomear_campanha"
             ? "dry_run nativo so em create_campaign/update_campaign; neste nivel a simulacao e local"
             : null),
         pipeboard_conexao: pipeboardMonitor,
@@ -2211,14 +2233,15 @@ Deno.serve(async (req) => {
     const depois: { status: number; body: any } = camposAlvo
       ? await g(`/${alvoExt}?fields=${camposAlvo}`)
       : { status: 0, body: null };
-    const sucesso = exec.status === 200 || exec.ok === true;
+    // O transporte MCP pode responder HTTP 200 com erro no corpo; `ok` é o veredito normalizado.
+    const sucesso = exec.ok === true;
     // O pedido de update ja e naturalmente por nivel: post traz status (pausas) ou daily_budget
     // (orcamento), nunca os dois.
     const reconciliacao: Reconciliacao | null = !sucesso
       ? null
       : camposAlvo
         ? compararPedidoComGraph(
-            { status: post?.status, daily_budget: post?.daily_budget },
+            { status: post?.status, daily_budget: post?.daily_budget, name: post?.name },
             depois.body,
             { http_status: depois.status, campos: camposAlvo },
           )

@@ -75,6 +75,7 @@ const TOOLS = [
   { name: "avaliar_escala", description: "Avalia se um conjunto esta apto a escala por duplicacao com no maximo +20%, usando a arvore de decisao, custo ate 80% do teto, volume e espera. Exige company_id e adset_external_id. Nao cobre CBO sem orcamento proprio; a espera enxerga apenas escalas registradas pelo sistema, nao alteracoes manuais.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, adset_external_id: { type: "string" } }, required: ["company_id", "adset_external_id"] } },
   { name: "avaliar_pacing", description: "Calcula capacidade diaria da estrutura e, se meta_leads_dia for informada, o PISO de verba diaria ao custo atual. Exige company_id; meta_leads_dia e opcional. Declara que nao existe meta registrada e que a projecao nao e estimativa: escalar tende a elevar o custo, portanto a verba real pode ser maior.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, meta_leads_dia: { type: "number" } }, required: ["company_id"] } },
   { name: "validar_pedido_contra_contrato", description: "Valida pedido jsonb contra contrato_de_execucao. Assinatura real: (acao text, pedido jsonb). contrato_desconhecido se nao houver linhas; recusa se faltar obrigatorio; extras nao invalidam (vao em nao_previstos_no_contrato). Lacunas: contrato de anuncio veio do codigo montarCriacao, nao de card executado; url_tags e opcional e vai no adcreative; NAO substitui pedido_de_anuncio_completo.", inputSchema: { type: "object", properties: { acao: { type: "string" }, pedido: { type: "object" } }, required: ["acao", "pedido"] } },
+  { name: "renomear_campanha", description: "Emite card de aprovacao para renomear campanha existente via Pipeboard update_campaign. Nao executa antes da aprovacao humana. Exige driver Pipeboard e flag renomear_campanha; envia somente campaign_id + name e reconcilia pela Graph.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, campanha_atual: { type: "string" }, novo_nome: { type: "string" }, justificativa: { type: "string" } }, required: ["company_id", "campanha_atual", "novo_nome"] } },
   { name: "create_approval_request", description: "PROPOE uma alteracao (campaign|budget|ad|audience|config). Entra na fila como pending. NADA e executado ate um humano aprovar no painel.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, entity_type: { type: "string", enum: ["campaign", "budget", "ad", "audience", "config"] }, action: { type: "string" }, summary: { type: "string" }, payload: { type: "object" } }, required: ["company_id", "entity_type", "action", "summary"] } },
   { name: "create_alert_rule", description: "Cria uma regra de alerta com threshold (ex.: CPL > 50 na janela de 7 dias).", inputSchema: { type: "object", properties: { company_id: { type: "string" }, name: { type: "string" }, metric: { type: "string" }, comparator: { type: "string", enum: [">", "<", ">=", "<=", "pct_change_up", "pct_change_down"] }, threshold: { type: "number" }, window_days: { type: "number" }, severity: { type: "string", enum: ["low", "medium", "high", "critical"] } }, required: ["company_id", "name", "metric", "comparator", "threshold"] } },
   { name: "resolve_alert", description: "Marca um alerta como resolvido.", inputSchema: { type: "object", properties: { alert_id: { type: "string" } }, required: ["alert_id"] } },
@@ -219,6 +220,39 @@ async function callTool(name: string, args: any) {
         return await callRpc("avaliar_pacing", { p_company_id: args.company_id, p_meta_leads_dia: args.meta_leads_dia ?? null });
       case "validar_pedido_contra_contrato":
         return await callRpc("validar_pedido_contra_contrato", { p_acao: args.acao, p_pedido: args.pedido ?? {} });
+      case "renomear_campanha": {
+        const atual = String(args.campanha_atual ?? "").trim(), novo = String(args.novo_nome ?? "").trim();
+        if (!atual || !novo) return toolText("campanha_atual e novo_nome sao obrigatorios.", true);
+        if (atual.toLocaleLowerCase("pt-BR") === novo.toLocaleLowerCase("pt-BR")) return toolText("O novo nome e igual ao atual; nenhum card foi emitido.", true);
+        const postura = await db.rpc("pode_executar_acao", { p_company_id: args.company_id, p_action: "renomear_campanha" });
+        if (postura.error) return toolText(`Falha ao verificar a postura: ${postura.error.message}`, true);
+        if (!postura.data?.permitido) return toolText(postura.data ?? { erro: "renomear_campanha_nao_permitida" }, true);
+        if (postura.data?.driver_escrita !== "pipeboard") return toolText("renomear_campanha exige driver Pipeboard; nenhum card foi emitido.", true);
+        const { data: campanhas, error: ce } = await db.from("campaigns").select("id,name,external_id").eq("company_id", args.company_id).ilike("name", `%${atual}%`);
+        if (ce) return toolText(ce.message, true);
+        const candidatas = campanhas ?? [];
+        const exatas = candidatas.filter((c: any) => String(c.name).toLocaleLowerCase("pt-BR") === atual.toLocaleLowerCase("pt-BR"));
+        const alvo = exatas.length === 1 ? exatas[0] : candidatas.length === 1 ? candidatas[0] : null;
+        if (!alvo) return toolText(candidatas.length ? { ambiguo: true, opcoes: candidatas.slice(0, 10).map((c: any) => c.name) } : { erro: "campanha_nao_encontrada", busca: atual }, true);
+        const { data: adm } = await db.from("user_roles").select("user_id").eq("role", "admin").limit(1).maybeSingle();
+        if (!adm?.user_id) return toolText("Nao ha administrador cadastrado para ser solicitante do card.", true);
+        const payload = { target_name: alvo.name, target_external_id: alvo.external_id, novo_nome: novo,
+          justificativa: String(args.justificativa ?? "").trim() || "Solicitacao explicita do gestor para corrigir o nome da campanha.",
+          reversa: `Renomear a campanha de volta para "${alvo.name}" pelo Pipeboard.`,
+          metrica_sucesso: `Graph API devolver name exatamente igual a "${novo}".`,
+          risco: "Links, relatorios ou rotinas que dependam do nome antigo podem deixar de casar; o ID nao muda.",
+          proposto_por: "mcp-server:renomear_campanha" };
+        const { data: card, error } = await db.from("approval_requests").insert({
+          company_id: args.company_id, requested_by: adm.user_id, entity_type: "campaign", entity_id: alvo.id,
+          action: "renomear_campanha", summary: `Renomear a campanha "${alvo.name}" para "${novo}" via Pipeboard`,
+          payload, status: "pending",
+        }).select("id,status,expires_at").single();
+        if (error) return toolText(error.message, true);
+        await db.from("audit_log").insert({ company_id: args.company_id, user_id: adm.user_id, action: "approval_created",
+          target_type: "approval_request", target_id: card.id,
+          details: { acao: "renomear_campanha", alvo: alvo.name, novo_nome: novo, origem: "mcp-server" } });
+        return toolText({ ok: true, card, aviso: "PENDENTE: nada foi renomeado. Um administrador precisa aprovar o card." });
+      }
       case "create_approval_request": {
         const { data, error } = await db.from("approval_requests").insert({
           company_id: args.company_id, entity_type: args.entity_type, action: args.action,

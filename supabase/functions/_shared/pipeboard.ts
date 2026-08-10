@@ -444,6 +444,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
   switch (acao) {
     case "criar_campanha":
     case "pausar_campanha":
+    case "renomear_campanha":
       return "campanha";
     case "criar_conjunto_a_partir_de":
     case "alterar_orcamento":
