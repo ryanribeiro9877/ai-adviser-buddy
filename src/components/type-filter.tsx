@@ -36,7 +36,7 @@ export function TypeFilter({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {chip(ALL_TYPES, "Todos", "border-primary/40 bg-primary/15 text-primary")}
-      {types.map((t) => chip(t, TIPO_META[t].label, TIPO_META[t].badge))}
+      {types.map((t) => chip(t, TIPO_META[t]?.label ?? t, TIPO_META[t]?.badge))}
     </div>
   );
 }

@@ -212,16 +212,28 @@ export function resultForCampaign(c: CampaignRow): ResultMetric {
 
 // --- Formatadores (pt-BR) ------------------------------------------------------
 
-export const fmtBRL = (n: number) =>
-  n.toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-export const fmtInt = (n: number) => Math.round(n).toLocaleString("pt-BR");
-export const fmtPct = (n: number) => `${n.toFixed(2)}%`;
-export const fmtDec = (n: number, d = 2) => n.toFixed(d);
+// Aceitam nulo porque as views devolvem NULL em métrica derivada sem denominador
+// (custo sem conversão, CTR sem impressão). Nesse caso mostram a ausência em vez
+// de estourar — um número faltando não pode derrubar a tela inteira.
+const SEM_DADO = "—";
+const finito = (n: number | null | undefined): n is number =>
+  typeof n === "number" && Number.isFinite(n);
+
+export const fmtBRL = (n: number | null | undefined) =>
+  finito(n)
+    ? n.toLocaleString("pt-BR", {
+        style: "currency",
+        currency: "BRL",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
+    : SEM_DADO;
+export const fmtInt = (n: number | null | undefined) =>
+  finito(n) ? Math.round(n).toLocaleString("pt-BR") : SEM_DADO;
+export const fmtPct = (n: number | null | undefined) =>
+  finito(n) ? `${n.toFixed(2)}%` : SEM_DADO;
+export const fmtDec = (n: number | null | undefined, d = 2) =>
+  finito(n) ? n.toFixed(d) : SEM_DADO;
 
 // --- Anúncios (tabela ads) -----------------------------------------------------
 

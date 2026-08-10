@@ -19,25 +19,37 @@ import {
 
 // Retorno de get_weekly_report_data. A RPC declara o que NÃO tem em
 // `nao_disponivel` — a tela mostra essa lista, nunca omite em silêncio.
+// As métricas derivadas (custo por X, CTR, conversão) vêm NULAS quando o
+// denominador é zero — a RPC não inventa zero para período sem entrega. Por isso
+// todo número aqui é anulável e os formatadores devolvem "—" em vez de quebrar.
+type Numero = number | null | undefined;
+
 type Relatorio = {
   periodo: { inicio: string; fim: string; dias_com_dado: number; dias_no_periodo: number };
-  investimento: number;
-  formularios: number;
-  custo_por_formulario: number;
-  cliques_link: number;
-  custo_por_clique: number;
-  visualizacoes_pagina: number;
-  ctr_pct: number;
-  conversao_view_form_pct: number;
-  por_campanha: { campanha: string; gasto: number; formularios: number }[];
+  investimento: Numero;
+  formularios: Numero;
+  custo_por_formulario: Numero;
+  cliques_link: Numero;
+  custo_por_clique: Numero;
+  visualizacoes_pagina: Numero;
+  ctr_pct: Numero;
+  conversao_view_form_pct: Numero;
+  por_campanha: { campanha: string; gasto: Numero; formularios: Numero }[];
   nao_disponivel: string[];
 };
 
-const brl = (n: number) =>
-  n.toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 2 });
-const int = (n: number) => n.toLocaleString("pt-BR");
-const pct = (n: number) =>
-  `${n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`;
+const SEM_DADO = "—";
+const finito = (n: Numero): n is number => typeof n === "number" && Number.isFinite(n);
+
+const brl = (n: Numero) =>
+  finito(n)
+    ? n.toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 2 })
+    : SEM_DADO;
+const int = (n: Numero) => (finito(n) ? n.toLocaleString("pt-BR") : SEM_DADO);
+const pct = (n: Numero) =>
+  finito(n)
+    ? `${n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`
+    : SEM_DADO;
 const ddmm = (iso: string) => iso.split("-").reverse().slice(0, 2).join("/");
 
 /** Segunda a domingo da semana anterior — o período que o gestor reporta. */
@@ -262,7 +274,9 @@ export function WeeklyReport({
                         {int(c.formularios)}
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
-                        {c.formularios > 0 ? brl(c.gasto / c.formularios) : "—"}
+                        {finito(c.formularios) && c.formularios > 0 && finito(c.gasto)
+                          ? brl(c.gasto / c.formularios)
+                          : SEM_DADO}
                       </TableCell>
                     </TableRow>
                   ))}
