@@ -1,4 +1,18 @@
-// supabase/functions/meta-campaign-status/index.ts (v7)
+// supabase/functions/meta-campaign-status/index.ts (v8)
+// v8 (10/08/2026) - ESTADO DO CONJUNTO (is_dynamic_creative) PASSA A SER COLETADO.
+//   O portao de emissao de anuncio (avaliar_estado_destino_execucao) le
+//   ad_sets.is_dynamic_creative e RECUSA fechado quando a coluna e nula - correto, porque
+//   ausencia de leitura nao e liberacao. O defeito estava em quem deveria alimentar a coluna:
+//   NINGUEM. Esta funcao nunca leu o campo, o meta-health so le e registra em audit_log, e o
+//   unico preenchimento veio da migracao manual 20260807183846, para 4 moldes. Resultado medido
+//   em 10/08: o conjunto 120254387861670191, criado as 21:17, travou o card do anuncio com
+//   `estado_conjunto_destino_nao_verificado` - e nenhuma espera resolveria, porque nao havia
+//   processo amadurecendo. Todo conjunto novo nascia invisivel para o portao.
+//   A leitura roda ANTES das sondas de anuncio e criativo, pela licao da v5: passo de escrita
+//   nao fica atras de passo lento, senao um estouro do teto do cron perde justamente o dado que
+//   destrava a emissao. A gravacao e da RPC espelhar_estado_de_conjuntos_da_graph, que mantem o
+//   contrato do ESP-13: chave ausente na Graph preserva o valor anterior, e valor presente que
+//   nao seja booleano fica de fora em vez de virar `false` por conveniencia.
 // v7 (06/08/2026) - VARREDURA DE ORFAOS. Depois que a Graph devolve a lista da conta, o que
 //   esta no espelho e nao veio e marcado DELETED + ausente_na_graph_em (RPC
 //   marcar_orfaos_ausentes_na_graph). Nao apaga linha nem metrica. Conta inacessivel nao marca
@@ -85,7 +99,7 @@ type ConfigCampanha = {
 };
 
 type LeituraCampo = {
-  nivel: "anuncio" | "criativo" | "conta";
+  nivel: "anuncio" | "criativo" | "conta" | "conjunto";
   campo: string;
   solicitados: number;
   respostas: number;
@@ -151,7 +165,7 @@ function exemploSeguro(v: unknown): unknown {
 // invalido derrube a leitura dos demais.
 async function lerCampoPorIds(
   ids: string[],
-  nivel: "anuncio" | "criativo" | "conta",
+  nivel: "anuncio" | "criativo" | "conta" | "conjunto",
   campo: string,
 ): Promise<ResultadoCampo> {
   const valores = new Map<string, unknown>();
@@ -424,6 +438,28 @@ Deno.serve(async (req) => {
   }
 
   const diagnosticoCampos: LeituraCampo[] = [];
+
+  // ============ v8: ESTADO DO CONJUNTO, ANTES DAS SONDAS PESADAS ============
+  // Primeiro da fila de proposito. Este e o dado que o portao de emissao de anuncio consulta;
+  // se um estouro do teto do cron interromper a corrida no meio das sondas de criativo, o que
+  // nao pode faltar e justamente ele. Mesma licao da v5, aplicada ao nivel do conjunto.
+  const adsetIds = [...new Set([...adsetsPorConta.values()].flat())];
+  const adsetDynamic = await lerCampoPorIds(adsetIds, "conjunto", "is_dynamic_creative");
+  diagnosticoCampos.push(adsetDynamic.diagnostico);
+
+  let estadoConjuntos: unknown = { nota: "nenhum conjunto lido na Graph" };
+  if (adsetDynamic.valores.size) {
+    // So entra na lista o conjunto cuja chave a Graph devolveu: e a diferenca entre "nao
+    // respondeu" e "respondeu false". A RPC preserva o valor anterior no primeiro caso, para
+    // que nulo continue significando "nunca verificado" e o portao siga recusando fechado.
+    const linhas = [...adsetDynamic.valores.entries()].map(([id, valor]) => ({
+      adset_external_id: id,
+      is_dynamic_creative: valor,
+      fonte: "Graph fields=is_dynamic_creative; coleta meta-campaign-status",
+    }));
+    const { data, error } = await supa.rpc("espelhar_estado_de_conjuntos_da_graph", { p: linhas });
+    estadoConjuntos = error ? { erro: error.message } : data;
+  }
 
   const adUrlTags = await lerCampoPorIds(adIds, "anuncio", "url_tags");
   diagnosticoCampos.push(adUrlTags.diagnostico);
@@ -709,6 +745,12 @@ Deno.serve(async (req) => {
       resultado: espelhoAds,
       nota: "inseridos = anuncio que existia na Graph e nao no espelho (a rota do Windsor nao o traz porque descarta objeto sem entrega). Metrica de anuncio novo e a soma de ad_metric_snapshots, nao um zero inventado; anuncio existente nao tem metrica tocada aqui - quem a mantem e o windsor-sync na janela ampla. last_synced_at avanca para todo anuncio lido na Graph.",
     },
+    estado_dos_conjuntos: {
+      conjuntos_lidos_na_meta: adsetIds.length,
+      resultado: estadoConjuntos,
+      sonda: diagnosticoCampos.filter((d) => d.nivel === "conjunto"),
+      nota: "is_dynamic_creative=true impede anuncio avulso no conjunto (Criativo Dinamico); false libera. Campo nao devolvido pela Graph preserva o valor anterior - nulo continua significando 'nunca verificado', e nesse caso o portao de emissao recusa fechado. Ate a v8 nenhuma coleta preenchia esta coluna: todo conjunto criado depois da medicao manual de 07/08 travava a emissao de anuncio sem que nenhuma espera resolvesse. sem_espelho = conjunto que existe na Graph e ainda nao em ad_sets.",
+    },
     orfaos_ausentes_na_graph: {
       por_conta: orfaosPorConta,
       nota: "Apos lista Graph ok, o que esta no espelho e nao veio e marcado status=DELETED + ausente_na_graph_em. Conta inacessivel nao entra (falso positivo). Nao apaga metrica. Rodar de novo depois que Ryan apagar TESTE-* na Meta.",
@@ -742,6 +784,6 @@ Deno.serve(async (req) => {
       ),
       nota: "com_chave=0 significa campo nao retornado: a coluna nao entra no upsert. Array vazio ou null com chave presente e uma leitura e e preservado. Conta inacessivel nao gera linha.",
     },
-    versao: "meta-campaign-status-v7",
+    versao: "meta-campaign-status-v8",
   });
 });
