@@ -285,6 +285,7 @@ Deno.serve(async (req) => {
   ];
 
   const reais = new Map<string, string>(); // campaign_id -> effective_status
+  const nomesReais = new Map<string, string>(); // campaign_id -> name (nome real na Meta)
   const config = new Map<string, ConfigCampanha>(); // campaign_id -> configuracao lida da Graph
   const acessiveis: string[] = [];
   const inacessiveis: string[] = [];
@@ -334,6 +335,7 @@ Deno.serve(async (req) => {
       const campIds = campanhasPorConta.get(c) ?? [];
       for (const x of p?.data ?? []) {
         reais.set(String(x.id), String(x.effective_status ?? ""));
+        if (x.name != null) nomesReais.set(String(x.id), String(x.name));
         config.set(String(x.id), lerConfig(x));
         campIds.push(String(x.id));
       }
@@ -714,6 +716,7 @@ Deno.serve(async (req) => {
     .eq("provider", "meta_ads");
 
   const corrigidas: any[] = [];
+  const renomeadas: any[] = [];
   const porInatividade: any[] = [];
   let iguais = 0;
   let configGravada = 0;
@@ -732,9 +735,26 @@ Deno.serve(async (req) => {
       const novo = real.toUpperCase() === "ACTIVE" ? "active" : "paused";
       if (novo !== loc.status) patch.status = novo;
 
+      // ESPELHO DO NOME: o nome pode ter mudado na Meta (renomear_campanha, ou edicao manual no
+      // Gerenciador) sem o espelho acompanhar. A reconciliacao ja sincroniza status; o nome segue
+      // a mesma logica - a Graph e a fonte de autoridade. Sem isto, um rename executado deixava
+      // campaigns.name defasado ate alguem reescrever a mao.
+      const nomeReal = nomesReais.get(String(loc.external_id));
+      const nomeMudou = nomeReal != null && nomeReal !== loc.name;
+      if (nomeMudou) patch.name = nomeReal;
+
       if (Object.keys(patch).length > 0)
         await supa.from("campaigns").update(patch).eq("id", loc.id);
       if (cfgCamp) configGravada++;
+
+      if (nomeMudou) {
+        renomeadas.push({
+          external_id: loc.external_id,
+          de: loc.name,
+          para: nomeReal,
+          fonte: "name da Meta (Graph)",
+        });
+      }
 
       if (novo !== loc.status) {
         corrigidas.push({
@@ -800,6 +820,8 @@ Deno.serve(async (req) => {
     campanhas_lidas_na_meta: reais.size,
     corrigidas_por_status_oficial: corrigidas.length,
     corrigidas,
+    renomeadas_por_nome_oficial: renomeadas.length,
+    renomeadas,
     pausadas_por_inatividade: porInatividade.length,
     porInatividade,
     ja_corretas: iguais,

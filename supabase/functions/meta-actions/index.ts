@@ -2288,6 +2288,41 @@ Deno.serve(async (req) => {
               : "NAO consegui olhar o objeto na Graph depois da escrita. Isto NAO afirma que a alteracao falhou - nada foi concluido sobre o valor.",
         });
       }
+      // ESPELHO DO NOME (renomear_campanha): a escrita muda o nome na Meta, mas ate aqui o espelho
+      // campaigns.name seguia afirmando o nome ANTIGO - o agente leu esse valor stale e errou duas
+      // vezes. As outras acoes desta executora nao mexem no nome; a reconciliacao periodica so
+      // sincronizava status. Fonte de autoridade: o nome LIDO de volta na Graph (depois.body.name,
+      // conferido); sem leitura, o nome pedido (post.name) - mesma precedencia do espelhar() de
+      // criacao. Falha de espelho vai para o audit, nao derruba a execucao (o objeto na Meta ja mudou).
+      if (acao === "renomear_campanha") {
+        const nomeGraph = (depois.body as any)?.name;
+        const nomeEspelho = String(nomeGraph ?? post?.name ?? "").trim();
+        if (nomeEspelho) {
+          const { error: erroEspelho } = await supa
+            .from("campaigns")
+            .update({ name: nomeEspelho })
+            .eq("provider", "meta_ads")
+            .eq("external_id", alvoExt);
+          await audit(
+            r.company_id,
+            sistema,
+            erroEspelho ? "meta_action_espelho_nome_falhou" : "meta_action_espelho_nome",
+            r.id,
+            {
+              acao,
+              alvo_external_id: alvoExt,
+              campo: "name",
+              valor_espelhado: nomeEspelho,
+              fonte: nomeGraph != null ? "graph (conferido)" : "nome pedido (graph nao relida)",
+              reconciliacao_estado: reconciliacao?.estado ?? null,
+              erro: erroEspelho?.message ?? null,
+              nota: erroEspelho
+                ? "FALHA ao espelhar campaigns.name - o nome na Meta mudou mas o espelho local segue defasado ate a proxima reconciliacao"
+                : "campaigns.name sincronizado com a Meta apos renomear_campanha bem-sucedido",
+            },
+          );
+        }
+      }
       await supa
         .from("approval_requests")
         .update({
