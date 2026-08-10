@@ -13,6 +13,7 @@ import {
   Lock,
   AlertTriangle,
   RotateCcw,
+  ShieldCheck,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAgora } from "@/hooks/use-agora";
@@ -62,7 +63,12 @@ const ACTION_META: Record<string, { label: string; icon: typeof Pause }> = {
   escalar_criativo: { label: "Escalar criativo", icon: TrendingUp },
   pausar_campanha: { label: "Pausar campanha", icon: PauseCircle },
   alterar_orcamento: { label: "Alterar orçamento", icon: DollarSign },
+  registrar_veredito_peca: { label: "Veredito de compliance", icon: ShieldCheck },
 };
+
+/** Card cuja aprovação se resolve dentro do banco, sem escrita no Meta — logo, nada a
+ *  "aplicar no Gerenciador". Aprovar aqui É o ato: a assinatura gravada é a de quem clica. */
+const DECIDE_NO_BANCO = new Set(["registrar_veredito_peca"]);
 
 const STATUS_META: Record<string, { label: string; className: string }> = {
   pending: {
@@ -160,10 +166,14 @@ export function ActionCard({
   const [reason, setReason] = useState("");
 
   const meta = ACTION_META[approval.action] ?? { label: approval.action, icon: Clock };
-  const status = STATUS_META[approval.status] ?? {
+  const statusBase = STATUS_META[approval.status] ?? {
     label: approval.status,
     className: "border-border bg-muted text-muted-foreground",
   };
+  const status =
+    approval.status === "approved" && DECIDE_NO_BANCO.has(approval.action)
+      ? { ...statusBase, label: "Aprovada — veredito registrado" }
+      : statusBase;
   const Icon = meta.icon;
   const just = justificativa(approval.payload);
   const pendente = approval.status === "pending";

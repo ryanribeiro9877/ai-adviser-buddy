@@ -66,7 +66,7 @@ const TOOLS = [
   { name: "custo_llm_periodo", description: "Calcula em USD o custo derivado dos tokens gravados de chat e jobs do company_id no periodo. Nao e fatura. Declara premissa de modelos e lacunas: cache-teto, subagentes sem tokens e visao/compliance-check invisiveis.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, de: { type: "string", description: "YYYY-MM-DD" }, ate: { type: "string", description: "YYYY-MM-DD" } }, required: ["company_id", "de", "ate"] } },
   { name: "panorama_utm_anuncios", description: "Mostra no company_id a coleta de url_tags e destino: nunca lido, lido sem/com rotulo, rotulos, ambiguidades e URLs. Distingue ausencia configurada de nao coleta quando o retorno permite. Nao mede leads por UTM; token alcanca so parte das contas.", inputSchema: { type: "object", properties: { company_id: { type: "string" } }, required: ["company_id"] } },
   { name: "nota_visual_da_peca", description: "Retorna nota visual textual de uma peca no company_id: revisao aberta, base, produto, aproveitabilidade, risco, motivo e divergencia. Informa, nao aprova; ausencia de leitura nao e ausencia de risco.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, drive_file_id: { type: "string" } }, required: ["company_id", "drive_file_id"] } },
-  { name: "registrar_veredito_peca_em_revisao", description: "PORTA UNICA para o responsavel fechar revisao de compliance. So use com veredito humano explicito. liberado_como_esta desbloqueia; ajustar_peca/nao_usar mantem bloqueio. Nao faca UPDATE a mao.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, drive_file_id: { type: "string" }, veredito: { type: "string", enum: ["liberado_como_esta", "ajustar_peca", "nao_usar"] }, veredito_por: { type: "string" }, nota: { type: "string" } }, required: ["company_id", "drive_file_id", "veredito", "veredito_por"] } },
+  { name: "registrar_veredito_peca_em_revisao", description: "PROPOE veredito de compliance emitindo um CARD DE APROVACAO. NAO decide e NAO libera: a peca segue impedida ate um administrador aprovar na tela, e a assinatura gravada e a de quem aprovar (resolvida por auth.users). veredito_por entra so como autor_sugerido, sem valor de decisao. liberado_como_esta libera SE aprovado; ajustar_peca/nao_usar mantem o bloqueio. Proposta pendente ja existente e recusada. Nao faca UPDATE a mao.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, drive_file_id: { type: "string" }, veredito: { type: "string", enum: ["liberado_como_esta", "ajustar_peca", "nao_usar"] }, veredito_por: { type: "string", description: "Opcional: quem pediu. Informativo, nao assinatura." }, nota: { type: "string" } }, required: ["company_id", "drive_file_id", "veredito"] } },
   { name: "get_acervo_para_anuncio", description: "ACERVO do Drive apto a VIRAR anuncio novo no company_id, deduplicado por arquivo e filtravel por produto (ex.: 'CLT'). Diferente de anuncios ja no ar: aqui estao as pecas do acervo. Por peca: nome, drive_file_id, o que a peca DIZ (transcricao do video / texto visivel), analise visual, se esta na biblioteca da Meta (apta), bloqueio de compliance SEMPRE marcado e se ja foi usada em anuncio. Video: produto INFERIDO; sem transcricao vem declarado.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, produto: { type: "string" }, incluir_inaptas: { type: "boolean" } }, required: ["company_id"] } },
   { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e problema depois do clique e apenas apontado porque esta fora do escopo.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, ad_external_id: { type: "string" } }, required: ["company_id", "ad_external_id"] } },
   { name: "avaliar_fadiga", description: "Avalia se uma peca cansou, teve queda sem saturacao, esta com frequencia alta antes da queda ou nao tem sinal de fadiga. Exige company_id e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e declara que frequencia deduplicada de 30 dias nao pode ser derivada das linhas diarias.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, ad_external_id: { type: "string" } }, required: ["company_id", "ad_external_id"] } },
@@ -188,14 +188,21 @@ async function callTool(name: string, args: any) {
         return await callRpc("panorama_utm_anuncios", { p_company_id: args.company_id });
       case "nota_visual_da_peca":
         return await callRpc("nota_visual_da_peca", { p_company_id: args.company_id, p_drive_file_id: args.drive_file_id });
-      case "registrar_veredito_peca_em_revisao":
+      case "registrar_veredito_peca_em_revisao": {
+        // A RPC exige um solicitante real (FK em auth.users): proposta sem dono nao e proposta.
+        // Aqui nao existe sessao de usuario, entao o pedido nasce no nome de um admin. Isso NAO
+        // decide nada - quem assina o veredito e quem aprovar o card na tela.
+        const { data: adm } = await db.from("user_roles").select("user_id").eq("role", "admin").limit(1).maybeSingle();
+        if (!adm?.user_id) return toolText("Nao ha administrador cadastrado para assinar a proposta de veredito.", true);
         return await callRpc("registrar_veredito_peca_em_revisao", {
           p_company_id: args.company_id,
           p_drive_file_id: args.drive_file_id,
           p_veredito: args.veredito,
-          p_veredito_por: args.veredito_por,
+          p_veredito_por: (typeof args.veredito_por === "string" && args.veredito_por.trim()) ? args.veredito_por.trim() : null,
           p_nota: (typeof args.nota === "string" && args.nota.trim()) ? args.nota.trim() : null,
+          p_solicitado_por: adm.user_id,
         });
+      }
       case "get_acervo_para_anuncio":
         return await callRpc("get_acervo_para_anuncio", { p_company_id: args.company_id, p_produto: (typeof args.produto === "string" && args.produto.trim()) ? args.produto.trim() : null, p_incluir_inaptas: args.incluir_inaptas === false ? false : true });
       case "diagnosticar_custo":
