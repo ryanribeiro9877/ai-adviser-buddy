@@ -1,4 +1,21 @@
-// supabase/functions/meta-campaign-status/index.ts (v8)
+// supabase/functions/meta-campaign-status/index.ts (v10)
+// v10 (10/08/2026) - os OUTROS pre-requisitos do molde. Conferindo o criterio da v9 contra a
+//   executora apareceram dois vizinhos no mesmo ponto de meta-actions, com o mesmo defeito de
+//   momento: molde_sem_page_id e molde_sem_link_de_destino tambem so falavam depois da
+//   aprovacao. Agora page_id e o link de destino (que mora dentro do video_data) tambem sao
+//   gravados, e o portao cobra os quatro na ordem da executora.
+// v9 (10/08/2026) - ESTADO DO CRIATIVO: ELE SERVE DE MOLDE PARA PECA NOVA DE VIDEO?
+//   Mesmo defeito da v8, um nivel ao lado. Em 10/08 as 21:58 um card de anuncio foi
+//   APROVADO e so entao a execucao recusou com molde_sem_video_data - o molde escolhido
+//   era de conjunto Dynamic Creative e expunha object_story_spec so com page_id. A recusa
+//   estava certa; errado era o MOMENTO, porque aprovar card de anuncio e o ato que inicia
+//   o gasto e o gestor aprovou algo que nunca teve como executar.
+//   O dado ja passava por aqui: esta funcao le object_story_spec de todo criativo da conta
+//   desde a v4 (GT-12), usava so para deduzir destino_url e descartava o resto. Agora o
+//   fato e gravado em creative_estado_graph e o portao (contrato_de_estado_execucao,
+//   propriedade molde_expoe_video_data) recusa ANTES do card.
+//   O criterio de "expoe video" replica literalmente o da executora meta-actions: divergir
+//   recriaria o mesmo defeito ao contrario - card emitido que a execucao recusa.
 // v8 (10/08/2026) - ESTADO DO CONJUNTO (is_dynamic_creative) PASSA A SER COLETADO.
 //   O portao de emissao de anuncio (avaliar_estado_destino_execucao) le
 //   ad_sets.is_dynamic_creative e RECUSA fechado quando a coluna e nula - correto, porque
@@ -110,6 +127,10 @@ type LeituraCampo = {
 
 type ResultadoCampo = {
   valores: Map<string, unknown>;
+  // v9: quem RESPONDEU, independentemente de ter trazido a chave. Sem este conjunto nao da
+  // para separar "a Graph nao respondeu por este objeto" de "respondeu e o campo nao existe
+  // nele" - e essa e justamente a diferenca entre nao saber e saber que nao tem.
+  respondidos: Set<string>;
   diagnostico: LeituraCampo;
 };
 
@@ -169,6 +190,7 @@ async function lerCampoPorIds(
   campo: string,
 ): Promise<ResultadoCampo> {
   const valores = new Map<string, unknown>();
+  const respondidos = new Set<string>();
   const diagnostico: LeituraCampo = {
     nivel,
     campo,
@@ -197,6 +219,7 @@ async function lerCampoPorIds(
       const obj = p[id];
       if (!obj || typeof obj !== "object") continue;
       diagnostico.respostas++;
+      respondidos.add(id);
       if (!temChave(obj, campo)) continue;
       const valor = obj[campo];
       valores.set(id, valor);
@@ -204,7 +227,7 @@ async function lerCampoPorIds(
       if (diagnostico.exemplos.length < 2) diagnostico.exemplos.push(exemploSeguro(valor));
     }
   }
-  return { valores, diagnostico };
+  return { valores, respondidos, diagnostico };
 }
 
 function destinoDoCriativo(
@@ -486,6 +509,7 @@ Deno.serve(async (req) => {
   diagnosticoCampos.push(accountCapabilities.diagnostico);
 
   const camposCriativo = new Map<string, Map<string, unknown>>();
+  let storySpec: ResultadoCampo | null = null;
   for (const campo of [
     "url_tags",
     "object_story_spec",
@@ -495,7 +519,51 @@ Deno.serve(async (req) => {
   ]) {
     const lido = await lerCampoPorIds(creativeIds, "criativo", campo);
     camposCriativo.set(campo, lido.valores);
+    if (campo === "object_story_spec") storySpec = lido;
     diagnosticoCampos.push(lido.diagnostico);
+  }
+
+  // ============ v9: O CRIATIVO SERVE DE MOLDE PARA PECA NOVA DE VIDEO? ============
+  // Esta leitura ja acontecia desde a v4 e era usada so para deduzir destino_url; o resto
+  // era descartado. Em 10/08 um card foi APROVADO e so entao falhou com molde_sem_video_data,
+  // porque a emissao nao tinha como saber o que esta corrida ja sabia. Agora o fato fica.
+  //
+  // O criterio replica LITERALMENTE o da executora (meta-actions montarCriacao): spec ausente
+  // ou nulo recusa, e video_data e testado pelo VALOR, nao pela presenca da chave. Divergir
+  // aqui recriaria o defeito ao contrario - um card emitido que a execucao recusa.
+  let estadoCriativos: unknown = { nota: "object_story_spec nao foi lido nesta corrida" };
+  if (storySpec && storySpec.respondidos.size) {
+    const contaDoCriativo = new Map<string, string>();
+    for (const a of anunciosGraph) {
+      if (a.creative_id) contaDoCriativo.set(a.creative_id, a.account_id);
+    }
+    // So os que RESPONDERAM entram. Criativo sem resposta preserva o valor anterior, e a
+    // linha ausente continua significando "nunca verificado" para o portao de emissao.
+    const linhas = [...storySpec.respondidos].map((id) => {
+      const bruto = storySpec!.valores.get(id);
+      const spec =
+        storySpec!.valores.has(id) && bruto && typeof bruto === "object"
+          ? (bruto as Record<string, unknown>)
+          : null;
+      const videoData = spec ? (spec.video_data as Record<string, unknown> | null) : null;
+      // O link mora DENTRO do video_data, nos dois lugares em que a executora o procura.
+      // Sem video_data nao ha link, e o false daqui e consequencia, nao diagnostico - a
+      // ordem declarada no contrato garante que a recusa de video_data fale primeiro.
+      const cta = videoData?.call_to_action as { value?: { link?: unknown } } | undefined;
+      const link = cta?.value?.link ?? videoData?.link ?? null;
+      return {
+        creative_id: id,
+        account_id: contaDoCriativo.get(id) ?? null,
+        expoe_object_story_spec: spec !== null,
+        expoe_video_data: !!videoData,
+        expoe_page_id: !!spec?.page_id,
+        expoe_link_destino: !!link,
+        chaves_do_spec: spec ? Object.keys(spec) : [],
+        fonte: "Graph fields=object_story_spec; coleta meta-campaign-status",
+      };
+    });
+    const { data, error } = await supa.rpc("espelhar_estado_de_criativos_da_graph", { p: linhas });
+    estadoCriativos = error ? { erro: error.message } : data;
   }
 
   const { data: adsLocais } = await supa
@@ -745,6 +813,11 @@ Deno.serve(async (req) => {
       resultado: espelhoAds,
       nota: "inseridos = anuncio que existia na Graph e nao no espelho (a rota do Windsor nao o traz porque descarta objeto sem entrega). Metrica de anuncio novo e a soma de ad_metric_snapshots, nao um zero inventado; anuncio existente nao tem metrica tocada aqui - quem a mantem e o windsor-sync na janela ampla. last_synced_at avanca para todo anuncio lido na Graph.",
     },
+    estado_dos_criativos: {
+      criativos_lidos_na_meta: creativeIds.length,
+      resultado: estadoCriativos,
+      nota: "Responde se o criativo serve de MOLDE para peca nova de video: expoe_video_data=true libera; false significa que usar o molde mudaria o FORMATO do anuncio, nao a peca (tipico de criativo de conjunto Criativo Dinamico, onde a midia vive no asset_feed_spec, e de molde de imagem). Criativo que a Graph nao respondeu nao entra e continua 'nunca verificado', com o portao recusando fechado. O criterio e o mesmo da executora meta-actions, de proposito.",
+    },
     estado_dos_conjuntos: {
       conjuntos_lidos_na_meta: adsetIds.length,
       resultado: estadoConjuntos,
@@ -784,6 +857,6 @@ Deno.serve(async (req) => {
       ),
       nota: "com_chave=0 significa campo nao retornado: a coluna nao entra no upsert. Array vazio ou null com chave presente e uma leitura e e preservado. Conta inacessivel nao gera linha.",
     },
-    versao: "meta-campaign-status-v8",
+    versao: "meta-campaign-status-v10",
   });
 });
