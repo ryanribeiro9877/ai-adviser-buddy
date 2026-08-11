@@ -1,4 +1,16 @@
-// supabase/functions/meta-campaign-status/index.ts (v13)
+// supabase/functions/meta-campaign-status/index.ts (v14)
+// v14 (11/08/2026) - COLETA PONTUAL DE UM CONJUNTO SOB DEMANDA (auto-resolucao de leitura).
+//   A corrida diaria colhe is_dynamic_creative de TODOS os conjuntos, mas conjunto recem-criado
+//   pelo fluxo nasce com is_dynamic_creative NULO e so ganha leitura no dia seguinte - e o portao
+//   de emissao recusa fechado (estado_conjunto_destino_nao_verificado). Medido em 11/08 com o
+//   conjunto 120254414154880191 ("Campanhas Teste RR"): tinha linha em ad_sets, mas estado nulo,
+//   e o card do anuncio travou. Nao e edge case: e o caminho feliz de "crio o conjunto e no minuto
+//   seguinte quero o anuncio nele". Doutrina do Ryan (11/08): lacuna de LEITURA que o sistema
+//   alcanca e resolvida na mesma chamada, sem devolver tarefa ao humano.
+//   Esta versao aceita, alem da corrida completa (POST sem corpo, do cron), um POST com
+//   { conjunto | adset_external_id } que le SO aquele conjunto na Graph (fields=is_dynamic_creative,
+//   LEITURA, nada escrito na Meta), garante a linha em ad_sets se faltar e espelha pela MESMA RPC
+//   espelhar_estado_de_conjuntos_da_graph. Reusa lerCampoPorIds - nada de parsing duplicado.
 // v13 (11/08/2026) - MOLDE DE IMAGEM: grava expoe_link_data + serve_de_molde_imagem a partir
 //   de object_story_spec.link_data (page_id + link + CTA). Os 25 criativos com
 //   chaves=["page_id","link_data"] passam a servir de molde para peca nova de imagem.
@@ -287,6 +299,84 @@ function destinoDoCriativo(
   return { lido: true, situacao: "ausente", url: null, candidatas: null };
 }
 
+// v14: coleta pontual do estado de UM conjunto. Le is_dynamic_creative (e, quando precisa criar a
+// linha, account_id/name) na Graph e espelha pela mesma RPC da corrida diaria. LEITURA apenas -
+// nada e criado/pausado/alterado na Meta. Preserva o contrato do ESP-13: campo ausente na Graph
+// nao vira false; so grava quando o valor veio como booleano.
+async function coletarEstadoDeUmConjunto(externalId: string, corpo: any): Promise<Response> {
+  const accountBody = corpo?.account_id ? String(corpo.account_id).replace(/^act_/, "").trim() : null;
+  const companyBody = corpo?.company_id ? String(corpo.company_id).trim() : null;
+
+  // Reuso do parser de campo por ids (nada duplicado). Um unico id no lote.
+  const r = await lerCampoPorIds([externalId], "conjunto", "is_dynamic_creative");
+  const respondido = r.respondidos.has(externalId);
+  const valor = r.valores.has(externalId) ? r.valores.get(externalId) : null;
+  const boolLido = typeof valor === "boolean" ? valor : null;
+
+  // Garante a linha em ad_sets: conjunto lido na Graph que ainda nao existe no espelho nao pode ser
+  // espelhado pela RPC (ela so faz UPDATE). account_id/company_id sao nullable; preencho quando os
+  // tenho (corpo da emissao ou leitura da Graph) para o portao casar por conta.
+  let linhaCriada = false;
+  const { data: existe } = await supa
+    .from("ad_sets")
+    .select("external_id, account_id, company_id")
+    .eq("external_id", externalId)
+    .eq("provider", "meta_ads")
+    .maybeSingle();
+
+  if (!existe) {
+    let accountId = accountBody;
+    let nome: string | null = null;
+    // Sem conta conhecida, pergunto a Graph pelo objeto (id, account_id, name) - ainda LEITURA.
+    const url = `${GRAPH}/${encodeURIComponent(externalId)}?fields=id,account_id,name&access_token=${encodeURIComponent(TOKEN)}`;
+    try {
+      const g = await fetch(url);
+      const gt = await g.text();
+      if (g.ok) {
+        const gp: any = JSON.parse(gt);
+        if (!accountId && gp?.account_id) accountId = String(gp.account_id).replace(/^act_/, "");
+        if (gp?.name != null) nome = String(gp.name);
+      }
+    } catch { /* leitura opcional: se falhar, insere linha minima */ }
+    const linha: Record<string, unknown> = {
+      external_id: externalId,
+      provider: "meta_ads",
+      criado_pelo_sistema: true,
+    };
+    if (accountId) linha.account_id = accountId;
+    if (companyBody) linha.company_id = companyBody;
+    if (nome) linha.name = nome;
+    const { error: insErr } = await supa.from("ad_sets").insert(linha);
+    linhaCriada = !insErr;
+  }
+
+  let espelho: unknown = { nota: "is_dynamic_creative nao veio como booleano na Graph; nada gravado" };
+  if (boolLido !== null) {
+    const { data, error } = await supa.rpc("espelhar_estado_de_conjuntos_da_graph", {
+      p: [{
+        adset_external_id: externalId,
+        is_dynamic_creative: boolLido,
+        fonte: "coleta pontual sob demanda; Graph fields=is_dynamic_creative",
+      }],
+    });
+    espelho = error ? { erro: error.message } : data;
+  }
+
+  return json({
+    modo: "coleta_pontual_de_conjunto",
+    conjunto: externalId,
+    respondido_pela_graph: respondido,
+    is_dynamic_creative: boolLido,
+    linha_criada: linhaCriada,
+    espelho,
+    diagnostico: r.diagnostico,
+    nota:
+      "Leitura pontual do estado do conjunto. is_dynamic_creative=true impede anuncio avulso " +
+      "(Dynamic Creative); false libera; null = a Graph nao devolveu o campo e o portao segue " +
+      "recusando fechado. Nada foi criado/pausado/alterado na Meta.",
+  });
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   if (!TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
@@ -294,6 +384,15 @@ Deno.serve(async (req) => {
   // que autoriza revogar a chave legada depois (CODE 1.5).
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-or-bearer"));
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
+
+  // v14: modo pontual. O cron dispara POST sem corpo (corrida completa); a auto-resolucao de
+  // leitura manda { conjunto | adset_external_id } e recebe SO aquele conjunto, sem varrer a conta.
+  let corpo: any = null;
+  try { corpo = await req.json(); } catch { corpo = null; }
+  const conjuntoAlvo = corpo && typeof corpo === "object"
+    ? String(corpo.conjunto ?? corpo.adset_external_id ?? "").trim()
+    : "";
+  if (conjuntoAlvo) return await coletarEstadoDeUmConjunto(conjuntoAlvo, corpo);
 
   const { data: integs } = await supa
     .from("integrations")

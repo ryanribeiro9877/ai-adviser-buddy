@@ -1061,10 +1061,26 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       return { erro: "verificacao_do_pedido_indisponivel",
         detalhe: `Nao consegui verificar se o pedido esta completo (${verErr?.message ?? "resposta vazia"}), entao NAO emiti o card. Sem essa verificacao eu estaria propondo criacao de anuncio sem conferir o que ela exige.` };
     }
-    const v: any = ver;
+    let v: any = ver;
+    // AUTO-RESOLUCAO DE LEITURA (doutrina Ryan 11/08): se o portao recusou porque o estado do
+    // conjunto de destino nao foi verificado (is_dynamic_creative nulo - conjunto recem-criado que
+    // ainda nao entrou na coleta diaria), o sistema NAO devolve tarefa ao humano. Ele colhe o estado
+    // do conjunto na Graph (LEITURA, sem escrita na Meta), espelha aquela linha e reavalia UMA vez,
+    // na mesma chamada. Ponto de escolha: aqui, na emissao, e nao numa tool separada - a falha
+    // reportada foi o agente DIAGNOSTICAR a leitura que faltava e mesmo assim mandar pedir de novo;
+    // uma tool exposta ao agente reintroduz esse mesmo desvio (ele teria de lembrar de chama-la).
+    // Resolvendo inline, o agente sai do laco e o card fecha na mesma conversa. Nao afrouxa portao:
+    // leitura fresca dizendo Dynamic Creative mantem a recusa por nome.
+    let autoResConjunto: any = null;
+    if (v.completo !== true && v.recusa === "estado_conjunto_destino_nao_verificado") {
+      autoResConjunto = await t_atualizar_estado_conjunto(dest.external_id, contaDaEmpresa, companyId, mcpKey);
+      const { data: ver2 } = await supa.rpc("pedido_de_anuncio_completo", { p_company_id: companyId, p_pedido: pedido });
+      if (ver2) v = ver2;
+    }
     if (v.completo !== true) {
       // A mensagem e dela, nao minha: recusa inventada aqui seria a doutrina em dois lugares.
       return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
+        auto_resolucao_estado_conjunto: autoResConjunto,
         faltando: v.faltando ?? null, mensagem_para_o_gestor: v.mensagem_para_o_gestor,
         destino_do_anuncio: v.destino_do_anuncio ?? null,
         instrucao: "Repasse esta mensagem ao gestor e peca o que falta. NAO monte card e NAO preencha o que falta por conta propria." };
@@ -1226,6 +1242,23 @@ async function t_upload_midia(companyId: string, driveFileId: string, mcpKey: st
   const t = await r.text();
   let j: any; try { j = JSON.parse(t); } catch { return { ok: false, erro: `upload-midia falhou (${r.status}): ${t.slice(0, 200)}` }; }
   return j;
+}
+
+// Auto-resolucao de LEITURA (doutrina Ryan 11/08): estado de conjunto ausente/desatualizado e uma
+// lacuna que o sistema alcanca sozinho. Dispara a coleta pontual da meta-campaign-status (le
+// is_dynamic_creative na Graph, LEITURA, e espelha aquela linha agora) para o portao reavaliar na
+// MESMA chamada. Nao escreve nada na Meta e nao afrouxa portao: se a leitura fresca disser Dynamic
+// Creative, a recusa por nome continua, agora com o fato fresco em vez de "nao sei".
+async function t_atualizar_estado_conjunto(adsetExternalId: string, accountId: string | null, companyId: string, mcpKey: string) {
+  const body: Record<string, unknown> = { conjunto: adsetExternalId, company_id: companyId };
+  if (accountId) body.account_id = accountId;
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/meta-campaign-status`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+    body: JSON.stringify(body),
+  });
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { ok: false, erro: `coleta pontual do conjunto falhou (${r.status}): ${t.slice(0, 200)}` }; }
 }
 
 // Video na Meta e assincrono: id existe antes de status.video_status=ready.
