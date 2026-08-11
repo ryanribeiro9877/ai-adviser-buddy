@@ -809,7 +809,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   cards.push({ approval_id: ins.id, action, entity_type: entityType, target_name: alvo.name, summary, params, status: "pending" });
   return { ok: true, approval_id: ins.id, resumo: summary, aviso: "Pedido PENDENTE. Nada foi executado." };
 }
-/** Tool dedicada: emite card humano; meta-actions é o único executor e exige Pipeboard. */
+/** Tool dedicada: emite card humano; meta-actions Ã© o Ãºnico executor e exige Pipeboard. */
 async function t_renomear_campanha(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[]) {
   const campanhaAtual = String(args?.campanha_atual ?? "").trim();
   const novoNome = String(args?.novo_nome ?? "").trim();
@@ -827,7 +827,7 @@ async function t_renomear_campanha(companyId: string, convId: string, requestedB
   }, cards);
 }
 // v25: proposta das acoes de CRIACAO. Separada de t_propose_action porque a semantica e
-// oposta: lá o alvo e o objeto a modificar; aqui o "alvo" e o MOLDE a replicar (ou, no caso
+// oposta: lÃ¡ o alvo e o objeto a modificar; aqui o "alvo" e o MOLDE a replicar (ou, no caso
 // de campanha, o nome do objeto que vai nascer).
 const ACOES_CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"];
 
@@ -968,7 +968,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // mostra sem expandir nada, e o gestor decide lendo o cartao no sininho - aviso que fica so na
     // conversa ja rolou para cima quando a decisao acontece.
     const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO` +
-      (avisoOrcamento ? ` — ${avisoOrcamento}` : "");
+      (avisoOrcamento ? ` â€” ${avisoOrcamento}` : "");
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
@@ -992,7 +992,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
   if (action === "criar_anuncio_a_partir_de") {
     const nomeNovo = String(params?.nome_novo ?? "").trim();
     // Nome do conjunto na fala do agente (ou id). O nome CANONICO no pedido/card/executor e
-    // conjunto_destino_external_id — o que montarCriacao consome. Alias conjunto_destino so
+    // conjunto_destino_external_id â€” o que montarCriacao consome. Alias conjunto_destino so
     // resolve o objeto aqui; a RPC e o payload usam o external_id.
     const conjuntoDestino = String(
       params?.conjunto_destino ?? params?.conjunto_destino_external_id ?? "",
@@ -1004,7 +1004,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!conjuntoDestino) {
       return {
         erro:
-          "params.conjunto_destino (nome) ou params.conjunto_destino_external_id obrigatorio — conjunto que recebe o anuncio",
+          "params.conjunto_destino (nome) ou params.conjunto_destino_external_id obrigatorio â€” conjunto que recebe o anuncio",
       };
     }
     if (!utmCampaign) return { erro: "params.utm_campaign obrigatorio: e o valor que aparece no Dash como identificacao da campanha (ex.: AGOSTO26). Pergunte ao gestor se nao souber." };
@@ -1012,7 +1012,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id").eq("company_id", companyId);
     const molde = (anuncios ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
     if (!molde) return { erro: `anuncio molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato.` };
-    if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel replicar sem upload de midia, que nao esta implementado.` };
+    if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde.` };
 
     const { data: sets } = await supa.from("ad_sets").select("id,name,external_id").eq("company_id", companyId);
     const dest = (sets ?? []).find((x) => x.external_id === conjuntoDestino)
@@ -1075,18 +1075,58 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (v.peca_ja_na_biblioteca === false) {
       return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
         mensagem_para_o_gestor: v.mensagem_para_o_gestor,
-        instrucao: "A peca ainda nao esta na biblioteca da conta. NAO emiti o card porque ele falharia na execucao, depois de aprovado. Repasse a mensagem ao gestor." };
+        proximo_passo: "chame upload_midia com este drive_file_id para subir a peca a biblioteca da conta; depois proponha o card de novo",
+        drive_file_id: driveFileId || null,
+        instrucao: "A peca ainda nao esta na biblioteca da conta. NAO emiti o card. NAO diga que o sistema nao sabe subir midia: chame upload_midia(drive_file_id) agora, espere o retorno (e, se for video, status_processamento=ready), e so entao proponha o card." };
     }
 
     // A biblioteca ja foi julgada pela RPC; aqui e so BUSCAR o valor que ela confirmou existir.
+    // Imagem e video: um anuncio avulso usa UM dos dois.
     let metaVideoId: string | null = null;
+    let metaImageHash: string | null = null;
     if (driveFileId) {
-      const { data: up } = await supa.from("media_uploads").select("meta_video_id")
-        .eq("drive_file_id", driveFileId).not("meta_video_id", "is", null).limit(1).maybeSingle();
+      const { data: up } = await supa.from("media_uploads")
+        .select("meta_video_id, meta_image_hash, tipo")
+        .eq("drive_file_id", driveFileId)
+        .eq("status", "enviado")
+        .or("meta_video_id.not.is.null,meta_image_hash.not.is.null")
+        .order("enviado_em", { ascending: false })
+        .limit(1).maybeSingle();
       metaVideoId = up?.meta_video_id ? String(up.meta_video_id) : null;
-      if (!metaVideoId) {
+      metaImageHash = up?.meta_image_hash ? String(up.meta_image_hash) : null;
+      if (!metaVideoId && !metaImageHash) {
         return { erro: "inconsistencia_entre_verificacao_e_biblioteca",
-          detalhe: `A verificacao disse que a peca ${driveFileId} esta na biblioteca da conta, mas media_uploads nao devolve meta_video_id para ela. NAO emiti card: propor criacao sem saber que midia sera publicada e o caminho para publicar a peca errada.` };
+          detalhe: `A verificacao disse que a peca ${driveFileId} esta na biblioteca da conta, mas media_uploads nao devolve meta_video_id nem meta_image_hash. NAO emiti card.`,
+          proximo_passo: "chame upload_midia com este drive_file_id" };
+      }
+    }
+
+    // Video na Meta e assincrono: o id existe antes do processamento terminar.
+    // Card apontando para video ainda processando falha na execucao - recusa aqui.
+    if (metaVideoId) {
+      const st = await t_status_video(metaVideoId, mcpKey);
+      if (st?.ok && st.pronto === false) {
+        return {
+          pedido_incompleto: true,
+          tipo_de_pedido: v.tipo_de_pedido ?? null,
+          meta_video_id: metaVideoId,
+          status_processamento: st.status_processamento ?? null,
+          mensagem_para_o_gestor:
+            `A peca ja tem identificador na Meta (${metaVideoId}), mas o video ainda nao esta pronto` +
+            (st.status_processamento ? ` (status_processamento=${st.status_processamento})` : "") +
+            ". NAO emiti o card porque anuncio apontando para video em processamento falha. Aguarde e consulte de novo; nao invente prazo.",
+          instrucao: "Repasse o estado real ao gestor. Nao prometa tempo de processamento.",
+        };
+      }
+      if (st?.ok === false) {
+        return {
+          pedido_incompleto: true,
+          tipo_de_pedido: v.tipo_de_pedido ?? null,
+          meta_video_id: metaVideoId,
+          mensagem_para_o_gestor:
+            `A peca tem meta_video_id=${metaVideoId}, mas nao consegui confirmar o status de processamento na Graph (${st?.erro ?? "falha"}). NAO emiti o card sem essa confirmacao.`,
+          instrucao: "Tente de novo com upload_midia/status ou aguarde; nao emita card Ã s cegas.",
+        };
       }
     }
 
@@ -1127,7 +1167,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       // v28.10 (GT-13): a executora le meta_video_id para trocar a midia no spec do molde.
       // Ausente = replicacao pura, e ela replica o criativo inteiro como sempre fez.
       tipo_de_pedido: v.tipo_de_pedido ?? null,
-      drive_file_id: driveFileId || null, meta_video_id: metaVideoId,
+      drive_file_id: driveFileId || null, meta_video_id: metaVideoId, meta_image_hash: metaImageHash,
       legenda, legenda_fonte: legendaFonte || null, legenda_referencias: legendaRefs,
       nota_visual_da_peca: v.nota_visual_da_peca ?? null,
       destino_url: destinoUrlCard,
@@ -1167,6 +1207,36 @@ async function t_check_compliance(legenda: string, imgAtts: { mime: string; b64:
   const r = await fetch(`${SUPABASE_URL}/functions/v1/compliance-check`, { method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey }, body: JSON.stringify(body) });
   const t = await r.text();
   try { return JSON.parse(t); } catch { return { erro: `compliance-check falhou (${r.status})` }; }
+}
+
+// Sobe peca do Drive para a biblioteca Meta (adimages/advideos) via edge upload-midia.
+// Respeita flag upload_midia e teto por hora DENTRO da edge. Idempotente.
+async function t_upload_midia(companyId: string, driveFileId: string, mcpKey: string, accountId?: string) {
+  const body: Record<string, unknown> = {
+    acao: "executar",
+    company: companyId,
+    drive_file_id: driveFileId,
+  };
+  if (accountId) body.account_id = accountId;
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+    body: JSON.stringify(body),
+  });
+  const t = await r.text();
+  let j: any; try { j = JSON.parse(t); } catch { return { ok: false, erro: `upload-midia falhou (${r.status}): ${t.slice(0, 200)}` }; }
+  return j;
+}
+
+// Video na Meta e assincrono: id existe antes de status.video_status=ready.
+async function t_status_video(videoId: string, mcpKey: string) {
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+    body: JSON.stringify({ acao: "status_video", video_id: videoId }),
+  });
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { ok: false, erro: `status_video falhou (${r.status})` }; }
 }
 
 // v28.6 (GT-03): a fila REAL, do banco. Sem isso o agente e cego para o efeito dos proprios
@@ -1234,10 +1304,11 @@ const TOOLS = [
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "get_acervo_para_anuncio", description: "ACERVO DO DRIVE PRONTO PARA VIRAR ANUNCIO NOVO. Esta e a ferramenta certa quando o gestor pede para MONTAR anuncio novo, ESCOLHER peca ou saber quais pecas do acervo servem para um produto - NAO use get_criativos_conteudo para isso (aquela le SO os anuncios ja no ar em public.ads e por isso nunca propoe peca nova). Deduplicada por arquivo e filtravel por produto (ex.: 'CLT'). Por peca: nome, drive_file_id, o que a peca DIZ (o_que_diz_no_audio = transcricao real do video; texto_visivel para imagem), analise visual, se esta na biblioteca da Meta (apta), se esta bloqueada por compliance (bloqueada_por_compliance, SEMPRE marcada quando ha revisao aberta) e se ja foi usada em anuncio antes. Honestidade embutida: produto de video e INFERIDO (produto_fonte); peca sem transcricao vem com transcricao_ausente=true. Antes de emitir o card de uma candidata, ainda leia nota_visual_da_peca.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional. Filtra por produto detectado, casa por pedaco insensivel a caso (ex.: 'CLT' acha 'consignado CLT'). Sem este campo devolve o acervo inteiro." }, incluir_inaptas: { type: "boolean", description: "Padrao true: inclui as bloqueadas e as fora da biblioteca, MARCADAS, para nao omitir nada. false = so as aptas agora." } } } } },
+  { type: "function", function: { name: "get_acervo_para_anuncio", description: "ACERVO DO DRIVE PRONTO PARA VIRAR ANUNCIO NOVO. Esta e a ferramenta certa quando o gestor pede para MONTAR anuncio novo, ESCOLHER peca ou saber quais pecas do acervo servem para um produto - NAO use get_criativos_conteudo para isso (aquela le SO os anuncios ja no ar em public.ads e por isso nunca propoe peca nova). Deduplicada por arquivo e filtravel por produto (ex.: 'CLT'). Por peca: nome, drive_file_id, meta_video_id (se video ja na Meta), meta_image_hash (se imagem ja na Meta), o que a peca DIZ, analise visual, na_biblioteca_da_meta/apta, bloqueio de compliance SEMPRE marcado e se ja foi usada. Se na_biblioteca_da_meta=false, chame upload_midia com o drive_file_id ANTES de propor o card - nao diga que o sistema nao sabe subir. Video recem-enviado pode ainda processar: so emita card com status ready.", parameters: { type: "object", properties: { produto: { type: "string" }, incluir_inaptas: { type: "boolean" } } } } },
+  { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. Localiza pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name (nunca access_token) e reconcilia pela Graph. ID, status, orcamento e estrutura nao mudam. Use quando o gestor pedir troca de nome; nao diga que nao existe ferramenta.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.utm_campaign e o conjunto que recebe o anuncio OBRIGATORIOS - o conjunto vai em params.conjunto_destino_external_id, e params.conjunto_destino aceita o nome dele quando voce so tem o nome). EXISTEM DOIS PEDIDOS DE ANUNCIO, e eles exigem coisas diferentes: (a) REPLICACAO PURA - escalar para outro conjunto um anuncio que ja funciona; nao passe params.drive_file_id, e a legenda NAO e sua: vem do molde. (b) PECA NOVA do acervo do Drive - passe params.drive_file_id (o id vem de get_drive_criativos ou get_analise_visual_drive, nunca o nome do arquivo), params.legenda e params.legenda_fonte, que e 'humano' se o gestor escreveu, 'herdada_do_molde' se ele autorizou usar o texto do molde, ou 'agente' se voce escreveu - e nesse caso params.legenda_referencias com os anuncios que serviram de base e OBRIGATORIO. So proponha peca nova cujo ja_enviada_para_meta seja true. NAO invente legenda para o pedido passar: se o gestor nao disse de onde vem o texto, PERGUNTE. Tudo que e criado nasce PAUSADO, com categoria especial de credito, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha). SO no anuncio com peca nova: drive_file_id, legenda, legenda_fonte ('humano' | 'herdada_do_molde' | 'agente') e legenda_referencias (array, obrigatorio quando a fonte e 'agente')" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa (evidencia), metrica_sucesso e reversa. Nunca proponha pausa baseada apenas em custo medio de recorte (veja get_ads_ranking). ACOES SOBRE O QUE JA EXISTE: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento - target_name e o objeto a alterar. ACOES DE CRIACAO: criar_campanha (target_name = NOME da campanha nova; params.objetivo opcional); criar_conjunto_a_partir_de (target_name = nome do conjunto MOLDE que ja funciona; params.nome_novo, params.campanha_destino e params.orcamento_diario_reais OBRIGATORIOS - se o gestor nao informou o orcamento, PERGUNTE, nao invente); criar_anuncio_a_partir_de (target_name = nome do anuncio MOLDE; params.nome_novo, params.utm_campaign e o conjunto que recebe o anuncio OBRIGATORIOS - o conjunto vai em params.conjunto_destino_external_id, e params.conjunto_destino aceita o nome dele quando voce so tem o nome). EXISTEM DOIS PEDIDOS DE ANUNCIO, e eles exigem coisas diferentes: (a) REPLICACAO PURA - escalar para outro conjunto um anuncio que ja funciona; nao passe params.drive_file_id, e a legenda NAO e sua: vem do molde. (b) PECA NOVA do acervo do Drive - passe params.drive_file_id (o id vem de get_drive_criativos ou get_analise_visual_drive, nunca o nome do arquivo), params.legenda e params.legenda_fonte, que e 'humano' se o gestor escreveu, 'herdada_do_molde' se ele autorizou usar o texto do molde, ou 'agente' se voce escreveu - e nesse caso params.legenda_referencias com os anuncios que serviram de base e OBRIGATORIO. So proponha peca nova com na_biblioteca_da_meta=true (ou meta_video_id/meta_image_hash presentes no acervo). Se estiver false, chame upload_midia(drive_file_id) ANTES - nao diga que o sistema nao sabe subir midia. NAO invente legenda para o pedido passar: se o gestor nao disse de onde vem o texto, PERGUNTE. Tudo que e criado nasce PAUSADO, com categoria especial de credito, e a legenda passa por validacao de compliance que BLOQUEIA a criacao se reprovar. Conjunto e anuncio sao REPLICADOS de um molde existente, nunca montados do zero.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string", description: "EVIDENCIA: metrica + nivel de avaliacao + janela de atribuicao + periodo + fonte" }, mecanismo: { type: "string", description: "por que o sistema produz esse padrao" }, metrica_sucesso: { type: "string", description: "OBRIGATORIO: metrica-alvo e limiar, lidos no funil completo ate contrato pago" }, janela_leitura: { type: "string", description: "janela minima de leitura e data de decisao (minimo 3-4 dias fora da fase de aprendizado)" }, reversa: { type: "string", description: "OBRIGATORIO: como desfazer, quem desfaz e em quanto tempo" }, risco: { type: "string", description: "o que pode piorar e como detectar cedo" }, params: { type: "object", description: "para criacao: nome_novo, campanha_destino OU conjunto_destino, orcamento_diario_reais (obrigatorio no conjunto), utm_campaign (obrigatorio no anuncio), objetivo (opcional na campanha). SO no anuncio com peca nova: drive_file_id, legenda, legenda_fonte ('humano' | 'herdada_do_molde' | 'agente') e legenda_referencias (array, obrigatorio quando a fonte e 'agente')" } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
@@ -1337,14 +1408,14 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeSaudeIntegracao && nome === "saude_das_integracoes") return 0;
   if (pedeTeto && nome === "teto_vigente") return 0;
   if (pedeConhecimento && nome === "get_conhecimento") return 0;
-  if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
+  if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "upload_midia" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
   const base: Record<string, number> = {
     get_aprovacoes: 1, propose_action: 1, get_overview: 2, get_funil_credito: 3, get_alerts: 4,
     get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
     teto_vigente: 2, checar_par_texto_e_peca: 2, custo_llm_periodo: 2, panorama_utm_anuncios: 2,
-    nota_visual_da_peca: 3, saude_das_integracoes: 3, get_acervo_para_anuncio: 3,
+    nota_visual_da_peca: 3, saude_das_integracoes: 3, get_acervo_para_anuncio: 3, upload_midia: 3,
     get_estrutura_conjuntos: 9, get_conhecimento: 9, get_recommendations: 11,
   };
   return base[nome] ?? 12;
@@ -1513,6 +1584,38 @@ async function runTool(name: string, args: any, ctx: any) {
         });
         return error ? { erro: error.message } : data;
       }
+      case "upload_midia": {
+        const dfid = String(args?.drive_file_id ?? "").trim();
+        if (!dfid) return { erro: "drive_file_id obrigatorio" };
+        const accountId = String(args?.account_id ?? "").trim() || undefined;
+        const out = await t_upload_midia(ctx.companyId, dfid, ctx.mcpKey, accountId);
+        // Traduz para o agente: o que fazer a seguir, sem jargao de edge.
+        if (out?.recusado) {
+          return {
+            ok: false,
+            recusado: true,
+            motivo: out.motivo,
+            mensagem: `Upload recusado: ${out.motivo}. Nao invente o id; resolva a trava (flag/teto/conta) ou aguarde a proxima janela do teto.`,
+          };
+        }
+        if (out?.error || out?.erro) {
+          return { ok: false, erro: out.error ?? out.erro, mensagem: "Upload falhou. Relate o erro exato ao gestor." };
+        }
+        return {
+          ok: true,
+          dedup: !!out?.dedup,
+          enviado: !!out?.enviado,
+          drive_file_id: dfid,
+          meta_video_id: out?.video_id ?? null,
+          meta_image_hash: out?.image_hash ?? null,
+          status_processamento: out?.status_processamento ?? null,
+          pronto: out?.pronto ?? (out?.image_hash ? true : null),
+          nota: out?.nota ?? null,
+          proximo_passo: out?.video_id && out?.pronto !== true
+            ? "Video ainda pode estar processando. Nao emita o card agora; diga o estado real e tente propor depois."
+            : "Peca na biblioteca. Pode propor criar_anuncio_a_partir_de com este drive_file_id.",
+        };
+      }
       case "get_estrutura_conjuntos":
         return await t_estrutura_conjuntos(ctx.companyId, Number(args?.pagina ?? 1));
       case "get_aprovacoes": return await t_aprovacoes(ctx.companyId, args?.apenas_abertos === false ? false : true);
@@ -1554,7 +1657,7 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
   campanhas apareceram no sistema desta vez" - com uma tabela de estado - sem ter chamado
   ferramenta nenhuma. Voce nao afirmou ter CRIADO: afirmou ter VERIFICADO. E foi essa
   verificacao inventada que fez o gestor decidir errado. Portanto: dizer que conferiu, que
-  confirmou, que algo apareceu, existe, esta pendente, foi aprovado ou nao esta lá exige
+  confirmou, que algo apareceu, existe, esta pendente, foi aprovado ou nao esta lÃ¡ exige
   retorno de ferramenta NESTA resposta. Anunciar uma verificacao e nao executa-la e pior que
   nao verificar, porque produz confianca falsa. Para estado de card use get_aprovacoes; para
   estado de campanha use as ferramentas de leitura. Se nao chamou, a frase correta e "nao
@@ -1571,9 +1674,13 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
   get_criativos_conteudo: aquela le SO os anuncios JA no ar (public.ads) e por isso arrasta o
   gestor a repetir criativo em uso (foi o que aconteceu em 07/08, quando o R06 ja no ar foi
   proposto no lugar de peca nova do acervo). get_acervo_para_anuncio devolve o que esta apto a
-  VIRAR anuncio: pecas do Drive na biblioteca da Meta, com o que cada uma diz (transcricao),
-  bloqueio de compliance MARCADO e se ja foi usada antes. Peca do acervo NAO tem metrica por
-  definicao - nao a compare com anuncio em operacao nem a preterira por "lastro".
+  VIRAR anuncio: pecas do Drive, meta_video_id/meta_image_hash quando ja na biblioteca,
+  o que cada uma diz (transcricao), bloqueio de compliance MARCADO e se ja foi usada antes.
+  Se na_biblioteca_da_meta=false, chame upload_midia(drive_file_id) - NAO diga que falta
+  "gerar o identificador" sem acao, nem que o sistema nao sobe midia. Video: o id pode
+  existir antes do processamento terminar; so proponha card com status ready (o proprio
+  upload_midia e a emissao checam isso). Peca do acervo NAO tem metrica por definicao -
+  nao a compare com anuncio em operacao nem a preterira por "lastro".
 - PECA ESPECIFICA DO DRIVE: antes de recomendar, classificar ou listar uma peca como candidata,
   chame nota_visual_da_peca com o drive_file_id atual (o id vem de get_acervo_para_anuncio ou
   get_analise_visual_drive). get_analise_visual_drive serve para inventario/triagem; nao autoriza
@@ -1741,7 +1848,7 @@ function argsCurtos(args: unknown): string {
   try {
     const s = JSON.stringify(args ?? {});
     if (!s || s === "{}" || s === "null") return "";
-    return s.length > 200 ? s.slice(0, 200) + "…" : s;
+    return s.length > 200 ? s.slice(0, 200) + "â€¦" : s;
   } catch { return ""; }
 }
 

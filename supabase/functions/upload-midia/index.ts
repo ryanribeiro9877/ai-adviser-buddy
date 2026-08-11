@@ -150,8 +150,8 @@ Deno.serve(async (req) => {
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
   const acao = String(body?.acao ?? "plan");
-  if (!["plan", "executar", "thumbnails", "creative", "escoar_imagens"].includes(acao)) {
-    return json({ error: "acao deve ser plan, executar, thumbnails, creative ou escoar_imagens" }, 400);
+  if (!["plan", "executar", "thumbnails", "creative", "escoar_imagens", "escoar_videos", "status_video"].includes(acao)) {
+    return json({ error: "acao deve ser plan, executar, thumbnails, creative, escoar_imagens, escoar_videos ou status_video" }, 400);
   }
 
   // v4 (04/08/2026) - GT-13: LEITURA do object_story_spec de um criativo que ja roda. GET puro,
@@ -281,6 +281,40 @@ Deno.serve(async (req) => {
         ? "ROTA VIAVEL: a Meta entrega 3+ quadros por video - multiquadro sem download nem ffmpeg"
         : "ROTA NAO PROVADA: menos de 3 quadros por video, o ganho sobre a miniatura atual e duvidoso",
       nota: "GET puro - nada foi enviado, nada foi gravado. Quadro da Meta e gerado na ingestao do video; nao ha como pedir offset de tempo especifico." });
+  }
+
+  // v5.1 (11/08/2026) - status de processamento de um video JA na biblioteca.
+  // advideos devolve id antes do video ficar pronto; anuncio apontando para video
+  // ainda processando falha. Esta acao e LEITURA pura do status.video_status.
+  if (acao === "status_video") {
+    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    const vid = String(body?.video_id ?? body?.meta_video_id ?? "").trim();
+    if (!vid) return json({ error: "informe video_id ou meta_video_id" }, 400);
+    const url = `${GRAPH}/${vid}?fields=id,title,length,status&access_token=${encodeURIComponent(META_ADS_TOKEN)}`;
+    const r = await fetch(url);
+    const t = await r.text();
+    let j: any; try { j = JSON.parse(t); } catch { j = { parse_error: t.slice(0, 200) }; }
+    if (!r.ok) {
+      return json({ ok: false, acao: "status_video", video_id: vid,
+        erro: `graph ${r.status}`, detalhe: JSON.stringify(j).slice(0, 300) }, 502);
+    }
+    const st = j?.status ?? null;
+    const videoStatus = String(st?.video_status ?? st?.processing_phase ?? "").trim() || null;
+    const pronto = videoStatus === "ready";
+    return json({
+      ok: true, acao: "status_video", versao: "upload-midia-v5.1",
+      video_id: String(j?.id ?? vid),
+      titulo: j?.title ?? null,
+      length_sec: j?.length ?? null,
+      status_cru: st,
+      status_processamento: videoStatus,
+      pronto,
+      nota: pronto
+        ? "Video pronto para uso em anuncio."
+        : (videoStatus
+          ? `Video ainda nao pronto (status_processamento=${videoStatus}). NAO emita card apontando para este id ate ficar ready - anuncio com video processando falha na Meta.`
+          : "Graph nao devolveu status.video_status legivel; nao afirme prontidao. Reconsulte antes de emitir card."),
+    });
   }
 
   // empresa
@@ -461,6 +495,165 @@ Deno.serve(async (req) => {
     });
   }
 
+  // ============== escoar_videos (cron horario, mesmo teto) ==============
+  if (acao === "escoar_videos") {
+    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    if (ex.master_enabled !== true) {
+      return json({ ok: false, recusado: true, motivo: "master_enabled desligado para a empresa" }, 403);
+    }
+    if (ex.action_flags?.upload_midia !== true) {
+      return json({ ok: false, recusado: true, motivo: "flag upload_midia desligada" }, 403);
+    }
+    if (!account) return json({ ok: false, recusado: true, motivo: "conta de destino indefinida" }, 403);
+    if (!contas.includes(account)) {
+      return json({ ok: false, recusado: true, motivo: `conta ${account} fora de contas_permitidas_criacao` }, 403);
+    }
+
+    const teto = Number(ex.max_actions_per_hour ?? 5);
+    const { count: naHora } = await supa.from("media_uploads").select("id", { count: "exact", head: true })
+      .eq("company_id", comp.id).eq("status", "enviado")
+      .gte("enviado_em", new Date(Date.now() - 3600_000).toISOString());
+    const slots = Math.max(0, teto - (naHora ?? 0));
+    if (slots === 0) {
+      return json({
+        ok: true, acao: "escoar_videos", versao: "upload-midia-v5.1",
+        enviados: 0, dedup: 0, falhas: 0, slots: 0, na_hora: naHora ?? 0, teto,
+        nota: "teto por hora atingido - nada enviado nesta janela; o cron tenta de novo na proxima",
+      });
+    }
+
+    const { data: analises, error: errAn } = await supa.from("drive_midia_analises")
+      .select("drive_file_id, nome, mime, aproveitavel, analisado_em")
+      .eq("company_id", comp.id)
+      .like("mime", "video/%")
+      .eq("aproveitavel", "sim")
+      .order("analisado_em", { ascending: false });
+    if (errAn) return json({ error: `falha ao listar acervo: ${errAn.message}` }, 500);
+
+    const visto = new Set<string>();
+    const candidatos: { drive_file_id: string; nome: string; mime: string }[] = [];
+    for (const a of analises ?? []) {
+      const id = String(a.drive_file_id ?? "").trim();
+      if (!id || visto.has(id)) continue;
+      visto.add(id);
+      candidatos.push({ drive_file_id: id, nome: String(a.nome ?? id), mime: String(a.mime ?? "") });
+    }
+
+    const { data: jaNaMeta } = await supa.from("media_uploads")
+      .select("drive_file_id")
+      .eq("company_id", comp.id)
+      .eq("account_external_id", account)
+      .eq("status", "enviado")
+      .not("meta_video_id", "is", null);
+    const comId = new Set((jaNaMeta ?? []).map((r: any) => String(r.drive_file_id)));
+    const pendentes = candidatos.filter((c) => !comId.has(c.drive_file_id));
+
+    if (!pendentes.length) {
+      return json({
+        ok: true, acao: "escoar_videos", versao: "upload-midia-v5.1",
+        enviados: 0, dedup: 0, falhas: 0, pendentes: 0, slots, na_hora: naHora ?? 0, teto,
+        nota: "nada pendente - cron para sozinho (sem trabalho nesta corrida)",
+      });
+    }
+
+    const lote = pendentes.slice(0, slots);
+    const resultados: any[] = [];
+    let enviados = 0, dedup = 0, falhas = 0;
+
+    for (const item of lote) {
+      const { count: agora } = await supa.from("media_uploads").select("id", { count: "exact", head: true })
+        .eq("company_id", comp.id).eq("status", "enviado")
+        .gte("enviado_em", new Date(Date.now() - 3600_000).toISOString());
+      if ((agora ?? 0) >= teto) {
+        resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "parado_pelo_teto" });
+        break;
+      }
+
+      const { data: existente } = await supa.from("media_uploads")
+        .select("id,status,meta_video_id,enviado_em")
+        .eq("drive_file_id", item.drive_file_id)
+        .eq("account_external_id", account)
+        .maybeSingle();
+      if (existente?.status === "enviado" && existente.meta_video_id) {
+        dedup++;
+        resultados.push({
+          drive_file_id: item.drive_file_id, nome: item.nome, status: "dedup",
+          video_id: existente.meta_video_id,
+        });
+        continue;
+      }
+
+      if (ex.dry_run === true) {
+        await supa.from("media_uploads").upsert({
+          company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
+          nome: item.nome, mime: item.mime, tipo: "video", status: "planejado", dry_run: true,
+          criado_por: "upload-midia v5.1 escoar_videos",
+        }, { onConflict: "drive_file_id,account_external_id" });
+        resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "dry_run" });
+        continue;
+      }
+
+      try {
+        const meta = await driveMeta(item.drive_file_id);
+        const mime = String(meta.mimeType ?? item.mime);
+        const tamanho = Number(meta.size ?? 0);
+        if (!mime.startsWith("video/")) {
+          falhas++;
+          resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "erro",
+            erro: `tipo nao suportado no escoamento de video: ${mime}` });
+          continue;
+        }
+        if (tamanho > MAX_VIDEO_BYTES) {
+          falhas++;
+          const msg = `arquivo excede o limite v1 (${tamanho} bytes) - envio em partes e v2`;
+          await supa.from("media_uploads").upsert({
+            company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
+            nome: meta.name ?? item.nome, mime, tamanho_bytes: tamanho, tipo: "video",
+            status: "erro", dry_run: false, erro: msg, criado_por: "upload-midia v5.1 escoar_videos",
+          }, { onConflict: "drive_file_id,account_external_id" });
+          resultados.push({ drive_file_id: item.drive_file_id, nome: meta.name ?? item.nome, status: "erro", erro: msg });
+          continue;
+        }
+
+        const bytes = await driveBaixar(item.drive_file_id);
+        const video_id = await metaUploadVideo(account, meta.name ?? item.nome, bytes, mime);
+        await supa.from("media_uploads").upsert({
+          company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
+          nome: meta.name ?? item.nome, mime, tamanho_bytes: tamanho, tipo: "video",
+          status: "enviado", dry_run: false, meta_video_id: video_id,
+          enviado_em: new Date().toISOString(), criado_por: "upload-midia v5.1 escoar_videos",
+        }, { onConflict: "drive_file_id,account_external_id" });
+        enviados++;
+        resultados.push({
+          drive_file_id: item.drive_file_id, nome: meta.name ?? item.nome,
+          status: "enviado", video_id,
+          aviso: "id devolvido pela Meta; processamento pode ainda estar em andamento - consulte status_video antes de emitir card",
+        });
+      } catch (e) {
+        falhas++;
+        const msg = String((e as any)?.message ?? e).slice(0, 400);
+        await supa.from("media_uploads").upsert({
+          company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
+          nome: item.nome, mime: item.mime, tipo: "video", status: "erro", dry_run: false,
+          erro: msg, criado_por: "upload-midia v5.1 escoar_videos",
+        }, { onConflict: "drive_file_id,account_external_id" });
+        resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "erro", erro: msg });
+      }
+    }
+
+    return json({
+      ok: true, acao: "escoar_videos", versao: "upload-midia-v5.1",
+      enviados, dedup, falhas,
+      pendentes_antes: pendentes.length,
+      pendentes_depois: Math.max(0, pendentes.length - enviados - dedup),
+      slots, na_hora_antes: naHora ?? 0, teto,
+      resultados,
+      nota: pendentes.length <= enviados + dedup
+        ? "acervo aproveitavel de video escoado - proximas corridas nao tem o que subir"
+        : `ainda ha pendentes; o cron horario escoa ate ${teto}/hora`,
+    });
+  }
+
   // arquivo: por id direto ou por nome
   let fileId = String(body?.drive_file_id ?? "").trim();
   let meta: any = null;
@@ -523,8 +716,23 @@ Deno.serve(async (req) => {
   if ((naHora ?? 0) >= (ex.max_actions_per_hour ?? 5)) return recusa(`teto por hora atingido (${ex.max_actions_per_hour})`);
 
   if (existente?.status === "enviado") {
+    let status_processamento: string | null = null;
+    let pronto: boolean | null = existente.meta_image_hash ? true : null;
+    if (existente.meta_video_id && META_ADS_TOKEN) {
+      try {
+        const sr = await fetch(`${GRAPH}/${existente.meta_video_id}?fields=id,status&access_token=${encodeURIComponent(META_ADS_TOKEN)}`);
+        const sj = await sr.json();
+        const st = sj?.status ?? null;
+        status_processamento = String(st?.video_status ?? st?.processing_phase ?? "").trim() || null;
+        pronto = status_processamento === "ready";
+      } catch {
+        status_processamento = "consulta_falhou";
+        pronto = null;
+      }
+    }
     return json({ ok: true, acao: "executar", dedup: true,
       image_hash: existente.meta_image_hash, video_id: existente.meta_video_id,
+      status_processamento, pronto,
       nota: "arquivo ja estava na biblioteca desta conta - identificador reutilizado, nada reenviado" });
   }
 
@@ -551,8 +759,27 @@ Deno.serve(async (req) => {
       meta_image_hash: image_hash, meta_video_id: video_id, enviado_em: new Date().toISOString(),
       criado_por: "upload-midia v1",
     }, { onConflict: "drive_file_id,account_external_id" });
-    return json({ ok: true, acao: "executar", enviado: true, image_hash, video_id,
-      nota: "midia na biblioteca da conta - use image_hash/video_id ao criar o anuncio" });
+
+    let status_processamento: string | null = null;
+    let pronto: boolean | null = null;
+    if (video_id) {
+      try {
+        const sr = await fetch(`${GRAPH}/${video_id}?fields=status&access_token=${encodeURIComponent(META_ADS_TOKEN)}`);
+        const sj = await sr.json();
+        status_processamento = String(sj?.status?.video_status ?? "").trim() || null;
+        pronto = status_processamento === "ready";
+      } catch { /* status e informativo; falha de leitura nao desfaz o upload */ }
+    }
+
+    return json({
+      ok: true, acao: "executar", enviado: true, image_hash, video_id,
+      status_processamento, pronto,
+      nota: video_id
+        ? (pronto === true
+          ? "video na biblioteca e pronto para uso em anuncio"
+          : "video na biblioteca - id existe, mas processamento pode ainda estar em andamento. Consulte status_video antes de emitir card; anuncio com video processando falha na Meta.")
+        : "midia na biblioteca da conta - use image_hash/video_id ao criar o anuncio",
+    });
   } catch (e) {
     const msg = String((e as any)?.message ?? e).slice(0, 400);
     await supa.from("media_uploads").upsert({

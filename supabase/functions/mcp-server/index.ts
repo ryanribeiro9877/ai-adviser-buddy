@@ -67,7 +67,8 @@ const TOOLS = [
   { name: "panorama_utm_anuncios", description: "Mostra no company_id a coleta de url_tags e destino: nunca lido, lido sem/com rotulo, rotulos, ambiguidades e URLs. Distingue ausencia configurada de nao coleta quando o retorno permite. Nao mede leads por UTM; token alcanca so parte das contas.", inputSchema: { type: "object", properties: { company_id: { type: "string" } }, required: ["company_id"] } },
   { name: "nota_visual_da_peca", description: "Retorna nota visual textual de uma peca no company_id: revisao aberta, base, produto, aproveitabilidade, risco, motivo e divergencia. Informa, nao aprova; ausencia de leitura nao e ausencia de risco.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, drive_file_id: { type: "string" } }, required: ["company_id", "drive_file_id"] } },
   { name: "registrar_veredito_peca_em_revisao", description: "PROPOE veredito de compliance emitindo um CARD DE APROVACAO. NAO decide e NAO libera: a peca segue impedida ate um administrador aprovar na tela, e a assinatura gravada e a de quem aprovar (resolvida por auth.users). veredito_por entra so como autor_sugerido, sem valor de decisao. liberado_como_esta libera SE aprovado; ajustar_peca/nao_usar mantem o bloqueio. Proposta pendente ja existente e recusada. Nao faca UPDATE a mao.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, drive_file_id: { type: "string" }, veredito: { type: "string", enum: ["liberado_como_esta", "ajustar_peca", "nao_usar"] }, veredito_por: { type: "string", description: "Opcional: quem pediu. Informativo, nao assinatura." }, nota: { type: "string" } }, required: ["company_id", "drive_file_id", "veredito"] } },
-  { name: "get_acervo_para_anuncio", description: "ACERVO do Drive apto a VIRAR anuncio novo no company_id, deduplicado por arquivo e filtravel por produto (ex.: 'CLT'). Diferente de anuncios ja no ar: aqui estao as pecas do acervo. Por peca: nome, drive_file_id, o que a peca DIZ (transcricao do video / texto visivel), analise visual, se esta na biblioteca da Meta (apta), bloqueio de compliance SEMPRE marcado e se ja foi usada em anuncio. Video: produto INFERIDO; sem transcricao vem declarado.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, produto: { type: "string" }, incluir_inaptas: { type: "boolean" } }, required: ["company_id"] } },
+  { name: "get_acervo_para_anuncio", description: "ACERVO do Drive apto a VIRAR anuncio novo no company_id, deduplicado por arquivo e filtravel por produto (ex.: 'CLT'). Por peca: nome, drive_file_id, meta_video_id, meta_image_hash, o que a peca DIZ, analise visual, na_biblioteca_da_meta/apta, bloqueio de compliance SEMPRE marcado e se ja foi usada. Se na_biblioteca_da_meta=false, use upload_midia antes de propor card. Video: produto INFERIDO; sem transcricao vem declarado.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, produto: { type: "string" }, incluir_inaptas: { type: "boolean" } }, required: ["company_id"] } },
+  { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca Meta via edge upload-midia (adimages/advideos) e grava meta_image_hash ou meta_video_id. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false. NAO cria anuncio. Respeita flag upload_midia e teto 5/hora. Idempotente. Video pode devolver id antes de ready - nao emita card ate pronto=true.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, drive_file_id: { type: "string" }, account_id: { type: "string" } }, required: ["company_id", "drive_file_id"] } },
   { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e problema depois do clique e apenas apontado porque esta fora do escopo.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, ad_external_id: { type: "string" } }, required: ["company_id", "ad_external_id"] } },
   { name: "avaliar_fadiga", description: "Avalia se uma peca cansou, teve queda sem saturacao, esta com frequencia alta antes da queda ou nao tem sinal de fadiga. Exige company_id e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e declara que frequencia deduplicada de 30 dias nao pode ser derivada das linhas diarias.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, ad_external_id: { type: "string" } }, required: ["company_id", "ad_external_id"] } },
   { name: "pode_pausar_por_custo", description: "Verifica se um anuncio pode ser avaliado para pausa por custo: libera quando maduro ou pela excecao dura de zero resultado, CTR baixo e piso de gasto. Exige company_id e ad_external_id. Nao verifica a guarda do unico conjunto/alternativa ativa; permitido aqui NAO significa seguro pausar.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, ad_external_id: { type: "string" } }, required: ["company_id", "ad_external_id"] } },
@@ -88,7 +89,7 @@ async function callRpc(name: string, params: Record<string, unknown>) {
 }
 
 // deno-lint-ignore no-explicit-any
-async function callTool(name: string, args: any) {
+async function callTool(name: string, args: any, mcpKeyEncaminhada: string) {
   args = args ?? {};
   try {
     switch (name) {
@@ -206,6 +207,26 @@ async function callTool(name: string, args: any) {
       }
       case "get_acervo_para_anuncio":
         return await callRpc("get_acervo_para_anuncio", { p_company_id: args.company_id, p_produto: (typeof args.produto === "string" && args.produto.trim()) ? args.produto.trim() : null, p_incluir_inaptas: args.incluir_inaptas === false ? false : true });
+      case "upload_midia": {
+        const dfid = String(args.drive_file_id ?? "").trim();
+        if (!args.company_id || !dfid) return toolText("company_id e drive_file_id sao obrigatorios.", true);
+        const url = `${Deno.env.get("SUPABASE_URL")}/functions/v1/upload-midia`;
+        const body: Record<string, unknown> = {
+          acao: "executar",
+          company: args.company_id,
+          drive_file_id: dfid,
+        };
+        if (typeof args.account_id === "string" && args.account_id.trim()) body.account_id = args.account_id.trim();
+        // Encaminha a mesma chave MCP que autenticou este servidor (upload-midia exige x-mcp-key).
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-mcp-key": mcpKeyEncaminhada },
+          body: JSON.stringify(body),
+        });
+        const t = await r.text();
+        let j: unknown; try { j = JSON.parse(t); } catch { return toolText(`upload-midia falhou (${r.status}): ${t.slice(0, 200)}`, true); }
+        return toolText(j, !r.ok);
+      }
       case "diagnosticar_custo":
         return await callRpc("diagnosticar_custo", { p_company_id: args.company_id, p_ad_external_id: args.ad_external_id });
       case "avaliar_fadiga":
@@ -283,7 +304,7 @@ async function callTool(name: string, args: any) {
 }
 
 // deno-lint-ignore no-explicit-any
-async function handleRpc(msg: any): Promise<any | null> {
+async function handleRpc(msg: any, mcpKeyEncaminhada: string): Promise<any | null> {
   const { id, method, params } = msg ?? {};
   switch (method) {
     case "initialize":
@@ -296,7 +317,7 @@ async function handleRpc(msg: any): Promise<any | null> {
     case "tools/list":
       return { jsonrpc: "2.0", id, result: { tools: TOOLS } };
     case "tools/call":
-      return { jsonrpc: "2.0", id, result: await callTool(params?.name, params?.arguments) };
+      return { jsonrpc: "2.0", id, result: await callTool(params?.name, params?.arguments, mcpKeyEncaminhada) };
     default:
       return { jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } };
   }
@@ -310,16 +331,18 @@ Deno.serve(async (req: Request) => {
     return json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized: chave MCP invalida ou ausente." } }, 401);
   }
 
+  const mcpKeyEncaminhada = chaveMcpDe(req, "header-or-bearer") ?? "";
+
   // deno-lint-ignore no-explicit-any
   let body: any;
   try { body = await req.json(); } catch { return json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, 400); }
 
   if (Array.isArray(body)) {
     const out = [];
-    for (const m of body) { const r = await handleRpc(m); if (r) out.push(r); }
+    for (const m of body) { const r = await handleRpc(m, mcpKeyEncaminhada); if (r) out.push(r); }
     return json(out);
   }
-  const r = await handleRpc(body);
+  const r = await handleRpc(body, mcpKeyEncaminhada);
   if (r === null) return new Response(null, { status: 202, headers: CORS });
   return json(r);
 });
