@@ -1,4 +1,16 @@
-// supabase/functions/meta-actions/index.ts (v5.8)
+// supabase/functions/meta-actions/index.ts (v5.10)
+// v5.10 (11/08/2026) - DESTINO POR PRODUTO, NAO POR DOMINIO. A correcao do link deixa de ser por
+//   dominio (v5.6) e passa a HONRAR a decisao de produto tomada na emissao (payload.destino_do_anuncio,
+//   via RPC resolver_destino_do_anuncio/inferir_produto_anuncio). destinoDoPedidoCompat(p): so
+//   "aplicavel" quando o produto e credito CLT (unica LP decidida -> /simulacao-clt); produto OUTRO
+//   ou indeterminado -> URL do molde PRESERVADA (nunca reescreve as cegas). A recusa sem story_spec
+//   so dispara para CLT que precisa corrigir. Espelho SQL: destino_por_produto (PO-17).
+// v5.9 (11/08/2026) - PECA NOVA DE IMAGEM. meta_image_hash deixa de ser foto_nao_suportada e
+//   passa a montar object_story_spec.link_data a partir do molde (troca image_hash), espelhando
+//   a disciplina do video. Pipeboard create_ad_creative ja aceita image_hash plano (argsCreative
+//   DeGraph desembrulha link_data). Carrossel CONTINUA recusado. Video XOR imagem: conflito
+//   recusa por nome. Avisos de veiculacao derivados do FORMATO (imagem VEICULA na Coluna da
+//   direita; video nao). Upload de imagem nova: via upload-midia/adimages (nao via Pipeboard).
 // v5.8 (11/08/2026) - POSICIONAMENTO E IDENTIDADE. (1) personalizacao_por_posicionamento_nao_suportada:
 //   pedido que pede midia por posicionamento (ex.: imagem so na Coluna da direita, que nao aceita
 //   video) RECUSA por nome - a executora monta um unico video_data, nao asset por posicionamento.
@@ -11,13 +23,10 @@
 //   molde nao expoe video_data no story_spec. Monta object_story_spec minimo; molde de
 //   imagem continua recusado. Identidade IG herdada se existir. Destino LP canonico (v5.6)
 //   permanece. Portao: creative_estado_graph.serve_de_molde_video.
-// v5.6 (11/08/2026) - DESTINO CANONICO LP/SITE DA LEGAL E VIVER.
-//   Anuncios LP/Site usam https://legaleviver.com.br/simulacao-clt. Molde com URL do mesmo
-//   dominio raiz sem esse path (ex.: https://legaleviver.com.br/) e CORRIGIDO na peca nova e
-//   na replicacao com object_story_spec — nao inventamos URL para WhatsApp/outros dominios.
-//   Sem story_spec (reusar_creative_id) e com destino LP fora do canonico: RECUSA nomeada
-//   destino_url_lp_nao_corrigivel_sem_object_story_spec. Criterio espelhado em
-//   public.resolver_destino_url_lp_legal_e_viver (PO-17).
+// v5.6 (11/08/2026) - DESTINO CANONICO LP/SITE (SUPERADO pela v5.10, que decide por PRODUTO).
+//   Anuncios de credito CLT usam https://legaleviver.com.br/simulacao-clt. A correcao por dominio
+//   foi substituida por decisao de produto na emissao; a recusa sem story_spec permanece, mas so
+//   para o caso CLT que precisa corrigir.
 // v5.5 (07/08/2026) - ABO DE VERDADE PELO PIPEBOARD. O gestor decidiu o regime: ABO (campanha SEM
 //   orcamento, dinheiro em cada conjunto). Ate aqui montarCriacao montava ABO "por construcao"
 //   (corpo sem orcamento), mas o conector Pipeboard INJETAVA daily_budget=1000, e TODA campanha
@@ -211,7 +220,8 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
 import {
   aplicarLinkNoVideoData,
-  resolverDestinoUrlLpLegalEViver,
+  aplicarLinkNoLinkData,
+  destinoDoPedidoCompat,
 } from "../_shared/destino_url_lp.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
@@ -1164,33 +1174,27 @@ export async function montarCriacao(
     const adset = String(p?.conjunto_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
     const urlTags = String(p?.url_tags ?? "").trim();
-    const videoNovo = String(p?.meta_video_id ?? "").trim(); // v4.4: peca nova
+    const videoNovo = String(p?.meta_video_id ?? "").trim(); // v4.4: peca nova video
+    const imagemNova = String(p?.meta_image_hash ?? "").trim(); // v5.9: peca nova imagem
     const legendaNova = String(p?.legenda ?? "").trim();
     if (!creativeMolde || !adset || !nome)
       return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
 
-    // ============ v5.1: FORMATOS SEM CAMINHO RECUSAM POR NOME, ANTES DE LER O MOLDE ============
-    // Ate aqui, child_attachments e meta_image_hash nao eram lidos por ramo nenhum: o pedido
-    // atravessava intacto e terminava na replicacao pura, publicando o criativo do MOLDE. Isso e
-    // pior que erro - e acerto aparente. O card volta "CRIADO", o espelho grava, e o que foi ao ar
-    // e a peca ANTIGA, gastando. A rota de video ja tinha essa licao aprendida na v4.4 (recusa com
-    // molde_sem_video_data, molde_sem_link_de_destino); estes dois formatos ficaram de fora.
-    // Vem ANTES da leitura do molde de proposito: nao ha por que consultar a Graph para um pedido
-    // que nao tem execucao possivel. Suportar carrossel exige montar child_attachments com peca,
-    // link e CTA por cartao; suportar foto exige trocar video_data por image_hash e mudar o
-    // formato do anuncio - as duas coisas sao trabalho novo, nao ajuste, e nenhuma sera adivinhada.
+    // ============ v5.1 / v5.9: FORMATOS ============
+    // Carrossel CONTINUA recusado por nome. Foto deixa de ser recusa fixa: v5.9 monta link_data.
+    // Video e imagem no mesmo pedido e ambiguidade de formato - recusa, nao escolhe.
     if (campoPresente(p?.child_attachments)) {
       return {
         erro: "carrossel_nao_suportado",
         detalhe:
-          "O pedido traz child_attachments (carrossel) e esta executora NAO monta carrossel: ela replica o criativo do molde ou troca a midia de um video_data. Antes desta versao o campo era ignorado em silencio e a Meta publicava o CRIATIVO DO MOLDE - a peca antiga no ar, com o gestor achando que aprovou o carrossel novo. Monte o carrossel no Gerenciador, ou peca o suporte a carrossel como trabalho declarado.",
+          "O pedido traz child_attachments (carrossel) e esta executora NAO monta carrossel: ela replica o criativo do molde ou troca a midia de um video_data/link_data. Antes desta versao o campo era ignorado em silencio e a Meta publicava o CRIATIVO DO MOLDE - a peca antiga no ar, com o gestor achando que aprovou o carrossel novo. Monte o carrossel no Gerenciador, ou peca o suporte a carrossel como trabalho declarado.",
       };
     }
-    if (campoPresente(p?.meta_image_hash)) {
+    if (videoNovo && imagemNova) {
       return {
-        erro: "foto_nao_suportada",
+        erro: "formatos_de_midia_conflitantes",
         detalhe:
-          "O pedido traz meta_image_hash (foto) e esta executora so publica peca nova em VIDEO: a rota da v4.4 copia o object_story_spec do molde e troca video_id, e um molde de video nao vira anuncio de imagem trocando um campo - muda o formato do anuncio, nao so a peca. Antes desta versao o campo era ignorado em silencio e ia ao ar o criativo do molde. Publique a foto pelo Gerenciador, ou peca o suporte a imagem como trabalho declarado.",
+          "O pedido traz meta_video_id E meta_image_hash. Um anuncio avulso e de UM formato: video (video_data) ou imagem (link_data). Remova um dos dois campos.",
       };
     }
     // ============ v5.8: PERSONALIZACAO POR POSICIONAMENTO NAO E SUPORTADA ============
@@ -1327,7 +1331,8 @@ export async function montarCriacao(
           detalhe: `O video_data do molde nao traz link de destino (chaves: ${Object.keys(vd).join(", ")}). A URL de destino nao sera inventada. Escolha um molde que carregue o link.`,
         };
       }
-      const destino = resolverDestinoUrlLpLegalEViver(companyId, String(linkMolde));
+      // Destino POR PRODUTO (decidido na emissao, honrado aqui): so corrige quando CLT.
+      const destino = destinoDoPedidoCompat(p);
       const linkFinal = destino.aplicavel && destino.url_final ? destino.url_final : String(linkMolde);
       const th = await escolherThumbnail(videoNovo, String(p?.thumbnail_url ?? ""));
       if (th.erro) {
@@ -1395,6 +1400,114 @@ export async function montarCriacao(
       };
     }
 
+    // ============ v5.9: PECA NOVA DE IMAGEM (hash ja na biblioteca da conta) ============
+    // Espelha a disciplina do video: COPIA link_data do molde e TROCA image_hash.
+    // Pipeboard create_ad_creative aceita image_hash plano (argsCreativeDeGraph desembrulha
+    // link_data). Sem link_data no molde: recusa (molde de video ou incompleto) - nao inventa
+    // URL. Upload de imagem nova e via upload-midia → Graph adimages (nao via Pipeboard).
+    if (imagemNova) {
+      if (!temStorySpec) {
+        return {
+          erro: "molde_sem_object_story_spec",
+          detalhe: `O anuncio molde (creative ${creativeMolde}) nao expoe object_story_spec. Sem page_id/link_data nao monto anuncio de imagem, e este caminho NAO reusa o criativo do molde. Escolha um molde de IMAGEM (link_data) ou monte no Gerenciador.`,
+        };
+      }
+      const pageId = cb.object_story_spec?.page_id ?? null;
+      if (!pageId) {
+        return {
+          erro: "molde_sem_page_id",
+          detalhe:
+            "O object_story_spec do molde nao traz page_id, e a Meta recusa adcreative sem pagina. Nao ha default seguro.",
+        };
+      }
+      const ld: any = cb.object_story_spec?.link_data ?? null;
+      if (!ld) {
+        return {
+          erro: "molde_sem_link_data",
+          detalhe: `O molde expoe object_story_spec sem link_data (chaves: ${Object.keys(cb.object_story_spec ?? {}).join(", ") || "nenhuma"}). E molde de VIDEO ou formato incompleto - trocar por imagem mudaria o FORMATO. Use molde de IMAGEM.`,
+        };
+      }
+      if (Array.isArray(ld.child_attachments) && ld.child_attachments.length > 0) {
+        return {
+          erro: "carrossel_nao_suportado",
+          detalhe:
+            "O link_data do molde traz child_attachments (carrossel). Esta executora monta anuncio de imagem AVULSA (um image_hash), nao carrossel. Escolha um molde de imagem unica ou monte o carrossel no Gerenciador.",
+        };
+      }
+      const linkMolde = ld?.link ?? ld?.call_to_action?.value?.link ?? null;
+      if (!linkMolde) {
+        return {
+          erro: "molde_sem_link_de_destino",
+          detalhe: `O link_data do molde nao traz link de destino (chaves: ${Object.keys(ld).join(", ")}). A URL nao sera inventada.`,
+        };
+      }
+      const ctaTipo = ld?.call_to_action?.type ?? null;
+      if (!ctaTipo) {
+        return {
+          erro: "molde_sem_link_data",
+          detalhe: "O link_data do molde nao traz call_to_action.type. Sem CTA nao monto o anuncio de imagem.",
+        };
+      }
+
+      // Destino POR PRODUTO (decidido na emissao, honrado aqui): so corrige quando CLT.
+      const destino = destinoDoPedidoCompat(p);
+      const linkFinal = destino.aplicavel && destino.url_final ? destino.url_final : String(linkMolde);
+
+      let novoLd: any = { ...ld, image_hash: imagemNova };
+      if (legendaNova) novoLd.message = legendaNova;
+      if (destino.aplicavel && destino.corrigiu) {
+        novoLd = aplicarLinkNoLinkData(novoLd, linkFinal);
+      }
+
+      const novoSpec: any = {
+        ...cb.object_story_spec,
+        link_data: novoLd,
+      };
+      delete novoSpec.video_data; // formato imagem: nao misturar video_data
+      const ig =
+        cb.object_story_spec?.instagram_user_id ??
+        cb.object_story_spec?.instagram_actor_id ??
+        null;
+      if (ig && !novoSpec.instagram_user_id && !novoSpec.instagram_actor_id) {
+        novoSpec.instagram_user_id = ig;
+      }
+
+      const avisosVeiculacao: string[] = [
+        "Anuncio de IMAGEM: a Coluna da direita do Facebook ACEITA imagem - esse posicionamento pode veicular (diferente do anuncio de video, que a Coluna da direita recusa).",
+      ];
+      if (!ig) {
+        avisosVeiculacao.push(
+          "Sem identidade Instagram: o molde nao carrega instagram_user_id, entao o anuncio nasce sem identidade Instagram/Threads e esses posicionamentos nao veiculam.",
+        );
+      }
+
+      return {
+        path: `/${conta}/ads`,
+        body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+        criativo: {
+          modo: "novo_adcreative_peca_nova_imagem",
+          path: `/${conta}/adcreatives`,
+          body: {
+            name: `${nome} - creative`,
+            object_story_spec: JSON.stringify(novoSpec),
+            ...(urlTags ? { url_tags: urlTags } : {}),
+          } as Record<string, string>,
+        },
+        peca_nova: {
+          meta_image_hash: imagemNova,
+          link_herdado_do_molde: linkMolde,
+          link_publicado: linkFinal,
+          destino_url_lp: destino,
+          legenda_substituida: !!legendaNova,
+          creative_molde: creativeMolde,
+          fonte_da_config: "link_data",
+          identidade_ig_herdada: !!ig,
+          formato: "imagem",
+        },
+        avisos_de_veiculacao: avisosVeiculacao,
+      };
+    }
+
     // Replicacao pura: se o molde expoe story_spec, reescrevemos o link LP canônico antes
     // de criar o adcreative novo. Sem story_spec (reusar_creative_id) nao ha como corrigir
     // o destino — e se o molde for LP da LEV com URL fora do canônico, RECUSAMOS por nome
@@ -1403,7 +1516,8 @@ export async function montarCriacao(
       const spec: any = cb.object_story_spec;
       const vdRep: any = spec?.video_data ?? null;
       const linkRep = vdRep?.call_to_action?.value?.link ?? vdRep?.link ?? null;
-      const destinoRep = resolverDestinoUrlLpLegalEViver(companyId, linkRep ? String(linkRep) : null);
+      // Destino POR PRODUTO (decidido na emissao): so corrige quando CLT; preserva o resto.
+      const destinoRep = destinoDoPedidoCompat(p);
       let specFinal = spec;
       if (destinoRep.aplicavel && destinoRep.corrigiu && vdRep && destinoRep.url_final) {
         specFinal = {
@@ -1427,17 +1541,15 @@ export async function montarCriacao(
       };
     }
 
-    // Sem story_spec: so reusa o creative_id. Se o pedido JA declara destino_url do dominio
-    // LP fora do canônico (vindo da emissao), recusa — nao ha campo para corrigir no reuso.
-    const destinoPedido = resolverDestinoUrlLpLegalEViver(
-      companyId,
-      p?.destino_url != null ? String(p.destino_url) : null,
-    );
+    // Sem story_spec: so reusa o creative_id. Se a emissao decidiu que o produto e CLT e o
+    // destino precisa ser corrigido, recusa por nome — nao ha campo para corrigir no reuso.
+    // Produto OUTRO/indeterminado nao dispara recusa: preserva o criativo do molde.
+    const destinoPedido = destinoDoPedidoCompat(p);
     if (destinoPedido.aplicavel && destinoPedido.corrigiu) {
       return {
         erro: "destino_url_lp_nao_corrigivel_sem_object_story_spec",
         detalhe:
-          `O molde nao expoe object_story_spec, entao o anuncio novo reusaria o criativo original com destino "${destinoPedido.url_original}". Para LP/Site da Legal e Viver o destino canônico e ${destinoPedido.url_final}, e sem o spec nao ha como corrigir o link na criacao. Escolha um molde que expoe object_story_spec com link (ex.: CREATIVE_LPV2_Reel*) ou um molde que ja aponte para ${destinoPedido.url_final}.`,
+          `O molde nao expoe object_story_spec, entao o anuncio novo reusaria o criativo original com destino "${destinoPedido.url_original}". O anuncio foi identificado como credito CLT (sinal ${destinoPedido.sinal ?? "?"}), cujo destino canonico e ${destinoPedido.url_final}, e sem o spec nao ha como corrigir o link na criacao. Escolha um molde que expoe object_story_spec com link (ex.: CREATIVE_LPV2_Reel*) ou um molde que ja aponte para ${destinoPedido.url_final}.`,
       };
     }
 
@@ -1751,6 +1863,7 @@ Deno.serve(async (req) => {
           p_company_id: r.company_id,
           p_drive_file_id: r.payload?.drive_file_id ?? null,
           p_meta_video_id: r.payload?.meta_video_id ?? null,
+          p_meta_image_hash: r.payload?.meta_image_hash ?? null,
         });
         // Verificador que nao respondeu nao liberou nada: sem resposta, nao executa.
         const indisponivel = !!bloqErr || !bloq;

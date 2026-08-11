@@ -1,126 +1,101 @@
-// Destino canônico de anúncios LP/Site da Legal e Viver.
+// Destino de anúncio por PRODUTO (não por domínio) — Legal e Viver.
 //
-// COMPORTAMENTO (11/08/2026):
-//   CORRIGIR automaticamente, não recusar, quando o molde traz URL do domínio
-//   legaleviver.com.br sem o path /simulacao-clt (ex.: https://legaleviver.com.br/).
-//   Justificativa: a Graph já prova o canônico nos moldes bons (asset_feed_spec /
-//   object_story_spec); a raiz é o mesmo produto com path incompleto — há dezenas
-//   de moldes operacionais nessa forma. Recusar bloquearia a operação; inventar
-//   URL para WhatsApp/outros domínios NÃO entra no escopo.
+// CORREÇÃO 11/08/2026: a versão anterior corrigia por DOMÍNIO (legaleviver.com.br →
+// /simulacao-clt), o que reescreveria um anúncio de outro produto do mesmo domínio para a
+// LP de CLT. O critério certo é o PRODUTO/OFERTA do anúncio.
 //
-// Espelho SQL: public.resolver_destino_url_lp_legal_e_viver (mesmos critérios, PO-17).
+// A decisão de produto + URL é tomada na EMISSÃO pela RPC resolver_destino_do_anuncio e
+// viaja no card em payload.destino_do_anuncio. A executora NÃO reinfere nem reescreve por
+// domínio: ela apenas HONRA a decisão da emissão. Três casos:
+//   - caso 'clt' com corrigir=true  → aplica url_final (/simulacao-clt).
+//   - caso 'clt' já canônico        → nada a fazer.
+//   - 'outro_sem_lp_decidida' / 'outro' / 'indeterminado' → PRESERVA a URL do molde.
+// Sem decisão no payload (card antigo ou externo) → PRESERVA (fail-safe: nunca reescreve
+// às cegas).
 
 export const COMPANY_LEGAL_E_VIVER = "ded20b38-f42e-4c71-800c-31b97ea48bcf";
-export const DESTINO_CANONICO_LP_LEGAL_E_VIVER =
-  "https://legaleviver.com.br/simulacao-clt";
-const DOMINIO_LP_LEGAL_E_VIVER = "legaleviver.com.br";
 
-export type ResolucaoDestinoUrlLp = {
-  aplicavel: boolean;
-  url_original: string | null;
-  url_final: string | null;
-  corrigiu: boolean;
-  motivo:
-    | "empresa_fora_do_escopo"
-    | "url_ausente"
-    | "url_invalida"
-    | "dominio_fora_do_escopo_lp"
-    | "ja_canonico"
-    | "corrigido_para_canonico";
+export type DestinoDoAnuncio = {
+  aplicavel?: boolean;
+  produto?: string | null;
+  sinal?: string | null;
+  confianca?: string | null;
+  caso?: "clt" | "outro" | "outro_sem_lp_decidida" | "indeterminado" | string | null;
+  url_do_molde?: string | null;
+  url_canonica?: string | null;
+  url_final?: string | null;
+  corrigir?: boolean | null;
+  mensagem?: string | null;
 };
 
-/** Normaliza host (sem www) e path (sem barra final) para comparação. */
-function hostEPath(url: string): { host: string; path: string } | null {
-  try {
-    const u = new URL(url.trim());
-    const host = u.hostname.replace(/^www\./i, "").toLowerCase();
-    let path = u.pathname || "/";
-    if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
-    return { host, path };
-  } catch {
-    return null;
-  }
+/** Lê a decisão de destino resolvida na emissão (RPC), que a executora deve honrar. */
+export function destinoDoPedido(p: any): DestinoDoAnuncio | null {
+  const d = p?.destino_do_anuncio ?? null;
+  if (!d || typeof d !== "object") return null;
+  return d as DestinoDoAnuncio;
 }
 
-/**
- * Resolve o destino de LP/Site da Legal e Viver.
- * Só mexe quando company = LEV e a URL é do domínio legaleviver.com.br.
- * WhatsApp (wa.me, api.whatsapp.com) e outros domínios: aplicavel=false, URL intacta.
- */
-export function resolverDestinoUrlLpLegalEViver(
-  companyId: string | null | undefined,
-  url: string | null | undefined,
-): ResolucaoDestinoUrlLp {
-  const original = url == null ? null : String(url).trim() || null;
-  if (!companyId || companyId !== COMPANY_LEGAL_E_VIVER) {
+/** Deve a executora reescrever o link do criativo? Só quando a emissão decidiu CLT + corrigir. */
+export function deveCorrigirParaCanonico(d: DestinoDoAnuncio | null): d is DestinoDoAnuncio & { url_final: string } {
+  return !!d && d.caso === "clt" && d.corrigir === true && typeof d.url_final === "string" && d.url_final.length > 0;
+}
+
+// Forma de compatibilidade para os call sites da executora (peça nova vídeo, peça nova imagem,
+// replicação, reuso). Mantém as chaves { aplicavel, corrigiu, url_final, url_original } que o
+// código já consome, mas com SEMÂNTICA POR PRODUTO: só é "aplicável" quando o produto é CLT
+// (única LP decidida). Produto OUTRO / indeterminado → aplicavel=false → a URL do molde é
+// preservada. A decisão vem da emissão (payload.destino_do_anuncio); sem ela, preserva.
+export type DestinoCompat = {
+  aplicavel: boolean;
+  corrigiu: boolean;
+  url_final: string | null;
+  url_original: string | null;
+  produto: string | null;
+  sinal: string | null;
+  caso: string | null;
+  mensagem: string | null;
+};
+
+export function destinoDoPedidoCompat(p: any): DestinoCompat {
+  const d = destinoDoPedido(p);
+  if (!d) {
     return {
       aplicavel: false,
-      url_original: original,
-      url_final: original,
       corrigiu: false,
-      motivo: "empresa_fora_do_escopo",
-    };
-  }
-  if (!original) {
-    return {
-      aplicavel: false,
-      url_original: null,
       url_final: null,
-      corrigiu: false,
-      motivo: "url_ausente",
+      url_original: null,
+      produto: null,
+      sinal: null,
+      caso: null,
+      mensagem: null,
     };
   }
-  const hp = hostEPath(original);
-  if (!hp) {
-    return {
-      aplicavel: false,
-      url_original: original,
-      url_final: original,
-      corrigiu: false,
-      motivo: "url_invalida",
-    };
-  }
-  if (hp.host !== DOMINIO_LP_LEGAL_E_VIVER) {
-    return {
-      aplicavel: false,
-      url_original: original,
-      url_final: original,
-      corrigiu: false,
-      motivo: "dominio_fora_do_escopo_lp",
-    };
-  }
-
-  const ja =
-    hp.path === "/simulacao-clt" &&
-    /^https:\/\//i.test(original) &&
-    !/^https?:\/\/www\./i.test(original) &&
-    !original.includes("?") &&
-    !original.includes("#") &&
-    original.replace(/\/$/, "") === DESTINO_CANONICO_LP_LEGAL_E_VIVER;
-
-  if (ja) {
-    return {
-      aplicavel: true,
-      url_original: original,
-      url_final: DESTINO_CANONICO_LP_LEGAL_E_VIVER,
-      corrigiu: false,
-      motivo: "ja_canonico",
-    };
-  }
-
   return {
-    aplicavel: true,
-    url_original: original,
-    url_final: DESTINO_CANONICO_LP_LEGAL_E_VIVER,
-    corrigiu: true,
-    motivo: "corrigido_para_canonico",
+    aplicavel: d.caso === "clt",
+    corrigiu: deveCorrigirParaCanonico(d),
+    url_final: d.url_final ?? null,
+    url_original: d.url_do_molde ?? null,
+    produto: d.produto ?? null,
+    sinal: d.sinal ?? null,
+    caso: d.caso ?? null,
+    mensagem: d.mensagem ?? null,
   };
 }
 
-/** Grava o link canônico em video_data.link e call_to_action.value.link, se existirem. */
+/** Grava o link em video_data.link e call_to_action.value.link, se existirem. */
 export function aplicarLinkNoVideoData(vd: Record<string, unknown>, link: string): Record<string, unknown> {
-  const novo: Record<string, unknown> = { ...vd, link };
-  const cta = vd.call_to_action;
+  return aplicarLinkNoBloco(vd, link);
+}
+
+/** Grava o link em link_data.link e call_to_action.value.link, se existirem (anúncio de imagem). */
+export function aplicarLinkNoLinkData(ld: Record<string, unknown>, link: string): Record<string, unknown> {
+  return aplicarLinkNoBloco(ld, link);
+}
+
+// video_data e link_data compartilham o formato { link, call_to_action: { value: { link } } }.
+function aplicarLinkNoBloco(bloco: Record<string, unknown>, link: string): Record<string, unknown> {
+  const novo: Record<string, unknown> = { ...bloco, link };
+  const cta = bloco.call_to_action;
   if (cta && typeof cta === "object") {
     const ctaObj = cta as Record<string, unknown>;
     const value = ctaObj.value;

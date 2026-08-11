@@ -1066,7 +1066,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       // A mensagem e dela, nao minha: recusa inventada aqui seria a doutrina em dois lugares.
       return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
         faltando: v.faltando ?? null, mensagem_para_o_gestor: v.mensagem_para_o_gestor,
-        destino_url_lp: v.destino_url_lp ?? null,
+        destino_do_anuncio: v.destino_do_anuncio ?? null,
         instrucao: "Repasse esta mensagem ao gestor e peca o que falta. NAO monte card e NAO preencha o que falta por conta propria." };
     }
     // A RPC declara peca_ja_na_biblioteca=false e AVISA, mas nao recusa - a decisao e do fluxo.
@@ -1106,24 +1106,19 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // para fb/ig automaticamente - melhor que fixar um dos dois.
     const urlTags = `utm_source={{site_source_name}}&utm_medium=paid&utm_campaign=${slug(utmCampaign)}&utm_content=${slug(nomeNovo)}`;
 
-    // A mensagem da verificacao vai INTEIRA para o summary, inclusive a nota visual da peca. O
-    // gestor le o card no instante da decisao; o que fica so no payload recolhido ele nao le.
-    // Destino LP/Site da Legal e Viver: a RPC declara se o molde traz URL do dominio
-    // legaleviver e se precisa corrigir para o canonico /simulacao-clt. O card leva
-    // destino_url ja resolvido para o gestor ver o que sera publicado; a executora
-    // reaplica o mesmo criterio (nao confia so no payload).
-    const destLp = v.destino_url_lp ?? null;
-    const destinoUrlCard = destLp?.url_final ?? destLp?.url_do_molde ?? null;
-    const notaDestino = destLp?.aplicavel === true && destLp?.corrigiu === true
-      ? `\n\nDESTINO LP: o molde aponta para ${destLp.url_original}; na publicacao sera usado o canônico ${destLp.url_final} (simulacao CLT).`
-      : destLp?.aplicavel === true
-        ? `\n\nDESTINO LP: ${destLp.url_final}.`
-        : "";
+    // A mensagem da verificacao vai INTEIRA para o summary, inclusive a nota visual da peca e a
+    // linha DESTINO (que a RPC pedido_de_anuncio_completo ja anexa a mensagem_para_o_gestor). O
+    // destino e por PRODUTO: a RPC identifica a oferta (CLT/outro/indeterminado), o sinal usado e
+    // a URL escolhida. So corrige para /simulacao-clt quando o produto e CLT; produto diferente
+    // ou indeterminado preserva a URL do molde. O card carrega a decisao inteira em
+    // destino_do_anuncio; a executora HONRA essa decisao (nao reinfere por dominio).
+    const destAnuncio = v.destino_do_anuncio ?? null;
+    const destinoUrlCard = destAnuncio?.url_final ?? destAnuncio?.url_do_molde ?? null;
 
     const cabeca = driveFileId
       ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", usando "${molde.name}" como molde de configuracao - compliance de texto aprovado, nasce PAUSADO`
       : `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce PAUSADO`;
-    const summary = `${cabeca}\n\n${String(v.mensagem_para_o_gestor ?? "")}${notaDestino}`.trim();
+    const summary = `${cabeca}\n\n${String(v.mensagem_para_o_gestor ?? "")}`.trim();
     return await gravarCard(companyId, convId, requestedBy, action, "ad", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       creative_id: molde.creative_id, conjunto_destino_external_id: dest.external_id,
@@ -1136,7 +1131,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       legenda, legenda_fonte: legendaFonte || null, legenda_referencias: legendaRefs,
       nota_visual_da_peca: v.nota_visual_da_peca ?? null,
       destino_url: destinoUrlCard,
-      destino_url_lp: destLp,
+      destino_do_anuncio: destAnuncio,
       compliance: { veredito: comp?.veredito ?? "aprovado", regras_aplicadas: comp?.regras_aplicadas ?? null, validado_em: new Date().toISOString() },
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
