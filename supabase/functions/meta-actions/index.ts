@@ -1,4 +1,17 @@
-// supabase/functions/meta-actions/index.ts (v5.12)
+// supabase/functions/meta-actions/index.ts (v5.14)
+// v5.14 (11/08/2026) - PADRAO OBRIGATORIO DE POSICIONAMENTO DE VIDEO NA CRIACAO DO CONJUNTO
+//   (decisao do Ryan 11/08 + auditoria dos 3 conjuntos de video ACTIVE). criar_conjunto_a_partir_de
+//   com formato_midia_previsto=video nasce ja com publisher_platforms=["facebook"] e os 8
+//   facebook_positions observados (sem right_hand_column). IMAGEM nao exclui nada; formato ausente
+//   preserva o molde e avisa (nunca aplica a regra de video no escuro). A acao corretiva
+//   ajustar_posicionamentos_do_conjunto passou a reusar EXATAMENTE o mesmo padrao (aplicarPadrao-
+//   PosicionamentoVideo), deterministico e igual ao da criacao.
+// v5.13 (11/08/2026) - AJUSTE SANCIONADO DE POSICIONAMENTOS. A nova acao
+//   ajustar_posicionamentos_do_conjunto passa pelas mesmas flags, dry_run, teto horario, card,
+//   audit e reconciliacao das demais escritas. O formato governa a exclusao: VIDEO remove
+//   facebook.right_hand_column; IMAGEM nao inventa exclusao. Pipeboard update_adset(targeting)
+//   foi comprovado por tools/list (request 610). A Graph rele targeting e espelhar() atualiza
+//   ad_sets. Anuncio substituto pode depender do card de posicionamento reconciliado.
 // v5.12 (11/08/2026) - IDENTIDADE OFICIAL DO BUSINESS; CONFIG PREVALECE SOBRE O MOLDE. O id
 //   17841428674060566 (v5.11) mostrou-se ERRADO: a Meta gravava o instagram_user_id no creative,
 //   mas a previa mantinha o aviso de Threads porque esse id NAO e identidade valida do Business.
@@ -231,6 +244,12 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
 import {
+  aplicarPadraoPosicionamentoVideo,
+  FACEBOOK_POSITIONS_VIDEO_PADRAO,
+  PUBLISHER_PLATFORMS_VIDEO_PADRAO,
+  targetingCompativelComFormato,
+} from "../_shared/posicionamento.ts";
+import {
   aplicarLinkNoVideoData,
   aplicarLinkNoLinkData,
   destinoDoPedidoCompat,
@@ -247,6 +266,7 @@ import {
   monitorConexaoPipeboard,
   nivelDaAcao,
   pipeboardCall,
+  pipeboardListTools,
   pipeboardToken,
   reconciliacaoNivelDesconhecido,
   type ConexaoPipeboard,
@@ -259,7 +279,13 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
-const EXECUTAVEIS = ["pausar_criativo", "pausar_campanha", "alterar_orcamento", "renomear_campanha"];
+const EXECUTAVEIS = [
+  "pausar_criativo",
+  "pausar_campanha",
+  "alterar_orcamento",
+  "renomear_campanha",
+  "ajustar_posicionamentos_do_conjunto",
+];
 const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"];
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
@@ -476,7 +502,9 @@ async function escreverUpdate(
 
   let tool = "update_ad";
   if (acao === "pausar_campanha" || acao === "renomear_campanha") tool = "update_campaign";
-  if (acao === "alterar_orcamento") tool = "update_adset";
+  if (acao === "alterar_orcamento" || acao === "ajustar_posicionamentos_do_conjunto") {
+    tool = "update_adset";
+  }
 
   if (opts?.dry_run && tool !== "update_campaign") {
     return {
@@ -1249,7 +1277,44 @@ export async function montarCriacao(
     if (mb.dsa_beneficiary) body.dsa_beneficiary = String(mb.dsa_beneficiary);
     if (mb.dsa_payor) body.dsa_payor = String(mb.dsa_payor);
 
-    return { path: `/${conta}/adsets`, body, molde_lido: mb };
+    // ===== v5.14: PADRAO OBRIGATORIO DE POSICIONAMENTO POR FORMATO (decisao do Ryan 11/08) =====
+    // Conjunto destinado a VIDEO nasce ja com os placements manuais observados nos 3 conjuntos
+    // ACTIVE (facebook-only, sem Coluna da direita) - sem aviso na origem. IMAGEM nao recebe a
+    // exclusao (a Coluna aceita imagem). Formato NAO declarado NAO recebe silenciosamente a regra
+    // de video: o targeting do molde e preservado e o card avisa. Nao adivinhamos formato.
+    const formatoPrevisto = String(p?.formato_midia_previsto ?? "").trim().toLowerCase();
+    let posicionamento: Record<string, unknown>;
+    if (formatoPrevisto === "video") {
+      const base = (mb.targeting && typeof mb.targeting === "object")
+        ? (mb.targeting as Record<string, unknown>)
+        : {};
+      const { targeting, excluidos } = aplicarPadraoPosicionamentoVideo(base);
+      body.targeting = JSON.stringify(targeting);
+      posicionamento = {
+        formato_midia_previsto: "video",
+        padrao_aplicado: true,
+        origem_padrao: "3_conjuntos_video_active_observados_11_08",
+        publisher_platforms: [...PUBLISHER_PLATFORMS_VIDEO_PADRAO],
+        facebook_positions: [...FACEBOOK_POSITIONS_VIDEO_PADRAO],
+        excluidos,
+        declaracao:
+          "Conjunto de video: posicionamentos manuais aplicados conforme padrao observado nos 3 conjuntos ativos; Coluna da direita excluida por incompatibilidade de formato.",
+      };
+    } else if (formatoPrevisto === "imagem") {
+      posicionamento = {
+        formato_midia_previsto: "imagem",
+        padrao_aplicado: false,
+        nota: "Imagem veicula na Coluna da direita; nenhum posicionamento excluido. Targeting do molde preservado.",
+      };
+    } else {
+      posicionamento = {
+        formato_midia_previsto: null,
+        padrao_aplicado: false,
+        nota: "Formato de midia nao declarado: targeting do molde preservado; a regra de video NAO foi aplicada. Se o anuncio for video, declare formato_midia_previsto=video para excluir a Coluna da direita na origem.",
+      };
+    }
+
+    return { path: `/${conta}/adsets`, body, molde_lido: mb, posicionamento };
   }
 
   if (acao === "criar_anuncio_a_partir_de") {
@@ -1775,6 +1840,21 @@ async function espelhar(
         : { ok: true, tabela: "ads" };
     }
 
+    if (acao === "ajustar_posicionamentos_do_conjunto") {
+      const { error } = await supa
+        .from("ad_sets")
+        .update({
+          status: statusMeta.toUpperCase(),
+          targeting: objeto?.targeting ?? p?.targeting_aprovado ?? null,
+        })
+        .eq("company_id", companyId)
+        .eq("provider", "meta_ads")
+        .eq("external_id", novoId);
+      return error
+        ? { ok: false, erro: error.message, tabela: "ad_sets" }
+        : { ok: true, tabela: "ad_sets" };
+    }
+
     return { ok: false, erro: `acao sem regra de espelho: ${acao}` };
   } catch (e) {
     return { ok: false, erro: String(e) };
@@ -1794,6 +1874,38 @@ Deno.serve(async (req) => {
     /* */
   }
   const onlyId: string | null = body?.approval_id ?? null;
+
+  // Sonda SOMENTE LEITURA: prova o schema que o driver Pipeboard realmente expoe antes de
+  // declarar uma nova escrita suportada. tools/list nao chama update_adset nem toca a Meta.
+  if (body?.modo === "sonda_pipeboard_update_adset") {
+    const token = await pipeboardToken(segredoIntegracao);
+    const lista = await pipeboardListTools(token);
+    const tool = lista.tools.find((t: any) => String(t?.name ?? "") === "update_adset") ?? null;
+    return json({
+      ok: lista.ok && !!tool,
+      modo: "sonda_pipeboard_update_adset",
+      somente_leitura: true,
+      http_status: lista.status,
+      update_adset: tool,
+      erro: lista.erro ?? null,
+      mcp_chamador: auth.chamador,
+    });
+  }
+  if (body?.modo === "ler_posicionamentos_conjunto") {
+    const adsetId = String(body?.adset_external_id ?? "").trim();
+    if (!/^\d+$/.test(adsetId)) {
+      return json({ error: "adset_external_id numerico obrigatorio" }, 400);
+    }
+    const lido = await g(`/${adsetId}?fields=id,name,status,effective_status,targeting`);
+    return json({
+      ok: lido.status === 200,
+      modo: "ler_posicionamentos_conjunto",
+      somente_leitura: true,
+      http_status: lido.status,
+      conjunto: lido.body,
+      mcp_chamador: auth.chamador,
+    });
+  }
 
   // v5.3: sonda de reconciliacao. Retorna ANTES de tocar a fila, de proposito: com dry_run=false e
   // flags ligadas, uma corrida normal executaria cards aprovados - conferir a conferencia nao pode
@@ -2130,6 +2242,43 @@ Deno.serve(async (req) => {
         });
         resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
         continue;
+      }
+
+      // Um anuncio substituto pode depender de um ajuste sancionado no MESMO conjunto. Nao
+      // contornamos a aprovacao da outra acao: o card de criacao so executa depois que o card
+      // referenciado foi aprovado, executado e reconciliado com sucesso.
+      if (acao === "criar_anuncio_a_partir_de" && r.payload?.depende_de_approval_id) {
+        const dependenciaId = String(r.payload.depende_de_approval_id);
+        const { data: dep } = await supa
+          .from("approval_requests")
+          .select("status,executed_at,execution_result,action,company_id")
+          .eq("id", dependenciaId)
+          .eq("company_id", r.company_id)
+          .maybeSingle();
+        const depOk =
+          dep?.action === "ajustar_posicionamentos_do_conjunto" &&
+          !!dep?.executed_at &&
+          dep?.execution_result?.ok === true &&
+          dep?.execution_result?.reconciliacao_conferida === true;
+        if (!depOk) {
+          const motivo = "ajuste_de_posicionamento_ainda_nao_executado_e_reconciliado";
+          await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+            motivo,
+            acao,
+            depende_de_approval_id: dependenciaId,
+            dependencia: dep ?? null,
+            driver_escrita: driver,
+          });
+          resultados.push({
+            id: r.id,
+            acao,
+            resultado: "bloqueado",
+            motivo,
+            depende_de_approval_id: dependenciaId,
+            driver_escrita: driver,
+          });
+          continue;
+        }
       }
 
       // Passo previo: criar adcreative novo (so no caso do anuncio com object_story_spec).
@@ -2511,6 +2660,39 @@ Deno.serve(async (req) => {
       }
       post = { daily_budget: String(Math.round(reais * 100)) };
     }
+    if (acao === "ajustar_posicionamentos_do_conjunto") {
+      const formato = String(r.payload?.formato_midia ?? "").trim().toLowerCase();
+      if (antes.status !== 200 || !antes.body || typeof antes.body !== "object") {
+        const motivo = "estado_atual_do_conjunto_nao_pode_ser_lido";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          acao,
+          driver_escrita: driver,
+          leitura_graph: antes,
+        });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+        continue;
+      }
+      const derivado = targetingCompativelComFormato(
+        ((antes.body as any)?.targeting ?? {}) as Record<string, unknown>,
+        formato,
+      );
+      if (!derivado.targeting || derivado.erro) {
+        const motivo = derivado.erro ?? "posicionamentos_compativeis_nao_derivados";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          acao,
+          formato_midia: formato,
+          driver_escrita: driver,
+        });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+        continue;
+      }
+      post = { targeting: JSON.stringify(derivado.targeting) };
+      r.payload.targeting_aprovado = derivado.targeting;
+      r.payload.posicionamentos_excluidos = derivado.excluidos;
+      r.payload.perfil_posicionamento = derivado.perfil;
+    }
 
     if (conf.dry_run) {
       let ensaioPipeboard: ResultadoEscrita | null = null;
@@ -2590,7 +2772,12 @@ Deno.serve(async (req) => {
       ? null
       : camposAlvo
         ? compararPedidoComGraph(
-            { status: post?.status, daily_budget: post?.daily_budget, name: post?.name },
+            {
+              status: post?.status,
+              daily_budget: post?.daily_budget,
+              name: post?.name,
+              targeting: post?.targeting ? JSON.parse(post.targeting) : undefined,
+            },
             depois.body,
             { http_status: depois.status, campos: camposAlvo },
           )
@@ -2671,6 +2858,33 @@ Deno.serve(async (req) => {
             },
           );
         }
+      }
+      if (acao === "ajustar_posicionamentos_do_conjunto") {
+        const esp = await espelhar(
+          acao,
+          alvoExt,
+          alvoLido,
+          r.payload,
+          "",
+          String(r.company_id),
+          String(r.id),
+          null,
+          null,
+          String((alvoLido as any)?.status ?? (antes.body as any)?.status ?? "PAUSED"),
+        );
+        await audit(
+          r.company_id,
+          sistema,
+          esp.ok ? "meta_action_espelho_posicionamentos" : "meta_action_espelho_posicionamentos_falhou",
+          r.id,
+          {
+            acao,
+            alvo_external_id: alvoExt,
+            espelho: esp,
+            targeting_graph: (alvoLido as any)?.targeting ?? null,
+            reconciliacao_estado: reconciliacao?.estado ?? null,
+          },
+        );
       }
       await supa
         .from("approval_requests")

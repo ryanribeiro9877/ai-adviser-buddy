@@ -213,6 +213,50 @@ export async function pipeboardCall(
   };
 }
 
+/** Lista schemas do conector sem executar nenhuma ferramenta. Uso: sondas de capacidade. */
+export async function pipeboardListTools(token: string): Promise<{
+  ok: boolean;
+  status: number;
+  tools: any[];
+  erro?: string;
+}> {
+  if (!token) return { ok: false, status: 0, tools: [], erro: "PIPEBOARD_API_TOKEN ausente" };
+  try {
+    const r = await fetch(PIPEBOARD_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    const raw = await r.text();
+    const linhas = raw
+      .split("\n")
+      .map((l) => l.replace(/^data:\s*/, "").trim())
+      .filter(Boolean);
+    let parsed: any = null;
+    for (const candidato of [raw, ...linhas.reverse()]) {
+      try {
+        parsed = JSON.parse(candidato);
+        break;
+      } catch {
+        /* tenta o proximo */
+      }
+    }
+    const tools = Array.isArray(parsed?.result?.tools) ? parsed.result.tools : [];
+    return {
+      ok: r.ok && tools.length > 0,
+      status: r.status,
+      tools,
+      ...(parsed?.error ? { erro: String(parsed.error?.message ?? "tools/list falhou") } : {}),
+    };
+  } catch (e) {
+    return { ok: false, status: 0, tools: [], erro: `pipeboard_rede: ${String((e as any)?.message ?? e)}` };
+  }
+}
+
 export type ConexaoPipeboard = {
   ok: boolean;
   token_status: string | null;
@@ -448,6 +492,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
       return "campanha";
     case "criar_conjunto_a_partir_de":
     case "alterar_orcamento":
+    case "ajustar_posicionamentos_do_conjunto":
       return "conjunto";
     case "criar_anuncio_a_partir_de":
     case "pausar_criativo":
@@ -486,7 +531,24 @@ const CAMPOS_COMPARAVEIS = [
   "daily_budget",
   "campaign_id",
   "adset_id",
+  "targeting",
 ];
+
+function jsonCanonico(v: unknown): string {
+  if (Array.isArray(v)) {
+    const itens = v.map((x) => JSON.parse(jsonCanonico(x)));
+    if (itens.every((x) => ["string", "number", "boolean"].includes(typeof x))) itens.sort();
+    return JSON.stringify(itens);
+  }
+  if (v && typeof v === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+      out[k] = JSON.parse(jsonCanonico((v as Record<string, unknown>)[k]));
+    }
+    return JSON.stringify(out);
+  }
+  return JSON.stringify(v);
+}
 
 function descreverFalhaDeLeitura(lido: any, httpStatus?: number): string | null {
   const httpRuim = typeof httpStatus === "number" && httpStatus !== 0 && httpStatus !== 200;
@@ -583,6 +645,12 @@ export function compararPedidoComGraph(
         if (a !== b) divergencias.push(`${campo}: pediu=${a} graph=${b} (centavos)`);
       } else if (String(querido) !== String(obtido)) {
         divergencias.push(`${campo}: pediu=${String(querido)} graph=${String(obtido)}`);
+      }
+      continue;
+    }
+    if (campo === "targeting") {
+      if (jsonCanonico(querido) !== jsonCanonico(obtido)) {
+        divergencias.push(`targeting: o objeto relido nao confere com o targeting aprovado`);
       }
       continue;
     }
