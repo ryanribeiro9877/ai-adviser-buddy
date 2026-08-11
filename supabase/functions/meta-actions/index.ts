@@ -1,4 +1,11 @@
-// supabase/functions/meta-actions/index.ts (v5.10)
+// supabase/functions/meta-actions/index.ts (v5.11)
+// v5.11 (11/08/2026) - IDENTIDADE INSTAGRAM PREENCHIDA, NAO SO AVISADA. Para peca nova
+//   (video_data ou link_data), resolve a identidade pela RPC identidade_instagram_para_criacao:
+//   primeiro creative_estado_graph.instagram_actor_id do MOLDE; na ausencia, configuracao da
+//   EMPRESA em meta_execution_config. Sem as duas fontes, preserva o fail-safe anterior (sem id
+//   + aviso). A Legal e Viver configura 17841428674060566 (@legaleviver), observado diretamente
+//   em dois criativos reais; o endpoint autenticado da Pagina nao confirmou o vinculo porque o
+//   token nao tem pages_read_engagement — procedencia registrada no banco, sem fingir confirmacao.
 // v5.10 (11/08/2026) - DESTINO POR PRODUTO, NAO POR DOMINIO. A correcao do link deixa de ser por
 //   dominio (v5.6) e passa a HONRAR a decisao de produto tomada na emissao (payload.destino_do_anuncio,
 //   via RPC resolver_destino_do_anuncio/inferir_produto_anuncio). destinoDoPedidoCompat(p): so
@@ -1036,6 +1043,77 @@ export function campoPresente(v: unknown): boolean {
   return true;
 }
 
+export type IdentidadeInstagramResolvida = {
+  encontrada: boolean;
+  instagram_actor_id: string | null;
+  instagram_handle: string | null;
+  fonte: "molde_creative_estado_graph" | "config_empresa" | null;
+  procedencia: string | null;
+  vinculo_pagina_confirmado: boolean | null;
+};
+
+const SEM_IDENTIDADE_INSTAGRAM: IdentidadeInstagramResolvida = {
+  encontrada: false,
+  instagram_actor_id: null,
+  instagram_handle: null,
+  fonte: null,
+  procedencia: null,
+  vinculo_pagina_confirmado: null,
+};
+
+async function resolverIdentidadeInstagram(
+  companyId: string | null,
+  creativeMolde: string,
+): Promise<IdentidadeInstagramResolvida> {
+  if (!companyId || !creativeMolde) return SEM_IDENTIDADE_INSTAGRAM;
+  const { data, error } = await supa.rpc("identidade_instagram_para_criacao", {
+    p_company_id: companyId,
+    p_creative_id: creativeMolde,
+  });
+  if (error || !data || typeof data !== "object") return SEM_IDENTIDADE_INSTAGRAM;
+  const id = String((data as any).instagram_actor_id ?? "").trim();
+  if (!id) return SEM_IDENTIDADE_INSTAGRAM;
+  return {
+    encontrada: true,
+    instagram_actor_id: id,
+    instagram_handle: String((data as any).instagram_handle ?? "").trim() || null,
+    fonte:
+      (data as any).fonte === "molde_creative_estado_graph"
+        ? "molde_creative_estado_graph"
+        : "config_empresa",
+    procedencia: String((data as any).procedencia ?? "").trim() || null,
+    vinculo_pagina_confirmado:
+      typeof (data as any).vinculo_pagina_confirmado === "boolean"
+        ? (data as any).vinculo_pagina_confirmado
+        : null,
+  };
+}
+
+/** Aplica a identidade resolvida sem deixar dois ids conflitantes no story spec. */
+export function aplicarIdentidadeInstagramNoSpec(
+  spec: Record<string, unknown>,
+  identidade: IdentidadeInstagramResolvida,
+): Record<string, unknown> {
+  if (!identidade.encontrada || !identidade.instagram_actor_id) return { ...spec };
+  const novo = { ...spec };
+  delete novo.instagram_user_id;
+  delete novo.instagram_actor_id;
+  novo.instagram_user_id = identidade.instagram_actor_id;
+  return novo;
+}
+
+function avisoIdentidadeInstagram(identidade: IdentidadeInstagramResolvida): string {
+  if (!identidade.encontrada || !identidade.instagram_actor_id) {
+    return "Sem identidade Instagram: nem o molde nem a configuracao da empresa fornecem instagram_user_id. O anuncio nasce sem identidade Instagram/Threads e esses posicionamentos nao veiculam; nenhum id foi inventado.";
+  }
+  const handle = identidade.instagram_handle ? ` (${identidade.instagram_handle})` : "";
+  const origem =
+    identidade.fonte === "molde_creative_estado_graph"
+      ? "copiada do molde observado em creative_estado_graph"
+      : "lida da configuracao da empresa em meta_execution_config";
+  return `Com identidade Instagram${handle}, id ${identidade.instagram_actor_id}, ${origem}. Os posicionamentos Instagram/Threads passam a ser elegiveis; a entrega final ainda depende das demais regras da Meta.`;
+}
+
 // v2: monta o corpo de criacao lendo o molde quando necessario. Retorna o path de colecao,
 // o body do POST e, opcionalmente, um passo previo (criacao de adcreative).
 // v5.1: exportada para que as recusas nomeadas sejam verificaveis fora de uma execucao real. Sem
@@ -1248,6 +1326,10 @@ export async function montarCriacao(
     );
     const cb: any = c.body ?? {};
     const temStorySpec = c.status === 200 && cb.object_story_spec;
+    const identidadeInstagram =
+      videoNovo || imagemNova
+        ? await resolverIdentidadeInstagram(companyId, creativeMolde)
+        : SEM_IDENTIDADE_INSTAGRAM;
 
     // ============ v4.4 / v5.7: PECA NOVA (video do Drive ja na biblioteca da conta) ============
     // FONTES DE CONFIG (ordem):
@@ -1349,17 +1431,11 @@ export async function montarCriacao(
 
       // Avulso: preserva o story_spec do molde e so troca video_data.
       // Dinamico (asset_feed): monta story_spec minimo — o feed nao e object_story_spec.
-      const novoSpec: any =
+      let novoSpec: any =
         fonteConfig === "video_data"
           ? { ...cb.object_story_spec, video_data: novoVd }
           : { page_id: pageId, video_data: novoVd };
-      const ig =
-        cb.object_story_spec?.instagram_user_id ??
-        cb.object_story_spec?.instagram_actor_id ??
-        null;
-      if (ig && !novoSpec.instagram_user_id && !novoSpec.instagram_actor_id) {
-        novoSpec.instagram_user_id = ig;
-      }
+      novoSpec = aplicarIdentidadeInstagramNoSpec(novoSpec, identidadeInstagram);
 
       // Avisos de veiculacao, derivados do que a peca REALMENTE e (video) e do que o molde
       // expoe (identidade). O card antes da aprovacao ja avisa via pedido_de_anuncio_completo;
@@ -1367,11 +1443,7 @@ export async function montarCriacao(
       const avisosVeiculacao: string[] = [
         "Anuncio de VIDEO: a Coluna da direita do Facebook nao veicula video (exige imagem, de qualquer proporcao). Esse posicionamento nao sera entregue - nao e tamanho nem largura do video, e regra do posicionamento.",
       ];
-      if (!ig) {
-        avisosVeiculacao.push(
-          "Sem identidade Instagram: o molde nao carrega instagram_user_id, entao o anuncio nasce sem identidade Instagram/Threads e esses posicionamentos (Instagram, Threads) nao veiculam. Para veicular neles, use molde que exponha a identidade ou configure no Gerenciador.",
-        );
-      }
+      avisosVeiculacao.push(avisoIdentidadeInstagram(identidadeInstagram));
 
       return {
         path: `/${conta}/ads`,
@@ -1394,7 +1466,9 @@ export async function montarCriacao(
           legenda_substituida: !!legendaNova,
           creative_molde: creativeMolde,
           fonte_da_config: fonteConfig,
-          identidade_ig_herdada: !!ig,
+          identidade_ig_herdada: identidadeInstagram.fonte === "molde_creative_estado_graph",
+          identidade_instagram_preenchida: identidadeInstagram.encontrada,
+          identidade_instagram: identidadeInstagram,
         },
         avisos_de_veiculacao: avisosVeiculacao,
       };
@@ -1459,27 +1533,17 @@ export async function montarCriacao(
         novoLd = aplicarLinkNoLinkData(novoLd, linkFinal);
       }
 
-      const novoSpec: any = {
+      let novoSpec: any = {
         ...cb.object_story_spec,
         link_data: novoLd,
       };
       delete novoSpec.video_data; // formato imagem: nao misturar video_data
-      const ig =
-        cb.object_story_spec?.instagram_user_id ??
-        cb.object_story_spec?.instagram_actor_id ??
-        null;
-      if (ig && !novoSpec.instagram_user_id && !novoSpec.instagram_actor_id) {
-        novoSpec.instagram_user_id = ig;
-      }
+      novoSpec = aplicarIdentidadeInstagramNoSpec(novoSpec, identidadeInstagram);
 
       const avisosVeiculacao: string[] = [
         "Anuncio de IMAGEM: a Coluna da direita do Facebook ACEITA imagem - esse posicionamento pode veicular (diferente do anuncio de video, que a Coluna da direita recusa).",
       ];
-      if (!ig) {
-        avisosVeiculacao.push(
-          "Sem identidade Instagram: o molde nao carrega instagram_user_id, entao o anuncio nasce sem identidade Instagram/Threads e esses posicionamentos nao veiculam.",
-        );
-      }
+      avisosVeiculacao.push(avisoIdentidadeInstagram(identidadeInstagram));
 
       return {
         path: `/${conta}/ads`,
@@ -1501,7 +1565,9 @@ export async function montarCriacao(
           legenda_substituida: !!legendaNova,
           creative_molde: creativeMolde,
           fonte_da_config: "link_data",
-          identidade_ig_herdada: !!ig,
+          identidade_ig_herdada: identidadeInstagram.fonte === "molde_creative_estado_graph",
+          identidade_instagram_preenchida: identidadeInstagram.encontrada,
+          identidade_instagram: identidadeInstagram,
           formato: "imagem",
         },
         avisos_de_veiculacao: avisosVeiculacao,
