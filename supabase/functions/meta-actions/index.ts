@@ -1,4 +1,16 @@
-// supabase/functions/meta-actions/index.ts (v5.5)
+// supabase/functions/meta-actions/index.ts (v5.7)
+// v5.7 (11/08/2026) - MOLDE DINAMICO SERVE DE CONFIG. Peca nova tambem herda page_id+link+CTA
+//   de asset_feed_spec (videos[] + link_urls + call_to_action_types string plana) quando o
+//   molde nao expoe video_data no story_spec. Monta object_story_spec minimo; molde de
+//   imagem continua recusado. Identidade IG herdada se existir. Destino LP canonico (v5.6)
+//   permanece. Portao: creative_estado_graph.serve_de_molde_video.
+// v5.6 (11/08/2026) - DESTINO CANONICO LP/SITE DA LEGAL E VIVER.
+//   Anuncios LP/Site usam https://legaleviver.com.br/simulacao-clt. Molde com URL do mesmo
+//   dominio raiz sem esse path (ex.: https://legaleviver.com.br/) e CORRIGIDO na peca nova e
+//   na replicacao com object_story_spec — nao inventamos URL para WhatsApp/outros dominios.
+//   Sem story_spec (reusar_creative_id) e com destino LP fora do canonico: RECUSA nomeada
+//   destino_url_lp_nao_corrigivel_sem_object_story_spec. Criterio espelhado em
+//   public.resolver_destino_url_lp_legal_e_viver (PO-17).
 // v5.5 (07/08/2026) - ABO DE VERDADE PELO PIPEBOARD. O gestor decidiu o regime: ABO (campanha SEM
 //   orcamento, dinheiro em cada conjunto). Ate aqui montarCriacao montava ABO "por construcao"
 //   (corpo sem orcamento), mas o conector Pipeboard INJETAVA daily_budget=1000, e TODA campanha
@@ -190,6 +202,10 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
+import {
+  aplicarLinkNoVideoData,
+  resolverDestinoUrlLpLegalEViver,
+} from "../_shared/destino_url_lp.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
   argsAdDeGraph,
@@ -1008,7 +1024,13 @@ export function campoPresente(v: unknown): boolean {
 // v5.1: exportada para que as recusas nomeadas sejam verificaveis fora de uma execucao real. Sem
 // isso, a unica forma de provar que carrossel recusa era emitir um card de verdade - caro demais
 // para uma prova que precisa ser repetida a cada mudanca de contrato.
-export async function montarCriacao(acao: string, p: any, conta: string, tetoSanidade: number) {
+export async function montarCriacao(
+  acao: string,
+  p: any,
+  conta: string,
+  tetoSanidade: number,
+  companyId: string | null = null,
+) {
   if (acao === "criar_campanha") {
     const nome = String(p?.nome_novo ?? "").trim();
     if (!nome) return { erro: "payload sem nome_novo" };
@@ -1188,61 +1210,124 @@ export async function montarCriacao(acao: string, p: any, conta: string, tetoSan
       };
     }
 
-    // Le o creative do molde para tentar recria-lo com as UTMs novas.
+    // Le o creative do molde. asset_feed_spec entra porque criativo Dinamico guarda
+    // link/CTA/videos la - sem ele so 8 moldes serviam; com ele a config e herdavel.
     const c = await g(
-      `/${creativeMolde}?fields=object_story_spec,url_tags,name,degrees_of_freedom_spec`,
+      `/${creativeMolde}?fields=object_story_spec,asset_feed_spec,url_tags,name,degrees_of_freedom_spec`,
     );
     const cb: any = c.body ?? {};
     const temStorySpec = c.status === 200 && cb.object_story_spec;
 
-    // ============ v4.4: PECA NOVA (video do Drive ja na biblioteca da conta) ============
-    // Rota: COPIAR o object_story_spec do molde e TROCAR a midia. So esta rota existe porque a
-    // configuracao que faz um anuncio funcionar (page_id, link de destino, CTA, titulo) nao esta
-    // em tabela nenhuma do sistema - ela vive dentro do spec do molde. Montar do zero exigiria
-    // inventar a URL de destino, e inventar URL de anuncio de credito nao esta em questao.
-    // AQUI NAO EXISTE DEGRADACAO. No caminho de replicacao pura, cair para reusar_creative_id e
-    // correto - o pedido E publicar o criativo do molde. Com peca nova seria publicar A PECA
-    // ERRADA: o gestor aprovaria "subir o video novo" e a Meta entregaria o video antigo, sem
-    // ninguem notar, gastando. Por isso cada pre-requisito ausente RECUSA, com nome proprio.
+    // ============ v4.4 / v5.7: PECA NOVA (video do Drive ja na biblioteca da conta) ============
+    // FONTES DE CONFIG (ordem):
+    //   1) object_story_spec.video_data do molde (anuncio avulso) - copia e troca video_id;
+    //   2) asset_feed_spec do molde dinamico (videos + link_urls + call_to_action_types) -
+    //      MONTA video_data com page_id do story_spec. CTA observado 11/08: string plana.
+    //      URL/CTA ambiguos RECUSAM (nao escolhemos). Molde de imagem RECUSA.
+    // Sem as duas fontes: recusa. Nunca inventa URL de credito. Sem degradacao para
+    // reusar_creative_id na peca nova (publicaria a peca antiga).
+    // v5.6: LP Legal e Viver corrige legaleviver.com.br sem /simulacao-clt para o canonico.
     if (videoNovo) {
       if (!temStorySpec) {
         return {
           erro: "molde_sem_object_story_spec",
-          detalhe: `O anuncio molde (creative ${creativeMolde}) nao expoe object_story_spec - tipico de criativo flexivel/Advantage+, onde midia, textos e link vivem no asset_feed_spec. Sem o spec nao ha de onde copiar page_id, link de destino e CTA, e este caminho NAO reusa o criativo do molde: reusar publicaria a peca ANTIGA num card que pede a peca NOVA. Escolha um molde que exponha o spec (na conta da Legal e Viver os CREATIVE_LPV2_Reel* expoem) ou monte o anuncio no Gerenciador.`,
+          detalhe: `O anuncio molde (creative ${creativeMolde}) nao expoe object_story_spec. Sem page_id nao ha de onde montar o emissor, e este caminho NAO reusa o criativo do molde: reusar publicaria a peca ANTIGA. Escolha outro molde ou monte no Gerenciador.`,
         };
       }
-      const vd: any = cb.object_story_spec?.video_data ?? null;
-      if (!vd) {
-        return {
-          erro: "molde_sem_video_data",
-          detalhe: `O molde expoe object_story_spec, mas sem video_data (chaves presentes: ${Object.keys(cb.object_story_spec ?? {}).join(", ") || "nenhuma"}). Trocar a midia de um spec de imagem por video mudaria o formato do anuncio, nao so a peca - e isso nao e replicar molde. Use como molde um anuncio de VIDEO.`,
-        };
-      }
-      if (!cb.object_story_spec?.page_id) {
+      const pageId = cb.object_story_spec?.page_id ?? null;
+      if (!pageId) {
         return {
           erro: "molde_sem_page_id",
           detalhe:
             "O object_story_spec do molde nao traz page_id, e a Meta recusa adcreative sem pagina. Nao ha default seguro: publicar por outra pagina mudaria o emissor do anuncio.",
         };
       }
-      // §7 do briefing: a URL de destino nao existe em tabela nenhuma - ela vem do molde ou nao vem.
+
+      let vd: any = cb.object_story_spec?.video_data ?? null;
+      let fonteConfig: "video_data" | "asset_feed_spec" | null = vd ? "video_data" : null;
+
+      if (!vd) {
+        const afs: any = cb.asset_feed_spec ?? null;
+        const videosAfs = Array.isArray(afs?.videos) ? afs.videos : [];
+        if (!videosAfs.length) {
+          return {
+            erro: "molde_sem_video_data",
+            detalhe: `O molde expoe object_story_spec sem video_data e sem videos[] no asset_feed_spec (chaves do story: ${Object.keys(cb.object_story_spec ?? {}).join(", ") || "nenhuma"}; chaves do feed: ${Object.keys(afs ?? {}).join(", ") || "nenhuma"}). E molde de IMAGEM ou config incompleta - trocar por video mudaria o FORMATO. Use molde de VIDEO (avulso ou dinamico com videos no feed).`,
+          };
+        }
+        const urls = [
+          ...new Set(
+            (Array.isArray(afs?.link_urls) ? afs.link_urls : [])
+              .map((u: any) => String(u?.website_url ?? "").trim())
+              .filter(Boolean),
+          ),
+        ];
+        if (urls.length !== 1) {
+          return {
+            erro: "molde_sem_link_de_destino",
+            detalhe:
+              urls.length === 0
+                ? "O asset_feed_spec do molde nao traz link_urls[].website_url. A URL de destino nao sera inventada."
+                : `O asset_feed_spec do molde traz ${urls.length} URLs distintas e nao escolhemos entre elas. Use um molde com destino unico.`,
+          };
+        }
+        const ctas = [
+          ...new Set(
+            (Array.isArray(afs?.call_to_action_types) ? afs.call_to_action_types : [])
+              .map((t: any) => (typeof t === "string" ? t.trim() : ""))
+              .filter(Boolean),
+          ),
+        ];
+        if (ctas.length !== 1) {
+          return {
+            erro: "molde_sem_video_data",
+            detalhe:
+              ctas.length === 0
+                ? "O asset_feed_spec do molde nao traz call_to_action_types. Sem CTA nao monto o video_data."
+                : `O asset_feed_spec traz ${ctas.length} CTAs distintos e nao escolhemos entre eles.`,
+          };
+        }
+        vd = {
+          call_to_action: { type: ctas[0], value: { link: urls[0] } },
+        };
+        fonteConfig = "asset_feed_spec";
+      }
+
       const linkMolde = vd?.call_to_action?.value?.link ?? vd?.link ?? null;
       if (!linkMolde) {
         return {
           erro: "molde_sem_link_de_destino",
-          detalhe: `O video_data do molde nao traz link de destino (chaves: ${Object.keys(vd).join(", ")}). A URL de destino nao esta em nenhuma tabela do sistema, so dentro do spec do molde - e nao sera inventada. Escolha um molde que carregue o link.`,
+          detalhe: `O video_data do molde nao traz link de destino (chaves: ${Object.keys(vd).join(", ")}). A URL de destino nao sera inventada. Escolha um molde que carregue o link.`,
         };
       }
+      const destino = resolverDestinoUrlLpLegalEViver(companyId, String(linkMolde));
+      const linkFinal = destino.aplicavel && destino.url_final ? destino.url_final : String(linkMolde);
       const th = await escolherThumbnail(videoNovo, String(p?.thumbnail_url ?? ""));
       if (th.erro) {
         return { erro: "thumbnail_obrigatoria_nao_resolvida", detalhe: th.erro };
       }
 
       // image_hash do molde e o quadro do video ANTIGO: mantido, a Meta publicaria a capa errada.
-      const novoVd: any = { ...vd, video_id: videoNovo, image_url: th.url };
+      let novoVd: any = { ...vd, video_id: videoNovo, image_url: th.url };
       delete novoVd.image_hash;
       if (legendaNova) novoVd.message = legendaNova;
-      const novoSpec = { ...cb.object_story_spec, video_data: novoVd };
+      if (destino.aplicavel && destino.corrigiu) {
+        novoVd = aplicarLinkNoVideoData(novoVd, linkFinal);
+      }
+
+      // Avulso: preserva o story_spec do molde e so troca video_data.
+      // Dinamico (asset_feed): monta story_spec minimo — o feed nao e object_story_spec.
+      const novoSpec: any =
+        fonteConfig === "video_data"
+          ? { ...cb.object_story_spec, video_data: novoVd }
+          : { page_id: pageId, video_data: novoVd };
+      const ig =
+        cb.object_story_spec?.instagram_user_id ??
+        cb.object_story_spec?.instagram_actor_id ??
+        null;
+      if (ig && !novoSpec.instagram_user_id && !novoSpec.instagram_actor_id) {
+        novoSpec.instagram_user_id = ig;
+      }
 
       return {
         path: `/${conta}/ads`,
@@ -1260,31 +1345,71 @@ export async function montarCriacao(acao: string, p: any, conta: string, tetoSan
           meta_video_id: videoNovo,
           thumbnail: th,
           link_herdado_do_molde: linkMolde,
+          link_publicado: linkFinal,
+          destino_url_lp: destino,
           legenda_substituida: !!legendaNova,
           creative_molde: creativeMolde,
+          fonte_da_config: fonteConfig,
+          identidade_ig_herdada: !!ig,
         },
+      };
+    }
+
+    // Replicacao pura: se o molde expoe story_spec, reescrevemos o link LP canônico antes
+    // de criar o adcreative novo. Sem story_spec (reusar_creative_id) nao ha como corrigir
+    // o destino — e se o molde for LP da LEV com URL fora do canônico, RECUSAMOS por nome
+    // em vez de publicar a raiz em silencio.
+    if (temStorySpec) {
+      const spec: any = cb.object_story_spec;
+      const vdRep: any = spec?.video_data ?? null;
+      const linkRep = vdRep?.call_to_action?.value?.link ?? vdRep?.link ?? null;
+      const destinoRep = resolverDestinoUrlLpLegalEViver(companyId, linkRep ? String(linkRep) : null);
+      let specFinal = spec;
+      if (destinoRep.aplicavel && destinoRep.corrigiu && vdRep && destinoRep.url_final) {
+        specFinal = {
+          ...spec,
+          video_data: aplicarLinkNoVideoData(vdRep, destinoRep.url_final),
+        };
+      }
+      return {
+        path: `/${conta}/ads`,
+        body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+        criativo: {
+          modo: "novo_adcreative",
+          path: `/${conta}/adcreatives`,
+          body: {
+            name: `${nome} - creative`,
+            object_story_spec: JSON.stringify(specFinal),
+            ...(urlTags ? { url_tags: urlTags } : {}),
+          } as Record<string, string>,
+        },
+        destino_url_lp: destinoRep.aplicavel ? destinoRep : null,
+      };
+    }
+
+    // Sem story_spec: so reusa o creative_id. Se o pedido JA declara destino_url do dominio
+    // LP fora do canônico (vindo da emissao), recusa — nao ha campo para corrigir no reuso.
+    const destinoPedido = resolverDestinoUrlLpLegalEViver(
+      companyId,
+      p?.destino_url != null ? String(p.destino_url) : null,
+    );
+    if (destinoPedido.aplicavel && destinoPedido.corrigiu) {
+      return {
+        erro: "destino_url_lp_nao_corrigivel_sem_object_story_spec",
+        detalhe:
+          `O molde nao expoe object_story_spec, entao o anuncio novo reusaria o criativo original com destino "${destinoPedido.url_original}". Para LP/Site da Legal e Viver o destino canônico e ${destinoPedido.url_final}, e sem o spec nao ha como corrigir o link na criacao. Escolha um molde que expoe object_story_spec com link (ex.: CREATIVE_LPV2_Reel*) ou um molde que ja aponte para ${destinoPedido.url_final}.`,
       };
     }
 
     return {
       path: `/${conta}/ads`,
       body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>, // v4.3: anuncio nasce pausado - a entrega so comeca quando o gestor ativar
-      criativo: temStorySpec
-        ? {
-            modo: "novo_adcreative",
-            path: `/${conta}/adcreatives`,
-            body: {
-              name: `${nome} - creative`,
-              object_story_spec: JSON.stringify(cb.object_story_spec),
-              ...(urlTags ? { url_tags: urlTags } : {}),
-            } as Record<string, string>,
-          }
-        : {
-            modo: "reusar_creative_id",
-            creative_id: creativeMolde,
-            aviso:
-              "O criativo do molde nao expoe object_story_spec (tipico de Advantage+ com asset_feed_spec), entao o anuncio novo REUSA o criativo original e herda as UTMs dele - a utm_campaign pedida NAO sera aplicada. Ajustar manualmente no Gerenciador se a rastreabilidade for necessaria.",
-          },
+      criativo: {
+        modo: "reusar_creative_id",
+        creative_id: creativeMolde,
+        aviso:
+          "O criativo do molde nao expoe object_story_spec (tipico de Advantage+ com asset_feed_spec), entao o anuncio novo REUSA o criativo original e herda as UTMs dele - a utm_campaign pedida NAO sera aplicada. Ajustar manualmente no Gerenciador se a rastreabilidade for necessaria.",
+      },
     };
   }
 
@@ -1693,7 +1818,7 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      const plano = await montarCriacao(acao, r.payload, conta, tetoSanidade);
+      const plano = await montarCriacao(acao, r.payload, conta, tetoSanidade, String(r.company_id ?? ""));
       if ((plano as any).erro) {
         await audit(r.company_id, sistema, "meta_action_failed", r.id, {
           motivo: (plano as any).erro,
