@@ -1,4 +1,11 @@
-// supabase/functions/meta-actions/index.ts (v5.7)
+// supabase/functions/meta-actions/index.ts (v5.8)
+// v5.8 (11/08/2026) - POSICIONAMENTO E IDENTIDADE. (1) personalizacao_por_posicionamento_nao_suportada:
+//   pedido que pede midia por posicionamento (ex.: imagem so na Coluna da direita, que nao aceita
+//   video) RECUSA por nome - a executora monta um unico video_data, nao asset por posicionamento.
+//   (2) avisos_de_veiculacao no card da peca nova: anuncio de VIDEO nao veicula na Coluna da direita
+//   do Facebook (regra do posicionamento, nao tamanho do video); molde sem instagram_user_id nasce
+//   sem identidade Instagram/Threads e perde esses posicionamentos. O aviso ANTES da aprovacao vive
+//   em pedido_de_anuncio_completo (mensagem_para_o_gestor), derivado de creative_estado_graph.
 // v5.7 (11/08/2026) - MOLDE DINAMICO SERVE DE CONFIG. Peca nova tambem herda page_id+link+CTA
 //   de asset_feed_spec (videos[] + link_urls + call_to_action_types string plana) quando o
 //   molde nao expoe video_data no story_spec. Monta object_story_spec minimo; molde de
@@ -1186,6 +1193,26 @@ export async function montarCriacao(
           "O pedido traz meta_image_hash (foto) e esta executora so publica peca nova em VIDEO: a rota da v4.4 copia o object_story_spec do molde e troca video_id, e um molde de video nao vira anuncio de imagem trocando um campo - muda o formato do anuncio, nao so a peca. Antes desta versao o campo era ignorado em silencio e ia ao ar o criativo do molde. Publique a foto pelo Gerenciador, ou peca o suporte a imagem como trabalho declarado.",
       };
     }
+    // ============ v5.8: PERSONALIZACAO POR POSICIONAMENTO NAO E SUPORTADA ============
+    // A Coluna da direita do Facebook NAO veicula video (exige imagem, de qualquer proporcao) -
+    // trocar o video por um menor nunca resolve o aviso. A unica forma de veicular la e trocar a
+    // MIDIA daquele posicionamento por imagem (placement asset customization: asset_feed_spec com
+    // regras por posicionamento). Esta executora monta um object_story_spec com UM video_data
+    // unico; nao monta asset por posicionamento. Entao, no mesmo espirito de carrossel/foto, o
+    // pedido que pede asset por posicionamento RECUSA por nome em vez de publicar so o video e o
+    // gestor descobrir na previa que a Coluna da direita ficou de fora.
+    if (
+      campoPresente(p?.assets_por_posicionamento) ||
+      campoPresente(p?.placement_asset_customization) ||
+      campoPresente(p?.imagem_coluna_direita) ||
+      campoPresente(p?.asset_customization_rules)
+    ) {
+      return {
+        erro: "personalizacao_por_posicionamento_nao_suportada",
+        detalhe:
+          "O pedido pede midia diferente por posicionamento (ex.: imagem so na Coluna da direita do Facebook, que nao aceita video). Isso e placement asset customization - asset_feed_spec com regras por posicionamento - e esta executora NAO monta isso: ela monta um object_story_spec com um unico video_data. O padrao do sistema para anuncio de video e ACEITAR que a Coluna da direita nao veicule (e avisar isso no card antes da aprovacao). Se precisar veicular imagem nesse posicionamento, monte no Gerenciador ou peca o suporte a personalizacao por posicionamento como trabalho declarado.",
+      };
+    }
 
     // ============ v5.2: ESTADO DO DESTINO, ANTES DO ADCREATIVE ============
     // is_dynamic_creative nao e campo do pedido: e estado do conjunto na Graph. Por isso nao cabe
@@ -1329,6 +1356,18 @@ export async function montarCriacao(
         novoSpec.instagram_user_id = ig;
       }
 
+      // Avisos de veiculacao, derivados do que a peca REALMENTE e (video) e do que o molde
+      // expoe (identidade). O card antes da aprovacao ja avisa via pedido_de_anuncio_completo;
+      // aqui o mesmo aviso viaja no objeto executado, para o gestor nao descobrir na previa.
+      const avisosVeiculacao: string[] = [
+        "Anuncio de VIDEO: a Coluna da direita do Facebook nao veicula video (exige imagem, de qualquer proporcao). Esse posicionamento nao sera entregue - nao e tamanho nem largura do video, e regra do posicionamento.",
+      ];
+      if (!ig) {
+        avisosVeiculacao.push(
+          "Sem identidade Instagram: o molde nao carrega instagram_user_id, entao o anuncio nasce sem identidade Instagram/Threads e esses posicionamentos (Instagram, Threads) nao veiculam. Para veicular neles, use molde que exponha a identidade ou configure no Gerenciador.",
+        );
+      }
+
       return {
         path: `/${conta}/ads`,
         body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
@@ -1352,6 +1391,7 @@ export async function montarCriacao(
           fonte_da_config: fonteConfig,
           identidade_ig_herdada: !!ig,
         },
+        avisos_de_veiculacao: avisosVeiculacao,
       };
     }
 

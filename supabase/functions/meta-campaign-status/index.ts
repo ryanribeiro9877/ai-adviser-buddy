@@ -1,4 +1,19 @@
-// supabase/functions/meta-campaign-status/index.ts (v10)
+// supabase/functions/meta-campaign-status/index.ts (v12)
+// v12 (11/08/2026) - CONFIG DO MOLDE: grava VALORES (page_id, link, CTA, IG) e
+//   serve_de_molde_video a partir de object_story_spec.video_data OU asset_feed_spec
+//   (videos + link_urls + call_to_action_types). Forma do CTA observada na sonda v11:
+//   array de strings planas. Ambiguidade de URL/CTA deixa nulo (nao escolhemos). Molde
+//   de imagem continua serve=false. O portao passa a liberar os ~23+ criativos dinamicos
+//   de video que antes caiam em molde_sem_video_data.
+// v11 (11/08/2026) - SONDA READ-ONLY da config do molde dinamico. Hoje so 8 dos 59 criativos
+//   da conta servem de molde para peca nova, porque a rota le apenas object_story_spec.
+//   Os outros 48 tem object_story_spec com page_id e guardam midia, textos e link no
+//   asset_feed_spec - campo que esta funcao JA LE desde a v4 para deduzir destino_url.
+//   Antes de montar video_data a partir dessa fonte, esta versao apenas OBSERVA a forma:
+//   link_urls[].website_url ja e forma provada, mas a de call_to_action_types nunca foi vista
+//   nesta conta, e montar CTA adivinhado publicaria botao errado num anuncio de credito.
+//   Nada e gravado nesta versao - nenhuma coluna nova nasce antes da forma ser observada.
+// v10 (10/08/2026)
 // v10 (10/08/2026) - os OUTROS pre-requisitos do molde. Conferindo o criterio da v9 contra a
 //   executora apareceram dois vizinhos no mesmo ponto de meta-actions, com o mesmo defeito de
 //   momento: molde_sem_page_id e molde_sem_link_de_destino tambem so falavam depois da
@@ -512,6 +527,7 @@ Deno.serve(async (req) => {
 
   const camposCriativo = new Map<string, Map<string, unknown>>();
   let storySpec: ResultadoCampo | null = null;
+  let assetFeedSpec: ResultadoCampo | null = null;
   for (const campo of [
     "url_tags",
     "object_story_spec",
@@ -522,25 +538,24 @@ Deno.serve(async (req) => {
     const lido = await lerCampoPorIds(creativeIds, "criativo", campo);
     camposCriativo.set(campo, lido.valores);
     if (campo === "object_story_spec") storySpec = lido;
+    if (campo === "asset_feed_spec") assetFeedSpec = lido;
     diagnosticoCampos.push(lido.diagnostico);
   }
 
-  // ============ v9: O CRIATIVO SERVE DE MOLDE PARA PECA NOVA DE VIDEO? ============
-  // Esta leitura ja acontecia desde a v4 e era usada so para deduzir destino_url; o resto
-  // era descartado. Em 10/08 um card foi APROVADO e so entao falhou com molde_sem_video_data,
-  // porque a emissao nao tinha como saber o que esta corrida ja sabia. Agora o fato fica.
-  //
-  // O criterio replica LITERALMENTE o da executora (meta-actions montarCriacao): spec ausente
-  // ou nulo recusa, e video_data e testado pelo VALOR, nao pela presenca da chave. Divergir
-  // aqui recriaria o defeito ao contrario - um card emitido que a execucao recusa.
+  // ============ v12: CONFIG DO MOLDE (video_data OU asset_feed_spec) ============
+  // Ate a v11 so guardavamos booleanos de object_story_spec, e so 8 criativos serviam.
+  // A sonda v11 provou: criativos dinamicos trazem page_id no story_spec e
+  // link_urls[].website_url + call_to_action_types (string plana) + videos[] no
+  // asset_feed_spec. Agora gravamos VALORES e serve_de_molde_video=true quando a
+  // config completa de VIDEO existe em QUALQUER das duas fontes. Molde de imagem
+  // (sem video_data e sem videos[]) continua serve=false.
   let estadoCriativos: unknown = { nota: "object_story_spec nao foi lido nesta corrida" };
   if (storySpec && storySpec.respondidos.size) {
     const contaDoCriativo = new Map<string, string>();
     for (const a of anunciosGraph) {
       if (a.creative_id) contaDoCriativo.set(a.creative_id, a.account_id);
     }
-    // So os que RESPONDERAM entram. Criativo sem resposta preserva o valor anterior, e a
-    // linha ausente continua significando "nunca verificado" para o portao de emissao.
+    const afsMap = assetFeedSpec?.valores ?? new Map<string, unknown>();
     const linhas = [...storySpec.respondidos].map((id) => {
       const bruto = storySpec!.valores.get(id);
       const spec =
@@ -548,24 +563,81 @@ Deno.serve(async (req) => {
           ? (bruto as Record<string, unknown>)
           : null;
       const videoData = spec ? (spec.video_data as Record<string, unknown> | null) : null;
-      // O link mora DENTRO do video_data, nos dois lugares em que a executora o procura.
-      // Sem video_data nao ha link, e o false daqui e consequencia, nao diagnostico - a
-      // ordem declarada no contrato garante que a recusa de video_data fale primeiro.
-      const cta = videoData?.call_to_action as { value?: { link?: unknown } } | undefined;
-      const link = cta?.value?.link ?? videoData?.link ?? null;
+      const ctaVd = videoData?.call_to_action as
+        | { type?: unknown; value?: { link?: unknown } }
+        | undefined;
+      const linkVd = (ctaVd?.value?.link ?? videoData?.link ?? null) as string | null;
+      const ctaVdTipo = typeof ctaVd?.type === "string" ? ctaVd.type : null;
+      const pageId = typeof spec?.page_id === "string" ? spec.page_id : null;
+      const igRaw = spec?.instagram_user_id ?? spec?.instagram_actor_id ?? null;
+      const ig = typeof igRaw === "string" ? igRaw : null;
+
+      const afsBruto = afsMap.get(id);
+      const afs =
+        afsBruto && typeof afsBruto === "object" ? (afsBruto as Record<string, unknown>) : null;
+      const linkUrls = Array.isArray(afs?.link_urls) ? afs!.link_urls : [];
+      const urls = [
+        ...new Set(
+          linkUrls
+            .map((u) =>
+              u && typeof u === "object"
+                ? String((u as Record<string, unknown>).website_url ?? "").trim()
+                : "",
+            )
+            .filter(Boolean),
+        ),
+      ];
+      const linkAfs = urls.length === 1 ? urls[0] : null; // ambiguidade = nao escolhemos
+      const ctasRaw = Array.isArray(afs?.call_to_action_types) ? afs!.call_to_action_types : [];
+      const ctas = [
+        ...new Set(
+          ctasRaw
+            .map((c) => (typeof c === "string" ? c.trim() : ""))
+            .filter(Boolean),
+        ),
+      ];
+      const ctaAfs = ctas.length === 1 ? ctas[0] : null;
+      const temVideosAfs = Array.isArray(afs?.videos) && afs!.videos.length > 0;
+
+      const link = linkVd || linkAfs;
+      const cta = ctaVdTipo || ctaAfs;
+      const fonteCfg = videoData
+        ? "video_data"
+        : pageId && link && cta && temVideosAfs
+          ? "asset_feed_spec"
+          : null;
+      const serve =
+        !!pageId &&
+        !!link &&
+        !!cta &&
+        (!!videoData || temVideosAfs);
+
       return {
         creative_id: id,
         account_id: contaDoCriativo.get(id) ?? null,
         expoe_object_story_spec: spec !== null,
         expoe_video_data: !!videoData,
-        expoe_page_id: !!spec?.page_id,
+        expoe_page_id: !!pageId,
         expoe_link_destino: !!link,
+        serve_de_molde_video: serve,
+        page_id: pageId,
+        link_destino: link,
+        call_to_action_type: cta,
+        instagram_actor_id: ig,
+        fonte_da_config: fonteCfg,
         chaves_do_spec: spec ? Object.keys(spec) : [],
-        fonte: "Graph fields=object_story_spec; coleta meta-campaign-status",
+        fonte: "Graph fields=object_story_spec,asset_feed_spec; coleta meta-campaign-status",
       };
     });
     const { data, error } = await supa.rpc("espelhar_estado_de_criativos_da_graph", { p: linhas });
-    estadoCriativos = error ? { erro: error.message } : data;
+    estadoCriativos = error
+      ? { erro: error.message }
+      : {
+          ...(data as object),
+          servem_de_molde_video: linhas.filter((l) => l.serve_de_molde_video).length,
+          via_video_data: linhas.filter((l) => l.fonte_da_config === "video_data").length,
+          via_asset_feed_spec: linhas.filter((l) => l.fonte_da_config === "asset_feed_spec").length,
+        };
   }
 
   const { data: adsLocais } = await supa
@@ -838,7 +910,7 @@ Deno.serve(async (req) => {
     estado_dos_criativos: {
       criativos_lidos_na_meta: creativeIds.length,
       resultado: estadoCriativos,
-      nota: "Responde se o criativo serve de MOLDE para peca nova de video: expoe_video_data=true libera; false significa que usar o molde mudaria o FORMATO do anuncio, nao a peca (tipico de criativo de conjunto Criativo Dinamico, onde a midia vive no asset_feed_spec, e de molde de imagem). Criativo que a Graph nao respondeu nao entra e continua 'nunca verificado', com o portao recusando fechado. O criterio e o mesmo da executora meta-actions, de proposito.",
+      nota: "serve_de_molde_video=true libera peca nova: page_id+link+CTA e formato VIDEO (video_data no story_spec OU videos[] no asset_feed_spec). Molde de imagem fica false. Criativo sem resposta Graph nao entra e continua 'nunca verificado'. Criterio alinhado a meta-actions montarCriacao.",
     },
     estado_dos_conjuntos: {
       conjuntos_lidos_na_meta: adsetIds.length,
@@ -879,6 +951,6 @@ Deno.serve(async (req) => {
       ),
       nota: "com_chave=0 significa campo nao retornado: a coluna nao entra no upsert. Array vazio ou null com chave presente e uma leitura e e preservado. Conta inacessivel nao gera linha.",
     },
-    versao: "meta-campaign-status-v10",
+    versao: "meta-campaign-status-v12",
   });
 });
