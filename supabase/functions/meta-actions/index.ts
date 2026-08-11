@@ -1,4 +1,17 @@
-// supabase/functions/meta-actions/index.ts (v5.15)
+// supabase/functions/meta-actions/index.ts (v5.16)
+// v5.16 (11/08/2026) - CAMPO DA IDENTIDADE ESCOLHIDO PELO FORMATO DO ID. O Ryan informou o id
+//   oficial de @jcr2_legaleviver lido na Identidade do Gerenciador: 1296945687078272. Esse id NAO
+//   tem formato de Instagram Business Account (1784 + 13 digitos) - e um ator Instagram LEGADO.
+//   Ate a v5.15 aplicarIdentidadeInstagramNoSpec jogava o valor da config SEMPRE em
+//   instagram_user_id, que e o campo do IBA id; com um id legado esse e o campo errado. Evidencia
+//   do campo certo: tools/list do Pipeboard (request 620) mostra create_ad_creative expondo
+//   "instagram_actor_id" (Instagram Actor Id) e create_existing_post_ad_creative expondo
+//   "instagram_user_id" descrito como "Instagram business account ID". Agora
+//   campoIdentidadeInstagramPorFormato() decide: 1784... -> instagram_user_id; caso contrario ->
+//   instagram_actor_id. Nada de hardcode do id - a escolha e pelo formato, entao o dia em que a
+//   empresa tiver um IBA id ele vai para o campo certo sozinho. A nota ao gestor declara a
+//   ressalva: identidade legada, vinculo com a pagina nao confirmado (token sem
+//   pages_read_engagement; GET direto responde 36106), revalidar se a Meta recusar.
 // v5.15 (11/08/2026) - INSTAGRAM OFICIAL = @jcr2_legaleviver; THREADS OFF; AGENTE PERGUNTA REDES.
 //   Decisoes do Ryan 11/08: (1) unico Instagram restante apos exclusao do intruso = jcr2_legaleviver
 //   (config prevalece; id so entra quando comprovado via Pipeboard/Graph — nao inventar);
@@ -249,6 +262,13 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
+import {
+  aplicarIdentidadeInstagramNoSpec,
+  avisoIdentidadeInstagram,
+  campoIdentidadeInstagramPorFormato,
+  SEM_IDENTIDADE_INSTAGRAM,
+  type IdentidadeInstagramResolvida,
+} from "../_shared/identidade_instagram.ts";
 import {
   aplicarPadraoPosicionamentoVideo,
   aplicarPosicionamentoPorPlataformas,
@@ -1083,24 +1103,6 @@ export function campoPresente(v: unknown): boolean {
   return true;
 }
 
-export type IdentidadeInstagramResolvida = {
-  encontrada: boolean;
-  instagram_actor_id: string | null;
-  instagram_handle: string | null;
-  fonte: "molde_creative_estado_graph" | "config_empresa" | null;
-  procedencia: string | null;
-  vinculo_pagina_confirmado: boolean | null;
-};
-
-const SEM_IDENTIDADE_INSTAGRAM: IdentidadeInstagramResolvida = {
-  encontrada: false,
-  instagram_actor_id: null,
-  instagram_handle: null,
-  fonte: null,
-  procedencia: null,
-  vinculo_pagina_confirmado: null,
-};
-
 async function resolverIdentidadeInstagram(
   companyId: string | null,
   creativeMolde: string,
@@ -1127,31 +1129,6 @@ async function resolverIdentidadeInstagram(
         ? (data as any).vinculo_pagina_confirmado
         : null,
   };
-}
-
-/** Aplica a identidade resolvida sem deixar dois ids conflitantes no story spec. */
-export function aplicarIdentidadeInstagramNoSpec(
-  spec: Record<string, unknown>,
-  identidade: IdentidadeInstagramResolvida,
-): Record<string, unknown> {
-  if (!identidade.encontrada || !identidade.instagram_actor_id) return { ...spec };
-  const novo = { ...spec };
-  delete novo.instagram_user_id;
-  delete novo.instagram_actor_id;
-  novo.instagram_user_id = identidade.instagram_actor_id;
-  return novo;
-}
-
-function avisoIdentidadeInstagram(identidade: IdentidadeInstagramResolvida): string {
-  if (!identidade.encontrada || !identidade.instagram_actor_id) {
-    return "Sem identidade Instagram comprovada na config/molde. O anuncio nasce sem identidade Instagram. Threads ja esta desabilitado por padrao (empresa sem cadastro). Nenhum id foi inventado.";
-  }
-  const handle = identidade.instagram_handle ? ` (${identidade.instagram_handle})` : "";
-  const origem =
-    identidade.fonte === "molde_creative_estado_graph"
-      ? "copiada do molde observado em creative_estado_graph"
-      : "lida da configuracao da empresa em meta_execution_config";
-  return `Com identidade Instagram${handle}, id ${identidade.instagram_actor_id}, ${origem}. Posicionamentos de Instagram passam a ser elegiveis. Threads permanece DESABILITADO (empresa sem cadastro nessa rede) — identidade Instagram nao habilita Threads.`;
 }
 
 // v2: monta o corpo de criacao lendo o molde quando necessario. Retorna o path de colecao,
@@ -1586,6 +1563,9 @@ export async function montarCriacao(
           identidade_ig_herdada: identidadeInstagram.fonte === "molde_creative_estado_graph",
           identidade_instagram_preenchida: identidadeInstagram.encontrada,
           identidade_instagram: identidadeInstagram,
+          identidade_instagram_campo_spec: identidadeInstagram.instagram_actor_id
+            ? campoIdentidadeInstagramPorFormato(identidadeInstagram.instagram_actor_id)
+            : null,
         },
         avisos_de_veiculacao: avisosVeiculacao,
       };
@@ -1685,6 +1665,9 @@ export async function montarCriacao(
           identidade_ig_herdada: identidadeInstagram.fonte === "molde_creative_estado_graph",
           identidade_instagram_preenchida: identidadeInstagram.encontrada,
           identidade_instagram: identidadeInstagram,
+          identidade_instagram_campo_spec: identidadeInstagram.instagram_actor_id
+            ? campoIdentidadeInstagramPorFormato(identidadeInstagram.instagram_actor_id)
+            : null,
           formato: "imagem",
         },
         avisos_de_veiculacao: avisosVeiculacao,
