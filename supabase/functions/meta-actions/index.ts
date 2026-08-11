@@ -1,11 +1,16 @@
-// supabase/functions/meta-actions/index.ts (v5.11)
+// supabase/functions/meta-actions/index.ts (v5.12)
+// v5.12 (11/08/2026) - IDENTIDADE OFICIAL DO BUSINESS; CONFIG PREVALECE SOBRE O MOLDE. O id
+//   17841428674060566 (v5.11) mostrou-se ERRADO: a Meta gravava o instagram_user_id no creative,
+//   mas a previa mantinha o aviso de Threads porque esse id NAO e identidade valida do Business.
+//   A sonda meta-identity-probe confirmou que o Business (id 3109716642547310) expoe
+//   17841423949227215 (@legaleviver_) em owned_instagram_accounts/instagram_accounts. Decisao do
+//   Ryan (11/08): esse passa a ser o id oficial em meta_execution_config. A RPC
+//   identidade_instagram_para_criacao inverteu a prioridade - a CONFIG oficial PREVALECE e o molde
+//   so e fallback -, porque os moldes antigos expoem o id velho e copiar deles o reinjetaria. Este
+//   arquivo nao muda de logica: le a identidade da MESMA RPC, entao herda o config-first.
 // v5.11 (11/08/2026) - IDENTIDADE INSTAGRAM PREENCHIDA, NAO SO AVISADA. Para peca nova
-//   (video_data ou link_data), resolve a identidade pela RPC identidade_instagram_para_criacao:
-//   primeiro creative_estado_graph.instagram_actor_id do MOLDE; na ausencia, configuracao da
-//   EMPRESA em meta_execution_config. Sem as duas fontes, preserva o fail-safe anterior (sem id
-//   + aviso). A Legal e Viver configura 17841428674060566 (@legaleviver), observado diretamente
-//   em dois criativos reais; o endpoint autenticado da Pagina nao confirmou o vinculo porque o
-//   token nao tem pages_read_engagement — procedencia registrada no banco, sem fingir confirmacao.
+//   (video_data ou link_data), resolve a identidade pela RPC identidade_instagram_para_criacao.
+//   [SUPERADO pela v5.12: a prioridade era molde-primeiro e o id da empresa era 17841428674060566.]
 // v5.10 (11/08/2026) - DESTINO POR PRODUTO, NAO POR DOMINIO. A correcao do link deixa de ser por
 //   dominio (v5.6) e passa a HONRAR a decisao de produto tomada na emissao (payload.destino_do_anuncio,
 //   via RPC resolver_destino_do_anuncio/inferir_produto_anuncio). destinoDoPedidoCompat(p): so
