@@ -6,12 +6,13 @@ project_id = "gzjwnjdpxpbmdhcyefvs"
 
 # 04/08/2026 (GT-13) - upload-midia estava com verify_jwt=true no projeto e um deploy meu com
 # --no-verify-jwt mudou isso para false. O flag da CLI so sabe DESLIGAR; sem uma declaracao aqui
-# o valor anterior nao volta sozinho. Esta linha existe para o deploy restaurar o estado em que a
-# funcao foi encontrada, e para que a proxima pessoa nao dependa de lembrar disso.
-# As demais edges deste projeto estao com verify_jwt=false e continuam assim - nao mexo em nada
-# que nao tenha sido eu que mudei.
+# o valor anterior nao volta sozinho.
+# 11/08/2026 - cron horario escoar_imagens chama esta edge com x-mcp-key (a propria edge
+# autentica via mcp_key_valida). Mesmo padrao de drive-audio-transcribe / pipeboard-metrics-sync:
+# gateway aberto, autenticacao dentro. verify_jwt=false e obrigatorio para o cron nao depender
+# de JWT de anon/service_role no agendador.
 [functions.upload-midia]
-verify_jwt = true
+verify_jwt = false
 
 # ESP-12: chamada interna pelo cron usa x-mcp-key e a propria edge valida via mcp_key_valida.
 [functions.drive-audio-transcribe]

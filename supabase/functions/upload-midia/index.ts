@@ -1,5 +1,9 @@
-// supabase/functions/upload-midia/index.ts (v4)
+// supabase/functions/upload-midia/index.ts (v5)
 // =============================================================================
+// v5 (11/08/2026) - acao "escoar_imagens": sobe as imagens aproveitaveis do acervo que
+//   ainda nao tem meta_image_hash, em sequencia, respeitando max_actions_per_hour.
+//   Cron horario chama isto; quando nao ha pendente, devolve enviados=0 e para sozinho.
+//   So imagem (mime image/ + aproveitavel='sim'); off-brand/reprovadas ficam de fora.
 // v4 (04/08/2026) - GT-13: acao "creative": GET /{creative_id}?fields=object_story_spec,...,
 //   LEITURA pura, para responder se o molde expoe o spec que a rota "copiar e trocar a midia"
 //   precisa. Nao sobe nada, nao grava nada, nao consulta trava. Mesmo padrao da acao
@@ -14,14 +18,15 @@
 // referenciar image_hash / video_id de um arquivo que nasceu no Drive.
 //
 // CONTRATO (POST, auth x-mcp-key ou Bearer vs mcp_config.api_key):
-//   { acao: "plan" | "executar" | "thumbnails",
+//   { acao: "plan" | "executar" | "thumbnails" | "creative" | "escoar_imagens",
 //     company: "<nome ou uuid>",
 //     drive_file_id: "<id do arquivo no Drive>"      // OU
 //     nome_arquivo: "<nome exato p/ localizar na pasta de criativos>",
 //     account_id: "act_XXXX" (opcional - default: unica conta em contas_permitidas_criacao) }
 //
-//   plan     -> localiza o arquivo, resolve conta, diz o que ACONTECERIA (nada sobe).
-//   executar -> exige TODAS as travas abertas; com dry_run=true registra sem subir.
+//   plan           -> localiza o arquivo, resolve conta, diz o que ACONTECERIA (nada sobe).
+//   executar       -> exige TODAS as travas abertas; com dry_run=true registra sem subir.
+//   escoar_imagens -> lote sequencial das imagens aproveitaveis sem meta_image_hash (cron).
 //
 // TRAVAS (padrao da casa, todas verificadas EM ORDEM e com recusa declarada):
 //   1. master_enabled da empresa
@@ -145,7 +150,9 @@ Deno.serve(async (req) => {
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
   const acao = String(body?.acao ?? "plan");
-  if (!["plan", "executar", "thumbnails", "creative"].includes(acao)) return json({ error: "acao deve ser plan, executar, thumbnails ou creative" }, 400);
+  if (!["plan", "executar", "thumbnails", "creative", "escoar_imagens"].includes(acao)) {
+    return json({ error: "acao deve ser plan, executar, thumbnails, creative ou escoar_imagens" }, 400);
+  }
 
   // v4 (04/08/2026) - GT-13: LEITURA do object_story_spec de um criativo que ja roda. GET puro,
   // mesmo padrao provado da acao "thumbnails": nao sobe nada, nao grava nada, nao consulta trava,
@@ -289,6 +296,170 @@ Deno.serve(async (req) => {
   if (!ex) return json({ error: "empresa sem configuracao de execucao" }, 400);
   const contas: string[] = ex.contas_permitidas_criacao ?? [];
   const account = String(body?.account_id ?? (contas.length === 1 ? contas[0] : "")).trim();
+
+  // ============== escoar_imagens (cron horario) ==============
+  // Sobe as imagens aproveitaveis do acervo que ainda nao tem meta_image_hash.
+  // Sequencial (nao paralelo) para o teto por hora ser medido de verdade a cada envio.
+  // Quando nao ha pendente, devolve enviados=0 — o cron continua agendado mas nao faz nada.
+  if (acao === "escoar_imagens") {
+    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    if (ex.master_enabled !== true) {
+      return json({ ok: false, recusado: true, motivo: "master_enabled desligado para a empresa" }, 403);
+    }
+    if (ex.action_flags?.upload_midia !== true) {
+      return json({ ok: false, recusado: true, motivo: "flag upload_midia desligada" }, 403);
+    }
+    if (!account) return json({ ok: false, recusado: true, motivo: "conta de destino indefinida" }, 403);
+    if (!contas.includes(account)) {
+      return json({ ok: false, recusado: true, motivo: `conta ${account} fora de contas_permitidas_criacao` }, 403);
+    }
+
+    const teto = Number(ex.max_actions_per_hour ?? 5);
+    const { count: naHora } = await supa.from("media_uploads").select("id", { count: "exact", head: true })
+      .eq("company_id", comp.id).eq("status", "enviado")
+      .gte("enviado_em", new Date(Date.now() - 3600_000).toISOString());
+    const slots = Math.max(0, teto - (naHora ?? 0));
+    if (slots === 0) {
+      return json({
+        ok: true, acao: "escoar_imagens", versao: "upload-midia-v5",
+        enviados: 0, dedup: 0, falhas: 0, slots: 0, na_hora: naHora ?? 0, teto,
+        nota: "teto por hora atingido - nada enviado nesta janela; o cron tenta de novo na proxima",
+      });
+    }
+
+    // Pendentes: imagem com analise aproveitavel='sim' e SEM meta_image_hash enviado nesta conta.
+    // Off-brand/reprovadas (aproveitavel != sim) ficam de fora de proposito.
+    const { data: analises, error: errAn } = await supa.from("drive_midia_analises")
+      .select("drive_file_id, nome, mime, aproveitavel, analisado_em")
+      .eq("company_id", comp.id)
+      .like("mime", "image/%")
+      .eq("aproveitavel", "sim")
+      .order("analisado_em", { ascending: false });
+    if (errAn) return json({ error: `falha ao listar acervo: ${errAn.message}` }, 500);
+
+    const visto = new Set<string>();
+    const candidatos: { drive_file_id: string; nome: string; mime: string }[] = [];
+    for (const a of analises ?? []) {
+      const id = String(a.drive_file_id ?? "").trim();
+      if (!id || visto.has(id)) continue;
+      visto.add(id);
+      candidatos.push({ drive_file_id: id, nome: String(a.nome ?? id), mime: String(a.mime ?? "") });
+    }
+
+    const { data: jaNaMeta } = await supa.from("media_uploads")
+      .select("drive_file_id")
+      .eq("company_id", comp.id)
+      .eq("account_external_id", account)
+      .eq("status", "enviado")
+      .not("meta_image_hash", "is", null);
+    const comHash = new Set((jaNaMeta ?? []).map((r: any) => String(r.drive_file_id)));
+    const pendentes = candidatos.filter((c) => !comHash.has(c.drive_file_id));
+
+    if (!pendentes.length) {
+      return json({
+        ok: true, acao: "escoar_imagens", versao: "upload-midia-v5",
+        enviados: 0, dedup: 0, falhas: 0, pendentes: 0, slots, na_hora: naHora ?? 0, teto,
+        nota: "nada pendente - cron para sozinho (sem trabalho nesta corrida)",
+      });
+    }
+
+    const lote = pendentes.slice(0, slots);
+    const resultados: any[] = [];
+    let enviados = 0, dedup = 0, falhas = 0;
+
+    for (const item of lote) {
+      // Reconta o teto a cada item: se outra escrita consumiu o slot, para.
+      const { count: agora } = await supa.from("media_uploads").select("id", { count: "exact", head: true })
+        .eq("company_id", comp.id).eq("status", "enviado")
+        .gte("enviado_em", new Date(Date.now() - 3600_000).toISOString());
+      if ((agora ?? 0) >= teto) {
+        resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "parado_pelo_teto" });
+        break;
+      }
+
+      const { data: existente } = await supa.from("media_uploads")
+        .select("id,status,meta_image_hash,enviado_em")
+        .eq("drive_file_id", item.drive_file_id)
+        .eq("account_external_id", account)
+        .maybeSingle();
+      if (existente?.status === "enviado" && existente.meta_image_hash) {
+        dedup++;
+        resultados.push({
+          drive_file_id: item.drive_file_id, nome: item.nome, status: "dedup",
+          image_hash: existente.meta_image_hash,
+        });
+        continue;
+      }
+
+      if (ex.dry_run === true) {
+        await supa.from("media_uploads").upsert({
+          company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
+          nome: item.nome, mime: item.mime, tipo: "imagem", status: "planejado", dry_run: true,
+          criado_por: "upload-midia v5 escoar_imagens",
+        }, { onConflict: "drive_file_id,account_external_id" });
+        resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "dry_run" });
+        continue;
+      }
+
+      try {
+        const meta = await driveMeta(item.drive_file_id);
+        const mime = String(meta.mimeType ?? item.mime);
+        const tamanho = Number(meta.size ?? 0);
+        if (!mime.startsWith("image/")) {
+          falhas++;
+          resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "erro",
+            erro: `tipo nao suportado no escoamento de imagem: ${mime}` });
+          continue;
+        }
+        if (tamanho > MAX_IMG_BYTES) {
+          falhas++;
+          const msg = `arquivo excede o limite v1 (${tamanho} bytes)`;
+          await supa.from("media_uploads").upsert({
+            company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
+            nome: meta.name ?? item.nome, mime, tamanho_bytes: tamanho, tipo: "imagem",
+            status: "erro", dry_run: false, erro: msg, criado_por: "upload-midia v5 escoar_imagens",
+          }, { onConflict: "drive_file_id,account_external_id" });
+          resultados.push({ drive_file_id: item.drive_file_id, nome: meta.name ?? item.nome, status: "erro", erro: msg });
+          continue;
+        }
+
+        const bytes = await driveBaixar(item.drive_file_id);
+        const image_hash = await metaUploadImagem(account, meta.name ?? item.nome, bytes);
+        await supa.from("media_uploads").upsert({
+          company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
+          nome: meta.name ?? item.nome, mime, tamanho_bytes: tamanho, tipo: "imagem",
+          status: "enviado", dry_run: false, meta_image_hash: image_hash,
+          enviado_em: new Date().toISOString(), criado_por: "upload-midia v5 escoar_imagens",
+        }, { onConflict: "drive_file_id,account_external_id" });
+        enviados++;
+        resultados.push({
+          drive_file_id: item.drive_file_id, nome: meta.name ?? item.nome,
+          status: "enviado", image_hash,
+        });
+      } catch (e) {
+        falhas++;
+        const msg = String((e as any)?.message ?? e).slice(0, 400);
+        await supa.from("media_uploads").upsert({
+          company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
+          nome: item.nome, mime: item.mime, tipo: "imagem", status: "erro", dry_run: false,
+          erro: msg, criado_por: "upload-midia v5 escoar_imagens",
+        }, { onConflict: "drive_file_id,account_external_id" });
+        resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "erro", erro: msg });
+      }
+    }
+
+    return json({
+      ok: true, acao: "escoar_imagens", versao: "upload-midia-v5",
+      enviados, dedup, falhas,
+      pendentes_antes: pendentes.length,
+      pendentes_depois: Math.max(0, pendentes.length - enviados - dedup),
+      slots, na_hora_antes: naHora ?? 0, teto,
+      resultados,
+      nota: pendentes.length <= enviados + dedup
+        ? "acervo aproveitavel escoado - proximas corridas nao tem o que subir"
+        : `ainda ha pendentes; o cron horario escoa ate ${teto}/hora`,
+    });
+  }
 
   // arquivo: por id direto ou por nome
   let fileId = String(body?.drive_file_id ?? "").trim();
