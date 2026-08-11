@@ -25,3 +25,9 @@ verify_jwt = false
 # Fase A: cron autentica por mcp_key_valida dentro da edge.
 [functions.pipeboard-metrics-sync]
 verify_jwt = false
+
+# Sonda de identidade (somente leitura). Sem esta linha o deploy nasce com verify_jwt=true
+# e o gateway rejeita a x-mcp-key antes de a edge validar — a propria edge autentica por
+# mcp_key_valida, como as demais.
+[functions.meta-identity-probe]
+verify_jwt = false
