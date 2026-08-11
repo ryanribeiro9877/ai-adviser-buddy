@@ -1,4 +1,8 @@
-// supabase/functions/meta-campaign-status/index.ts (v12)
+// supabase/functions/meta-campaign-status/index.ts (v13)
+// v13 (11/08/2026) - MOLDE DE IMAGEM: grava expoe_link_data + serve_de_molde_imagem a partir
+//   de object_story_spec.link_data (page_id + link + CTA). Os 25 criativos com
+//   chaves=["page_id","link_data"] passam a servir de molde para peca nova de imagem.
+//   Video (serve_de_molde_video) intacto. Amostra de chaves_do_link_data no retorno.
 // v12 (11/08/2026) - CONFIG DO MOLDE: grava VALORES (page_id, link, CTA, IG) e
 //   serve_de_molde_video a partir de object_story_spec.video_data OU asset_feed_spec
 //   (videos + link_urls + call_to_action_types). Forma do CTA observada na sonda v11:
@@ -542,13 +546,10 @@ Deno.serve(async (req) => {
     diagnosticoCampos.push(lido.diagnostico);
   }
 
-  // ============ v12: CONFIG DO MOLDE (video_data OU asset_feed_spec) ============
-  // Ate a v11 so guardavamos booleanos de object_story_spec, e so 8 criativos serviam.
-  // A sonda v11 provou: criativos dinamicos trazem page_id no story_spec e
-  // link_urls[].website_url + call_to_action_types (string plana) + videos[] no
-  // asset_feed_spec. Agora gravamos VALORES e serve_de_molde_video=true quando a
-  // config completa de VIDEO existe em QUALQUER das duas fontes. Molde de imagem
-  // (sem video_data e sem videos[]) continua serve=false.
+  // ============ v13: CONFIG DO MOLDE (video_data | asset_feed video | link_data imagem) ============
+  // v12: video via video_data OU asset_feed com videos. v13: IMAGEM via link_data
+  // (page_id + link + CTA). Forma observada nos 25 moldes da conta: chaves_do_spec =
+  // ["page_id","link_data"]. Pipeboard ja desembrulha link_data.image_hash.
   let estadoCriativos: unknown = { nota: "object_story_spec nao foi lido nesta corrida" };
   if (storySpec && storySpec.respondidos.size) {
     const contaDoCriativo = new Map<string, string>();
@@ -563,11 +564,18 @@ Deno.serve(async (req) => {
           ? (bruto as Record<string, unknown>)
           : null;
       const videoData = spec ? (spec.video_data as Record<string, unknown> | null) : null;
+      const linkData = spec ? (spec.link_data as Record<string, unknown> | null) : null;
       const ctaVd = videoData?.call_to_action as
         | { type?: unknown; value?: { link?: unknown } }
         | undefined;
       const linkVd = (ctaVd?.value?.link ?? videoData?.link ?? null) as string | null;
       const ctaVdTipo = typeof ctaVd?.type === "string" ? ctaVd.type : null;
+
+      const ctaLd = linkData?.call_to_action as
+        | { type?: unknown; value?: { link?: unknown } }
+        | undefined;
+      const linkLd = (linkData?.link ?? ctaLd?.value?.link ?? null) as string | null;
+      const ctaLdTipo = typeof ctaLd?.type === "string" ? ctaLd.type : null;
       const pageId = typeof spec?.page_id === "string" ? spec.page_id : null;
       const igRaw = spec?.instagram_user_id ?? spec?.instagram_actor_id ?? null;
       const ig = typeof igRaw === "string" ? igRaw : null;
@@ -587,7 +595,7 @@ Deno.serve(async (req) => {
             .filter(Boolean),
         ),
       ];
-      const linkAfs = urls.length === 1 ? urls[0] : null; // ambiguidade = nao escolhemos
+      const linkAfs = urls.length === 1 ? urls[0] : null;
       const ctasRaw = Array.isArray(afs?.call_to_action_types) ? afs!.call_to_action_types : [];
       const ctas = [
         ...new Set(
@@ -598,34 +606,51 @@ Deno.serve(async (req) => {
       ];
       const ctaAfs = ctas.length === 1 ? ctas[0] : null;
       const temVideosAfs = Array.isArray(afs?.videos) && afs!.videos.length > 0;
+      const temImagesAfs = Array.isArray(afs?.images) && (afs!.images as unknown[]).length > 0;
+      const linkDataEhCarrossel =
+        !!linkData && Array.isArray(linkData.child_attachments) &&
+        (linkData.child_attachments as unknown[]).length > 0;
 
-      const link = linkVd || linkAfs;
-      const cta = ctaVdTipo || ctaAfs;
+      const link = (typeof linkVd === "string" && linkVd) || (typeof linkLd === "string" && linkLd) || linkAfs || null;
+      const cta = ctaVdTipo || ctaLdTipo || ctaAfs;
       const fonteCfg = videoData
         ? "video_data"
-        : pageId && link && cta && temVideosAfs
-          ? "asset_feed_spec"
-          : null;
-      const serve =
+        : linkData && pageId && linkLd && ctaLdTipo && !linkDataEhCarrossel
+          ? "link_data"
+          : pageId && link && cta && temVideosAfs
+            ? "asset_feed_spec"
+            : null;
+      const serveVideo =
         !!pageId &&
         !!link &&
         !!cta &&
         (!!videoData || temVideosAfs);
+      // Imagem avulsa: link_data com page+link+CTA e SEM child_attachments (carrossel).
+      const serveImagem =
+        !!pageId &&
+        !!link &&
+        !!cta &&
+        !serveVideo &&
+        !linkDataEhCarrossel &&
+        (!!linkData || temImagesAfs);
 
       return {
         creative_id: id,
         account_id: contaDoCriativo.get(id) ?? null,
         expoe_object_story_spec: spec !== null,
         expoe_video_data: !!videoData,
+        expoe_link_data: !!linkData,
         expoe_page_id: !!pageId,
         expoe_link_destino: !!link,
-        serve_de_molde_video: serve,
+        serve_de_molde_video: serveVideo,
+        serve_de_molde_imagem: serveImagem,
         page_id: pageId,
         link_destino: link,
         call_to_action_type: cta,
         instagram_actor_id: ig,
         fonte_da_config: fonteCfg,
         chaves_do_spec: spec ? Object.keys(spec) : [],
+        chaves_do_link_data: linkData ? Object.keys(linkData) : [],
         fonte: "Graph fields=object_story_spec,asset_feed_spec; coleta meta-campaign-status",
       };
     });
@@ -635,8 +660,13 @@ Deno.serve(async (req) => {
       : {
           ...(data as object),
           servem_de_molde_video: linhas.filter((l) => l.serve_de_molde_video).length,
+          servem_de_molde_imagem: linhas.filter((l) => l.serve_de_molde_imagem).length,
           via_video_data: linhas.filter((l) => l.fonte_da_config === "video_data").length,
+          via_link_data: linhas.filter((l) => l.fonte_da_config === "link_data").length,
           via_asset_feed_spec: linhas.filter((l) => l.fonte_da_config === "asset_feed_spec").length,
+          amostra_chaves_link_data: [
+            ...new Set(linhas.flatMap((l) => l.chaves_do_link_data ?? [])),
+          ],
         };
   }
 
@@ -910,7 +940,7 @@ Deno.serve(async (req) => {
     estado_dos_criativos: {
       criativos_lidos_na_meta: creativeIds.length,
       resultado: estadoCriativos,
-      nota: "serve_de_molde_video=true libera peca nova: page_id+link+CTA e formato VIDEO (video_data no story_spec OU videos[] no asset_feed_spec). Molde de imagem fica false. Criativo sem resposta Graph nao entra e continua 'nunca verificado'. Criterio alinhado a meta-actions montarCriacao.",
+      nota: "serve_de_molde_video=true libera peca nova de VIDEO; serve_de_molde_imagem=true libera peca nova de IMAGEM (link_data). Criterio alinhado a meta-actions montarCriacao.",
     },
     estado_dos_conjuntos: {
       conjuntos_lidos_na_meta: adsetIds.length,
@@ -951,6 +981,6 @@ Deno.serve(async (req) => {
       ),
       nota: "com_chave=0 significa campo nao retornado: a coluna nao entra no upsert. Array vazio ou null com chave presente e uma leitura e e preservado. Conta inacessivel nao gera linha.",
     },
-    versao: "meta-campaign-status-v12",
+    versao: "meta-campaign-status-v13",
   });
 });
