@@ -1,4 +1,10 @@
-// supabase/functions/meta-actions/index.ts (v5.14)
+// supabase/functions/meta-actions/index.ts (v5.15)
+// v5.15 (11/08/2026) - INSTAGRAM OFICIAL = @jcr2_legaleviver; THREADS OFF; AGENTE PERGUNTA REDES.
+//   Decisoes do Ryan 11/08: (1) unico Instagram restante apos exclusao do intruso = jcr2_legaleviver
+//   (config prevalece; id so entra quando comprovado via Pipeboard/Graph — nao inventar);
+//   (2) Threads desabilitado por padrao (empresa sem cadastro); (3) agente SEMPRE pergunta
+//   plataformas_publicacao (facebook|instagram|audience_network|messenger) antes de criar
+//   conjunto; Facebook+video aplica automaticamente os 8 placements sem right_hand_column.
 // v5.14 (11/08/2026) - PADRAO OBRIGATORIO DE POSICIONAMENTO DE VIDEO NA CRIACAO DO CONJUNTO
 //   (decisao do Ryan 11/08 + auditoria dos 3 conjuntos de video ACTIVE). criar_conjunto_a_partir_de
 //   com formato_midia_previsto=video nasce ja com publisher_platforms=["facebook"] e os 8
@@ -245,6 +251,7 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
 import {
   aplicarPadraoPosicionamentoVideo,
+  aplicarPosicionamentoPorPlataformas,
   FACEBOOK_POSITIONS_VIDEO_PADRAO,
   PUBLISHER_PLATFORMS_VIDEO_PADRAO,
   targetingCompativelComFormato,
@@ -1137,14 +1144,14 @@ export function aplicarIdentidadeInstagramNoSpec(
 
 function avisoIdentidadeInstagram(identidade: IdentidadeInstagramResolvida): string {
   if (!identidade.encontrada || !identidade.instagram_actor_id) {
-    return "Sem identidade Instagram: nem o molde nem a configuracao da empresa fornecem instagram_user_id. O anuncio nasce sem identidade Instagram/Threads e esses posicionamentos nao veiculam; nenhum id foi inventado.";
+    return "Sem identidade Instagram comprovada na config/molde. O anuncio nasce sem identidade Instagram. Threads ja esta desabilitado por padrao (empresa sem cadastro). Nenhum id foi inventado.";
   }
   const handle = identidade.instagram_handle ? ` (${identidade.instagram_handle})` : "";
   const origem =
     identidade.fonte === "molde_creative_estado_graph"
       ? "copiada do molde observado em creative_estado_graph"
       : "lida da configuracao da empresa em meta_execution_config";
-  return `Com identidade Instagram${handle}, id ${identidade.instagram_actor_id}, ${origem}. Os posicionamentos Instagram/Threads passam a ser elegiveis; a entrega final ainda depende das demais regras da Meta.`;
+  return `Com identidade Instagram${handle}, id ${identidade.instagram_actor_id}, ${origem}. Posicionamentos de Instagram passam a ser elegiveis. Threads permanece DESABILITADO (empresa sem cadastro nessa rede) — identidade Instagram nao habilita Threads.`;
 }
 
 // v2: monta o corpo de criacao lendo o molde quando necessario. Retorna o path de colecao,
@@ -1277,14 +1284,43 @@ export async function montarCriacao(
     if (mb.dsa_beneficiary) body.dsa_beneficiary = String(mb.dsa_beneficiary);
     if (mb.dsa_payor) body.dsa_payor = String(mb.dsa_payor);
 
-    // ===== v5.14: PADRAO OBRIGATORIO DE POSICIONAMENTO POR FORMATO (decisao do Ryan 11/08) =====
-    // Conjunto destinado a VIDEO nasce ja com os placements manuais observados nos 3 conjuntos
-    // ACTIVE (facebook-only, sem Coluna da direita) - sem aviso na origem. IMAGEM nao recebe a
-    // exclusao (a Coluna aceita imagem). Formato NAO declarado NAO recebe silenciosamente a regra
-    // de video: o targeting do molde e preservado e o card avisa. Nao adivinhamos formato.
+    // ===== v5.15: PLATAFORMAS PEDIDAS + VIDEO SEM COLUNA + THREADS OFF (Ryan 11/08) =====
+    // O agente pergunta as redes. Threads nunca entra (empresa sem cadastro). Facebook+video
+    // aplica os 8 placements observados sem right_hand_column. Sem plataformas declaradas:
+    // recusa nomeada (nao assume em silencio).
     const formatoPrevisto = String(p?.formato_midia_previsto ?? "").trim().toLowerCase();
+    const plataformasPedidas = p?.plataformas_publicacao ?? p?.publisher_platforms ?? null;
     let posicionamento: Record<string, unknown>;
-    if (formatoPrevisto === "video") {
+
+    if (plataformasPedidas != null) {
+      const base = (mb.targeting && typeof mb.targeting === "object")
+        ? (mb.targeting as Record<string, unknown>)
+        : {};
+      const derivado = aplicarPosicionamentoPorPlataformas(
+        base,
+        formatoPrevisto || "desconhecido",
+        plataformasPedidas,
+      );
+      if (derivado.erro || !derivado.targeting) {
+        return {
+          erro: derivado.erro ?? "posicionamento_por_plataformas_nao_derivado",
+          detalhe: derivado.detalhe ?? null,
+        };
+      }
+      body.targeting = JSON.stringify(derivado.targeting);
+      posicionamento = {
+        formato_midia_previsto: formatoPrevisto || null,
+        padrao_aplicado: true,
+        plataformas_publicacao: derivado.plataformas,
+        excluidos: derivado.excluidos,
+        perfil: derivado.perfil,
+        declaracao: derivado.declaracao,
+        facebook_positions: derivado.targeting.facebook_positions ?? null,
+        publisher_platforms: derivado.targeting.publisher_platforms ?? null,
+      };
+    } else if (formatoPrevisto === "video") {
+      // Compat: pedidos antigos so com formato=video e sem plataformas => facebook-only + Threads off
+      // (mesmo padrao dos 3 conjuntos). Novos pedidos devem declarar plataformas_publicacao.
       const base = (mb.targeting && typeof mb.targeting === "object")
         ? (mb.targeting as Record<string, unknown>)
         : {};
@@ -1296,21 +1332,32 @@ export async function montarCriacao(
         origem_padrao: "3_conjuntos_video_active_observados_11_08",
         publisher_platforms: [...PUBLISHER_PLATFORMS_VIDEO_PADRAO],
         facebook_positions: [...FACEBOOK_POSITIONS_VIDEO_PADRAO],
-        excluidos,
+        excluidos: [...excluidos, "threads"],
         declaracao:
-          "Conjunto de video: posicionamentos manuais aplicados conforme padrao observado nos 3 conjuntos ativos; Coluna da direita excluida por incompatibilidade de formato.",
+          "Conjunto de video: posicionamentos manuais aplicados conforme padrao observado nos 3 conjuntos ativos; Coluna da direita excluida; Threads desabilitado (empresa sem cadastro). Prefira declarar plataformas_publicacao explicitamente.",
       };
     } else if (formatoPrevisto === "imagem") {
+      // Mesmo sem lista: corta Threads do molde se estiver la.
+      if (mb.targeting && typeof mb.targeting === "object") {
+        const t = { ...(mb.targeting as Record<string, unknown>) };
+        delete t.threads_positions;
+        if (Array.isArray(t.publisher_platforms)) {
+          t.publisher_platforms = (t.publisher_platforms as unknown[])
+            .map(String)
+            .filter((p) => p !== "threads");
+        }
+        body.targeting = JSON.stringify(t);
+      }
       posicionamento = {
         formato_midia_previsto: "imagem",
         padrao_aplicado: false,
-        nota: "Imagem veicula na Coluna da direita; nenhum posicionamento excluido. Targeting do molde preservado.",
+        nota: "Imagem: Coluna da direita elegivel. Threads removido se presente no molde. Declare plataformas_publicacao para fixar as redes.",
       };
     } else {
-      posicionamento = {
-        formato_midia_previsto: null,
-        padrao_aplicado: false,
-        nota: "Formato de midia nao declarado: targeting do molde preservado; a regra de video NAO foi aplicada. Se o anuncio for video, declare formato_midia_previsto=video para excluir a Coluna da direita na origem.",
+      return {
+        erro: "plataformas_de_publicacao_obrigatorias",
+        detalhe:
+          "Antes de criar o conjunto, pergunte ao gestor em quais redes publicar (facebook, instagram, audience_network, messenger). Threads esta desabilitado. Tambem declare formato_midia_previsto quando Facebook fizer parte da escolha.",
       };
     }
 
@@ -1881,12 +1928,18 @@ Deno.serve(async (req) => {
     const token = await pipeboardToken(segredoIntegracao);
     const lista = await pipeboardListTools(token);
     const tool = lista.tools.find((t: any) => String(t?.name ?? "") === "update_adset") ?? null;
+    const nomes = (lista.tools ?? []).map((t: any) => String(t?.name ?? "")).filter(Boolean);
+    const igRelacionadas = (lista.tools ?? []).filter((t: any) =>
+      /instagram|identity|actor|page/i.test(String(t?.name ?? "") + " " + String(t?.description ?? "")),
+    );
     return json({
       ok: lista.ok && !!tool,
       modo: "sonda_pipeboard_update_adset",
       somente_leitura: true,
       http_status: lista.status,
       update_adset: tool,
+      tool_names: nomes,
+      tools_instagram_relacionadas: igRelacionadas,
       erro: lista.erro ?? null,
       mcp_chamador: auth.chamador,
     });
@@ -1904,6 +1957,187 @@ Deno.serve(async (req) => {
       http_status: lido.status,
       conjunto: lido.body,
       mcp_chamador: auth.chamador,
+    });
+  }
+
+  // SOMENTE LEITURA: Pipeboard get_instagram_accounts (readOnlyHint=true). Devolve id+username
+  // usaveis como instagram_actor_id. Nao escreve na Meta.
+  if (body?.modo === "ler_instagram_via_pipeboard") {
+    const accountId = String(body?.ad_account ?? "act_3302001729967572").trim();
+    const handleBuscado = String(body?.username ?? "").trim().replace(/^@/, "").toLowerCase();
+    const token = await pipeboardToken(segredoIntegracao);
+    const r = await pipeboardCall("get_instagram_accounts", { account_id: accountId }, token);
+    const listaBruta = Array.isArray(r.body)
+      ? r.body
+      : Array.isArray(r.body?.data)
+        ? r.body.data
+        : Array.isArray(r.body?.accounts)
+          ? r.body.accounts
+          : Array.isArray(r.body?.instagram_accounts)
+            ? r.body.instagram_accounts
+            : [];
+    const contas = listaBruta.map((a: any) => ({
+      id: a?.id != null ? String(a.id) : null,
+      username: a?.username != null ? String(a.username) : null,
+      name: a?.name != null ? String(a.name) : null,
+      followers_count: a?.followers_count ?? null,
+    }));
+    const match = handleBuscado
+      ? contas.filter((a: any) => String(a.username ?? "").toLowerCase() === handleBuscado)
+      : [];
+    return json({
+      ok: r.ok,
+      modo: "ler_instagram_via_pipeboard",
+      somente_leitura: true,
+      mcp_chamador: auth.chamador,
+      account_id: accountId,
+      username_buscado: handleBuscado || null,
+      contas,
+      match_username: match,
+      total_reportado: r.body?.total ?? contas.length,
+      http_status: r.status,
+      erro: r.erro ?? null,
+      accounts_tipo: r.body?.accounts == null
+        ? "ausente"
+        : Array.isArray(r.body.accounts)
+          ? `array:${r.body.accounts.length}`
+          : typeof r.body.accounts,
+      sample_account: Array.isArray(r.body?.accounts) && r.body.accounts[0]
+        ? {
+          id: r.body.accounts[0]?.id ?? null,
+          username: r.body.accounts[0]?.username ?? null,
+          keys: Object.keys(r.body.accounts[0] ?? {}),
+        }
+        : null,
+    });
+  }
+  // assigned). Serve para cravar identidade oficial com username comprovado (ex.: jcr2), sem
+  // escrever na Meta. Nao toca approval_requests.
+  if (body?.modo === "ler_contas_instagram") {
+    const adAccount = String(body?.ad_account ?? "act_3302001729967572").trim();
+    const pageId = String(body?.page_id ?? "1095196357012756").trim();
+    const handleBuscado = String(body?.username ?? "").trim().replace(/^@/, "").toLowerCase();
+    const conta = await g(`/${adAccount}?fields=id,name,business`);
+    const businessId = (conta.body as any)?.business?.id
+      ? String((conta.body as any).business.id)
+      : null;
+    const caminhos: Record<string, unknown> = {
+      ad_account: conta,
+      me: await g(`/me?fields=id,name`),
+      me_instagram_accounts: await g(`/me/instagram_accounts?fields=id,username,name&limit=50`),
+      me_accounts_com_ig: await g(
+        `/me/accounts?fields=id,name,access_token,instagram_business_account{id,username,name}&limit=50`,
+      ),
+      ad_account_instagram_accounts: await g(
+        `/${adAccount}/instagram_accounts?fields=id,username,name&limit=50`,
+      ),
+      ad_account_assigned_instagram_accounts: await g(
+        `/${adAccount}/assigned_instagram_accounts?fields=id,username,name&limit=50`,
+      ),
+      business_id: businessId,
+      business_owned_instagram_accounts: businessId
+        ? await g(`/${businessId}/owned_instagram_accounts?fields=id,username,name&limit=50`)
+        : null,
+      business_client_instagram_accounts: businessId
+        ? await g(`/${businessId}/client_instagram_accounts?fields=id,username,name&limit=50`)
+        : null,
+      business_instagram_accounts: businessId
+        ? await g(`/${businessId}/instagram_accounts?fields=id,username,name&limit=50`)
+        : null,
+      page_instagram_accounts: await g(
+        `/${pageId}/instagram_accounts?fields=id,username,name&limit=25`,
+      ),
+      page_page_backed_instagram_accounts: await g(
+        `/${pageId}/page_backed_instagram_accounts?fields=id,username,name&limit=25`,
+      ),
+    };
+    const achados: { id: string; username: string | null; name: string | null; origem: string }[] = [];
+    // Se /me/accounts trouxe access_token da Pagina, tenta o campo Instagram com o token da
+    // Pagina (o token de ads sozinho nao tem pages_read_engagement). O page token NUNCA volta
+    // na resposta ao chamador.
+    try {
+      const pagesBody = (caminhos.me_accounts_com_ig as any)?.body;
+      const pages = Array.isArray(pagesBody?.data) ? pagesBody.data : [];
+      for (const p of pages) {
+        const pageTok = String(p?.access_token ?? "").trim();
+        const pid = String(p?.id ?? "").trim();
+        if (p && typeof p === "object") delete (p as any).access_token;
+        if (!pageTok || !pid) continue;
+        const r = await fetch(
+          `https://graph.facebook.com/v21.0/${pid}?fields=instagram_business_account{id,username,name},connected_instagram_account{id,username,name}&access_token=${encodeURIComponent(pageTok)}`,
+        );
+        const t = await r.text();
+        let bodyPage: any = t;
+        try {
+          bodyPage = JSON.parse(t);
+        } catch {
+          /* */
+        }
+        caminhos[`page_token_probe_${pid}`] = {
+          status: r.status,
+          body: bodyPage,
+          nota: "lido com page access_token de /me/accounts; token nao e devolvido",
+        };
+        if (bodyPage?.instagram_business_account?.id) {
+          achados.push({
+            id: String(bodyPage.instagram_business_account.id),
+            username: bodyPage.instagram_business_account.username ?? null,
+            name: bodyPage.instagram_business_account.name ?? null,
+            origem: `page_token_probe_${pid}.instagram_business_account`,
+          });
+        }
+        if (bodyPage?.connected_instagram_account?.id) {
+          achados.push({
+            id: String(bodyPage.connected_instagram_account.id),
+            username: bodyPage.connected_instagram_account.username ?? null,
+            name: bodyPage.connected_instagram_account.name ?? null,
+            origem: `page_token_probe_${pid}.connected_instagram_account`,
+          });
+        }
+        // Tambem aproveita o nested ja trazido por /me/accounts (sem segundo GET).
+        if (p?.instagram_business_account?.id) {
+          achados.push({
+            id: String(p.instagram_business_account.id),
+            username: p.instagram_business_account.username ?? null,
+            name: p.instagram_business_account.name ?? null,
+            origem: `me_accounts_com_ig.${pid}`,
+          });
+        }
+      }
+    } catch (e) {
+      caminhos.page_token_probe_erro = String(e);
+    }
+    const visitar = (origem: string, bodyResp: any) => {
+      const data = bodyResp?.body?.data ?? bodyResp?.data ?? null;
+      const lista = Array.isArray(data) ? data : [];
+      for (const item of lista) {
+        if (!item || typeof item !== "object") continue;
+        const id = String((item as any).id ?? "").trim();
+        if (!id) continue;
+        achados.push({
+          id,
+          username: (item as any).username != null ? String((item as any).username) : null,
+          name: (item as any).name != null ? String((item as any).name) : null,
+          origem,
+        });
+      }
+    };
+    for (const [k, v] of Object.entries(caminhos)) {
+      if (v && typeof v === "object" && "body" in (v as any)) visitar(k, v);
+    }
+    const unicos = Array.from(new Map(achados.map((a) => [a.id, a])).values());
+    const matchHandle = handleBuscado
+      ? unicos.filter((a) => String(a.username ?? "").toLowerCase() === handleBuscado)
+      : [];
+    return json({
+      ok: true,
+      modo: "ler_contas_instagram",
+      somente_leitura: true,
+      mcp_chamador: auth.chamador,
+      username_buscado: handleBuscado || null,
+      contas: unicos,
+      match_username: matchHandle,
+      caminhos,
     });
   }
 

@@ -937,12 +937,42 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const nomeNovo = String(params?.nome_novo ?? "").trim();
     const campanhaDestino = String(params?.campanha_destino ?? "").trim();
     const orcamento = Number(params?.orcamento_diario_reais ?? 0);
-    // v28.14: formato_midia_previsto governa o posicionamento na criacao. video => padrao manual
-    // (sem Coluna da direita); imagem => Coluna elegivel; ausente => preserva molde e avisa. NAO e
-    // obrigatorio (nao quebra fluxos existentes), mas quando video a exclusao e obrigatoria.
     const formatoPrevisto = String(params?.formato_midia_previsto ?? "").trim().toLowerCase();
     if (formatoPrevisto && !["video", "imagem"].includes(formatoPrevisto)) {
       return { erro: "params.formato_midia_previsto invalido: use 'video' ou 'imagem', ou omita. NAO adivinho o formato." };
+    }
+    // v28.15: plataformas_publicacao obrigatoria. O agente PERGUNTA ao gestor. Threads recusado.
+    const plataformasRaw = params?.plataformas_publicacao ?? params?.publisher_platforms ?? null;
+    if (plataformasRaw == null) {
+      return {
+        erro: "plataformas_de_publicacao_obrigatorias",
+        detalhe:
+          "PERGUNTE ao gestor em quais redes publicar antes de emitir o card. Opcoes: facebook, instagram, audience_network, messenger. Threads esta desabilitado (empresa sem cadastro). Quando Facebook+video, a Coluna da direita e excluida automaticamente.",
+      };
+    }
+    const plataformas = Array.isArray(plataformasRaw)
+      ? plataformasRaw.map((p: unknown) => String(p ?? "").trim().toLowerCase()).filter(Boolean)
+      : [];
+    if (!plataformas.length) {
+      return { erro: "plataformas_de_publicacao_obrigatorias", detalhe: "A lista veio vazia. Pergunte ao gestor." };
+    }
+    if (plataformas.includes("threads")) {
+      return {
+        erro: "threads_desabilitado_empresa_sem_cadastro",
+        detalhe:
+          "Threads esta desabilitado por padrao: a empresa nao possui perfil nessa rede. Nao proponha Threads; escolha entre facebook, instagram, audience_network e messenger.",
+      };
+    }
+    const permitidas = new Set(["facebook", "instagram", "audience_network", "messenger"]);
+    const invalidas = plataformas.filter((p: string) => !permitidas.has(p));
+    if (invalidas.length) {
+      return { erro: "plataforma_de_publicacao_nao_suportada", detalhe: `Invalidas: ${invalidas.join(", ")}` };
+    }
+    if (plataformas.includes("facebook") && !formatoPrevisto) {
+      return {
+        erro: "formato_de_midia_obrigatorio_quando_facebook_selecionado",
+        detalhe: "Facebook foi escolhido: informe params.formato_midia_previsto=video|imagem (video exclui a Coluna da direita automaticamente).",
+      };
     }
     if (!nomeAlvo) return { erro: "target_name deve ser o nome do CONJUNTO MOLDE a replicar (um que ja funciona)" };
     if (!nomeNovo) return { erro: "params.nome_novo obrigatorio (nome do conjunto que vai nascer)" };
@@ -1007,23 +1037,22 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // v28.9: o aviso entra NO SUMMARY, nao so no payload. O summary e o unico texto que o cartao
     // mostra sem expandir nada, e o gestor decide lendo o cartao no sininho - aviso que fica so na
     // conversa ja rolou para cima quando a decisao acontece.
-    // v28.14: a declaracao do padrao de posicionamento entra NO SUMMARY (o unico texto que o card
-    // mostra sem expandir). video declara a exclusao da Coluna da direita; imagem declara que ela
-    // segue elegivel; ausente avisa que a regra de video NAO foi aplicada (sem adivinhar formato).
-    const notaPosicionamento = formatoPrevisto === "video"
-      ? ` â€” CONJUNTO DE VIDEO: posicionamentos manuais aplicados conforme padrao observado nos 3 conjuntos ativos; Coluna da direita (facebook_right_hand_column) excluida por incompatibilidade de formato.`
-      : formatoPrevisto === "imagem"
-        ? ` â€” Conjunto de IMAGEM: Coluna da direita permanece elegivel (imagem veicula); nenhum posicionamento excluido.`
-        : ` â€” Formato de midia NAO declarado: placements do molde preservados, regra de video NAO aplicada. Se for video, declare formato_midia_previsto=video para excluir a Coluna da direita na origem.`;
+    // v28.15: summary declara plataformas + regras automaticas (FB+video sem Coluna; Threads off).
+    const redesTxt = plataformas.join(", ");
+    const notaPosicionamento = plataformas.includes("facebook") && formatoPrevisto === "video"
+      ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: identidade oficial @jcr2_legaleviver." : ""}`
+      : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoPrevisto === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: identidade oficial @jcr2_legaleviver." : ""}`;
     const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO` +
-      (avisoOrcamento ? ` â€” ${avisoOrcamento}` : "") + notaPosicionamento;
+      (avisoOrcamento ? ` — ${avisoOrcamento}` : "") + notaPosicionamento;
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
       campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
       orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "PAUSED",  // v28.6: aprovar CRIA pausado; ativar e ato do gestor
       formato_midia_previsto: formatoPrevisto || null,
-      posicionamento_padrao_video: formatoPrevisto === "video" ? {
-        publisher_platforms: ["facebook"],
+      plataformas_publicacao: plataformas,
+      threads_desabilitado: true,
+      posicionamento_padrao_video: formatoPrevisto === "video" && plataformas.includes("facebook") ? {
+        publisher_platforms: plataformas,
         facebook_positions: ["feed", "instream_video", "marketplace", "story", "search", "facebook_reels", "facebook_reels_overlay", "profile_feed"],
         coluna_direita_excluida: true,
         origem: "3_conjuntos_video_active_observados_11_08",
@@ -1396,7 +1425,7 @@ const TOOLS = [
   { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. Localiza pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name (nunca access_token) e reconcilia pela Graph. ID, status, orcamento e estrutura nao mudam. Use quando o gestor pedir troca de nome; nao diga que nao existe ferramenta.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de. Para criar_conjunto_a_partir_de, informe params.formato_midia_previsto=video quando o conjunto for para anuncio de VIDEO: ele nasce ja com o padrao manual (sem Coluna da direita). imagem mantem a Coluna elegivel; se omitir, o molde e preservado e o card avisa (nao adivinho formato). Tudo que e criado nasce PAUSED.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Ajuste de posicionamento: formato_midia=video|imagem. Criacao de conjunto: formato_midia_previsto=video|imagem (opcional; video aplica o padrao sem Coluna da direita). Demais campos especificos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, escalar_criativo, pausar_campanha, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de. Para criar_conjunto_a_partir_de, OBRIGATORIO: (1) PERGUNTE ao gestor as plataformas_publicacao (facebook|instagram|audience_network|messenger) — NAO assuma em silencio; Threads esta DESABILITADO (empresa sem cadastro; se pedirem Threads, recuse por nome). (2) Se Facebook fizer parte da escolha, informe formato_midia_previsto=video|imagem; video aplica automaticamente os 8 placements manuais sem facebook_right_hand_column. (3) Se Instagram for selecionado, use a identidade oficial @jcr2_legaleviver da config. Tudo que e criado nasce PAUSED.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Ajuste: formato_midia=video|imagem. Criacao de conjunto: plataformas_publicacao=[facebook|instagram|audience_network|messenger] OBRIGATORIO; formato_midia_previsto=video|imagem quando Facebook estiver na lista. Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },

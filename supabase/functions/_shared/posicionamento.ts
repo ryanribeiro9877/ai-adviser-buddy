@@ -1,11 +1,23 @@
 // supabase/functions/_shared/posicionamento.ts
-// PADRAO DE POSICIONAMENTO DE VIDEO, OBSERVADO EM PRODUCAO (11/08/2026).
-// Auditoria read-only dos 3 conjuntos com anuncios de VIDEO ACTIVE mostrou o MESMO targeting
-// manual nos tres: publisher_platforms=["facebook"] e estes 8 facebook_positions, SEM
-// right_hand_column (a Coluna da direita nao veicula video). Este modulo e a UNICA fonte desse
-// padrao: a criacao do conjunto (montarCriacao) e a acao corretiva
-// (ajustar_posicionamentos_do_conjunto) consomem daqui, para nunca divergirem. Puro e sem efeito
-// colateral de import, de proposito, para poder ser provado em teste isolado.
+// PADRAO DE POSICIONAMENTO (decisoes Ryan 11/08/2026).
+//
+// 1) VIDEO + Facebook selecionado: facebook_positions manuais observados nos 3 conjuntos
+//    ACTIVE (8 posicoes), SEM right_hand_column. Coluna da direita nao veicula video.
+// 2) Threads: DESABILITADO por padrao. A empresa NAO tem cadastro nessa rede; nunca entra em
+//    publisher_platforms nem threads_positions. Pedir Threads => recusa nomeada.
+// 3) Plataformas de publicacao: o agente PERGUNTA (facebook, instagram, audience_network,
+//    messenger). Nao assume em silencio. Instagram usa a identidade oficial da config
+//    (@jcr2_legaleviver quando o id estiver comprovado).
+// Puro e sem efeito colateral de import, para prova isolada.
+
+export const PLATAFORMAS_PUBLICACAO_SUPORTADAS = [
+  "facebook",
+  "instagram",
+  "audience_network",
+  "messenger",
+] as const;
+
+export type PlataformaPublicacao = (typeof PLATAFORMAS_PUBLICACAO_SUPORTADAS)[number];
 
 export const PUBLISHER_PLATFORMS_VIDEO_PADRAO = ["facebook"] as const;
 
@@ -20,26 +32,177 @@ export const FACEBOOK_POSITIONS_VIDEO_PADRAO = [
   "profile_feed",
 ] as const;
 
-// Aplica o padrao de video sobre um targeting existente: PRESERVA audiencia/geo/idade/automation
-// e SUBSTITUI apenas as chaves de posicionamento pelo padrao facebook-only observado. Como o
-// publisher passa a ser so facebook, as colocacoes de outras plataformas saem (senao a Meta
-// recusa placement de plataforma nao declarada). right_hand_column nunca entra.
+export const INSTAGRAM_POSITIONS_PADRAO = [
+  "stream",
+  "story",
+  "reels",
+  "explore",
+  "explore_home",
+  "ig_search",
+  "profile_feed",
+] as const;
+
+export const AUDIENCE_NETWORK_POSITIONS_PADRAO = [
+  "classic",
+  "rewarded_video",
+  "instream_video",
+] as const;
+
+export const MESSENGER_POSITIONS_PADRAO = ["messenger_home", "story"] as const;
+
+function normPlataformas(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((p) => String(p ?? "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+/** Normaliza e valida a lista pedida pelo gestor. Threads nunca passa. */
+export function validarPlataformasPublicacao(raw: unknown): {
+  plataformas?: PlataformaPublicacao[];
+  erro?: string;
+  detalhe?: string;
+} {
+  const lista = normPlataformas(raw);
+  if (lista.length === 0) {
+    return {
+      erro: "plataformas_de_publicacao_obrigatorias",
+      detalhe:
+        "Antes de criar o conjunto, pergunte ao gestor em quais redes publicar. Opcoes suportadas: facebook, instagram, audience_network, messenger. Threads esta desabilitado (empresa sem cadastro nessa rede).",
+    };
+  }
+  if (lista.some((p) => p === "threads")) {
+    return {
+      erro: "threads_desabilitado_empresa_sem_cadastro",
+      detalhe:
+        "Threads esta desabilitado por padrao: a empresa nao possui perfil/cadastro nessa rede. Nao ha identidade Threads a preencher; o remedia e excluir Threads dos posicionamentos, nao inventar conta. Escolha entre facebook, instagram, audience_network e messenger.",
+    };
+  }
+  const invalidas = lista.filter(
+    (p) => !(PLATAFORMAS_PUBLICACAO_SUPORTADAS as readonly string[]).includes(p),
+  );
+  if (invalidas.length) {
+    return {
+      erro: "plataforma_de_publicacao_nao_suportada",
+      detalhe: `Plataforma(s) nao suportada(s): ${invalidas.join(", ")}. Use apenas: ${PLATAFORMAS_PUBLICACAO_SUPORTADAS.join(", ")}.`,
+    };
+  }
+  const unicas = Array.from(new Set(lista)) as PlataformaPublicacao[];
+  return { plataformas: unicas };
+}
+
+/**
+ * Aplica posicionamento manual conforme plataformas escolhidas + formato.
+ * - Sempre remove Threads.
+ * - Facebook + video => 8 facebook_positions observados, sem right_hand_column.
+ * - Facebook + imagem => nao aplica a exclusao da Coluna (imagem veicula la); se o molde
+ *   ja tinha facebook_positions, remove so threads e filtra publishers.
+ * - Instagram/AN/Messenger => placements padrao da plataforma quando selecionados.
+ */
+export function aplicarPosicionamentoPorPlataformas(
+  targetingAtual: Record<string, unknown>,
+  formato: string,
+  plataformasRaw: unknown,
+): {
+  targeting?: Record<string, unknown>;
+  excluidos: string[];
+  plataformas?: PlataformaPublicacao[];
+  erro?: string;
+  detalhe?: string;
+  perfil?: string;
+  declaracao?: string;
+} {
+  const validacao = validarPlataformasPublicacao(plataformasRaw);
+  if (validacao.erro || !validacao.plataformas) {
+    return {
+      excluidos: [],
+      erro: validacao.erro,
+      detalhe: validacao.detalhe,
+    };
+  }
+  const plataformas = validacao.plataformas;
+  const f = String(formato ?? "").trim().toLowerCase();
+  const novo: Record<string, unknown> = { ...(targetingAtual ?? {}) };
+
+  // Threads nunca.
+  delete novo.threads_positions;
+  novo.publisher_platforms = [...plataformas];
+
+  const excluidos: string[] = ["threads"];
+  const notes: string[] = [
+    "Threads desabilitado por padrao (empresa sem cadastro nessa rede).",
+  ];
+
+  if (plataformas.includes("facebook")) {
+    if (f === "video") {
+      novo.facebook_positions = [...FACEBOOK_POSITIONS_VIDEO_PADRAO];
+      excluidos.push("facebook.right_hand_column");
+      notes.push(
+        "Facebook+video: posicionamentos manuais dos 3 conjuntos ativos; Coluna da direita excluida por incompatibilidade de formato.",
+      );
+    } else if (f === "imagem") {
+      // Imagem: Coluna elegivel. Se o molde ja tinha lista manual, preserva (sem forcar exclusao).
+      // Se nao tinha, nao inventamos lista de imagem — Advantage+/automatico no Facebook permanece
+      // possivel via ausencia de facebook_positions; publisher ja esta restrito a selecao.
+      notes.push(
+        "Facebook+imagem: Coluna da direita permanece elegivel; nenhuma exclusao automatica de right_hand_column.",
+      );
+    } else {
+      return {
+        excluidos: [],
+        erro: "formato_de_midia_obrigatorio_quando_facebook_selecionado",
+        detalhe:
+          "Facebook foi selecionado, mas formato_midia_previsto nao foi declarado (video|imagem). Sem o formato nao sei se a Coluna da direita deve sair. Declare o formato.",
+      };
+    }
+  } else {
+    delete novo.facebook_positions;
+  }
+
+  if (plataformas.includes("instagram")) {
+    novo.instagram_positions = [...INSTAGRAM_POSITIONS_PADRAO];
+    notes.push("Instagram selecionado: identidade oficial da config (@jcr2_legaleviver) deve ser usada no criativo.");
+  } else {
+    delete novo.instagram_positions;
+  }
+
+  if (plataformas.includes("audience_network")) {
+    novo.audience_network_positions = [...AUDIENCE_NETWORK_POSITIONS_PADRAO];
+  } else {
+    delete novo.audience_network_positions;
+  }
+
+  if (plataformas.includes("messenger")) {
+    novo.messenger_positions = [...MESSENGER_POSITIONS_PADRAO];
+  } else {
+    delete novo.messenger_positions;
+  }
+
+  return {
+    targeting: novo,
+    excluidos,
+    plataformas,
+    perfil: "plataformas_escolhidas_pelo_gestor_v1",
+    declaracao: notes.join(" "),
+  };
+}
+
+/** Compat: video-only facebook padrao (acao corretiva / criacao legada sem lista). */
 export function aplicarPadraoPosicionamentoVideo(
   targetingAtual: Record<string, unknown>,
 ): { targeting: Record<string, unknown>; excluidos: string[] } {
-  const novo: Record<string, unknown> = { ...(targetingAtual ?? {}) };
-  delete novo.instagram_positions;
-  delete novo.threads_positions;
-  delete novo.audience_network_positions;
-  delete novo.messenger_positions;
-  novo.publisher_platforms = [...PUBLISHER_PLATFORMS_VIDEO_PADRAO];
-  novo.facebook_positions = [...FACEBOOK_POSITIONS_VIDEO_PADRAO];
-  return { targeting: novo, excluidos: ["facebook.right_hand_column"] };
+  const r = aplicarPosicionamentoPorPlataformas(targetingAtual, "video", ["facebook"]);
+  return {
+    targeting: r.targeting ?? { ...(targetingAtual ?? {}) },
+    excluidos: r.excluidos,
+  };
 }
 
-// Acao CORRETIVA (ajustar_posicionamentos_do_conjunto) para conjuntos antigos/de teste ja
-// criados. Video: aplica o MESMO padrao observado, tornando o resultado deterministico e igual
-// ao que a criacao passa a fazer. Imagem: nao exclui nada (a Coluna da direita veicula imagem).
+/**
+ * Acao CORRETIVA (ajustar_posicionamentos_do_conjunto).
+ * Video: padrao facebook manual sem Coluna + Threads off.
+ * Imagem: nao exclui Coluna; ainda assim remove Threads (empresa sem cadastro).
+ */
 export function targetingCompativelComFormato(
   targetingAtual: Record<string, unknown>,
   formato: string,
@@ -48,17 +211,37 @@ export function targetingCompativelComFormato(
   if (f !== "video" && f !== "imagem") {
     return { excluidos: [], erro: "formato_de_midia_nao_suportado_para_posicionamento" };
   }
+
+  const base = { ...(targetingAtual ?? {}) };
+  // Sempre corta Threads no corretivo (decisao Ryan 11/08).
+  delete base.threads_positions;
+  const pubs = Array.isArray(base.publisher_platforms)
+    ? (base.publisher_platforms as unknown[]).map(String).filter((p) => p !== "threads")
+    : null;
+  if (pubs) base.publisher_platforms = pubs;
+
   if (f === "imagem") {
+    const tinhaThreads =
+      Array.isArray((targetingAtual ?? {}).publisher_platforms) &&
+      ((targetingAtual as any).publisher_platforms as unknown[]).map(String).includes("threads");
+    if (!tinhaThreads && !(targetingAtual as any)?.threads_positions) {
+      return {
+        excluidos: [],
+        erro: "nenhum_posicionamento_incompativel_detectado",
+        perfil: "imagem_sem_threads_e_sem_exclusao_de_coluna",
+      };
+    }
     return {
-      excluidos: [],
-      erro: "nenhum_posicionamento_incompativel_detectado",
-      perfil: "imagem_nao_exige_exclusao_da_coluna_direita",
+      targeting: base,
+      excluidos: ["threads"],
+      perfil: "imagem_remove_threads_mantem_coluna_direita",
     };
   }
-  const { targeting, excluidos } = aplicarPadraoPosicionamentoVideo(targetingAtual ?? {});
+
+  const { targeting, excluidos } = aplicarPadraoPosicionamentoVideo(base);
   return {
     targeting,
-    excluidos,
-    perfil: "padrao_video_facebook_manual_observado_3_conjuntos_ativos",
+    excluidos: Array.from(new Set([...excluidos, "threads"])),
+    perfil: "padrao_video_facebook_manual_observado_3_conjuntos_ativos_threads_off",
   };
 }

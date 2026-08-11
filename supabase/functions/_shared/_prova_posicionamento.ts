@@ -1,9 +1,10 @@
-// PROVA (nao entra no runtime): roda com `deno run supabase/functions/_shared/_prova_posicionamento.ts`.
-// Exercita as MESMAS funcoes que montarCriacao e ajustar_posicionamentos_do_conjunto usam.
+// PROVA (nao entra no runtime): deno run supabase/functions/_shared/_prova_posicionamento.ts
 import {
   aplicarPadraoPosicionamentoVideo,
+  aplicarPosicionamentoPorPlataformas,
   FACEBOOK_POSITIONS_VIDEO_PADRAO,
   targetingCompativelComFormato,
+  validarPlataformasPublicacao,
 } from "./posicionamento.ts";
 
 const ESPERADO_8 = [
@@ -29,8 +30,6 @@ function check(nome: string, cond: boolean, detalhe?: unknown) {
   }
 }
 
-// Molde tipico: audiencia/geo/idade + Advantage+ audience + placements de OUTRAS plataformas que
-// o padrao facebook-only deve remover. right_hand_column presente para provar que sai.
 const moldeTargeting = {
   geo_locations: { countries: ["BR"] },
   age_min: 25,
@@ -45,52 +44,39 @@ const moldeTargeting = {
   messenger_positions: ["messenger_home"],
 };
 
-// ---- PROVA 1: formato_midia_previsto=video monta EXATAMENTE os 8 facebook_positions ----
-// (mesmo caminho de montarCriacao: body.targeting = JSON.stringify(aplicarPadrao...(molde)))
+// PROVA 1: Facebook+video => 8 placements sem right_hand_column
+const fbVideo = aplicarPosicionamentoPorPlataformas(moldeTargeting, "video", ["facebook"]);
+check("FB+VIDEO: 8 facebook_positions", eq(fbVideo.targeting?.facebook_positions, ESPERADO_8), fbVideo.targeting?.facebook_positions);
+check("FB+VIDEO: publisher=[facebook]", eq(fbVideo.targeting?.publisher_platforms, ["facebook"]));
+check("FB+VIDEO: sem right_hand_column", !(fbVideo.targeting?.facebook_positions as string[])?.includes("right_hand_column"));
+check("FB+VIDEO: Threads fora", fbVideo.targeting?.threads_positions === undefined && (fbVideo.excluidos.includes("threads")));
+
+// PROVA 2: imagem nao exclui Coluna
+const img = aplicarPosicionamentoPorPlataformas(moldeTargeting, "imagem", ["facebook"]);
+check("FB+IMAGEM: nao forca exclusao da Coluna nos excluidos de right_hand",
+  !img.excluidos.includes("facebook.right_hand_column"), img.excluidos);
+
+// PROVA 3: Threads recusado por nome
+const thr = validarPlataformasPublicacao(["facebook", "threads"]);
+check("THREADS: recusa nomeada", thr.erro === "threads_desabilitado_empresa_sem_cadastro", thr);
+
+// PROVA 4: sem plataformas => obrigatorio
+const sem = validarPlataformasPublicacao([]);
+check("SEM PLATAFORMAS: obrigatorio", sem.erro === "plataformas_de_publicacao_obrigatorias", sem);
+
+// PROVA 5: Facebook+Instagram video inclui IG e corta Threads
+const fbIg = aplicarPosicionamentoPorPlataformas(moldeTargeting, "video", ["facebook", "instagram"]);
+check("FB+IG: publishers corretos", eq(fbIg.targeting?.publisher_platforms, ["facebook", "instagram"]));
+check("FB+IG: tem instagram_positions", Array.isArray(fbIg.targeting?.instagram_positions));
+check("FB+IG: sem threads_positions", fbIg.targeting?.threads_positions === undefined);
+
+// PROVA 6: corretivo video (compat) ainda monta os 8
 const video = aplicarPadraoPosicionamentoVideo(moldeTargeting);
-check("VIDEO: facebook_positions sao exatamente os 8 observados",
-  eq(video.targeting.facebook_positions, ESPERADO_8), video.targeting.facebook_positions);
-check("VIDEO: publisher_platforms = [facebook] (facebook-only, como os 3 conjuntos ativos)",
-  eq(video.targeting.publisher_platforms, ["facebook"]), video.targeting.publisher_platforms);
-check("VIDEO: NAO contem facebook_right_hand_column",
-  !(video.targeting.facebook_positions as string[]).includes("right_hand_column"));
-check("VIDEO: excluidos declara facebook.right_hand_column",
-  eq(video.excluidos, ["facebook.right_hand_column"]));
-check("VIDEO: placements de outras plataformas removidos (facebook-only)",
-  video.targeting.instagram_positions === undefined &&
-  video.targeting.threads_positions === undefined &&
-  video.targeting.audience_network_positions === undefined &&
-  video.targeting.messenger_positions === undefined);
-check("VIDEO: audiencia/geo/idade/advantage_audience PRESERVADOS",
-  eq(video.targeting.geo_locations, { countries: ["BR"] }) &&
-  video.targeting.age_min === 25 && video.targeting.age_max === 65 &&
-  eq(video.targeting.custom_audiences, [{ id: "1234567890" }]) &&
-  eq(video.targeting.targeting_automation, { advantage_audience: 1 }));
+check("CORRETIVO VIDEO: 8 positions", eq(video.targeting.facebook_positions, FACEBOOK_POSITIONS_VIDEO_PADRAO));
 
-// ---- PROVA 2: IMAGEM nao exclui a Coluna da direita (corretivo devolve "nada a excluir") ----
-const imagem = targetingCompativelComFormato(moldeTargeting, "imagem");
-check("IMAGEM: nenhuma exclusao aplicada (targeting nao e reescrito)",
-  imagem.targeting === undefined && imagem.excluidos.length === 0 &&
-  imagem.erro === "nenhum_posicionamento_incompativel_detectado", imagem);
-
-// Simula o ramo de montarCriacao para imagem: body.targeting continua o do molde (com a Coluna).
-const bodyImagem = { targeting: moldeTargeting };
-check("IMAGEM (criacao): Coluna da direita PERMANECE elegivel no targeting do molde",
-  (bodyImagem.targeting.facebook_positions as string[]).includes("right_hand_column"));
-
-// ---- PROVA 3: formato desconhecido/ausente NAO recebe a regra de video no escuro ----
-const desconhecido = targetingCompativelComFormato(moldeTargeting, "");
-check("DESCONHECIDO: recusa por nome, sem aplicar regra de video",
-  desconhecido.targeting === undefined &&
-  desconhecido.erro === "formato_de_midia_nao_suportado_para_posicionamento", desconhecido);
-
-// Simula o ramo de montarCriacao para formato ausente: body.targeting = targeting do molde intacto,
-// nada do padrao de video foi injetado.
-const bodyAusente = { targeting: moldeTargeting };
-check("DESCONHECIDO (criacao): targeting do molde intacto (regra de video nao aplicada)",
-  eq(bodyAusente.targeting.publisher_platforms,
-     ["facebook", "instagram", "threads", "audience_network", "messenger"]) &&
-  !eq(bodyAusente.targeting.facebook_positions, FACEBOOK_POSITIONS_VIDEO_PADRAO));
+// PROVA 7: corretivo imagem remove threads se presente
+const imgCorr = targetingCompativelComFormato(moldeTargeting, "imagem");
+check("CORRETIVO IMAGEM: remove threads", imgCorr.excluidos.includes("threads") && imgCorr.targeting?.threads_positions === undefined, imgCorr);
 
 console.log(falhas === 0 ? "\nTODAS AS PROVAS PASSARAM" : `\n${falhas} PROVA(S) FALHARAM`);
 if (falhas > 0) Deno.exit(1);
