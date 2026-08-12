@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.19)
+// supabase/functions/meta-actions/index.ts (v5.20)
+// v5.20 (12/08/2026) - ESP-25: escalar_duplicar. Criacao de conjunto com +20% so se
+//   avaliar_escala.apto na proposta E de novo na execucao; orcamento travado na escada;
+//   targeting herdado do molde (sem redes livres). redistribuir fica de fora.
 // v5.19 (12/08/2026) - ESP-24: pausar_conjunto (ad set → PAUSED via update_adset/Graph).
 //   Ativar continua FORA do sistema (gestor no Gerenciador). Sem ativar_*.
 // v5.18 (12/08/2026) - ESP-35: PECA NOVA SEM MOLDE. Quando creative_id ausente e ha
@@ -328,7 +331,7 @@ const EXECUTAVEIS = [
   "renomear_campanha",
   "ajustar_posicionamentos_do_conjunto",
 ];
-const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de"];
+const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 function redact(s: string): string {
@@ -429,7 +432,7 @@ async function escreverCriacao(
   if (acao === "criar_campanha") {
     tool = "create_campaign";
     args = argsCampanhaDeGraph(conta, body, { dry_run: !!opts?.dry_run });
-  } else if (acao === "criar_conjunto_a_partir_de") {
+  } else if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
     tool = "create_adset";
     args = argsAdsetDeGraph(conta, body);
   } else {
@@ -1201,7 +1204,7 @@ export async function montarCriacao(
     };
   }
 
-  if (acao === "criar_conjunto_a_partir_de") {
+  if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
     const molde = String(p?.molde_external_id ?? "");
     const campanha = String(p?.campanha_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
@@ -1217,6 +1220,34 @@ export async function montarCriacao(
         erro: "avaliacao_de_orcamento_indisponivel",
         detalhe: "company_id ausente no pedido de criacao de conjunto — sem ele nao consulto avaliar_orcamento_diario.",
       };
+    }
+    // ESP-25: escala revalida aptidao na execucao (fail-closed se ajanela mudou).
+    if (acao === "escalar_duplicar") {
+      const { data: aval, error: avalErr } = await supa.rpc("avaliar_escala", {
+        p_company_id: companyId,
+        p_adset_external_id: molde,
+      });
+      if (avalErr) {
+        return {
+          erro: "avaliacao_de_escala_indisponivel",
+          detalhe: `Nao revalidei avaliar_escala na execucao (${avalErr.message}). Sem aptidao atual, NAO crio a copia.`,
+        };
+      }
+      if (aval?.apto_a_escalar !== true) {
+        return {
+          erro: "conjunto_deixou_de_estar_apto_a_escalar",
+          detalhe: String(aval?.porque_nao ?? "avaliar_escala recusou na revalidacao da fila."),
+          avaliacao_escala: aval,
+        };
+      }
+      const proposto = Number(aval?.medidas?.orcamento_proposto_dia ?? 0);
+      if (!(proposto > 0) || Math.abs(proposto - reais) > 0.05) {
+        return {
+          erro: "orcamento_de_escala_divergiu_da_escada",
+          detalhe: `Pedido R$ ${reais} vs escada atual R$ ${proposto}. Escala nao aceita orcamento livre — emita card novo.`,
+          avaliacao_escala: aval,
+        };
+      }
     }
     {
       const julgado = await julgarOrcamentoDiario(supa, companyId, reais, 1);
@@ -1292,13 +1323,32 @@ export async function montarCriacao(
     if (mb.dsa_beneficiary) body.dsa_beneficiary = String(mb.dsa_beneficiary);
     if (mb.dsa_payor) body.dsa_payor = String(mb.dsa_payor);
 
+    // ESP-25: escala herda targeting do molde (so remove Threads se presente). Sem redes livres.
+    let posicionamento: Record<string, unknown>;
+    if (acao === "escalar_duplicar") {
+      if (mb.targeting && typeof mb.targeting === "object") {
+        const t = { ...(mb.targeting as Record<string, unknown>) };
+        delete t.threads_positions;
+        if (Array.isArray(t.publisher_platforms)) {
+          t.publisher_platforms = (t.publisher_platforms as unknown[])
+            .map(String)
+            .filter((pl) => pl !== "threads");
+        }
+        body.targeting = JSON.stringify(t);
+      }
+      posicionamento = {
+        herdar_targeting_do_molde: true,
+        threads_removido_se_presente: true,
+        declaracao:
+          "Escala por duplicacao: targeting copiado do molde (Threads removido se havia). Redes nao sao pedidas de novo — o passo e so +20% de orcamento em copia PAUSED.",
+      };
+    } else {
     // ===== v5.15: PLATAFORMAS PEDIDAS + VIDEO SEM COLUNA + THREADS OFF (Ryan 11/08) =====
     // O agente pergunta as redes. Threads nunca entra (empresa sem cadastro). Facebook+video
     // aplica os 8 placements observados sem right_hand_column. Sem plataformas declaradas:
     // recusa nomeada (nao assume em silencio).
     const formatoPrevisto = String(p?.formato_midia_previsto ?? "").trim().toLowerCase();
     const plataformasPedidas = p?.plataformas_publicacao ?? p?.publisher_platforms ?? null;
-    let posicionamento: Record<string, unknown>;
 
     if (plataformasPedidas != null) {
       const base = (mb.targeting && typeof mb.targeting === "object")
@@ -1368,6 +1418,7 @@ export async function montarCriacao(
           "Antes de criar o conjunto, pergunte ao gestor em quais redes publicar (facebook, instagram, audience_network, messenger). Threads esta desabilitado. Tambem declare formato_midia_previsto quando Facebook fizer parte da escolha.",
       };
     }
+    } // fim else criar_conjunto (plataformas)
 
     return { path: `/${conta}/adsets`, body, molde_lido: mb, posicionamento };
   }
@@ -1979,7 +2030,7 @@ async function espelhar(
         : { ok: true, tabela: "campaigns" };
     }
 
-    if (acao === "criar_conjunto_a_partir_de") {
+    if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
       // ad_sets.campaign_id e o uuid INTERNO, nao o id da Meta - precisa resolver.
       const { data: camp } = await supa
         .from("campaigns")
@@ -2776,7 +2827,7 @@ Deno.serve(async (req) => {
         {
           acao,
           conta,
-          etapa: acao === "criar_conjunto_a_partir_de" ? "create_adset" : "escrita_na_meta",
+          etapa: (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") ? "create_adset" : "escrita_na_meta",
           driver_escrita: driver,
           ferramenta_pipeboard: exec.ferramenta ?? null,
           criado_em: pl.path,

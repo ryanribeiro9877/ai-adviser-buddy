@@ -491,6 +491,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
     case "renomear_campanha":
       return "campanha";
     case "criar_conjunto_a_partir_de":
+    case "escalar_duplicar":
     case "alterar_orcamento":
     case "ajustar_posicionamentos_do_conjunto":
     case "pausar_conjunto":

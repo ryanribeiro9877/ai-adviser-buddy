@@ -1,0 +1,2 @@
+﻿-- Placeholder migration recorded remotely (20260812175037). Body is empty/comment-only.
+-- Real ESP-25 SQL lives in 20260812175149_esp25_escalar_duplicar_corpo.sql (+ typo fix 20260812175229).

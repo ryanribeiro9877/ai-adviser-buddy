@@ -64,6 +64,7 @@ const ACTION_META: Record<string, { label: string; icon: typeof Pause }> = {
   escalar_criativo: { label: "Escalar criativo", icon: TrendingUp },
   pausar_campanha: { label: "Pausar campanha", icon: PauseCircle },
   pausar_conjunto: { label: "Pausar conjunto", icon: PauseCircle },
+  escalar_duplicar: { label: "Escalar (duplicar +20%)", icon: TrendingUp },
   alterar_orcamento: { label: "Alterar orçamento", icon: DollarSign },
   renomear_campanha: { label: "Renomear campanha", icon: Pencil },
   registrar_veredito_peca: { label: "Veredito de compliance", icon: ShieldCheck },

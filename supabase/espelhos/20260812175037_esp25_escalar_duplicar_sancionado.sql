@@ -1,0 +1,8 @@
+-- ESPELHO DE MIGRACAO APLICADA
+-- version: 20260812175037
+-- name: esp25_escalar_duplicar_sancionado
+-- projeto: gzjwnjdpxpbmdhcyefvs (Gestor de Trafego IA)
+-- aplicada por: Claude via MCP apply_migration
+-- espelho gerado a partir de supabase_migrations.schema_migrations - NAO transcrito a mao
+-- Placeholder migration recorded remotely (20260812175037). Body is empty/comment-only.
+-- Real ESP-25 SQL lives in 20260812175149_esp25_escalar_duplicar_corpo.sql (+ typo fix 20260812175229).
