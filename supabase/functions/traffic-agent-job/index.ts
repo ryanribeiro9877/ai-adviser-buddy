@@ -504,6 +504,12 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       case "nota_visual_da_peca": return await t_rpc("nota_visual_da_peca", { p_company_id: ctx.companyId, p_drive_file_id: String(args?.drive_file_id ?? "") });
       case "diagnosticar_custo": return await t_rpc("diagnosticar_custo", { p_company_id: ctx.companyId, p_ad_external_id: String(args?.ad_external_id ?? "") });
       case "avaliar_fadiga": return await t_rpc("avaliar_fadiga", { p_company_id: ctx.companyId, p_ad_external_id: String(args?.ad_external_id ?? "") });
+      case "casar_criativo_performance": return await t_rpc("casar_criativo_performance", {
+        p_company_id: ctx.companyId,
+        p_drive_file_id: args?.drive_file_id == null || String(args.drive_file_id).trim() === "" ? null : String(args.drive_file_id),
+        p_ad_external_id: args?.ad_external_id == null || String(args.ad_external_id).trim() === "" ? null : String(args.ad_external_id),
+        p_dias: Number(args?.dias ?? 7),
+      });
       case "pode_pausar_por_custo": return await t_rpc("pode_pausar_por_custo", { p_company_id: ctx.companyId, p_ad_external_id: String(args?.ad_external_id ?? "") });
       case "decidir_sobre_conjunto": return await t_rpc("decidir_sobre_conjunto", { p_company_id: ctx.companyId, p_adset_external_id: String(args?.adset_external_id ?? "") });
       case "avaliar_escala": return await t_rpc("avaliar_escala", { p_company_id: ctx.companyId, p_adset_external_id: String(args?.adset_external_id ?? "") });
@@ -587,6 +593,7 @@ const DEF: Record<string, any> = {
   nota_visual_da_peca: { type: "function", function: { name: "nota_visual_da_peca", description: "Nota textual de uma peca no company_id: revisao, base, produto, aproveitabilidade, risco, motivo e divergencia. Informa, nao aprova; ausencia de leitura nao e ausencia de risco.", parameters: { type: "object", properties: { drive_file_id: { type: "string" } }, required: ["drive_file_id"] } } },
   diagnosticar_custo: { type: "function", function: { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id do job e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e pos-clique fica fora do escopo.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   avaliar_fadiga: { type: "function", function: { name: "avaliar_fadiga", description: "Avalia se a peca cansou, teve queda sem saturacao, frequencia alta antes da queda ou nenhum sinal. Exige company_id do job e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e nao deriva a frequencia deduplicada de 30 dias.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
+  casar_criativo_performance: { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca Drive com anuncios criados pelo sistema e metricas da janela + amostra_pequena. Filtros opcionais: drive_file_id, ad_external_id, dias.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer" } } } } },
   pode_pausar_por_custo: { type: "function", function: { name: "pode_pausar_por_custo", description: "Libera avaliacao de pausa por custo quando o anuncio esta maduro ou atende a excecao dura de zero resultado, CTR baixo e piso de gasto. Exige company_id do job e ad_external_id. Nao verifica a guarda do unico conjunto/alternativa ativa; permitido nao significa seguro pausar.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   decidir_sobre_conjunto: { type: "function", function: { name: "decidir_sobre_conjunto", description: "Decide manter, maturar, trocar criativo ou preparar reversao usando custo, volume e tendencia. Exige company_id do job e adset_external_id. A guarda do unico conjunto entregando sobrescreve pausa; sem regua de IDEAL separada do teto, nao prescreve escala.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
   avaliar_escala: { type: "function", function: { name: "avaliar_escala", description: "Avalia escala por duplicacao com no maximo +20%, usando arvore, custo ate 80% do teto, volume e espera. Exige company_id do job e adset_external_id. Nao cobre CBO sem orcamento proprio; a espera ve apenas escalas registradas pelo sistema.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
@@ -608,7 +615,7 @@ const DEF: Record<string, any> = {
 // especialista nao atende fora do proprio dominio, recusa e registra em LACUNAS).
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
-    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing"],
+    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing"],
     maxPorTool: { get_campaign_detail: 3 }, maxToolsTotal: 9,
     missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Respeitar literalmente lacunas e guardas das RPCs; ranking medio isolado nunca prescreve pausa.",
   },
@@ -642,9 +649,9 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive (pixels da miniatura em alta resolucao): produto detectado, texto visivel, riscos de compliance visiveis e veredito aproveitavel/nao/incerto por peca, persistido em banco. Use quando o gestor pedir para CLASSIFICAR/ANALISAR O CONTEUDO das pecas (nao apenas inventariar). Limite declarado: de video se ve UM FRAME.",
   },
   criativos_drive: {
-    tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 2, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
-    missao: "CRIATIVOS NOVOS NO DRIVE: para montar anuncio novo ou escolher peca por produto, comece por get_acervo_para_anuncio (filtravel por produto) - nunca por get_criativos_conteudo. Se na_biblioteca_da_meta=false, chame upload_midia(drive_file_id) - NAO diga que falta gerar id sem acao. Video so e pronta com pronto=true. Antes de recomendar peca especifica, ler nota_visual_da_peca. A nota informa e nao aprova.",
+    tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "get_criativos_conteudo", "get_conhecimento"],
+    maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 2, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 3, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
+    missao: "CRIATIVOS NOVOS NO DRIVE: para montar anuncio novo ou escolher peca por produto, comece por get_acervo_para_anuncio (filtravel por produto) - nunca por get_criativos_conteudo. Se na_biblioteca_da_meta=false, chame upload_midia(drive_file_id) - NAO diga que falta gerar id sem acao. Video so e pronta com pronto=true. Antes de recomendar peca especifica, ler nota_visual_da_peca. Para saber se a peca JA performou no ar, use casar_criativo_performance (amostra_pequena = hipotese). A nota informa e nao aprova.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],
