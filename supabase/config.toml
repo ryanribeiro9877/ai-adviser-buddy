@@ -41,3 +41,8 @@ verify_jwt = false
 # edge autentica via mcp_key_valida. Mesmo padrao de bm-monitor/meta-identity-probe.
 [functions.meta-token-monitor]
 verify_jwt = false
+
+# ESP-41: entrega do digest por e-mail + dreno de alertas criticos. Cron e trigger chamam com
+# Bearer get_mcp_api_key(); a propria edge autentica via mcp_key_valida.
+[functions.enviar-digest]
+verify_jwt = false
