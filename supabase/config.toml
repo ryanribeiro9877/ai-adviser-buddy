@@ -36,3 +36,8 @@ verify_jwt = false
 # ESP-37: traffic-chat chama com x-mcp-key; a propria edge autentica via mcp_key_valida.
 [functions.gerar-legendas]
 verify_jwt = false
+
+# ESP-30: monitor de expiracao/escopo dos tokens Meta. Cron chama com x-mcp-key; a propria
+# edge autentica via mcp_key_valida. Mesmo padrao de bm-monitor/meta-identity-probe.
+[functions.meta-token-monitor]
+verify_jwt = false

@@ -1,4 +1,7 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.0)
+// supabase/functions/traffic-agent-job/index.ts (v3.1)
+// v3.1 (12/08/2026) - ESP-30: tool saude_dos_tokens (RPC read-only) no subagente
+//   alertas_recomendacoes. Expiracao/escopo dos tokens Meta por metadado (meta_tokens),
+//   populado pelo meta-token-monitor. Nao chama a Graph, nunca expoe o valor do token.
 // v3.0 (12/08/2026) - ESP-38: tool score_de_prontidao (RPC read-only) exposta no subagente
 //   alertas_recomendacoes. Score 0-100 de prontidao da empresa (config, integracao, postura,
 //   brand, destino, driver) com nivel, checks, bloqueios e recomendacoes. Nao altera nada.
@@ -515,6 +518,7 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       });
       case "ler_brand_identity": return await t_rpc("ler_brand_identity", { p_company_id: ctx.companyId });
       case "score_de_prontidao": return await t_rpc("score_de_prontidao", { p_company_id: ctx.companyId });
+      case "saude_dos_tokens": return await t_rpc("saude_dos_tokens", { p_company_id: ctx.companyId });
       case "computar_perfil_vencedor": return await t_rpc("computar_perfil_vencedor", {
         p_company_id: ctx.companyId,
         p_dias: Number(args?.dias ?? 7),
@@ -612,6 +616,7 @@ const DEF: Record<string, any> = {
   computar_perfil_vencedor: { type: "function", function: { name: "computar_perfil_vencedor", description: "ESP-34: computa e VERSIONA o perfil do vencedor do company_id do job (regua evaluate_winners/ESP-01: >=30 resultados e >=30 gasto, custo <= teto_vigente*0,80; procedencia da peca ESP-33). Grava nova versao (dedup no mesmo dia salvo forcar). Nao substitui get_recommendations nem aprovacao humana; vencedor mora em ESCALA (ESP-39).", parameters: { type: "object", properties: { dias: { type: "integer" }, forcar: { type: "boolean" } } } } },
   ler_perfil_vencedor: { type: "function", function: { name: "ler_perfil_vencedor", description: "ESP-34: le a ultima versao (ou versao especifica) do perfil do vencedor ja computado para o company_id do job: vencedores, padroes, criterio, procedencia e lacunas. Leitura pura; se nunca computado, orienta chamar computar_perfil_vencedor.", parameters: { type: "object", properties: { versao: { type: "integer" } } } } },
   score_de_prontidao: { type: "function", function: { name: "score_de_prontidao", description: "ESP-38: score read-only 0-100 de prontidao do company_id do job para propor/executar anuncios: config (25), integracao viva (25), postura (20), brand (15), destino (10), driver (5). Devolve nivel (bloqueado|parcial|operacional|pronto), checks com evidencia/lacuna, bloqueios e recomendacoes. Nao altera nada nem substitui gates por pedido.", parameters: { type: "object", properties: {} } } },
+  saude_dos_tokens: { type: "function", function: { name: "saude_dos_tokens", description: "ESP-30: saude dos tokens Meta (ads/waba) do company_id do job por metadado gravado (meta_tokens): dias para expirar, dias para data_access, escopos faltando vs esperado por papel e veredito. Leitura pura do ultimo estado do meta-token-monitor; nao chama a Graph e nunca expoe o valor do token.", parameters: { type: "object", properties: {} } } },
   pode_pausar_por_custo: { type: "function", function: { name: "pode_pausar_por_custo", description: "Libera avaliacao de pausa por custo quando o anuncio esta maduro ou atende a excecao dura de zero resultado, CTR baixo e piso de gasto. Exige company_id do job e ad_external_id. Nao verifica a guarda do unico conjunto/alternativa ativa; permitido nao significa seguro pausar.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   decidir_sobre_conjunto: { type: "function", function: { name: "decidir_sobre_conjunto", description: "Decide manter, maturar, trocar criativo ou preparar reversao usando custo, volume e tendencia. Exige company_id do job e adset_external_id. A guarda do unico conjunto entregando sobrescreve pausa; sem regua de IDEAL separada do teto, nao prescreve escala.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
   avaliar_escala: { type: "function", function: { name: "avaliar_escala", description: "Avalia escala por duplicacao com no maximo +20%, usando arvore, custo ate 80% do teto, volume e espera. Exige company_id do job e adset_external_id. Nao cobre CBO sem orcamento proprio; a espera ve apenas escalas registradas pelo sistema.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
@@ -658,9 +663,9 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "CANAL WHATSAPP: tier de envio dos numeros (caminho para o TIER_UNLIMITED), qualidade GREEN/YELLOW/RED, envios, entregas, leituras e CLIQUES por template com taxa de clique. Declarar que o recorte por numero ainda nao e coletado quando relevante.",
   },
   alertas_recomendacoes: {
-    tools: ["get_alerts", "get_recommendations", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao"],
-    maxPorTool: { get_alerts: 1, get_recommendations: 1, saude_das_integracoes: 1, custo_llm_periodo: 2, score_de_prontidao: 1 }, maxToolsTotal: 5,
-    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes, saude das integracoes por evidencia, custo LLM derivado dos tokens e score de prontidao (ESP-38, read-only). Repetir as divergencias, premissas e lacunas declaradas pelos retornos.",
+    tools: ["get_alerts", "get_recommendations", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens"],
+    maxPorTool: { get_alerts: 1, get_recommendations: 1, saude_das_integracoes: 1, custo_llm_periodo: 2, score_de_prontidao: 1, saude_dos_tokens: 1 }, maxToolsTotal: 6,
+    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes, saude das integracoes por evidencia, custo LLM derivado dos tokens, score de prontidao (ESP-38) e saude dos tokens Meta (ESP-30: expiracao/escopo), tudo read-only. Repetir as divergencias, premissas e lacunas declaradas pelos retornos.",
   },
   analise_visual_drive: {
     tools: [], maxPorTool: {}, maxToolsTotal: 0,  // pipeline codificado - nao usa loop de tools
