@@ -47,9 +47,7 @@ export const Route = createFileRoute("/_authenticated/empresas")({
 
 const PROVIDERS = [
   { id: "meta_ads", label: "Meta Ads" },
-  { id: "ga4", label: "Google Analytics 4" },
-  { id: "gsc", label: "Search Console" },
-  { id: "gtm", label: "Tag Manager" },
+  // ESP-45: GA4 / Search Console / Tag Manager ocultos na UI — nao ha integracao real.
 ] as const;
 
 /** Badge de estado — mesma aparência na grade de provedores e na tabela. */
@@ -86,7 +84,11 @@ function EmpresasPage() {
     },
   });
 
-  const linhas = useMemo(() => integrations.data ?? [], [integrations.data]);
+  const linhas = useMemo(() => {
+    // ESP-45: nao exibir GA4 / GSC / GTM (provedores sem integracao real).
+    const ocultos = new Set(["ga4", "gsc", "gtm"]);
+    return (integrations.data ?? []).filter((i) => !ocultos.has(i.provider));
+  }, [integrations.data]);
 
   // Lista completa, com o que precisa de atenção no topo.
   const ordenadas = useMemo(
@@ -162,7 +164,7 @@ function EmpresasPage() {
         <div>
           <h1 className="text-2xl font-semibold">Empresas e contas</h1>
           <p className="text-sm text-muted-foreground">
-            Gerencie empresas e conecte plataformas de anúncios/analytics.
+            Gerencie empresas e conecte contas de Meta Ads.
           </p>
         </div>
         {isAdmin && (
@@ -222,7 +224,7 @@ function EmpresasPage() {
           O estado vem de <code>estado_operacional</code>, não da existência da linha. Verde só
           quando a conta está de fato acessível.
         </p>
-        <div className="grid gap-3 md:grid-cols-4">
+        <div className="grid gap-3 md:grid-cols-2">
           {PROVIDERS.map((p) => {
             const doProvedor = linhas.filter((i) => i.provider === p.id);
             const estados = doProvedor.map(estadoExibido);
