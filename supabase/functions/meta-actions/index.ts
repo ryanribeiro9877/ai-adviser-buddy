@@ -1,4 +1,10 @@
-// supabase/functions/meta-actions/index.ts (v5.16)
+// supabase/functions/meta-actions/index.ts (v5.17)
+// v5.17 (12/08/2026) - ESP-26: TETO DE ORCAMENTO NA EXECUCAO, NAO SO NA PROPOSTA.
+//   criar_conjunto_a_partir_de e alterar_orcamento passam a chamar a MESMA RPC
+//   avaliar_orcamento_diario (via _shared/avaliar_orcamento.ts) antes de escrever na Meta.
+//   A comparacao local contra teto_sanidade_orcamento_diario SAIU desses dois caminhos: dois
+//   juizes para a mesma pergunta era o defeito. Fail-closed: RPC indisponivel = nao executa.
+//   A mensagem ao gestor (exposicao acumulada dos conjuntos ACTIVE) fica no audit.
 // v5.16 (11/08/2026) - CAMPO DA IDENTIDADE ESCOLHIDO PELO FORMATO DO ID. O Ryan informou o id
 //   oficial de @jcr2_legaleviver lido na Identidade do Gerenciador: 1296945687078272. Esse id NAO
 //   tem formato de Instagram Business Account (1784 + 13 digitos) - e um ator Instagram LEGADO.
@@ -281,6 +287,7 @@ import {
   aplicarLinkNoLinkData,
   destinoDoPedidoCompat,
 } from "../_shared/destino_url_lp.ts";
+import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
   argsAdDeGraph,
@@ -1191,8 +1198,19 @@ export async function montarCriacao(
         erro: "payload incompleto (molde_external_id, campanha_destino_external_id, nome_novo)",
       };
     if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
-    if (reais > tetoSanidade)
-      return { erro: `orcamento ${reais} acima do teto de sanidade ${tetoSanidade}` };
+    // ESP-26: o juiz e a RPC, nao a comparacao local. Sem companyId nao ha como consultar.
+    if (!companyId) {
+      return {
+        erro: "avaliacao_de_orcamento_indisponivel",
+        detalhe: "company_id ausente no pedido de criacao de conjunto — sem ele nao consulto avaliar_orcamento_diario.",
+      };
+    }
+    {
+      const julgado = await julgarOrcamentoDiario(supa, companyId, reais, 1);
+      if (!julgado.ok) {
+        return { erro: julgado.motivo, detalhe: julgado.detalhe, avaliacao_orcamento: julgado.avaliacao };
+      }
+    }
 
     // ============ v5.4: ORCAMENTO DA CAMPANHA PAI, ANTES DE ESCREVER ============
     // Mesmo padrao do gate de Dynamic Creative da v5.2: le o estado do objeto PAI e recusa por
@@ -2863,16 +2881,25 @@ Deno.serve(async (req) => {
         });
         continue;
       }
-      // v2: teto de sanidade tambem na alteracao - a confusao reais/centavos vale aqui igual.
-      if (reais > tetoSanidade) {
-        const motivo = `orcamento ${reais} acima do teto de sanidade ${tetoSanidade}`;
+      // ESP-26: mesmo juiz da proposta (avaliar_orcamento_diario). Comparacao local SAIU.
+      const julgado = await julgarOrcamentoDiario(supa, String(r.company_id), reais, 1);
+      if (!julgado.ok) {
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
-          motivo,
+          motivo: julgado.motivo,
+          detalhe: julgado.detalhe,
+          avaliacao_orcamento: julgado.avaliacao,
           acao,
           payload: r.payload,
           driver_escrita: driver,
         });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo: julgado.motivo,
+          detalhe: julgado.detalhe,
+          driver_escrita: driver,
+        });
         continue;
       }
       post = { daily_budget: String(Math.round(reais * 100)) };

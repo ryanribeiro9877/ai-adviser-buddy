@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.13)
+// supabase/functions/traffic-chat/index.ts (v28.14)
+// v28.14 (12/08/2026) - ESP-26: alterar_orcamento tambem passa por avaliar_orcamento_diario
+//   ANTES de emitir o card (mesma RPC da criacao de conjunto e da execucao em meta-actions).
+//   Fail-closed: RPC indisponivel = nao emite. Helper compartilhado: _shared/avaliar_orcamento.ts.
 // v28.13 (11/08/2026) - CARD DE POSICIONAMENTO POR CONJUNTO. propose_action reconhece
 //   ajustar_posicionamentos_do_conjunto, resolve o alvo em ad_sets (nao campanhas), exige
 //   formato_midia video|imagem e deixa a derivacao da exclusao para o executor. O card fica
@@ -384,6 +387,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { situacaoDoCard } from "../_shared/aprovacoes.ts";
+import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -813,18 +817,35 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     if (exact.length === 1) alvo = exact[0];
     else return { ambiguo: true, opcoes: matches.slice(0, 6).map((m) => m.name), instrucao: "peca o NOME COMPLETO EXATO" };
   }
+
+  // ESP-26: alterar_orcamento julga o valor NA PROPOSTA com a mesma RPC da execucao.
+  let avisoOrcamentoAlteracao: string | null = null;
+  if (action === "alterar_orcamento") {
+    const reais = Number(params?.novo_orcamento_diario_reais ?? 0);
+    const julgado = await julgarOrcamentoDiario(supa, companyId, reais, 1);
+    if (!julgado.ok) {
+      return {
+        erro: julgado.motivo,
+        detalhe: julgado.detalhe,
+        avaliacao_orcamento: julgado.avaliacao,
+      };
+    }
+    avisoOrcamentoAlteracao = julgado.mensagem_para_o_gestor || null;
+  }
+
   const entityType = action === "alterar_orcamento"
     ? "budget"
     : action === "ajustar_posicionamentos_do_conjunto"
       ? "adset"
       : (isAd ? "ad" : "campaign");
-  const summary = ({ pausar_criativo: `Pausar o criativo "${alvo.name}"`, escalar_criativo: `Escalar o criativo "${alvo.name}"`,
+  const summaryBase = ({ pausar_criativo: `Pausar o criativo "${alvo.name}"`, escalar_criativo: `Escalar o criativo "${alvo.name}"`,
     pausar_campanha: `Pausar a campanha "${alvo.name}"`,
     alterar_orcamento: `Alterar orcamento diario de "${alvo.name}" para ${brl(Number(params?.novo_orcamento_diario_reais ?? 0))}`,
     renomear_campanha: `Renomear a campanha "${alvo.name}" para "${String(params?.novo_nome ?? "").trim()}" via Pipeboard`,
     ajustar_posicionamentos_do_conjunto:
       `Ajustar posicionamentos de "${alvo.name}" para ${String(params?.formato_midia).toUpperCase()}: excluir Facebook Coluna da direita quando incompatível, preservar Instagram/Threads e demais posicionamentos compatíveis`,
   } as Record<string, string>)[action];
+  const summary = avisoOrcamentoAlteracao ? `${summaryBase} — ${avisoOrcamentoAlteracao}` : summaryBase;
   const { data: ins, error: ie } = await supa.from("approval_requests").insert({
     company_id: companyId, requested_by: requestedBy, conversation_id: convId, entity_type: entityType,
     entity_id: alvo.id, action, summary,
@@ -833,6 +854,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
       mecanismo: String(args?.mecanismo ?? "").trim() || null,
+      aviso_orcamento: avisoOrcamentoAlteracao,
       proposto_por: "traffic-chat" },
     status: "pending",
   }).select("id").single();
@@ -840,7 +862,9 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   await supa.from("audit_log").insert({ company_id: companyId, user_id: requestedBy, action: "approval_created",
     target_type: "approval_request", target_id: ins.id, details: { acao: action, alvo: alvo.name, justificativa, origem: "edge:traffic-chat" } });
   cards.push({ approval_id: ins.id, action, entity_type: entityType, target_name: alvo.name, summary, params, status: "pending" });
-  return { ok: true, approval_id: ins.id, resumo: summary, aviso: "Pedido PENDENTE. Nada foi executado." };
+  return avisoOrcamentoAlteracao
+    ? { ok: true, approval_id: ins.id, resumo: summary, aviso: "Pedido PENDENTE. Nada foi executado.", aviso_orcamento: avisoOrcamentoAlteracao }
+    : { ok: true, approval_id: ins.id, resumo: summary, aviso: "Pedido PENDENTE. Nada foi executado." };
 }
 /** Tool dedicada: emite card humano; meta-actions Ã© o Ãºnico executor e exige Pipeboard. */
 async function t_renomear_campanha(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[]) {
@@ -979,21 +1003,13 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!campanhaDestino) return { erro: "params.campanha_destino obrigatorio (nome da campanha que vai receber o conjunto)" };
     if (!(orcamento > 0)) return { erro: "params.orcamento_diario_reais obrigatorio. NAO existe valor padrao: PERGUNTE ao gestor qual orcamento diario ele quer para este conjunto antes de propor." };
 
-    // v28.9: quem decide se o orcamento cabe e a RPC, nao uma comparacao local. Ela devolve
-    // tambem o que o numero REALMENTE permite - media, teto real do dia (175%, texto da Meta),
-    // teto semanal garantido e o pior dia somando N campanhas. O gestor decidiu "R$ 60 por
-    // campanha" achando que era limite do dia; com tres campanhas o pior dia e R$ 315,00.
-    // A comparacao contra tetoSanidade que existia aqui SAIU: dois juizes para a mesma pergunta
-    // foi o que produziu o desync do contrato de ativacao entre 31/07 e 03/08.
-    const { data: orc, error: orcErr } = await supa.rpc("avaliar_orcamento_diario", {
-      p_company_id: companyId, p_reais: orcamento, p_campanhas: 1,
-    });
-    if (orcErr) return { erro: `nao consegui avaliar o orcamento: ${orcErr.message}. NAO emiti o card - sem essa avaliacao nao ha como dizer ao gestor o que o valor realmente permite.` };
-    if (!orc?.permitido) {
-      return { erro: String(orc?.motivo ?? "orcamento_nao_permitido"),
-               detalhe: String(orc?.mensagem_para_o_gestor ?? "") };
+    // v28.9 / ESP-26: quem decide se o orcamento cabe e a RPC (helper compartilhado).
+    const julgadoConj = await julgarOrcamentoDiario(supa, companyId, orcamento, 1);
+    if (!julgadoConj.ok) {
+      return { erro: julgadoConj.motivo, detalhe: julgadoConj.detalhe, avaliacao_orcamento: julgadoConj.avaliacao };
     }
-    const avisoOrcamento = String(orc.mensagem_para_o_gestor ?? "");
+    const avisoOrcamento = julgadoConj.mensagem_para_o_gestor;
+    const orc = julgadoConj.avaliacao;
 
     const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,account_id").eq("company_id", companyId);
     const molde = (sets ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
