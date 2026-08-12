@@ -12,6 +12,24 @@ export function driverDe(cfg: { driver_escrita?: unknown } | null | undefined): 
   return cfg?.driver_escrita === "pipeboard" ? "pipeboard" : "graph";
 }
 
+// ESP-29: driver POR ACAO. Precedencia: override (driver_por_acao[acao]) > empresa
+// (driver_escrita) > graph. Mesmo criterio do RPC resolver_driver. So normaliza o
+// transporte do ultimo passo; a matriz de capacidade (ex.: renomear_campanha e
+// pipeboard-only) e conferida no RPC pode_executar_acao/resolver_driver.
+export function driverParaAcao(
+  cfg: { driver_escrita?: unknown; driver_por_acao?: unknown } | null | undefined,
+  acao: string,
+): DriverEscrita {
+  const porAcao = (cfg?.driver_por_acao && typeof cfg.driver_por_acao === "object")
+    ? cfg.driver_por_acao as Record<string, unknown>
+    : {};
+  const override = porAcao?.[acao];
+  const bruto = override != null && String(override).trim() !== ""
+    ? String(override)
+    : (cfg?.driver_escrita as unknown);
+  return bruto === "pipeboard" ? "pipeboard" : "graph";
+}
+
 export async function pipeboardToken(
   lerSegredo?: (nome: string) => Promise<string>,
 ): Promise<string> {

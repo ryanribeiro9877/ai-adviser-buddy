@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.22)
+// supabase/functions/meta-actions/index.ts (v5.23)
+// v5.23 (12/08/2026) - ESP-29: driver de transporte resolvido POR ACAO (driverParaAcao):
+//   override em meta_execution_config.driver_por_acao > driver_escrita (empresa) > graph.
+//   pode_executar_acao/resolver_driver aplicam a matriz de capacidade (renomear=pipeboard-only).
 // v5.22 (12/08/2026) - ESP-39: campanha exige papel TESTE|ESCALA no nome_partes; escalar_duplicar
 //   recusa destino TESTE (vencedores em campanha ESCALA separada).
 // v5.21 (12/08/2026) - ESP-40: na criacao/renomeacao, se o payload traz nome_partes, o nome_novo
@@ -311,7 +314,7 @@ import {
   argsCreativeDeGraph,
   camposDeReconciliacao,
   compararPedidoComGraph,
-  driverDe,
+  driverParaAcao,
   monitorConexaoPipeboard,
   nivelDaAcao,
   pipeboardCall,
@@ -2533,9 +2536,10 @@ Deno.serve(async (req) => {
     const tetoSanidade = Number(conf.teto_sanidade_orcamento_diario ?? 5000);
     const flagsOk = conf.master_enabled === true && conf.action_flags?.[acao] === true;
     const rateOk = executadasNaHora < conf.max_actions_per_hour;
-    // v5: driver vem da config da empresa — o mesmo campo que pode_executar_acao devolve.
+    // v5/ESP-29: driver resolvido POR ACAO — override (driver_por_acao) > empresa
+    // (driver_escrita) > graph, mesmo criterio de resolver_driver/pode_executar_acao.
     // Diz por ONDE o ultimo passo sai, nunca SE sai.
-    const driver = driverDe(conf);
+    const driver = driverParaAcao(conf, acao);
 
     // ==================== CAMINHO DE CRIACAO (v2) ====================
     if (CRIACAO.includes(acao)) {
