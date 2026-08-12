@@ -2,7 +2,7 @@
 // Diagnóstico do token Meta disponível no ambiente: escopos, acesso à ad account da
 // Legal é Viver (act_3302001729967572) e leitura de campanha. NÃO escreve nada no modo
 // diagnóstico padrão.
-// Tokens testados: META_ADS_TOKEN (se existir) senão WHATSAPP_ACCESS_TOKEN.
+// Token: META_ADS_TOKEN somente (ESP-32 — sem fallback WhatsApp).
 // Auth: x-mcp-key / Bearer <mcp_config.api_key>.
 //
 // v2 (07/08/2026) — DIAGNOSTICO DO OAuthException 100 / subcode 1885183.
@@ -31,8 +31,8 @@ import { monitorConexaoPipeboard, pipeboardCall, pipeboardToken } from "../_shar
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
-const TOKEN_FONTE = Deno.env.get("META_ADS_TOKEN") ? "META_ADS_TOKEN" : "WHATSAPP_ACCESS_TOKEN";
+const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
+const TOKEN_FONTE = "META_ADS_TOKEN";
 const AD_ACCOUNT = "act_3302001729967572";
 const GRAPH = "https://graph.facebook.com/v21.0";
 const COMPANY_ID = "ded20b38-f42e-4c71-800c-31b97ea48bcf";
@@ -241,7 +241,7 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-or-bearer"));
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
-  if (!TOKEN) return json({ error: "nenhum token Meta no ambiente" }, 500);
+  if (!TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
 
   let body: any = {};
   try {

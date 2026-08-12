@@ -14,14 +14,14 @@
 //   "submit"          { creation_id } -> exige master + action_flags.criar_template +
 //       dry_run=false (config POR EMPRESA — sem leitura de id=1) + rate limit; POST à Meta.
 //   "watch"           resolve pendências 'enviado' (aprovado/rejeitado) + alerta em rejeição.
-// Auth: x-mcp-key. Token Meta: mesmo arranjo vigente da replicate (decisão 29/07).
+// Auth: x-mcp-key. Token: WHATSAPP_ACCESS_TOKEN somente (ESP-32 — sem fallback Ads).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
+const TOKEN = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
 const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "anthropic/claude-sonnet-4.6").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
@@ -80,7 +80,7 @@ function checarUtility(bodyText: string, nome: string): string[] {
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  if (!TOKEN) return json({ error: "token Meta ausente" }, 500);
+  if (!TOKEN) return json({ error: "WHATSAPP_ACCESS_TOKEN ausente" }, 500);
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-only"));
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
   const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
