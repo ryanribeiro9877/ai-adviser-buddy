@@ -1,8 +1,12 @@
-// supabase/functions/meta-test-campaign/index.ts (v3) — F4.1 aceite 5 / F4.2 estágio 2
+// supabase/functions/meta-test-campaign/index.ts (v4) — ESP-47 ARQUIVADA
+// v4 (12/08/2026): edge ARQUIVADA. Create/pause/unpause/delete/status recusam com 410.
+//   Motivo: campanha [TESTE-API] (120253980286160191) e artefato de aceite F4; nao deve
+//   mais nascer objeto novo nem ser reativada por esta rota. Espelho: status paused.
+//   TESTE-GT02 (120254208284780191) ja consta DELETED no espelho — prova historica apenas.
 // v3: (a) fix GET com path que já contém '?' (usava '?' duplicado — syntax error no Graph);
 //     (b) REDACT do access_token em qualquer corpo devolvido (o Graph ecoa a URL em erros).
 // v2: is_adset_budget_sharing_enabled=false no create. v1: base.
-// Opera SOMENTE em campanha [TESTE-API] (trava dura). Ações: create|status|pause|unpause|delete.
+// Historico: opera SOMENTE em campanha [TESTE-API] (trava dura). Ações: create|status|pause|unpause|delete.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
@@ -13,6 +17,7 @@ const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
 const AD_ACCOUNT = "act_3302001729967572";
 const GRAPH = "https://graph.facebook.com/v21.0";
 const PREFIXO = "[TESTE-API]";
+const ARQUIVADA = true;
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 function redact(s: string): string {
@@ -47,6 +52,19 @@ async function guardTeste(campaignId: string) {
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
+
+  // ESP-47: edge arquivada — nenhuma acao escreve nem cria.
+  if (ARQUIVADA) {
+    const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-only"));
+    if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
+    await audit("meta_test_arquivada", { motivo: "ESP-47", mensagem: "edge meta-test-campaign arquivada em 12/08/2026" });
+    return json({
+      error: "edge_arquivada",
+      motivo: "ESP-47: meta-test-campaign arquivada. [TESTE-API] nao deve mais ser criada/reativada por esta rota. TESTE-GT02 ja esta DELETED no espelho (prova historica).",
+      versao: "v4",
+    }, 410);
+  }
+
   if (!TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-only"));
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
