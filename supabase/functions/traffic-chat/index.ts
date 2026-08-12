@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.19)
+// supabase/functions/traffic-chat/index.ts (v28.20)
+// v28.20 (12/08/2026) - ESP-39: papel TESTE|ESCALA obrigatorio em criar/renomear campanha;
+//   escalar_duplicar nao permanece em campanha TESTE (exige campanha_destino ESCALA).
 // v28.19 (12/08/2026) - ESP-40: nomenclatura por campos. criar_campanha / criar_conjunto /
 //   criar_anuncio / renomear_campanha MONTAO o nome a partir de marca+canal+objetivo_tag+periodo
 //   (+ produto/rotulo opcionais). Nome livre recusado. Padrao [MARCA][CANAL][OBJ][PROD?][ROT?][PER].
@@ -401,7 +403,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { situacaoDoCard } from "../_shared/aprovacoes.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
-import { resolverNomePartesDoParams } from "../_shared/nomenclatura.ts";
+import { resolverNomePartesDoParams, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -933,11 +935,13 @@ async function t_renomear_campanha(companyId: string, convId: string, requestedB
     canal: args?.canal,
     objetivo_tag: args?.objetivo_tag,
     produto: args?.produto,
+    papel: args?.papel,
     rotulo: args?.rotulo,
     periodo: args?.periodo,
   };
   const montado = resolverNomePartesDoParams(paramsNome, {
     defaultMarca: (cfgNome as any)?.marca_tag || "LEV",
+    exigirPapel: true,
   });
   if (!montado.ok) {
     return {
@@ -945,7 +949,7 @@ async function t_renomear_campanha(companyId: string, convId: string, requestedB
       detalhe: montado.detalhe,
       faltando: montado.faltando,
       instrucao:
-        "ESP-40: renomear exige marca/canal/objetivo_tag/periodo (+ produto/rotulo opcionais). novo_nome livre foi aposentado.",
+        "ESP-40/39: renomear campanha exige marca/canal/objetivo_tag/papel(TESTE|ESCALA)/periodo (+ produto/rotulo). novo_nome livre foi aposentado.",
     };
   }
   const novoNome = montado.nome;
@@ -1037,6 +1041,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const montado = resolverNomePartesDoParams(params, {
       defaultMarca: (cfgNome as any)?.marca_tag || "LEV",
       objetivoOdax: objetivo,
+      exigirPapel: true,
     });
     if (!montado.ok) {
       return {
@@ -1044,7 +1049,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
         detalhe: montado.detalhe,
         faltando: montado.faltando,
         instrucao:
-          "ESP-40: informe params.marca (ou usa LEV), params.canal (LP|WPP|…), params.objetivo_tag (ou objetivo ODAX), params.periodo (AGO26|01.05.26). Opcional: produto, rotulo. Nao use target_name como nome livre.",
+          "ESP-40/39: informe params.marca (ou usa LEV), params.canal, params.objetivo_tag (ou objetivo ODAX), params.papel (TESTE|ESCALA), params.periodo. Opcional: produto, rotulo. Vencedores e testes em campanhas SEPARADAS.",
       };
     }
     const nomeAlvoComposto = montado.nome;
@@ -1062,7 +1067,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if ((existentes ?? []).some((c) => norm(c.name) === norm(nomeAlvoComposto))) {
       return { erro: `ja existe uma campanha chamada '${nomeAlvoComposto}'. Ajuste rotulo/periodo/produto.` };
     }
-    const summary = `Criar campanha "${nomeAlvoComposto}" (objetivo ${objetivo}) - nasce PAUSADA, categoria especial de credito obrigatoria — nome composto ESP-40`;
+    const summary = `Criar campanha "${nomeAlvoComposto}" (objetivo ${objetivo}, papel ${montado.partes.papel}) - nasce PAUSADA, categoria especial de credito obrigatoria — nome composto ESP-40/39`;
     return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
       nome_novo: nomeAlvoComposto,
       nome_partes: montado.partes,
@@ -1305,15 +1310,66 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const avisoOrcamento = julgadoEsc.mensagem_para_o_gestor;
 
     if (!molde.campaign_id) {
-      return { erro: `conjunto '${molde.name}' sem campanha no espelho — escala exige a mesma campanha do original.` };
+      return { erro: `conjunto '${molde.name}' sem campanha no espelho — escala exige campanha do original.` };
     }
-    const { data: camp } = await supa
+    const { data: campOrig } = await supa
       .from("campaigns")
       .select("id,name,external_id")
       .eq("id", molde.campaign_id)
       .maybeSingle();
-    if (!camp?.external_id) {
+    if (!campOrig?.external_id) {
       return { erro: `campanha do conjunto '${molde.name}' sem external_id Meta no espelho. Aguarde sync.` };
+    }
+
+    // ESP-39: escala NAO permanece em campanha TESTE. Destino deve ser ESCALA.
+    const papelOrig = classificarPapelCampanha(campOrig.name);
+    let camp = campOrig;
+    let avisoPapel: string | null = null;
+    const destPedido = String(params?.campanha_destino ?? "").trim();
+
+    if (destPedido) {
+      const { data: camps } = await supa.from("campaigns").select("id,name,external_id").eq("company_id", companyId);
+      const soDigitos = /^\d{6,}$/.test(destPedido);
+      const hit = soDigitos
+        ? (camps ?? []).find((c) => String(c.external_id ?? "") === destPedido)
+        : ((camps ?? []).find((c) => norm(c.name) === norm(destPedido))
+          ?? (camps ?? []).filter((c) => norm(c.name).includes(norm(destPedido)))[0]);
+      if (!hit?.external_id) {
+        return {
+          erro: "campanha_destino_de_escala_nao_encontrada",
+          detalhe: `params.campanha_destino='${destPedido}' nao bateu com nenhuma campanha da empresa. Use nome ou external_id de uma campanha ESCALA.`,
+        };
+      }
+      camp = hit;
+    }
+
+    const papelDest = classificarPapelCampanha(camp.name);
+    if (papelDest === "teste") {
+      return {
+        erro: "escala_nao_vai_em_campanha_teste",
+        detalhe:
+          `A campanha destino "${camp.name}" e TESTE. ESP-39: escala/vencedores ficam em campanha ESCALA separada. Crie ou escolha uma campanha com papel=ESCALA e informe params.campanha_destino.`,
+        papel_destino: papelDest,
+      };
+    }
+    if (papelOrig === "teste" && !destPedido) {
+      return {
+        erro: "escala_exige_campanha_escala",
+        detalhe:
+          `O conjunto esta na campanha TESTE "${campOrig.name}". Para escalar, informe params.campanha_destino com uma campanha ESCALA (nao use a mesma).`,
+        papel_origem: papelOrig,
+      };
+    }
+    if (papelDest === "desconhecido") {
+      if (papelOrig === "teste") {
+        return {
+          erro: "campanha_destino_sem_papel_escala",
+          detalhe:
+            `Campanha destino "${camp.name}" nao declara [ESCALA] no nome. Com origem TESTE, o destino tem de ser ESCALA explicito (ESP-39 + ESP-40).`,
+        };
+      }
+      avisoPapel =
+        `AVISO ESP-39: campanha "${camp.name}" sem token [TESTE]/[ESCALA] (legado). Escala seguiu, mas campanhas novas devem nascer com papel.`;
     }
 
     const nomeNovo = String(params?.nome_novo ?? "").trim()
@@ -1321,14 +1377,22 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const summary =
       `Escalar por duplicacao: criar "${nomeNovo}" a partir de "${molde.name}" na campanha "${camp.name}" — ${brl(orcamento)}/dia (+20%), nasce PAUSED. Original continua entregando.` +
       (avisoOrcamento ? ` — ${avisoOrcamento}` : "") +
-      ` — Escala (ESP-19/25): NAO edita o original. Anuncios do molde NAO sao copiados neste card — apos o conjunto nascer, proponha criar_anuncio_a_partir_de para cada peca ativa.`;
+      (avisoPapel ? ` — ${avisoPapel}` : "") +
+      (camp.external_id !== campOrig.external_id
+        ? ` — ESP-39: copia vai para campanha ESCALA (origem era "${campOrig.name}").`
+        : ` — Escala (ESP-19/25): NAO edita o original.`) +
+      ` Anuncios do molde NAO sao copiados neste card — apos o conjunto nascer, proponha criar_anuncio_a_partir_de para cada peca ativa.`;
 
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo,
       molde_external_id: molde.external_id,
       molde_nome: molde.name,
+      campanha_origem_external_id: campOrig.external_id,
+      campanha_origem_nome: campOrig.name,
+      campanha_origem_papel: papelOrig,
       campanha_destino_external_id: camp.external_id,
       campanha_destino_nome: camp.name,
+      campanha_destino_papel: papelDest,
       orcamento_diario_reais: orcamento,
       orcamento_origem: "avaliar_escala.medidas.orcamento_proposto_dia",
       aumento_pct: 20,
@@ -1338,6 +1402,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       anuncios_nao_copiados_neste_card: true,
       avaliacao_escala: aval,
       aviso_orcamento: avisoOrcamento || null,
+      aviso_papel: avisoPapel,
       justificativa,
       reversa,
       metrica_sucesso: sucesso,
@@ -1345,8 +1410,8 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       risco: String(args?.risco ?? "").trim() || null,
     }, cards);
     return avisoOrcamento && card && typeof card === "object" && !(card as any).erro
-      ? { ...(card as any), aviso_orcamento: avisoOrcamento, avaliacao_escala: aval }
-      : { ...(typeof card === "object" ? card as any : { ok: true }), avaliacao_escala: aval };
+      ? { ...(card as any), aviso_orcamento: avisoOrcamento, avaliacao_escala: aval, aviso_papel: avisoPapel }
+      : { ...(typeof card === "object" ? card as any : { ok: true }), avaliacao_escala: aval, aviso_papel: avisoPapel };
   }
 
   // -------- criar_anuncio_a_partir_de (compliance BLOQUEANTE) --------
@@ -1810,8 +1875,8 @@ const TOOLS = [
   { type: "function", function: { name: "get_acervo_para_anuncio", description: "ACERVO DO DRIVE PRONTO PARA VIRAR ANUNCIO NOVO. Esta e a ferramenta certa quando o gestor pede para MONTAR anuncio novo, ESCOLHER peca ou saber quais pecas do acervo servem para um produto - NAO use get_criativos_conteudo para isso (aquela le SO os anuncios ja no ar em public.ads e por isso nunca propoe peca nova). Deduplicada por arquivo e filtravel por produto (ex.: 'CLT'). Por peca: nome, drive_file_id, meta_video_id (se video ja na Meta), meta_image_hash (se imagem ja na Meta), o que a peca DIZ, analise visual, na_biblioteca_da_meta/apta, bloqueio de compliance SEMPRE marcado e se ja foi usada. Se na_biblioteca_da_meta=false, chame upload_midia com o drive_file_id ANTES de propor o card - nao diga que o sistema nao sabe subir. Video recem-enviado pode ainda processar: so emita card com status ready.", parameters: { type: "object", properties: { produto: { type: "string" }, incluir_inaptas: { type: "boolean" } } } } },
   { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
-  { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. ESP-40: o novo nome e COMPOSTO a partir de marca/canal/objetivo_tag/periodo (+ produto/rotulo opcionais) no padrao [MARCA][CANAL][OBJ][PROD?][ROT?][PER] — novo_nome livre foi aposentado. Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "canal", "periodo"] } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, escalar_criativo, pausar_campanha, pausar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR conjunto/campanha/criativo continua MANUAL no Gerenciador — nao existe ativar_* neste sistema. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. ESP-40 NOMENCLATURA: o nome do objeto NOVO e COMPOSTO — params.marca (default LEV), params.canal, params.objetivo_tag (ou objetivo ODAX), params.periodo obrigatorios; params.produto e params.rotulo opcionais. Padrao [MARCA][CANAL][OBJ][PROD?][ROT?][PER]. Nome livre (target_name/nome_novo soltos) e RECUSADO. Para criar_campanha, target_name pode ser \"composto\". escalar_duplicar (ESP-25): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; mesma campanha; targeting herdado; nasce PAUSED; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de, OBRIGATORIO tambem: (1) PERGUNTE ao gestor as plataformas_publicacao (facebook|instagram|audience_network|messenger). (2) Se Facebook fizer parte, informe formato_midia_previsto=video|imagem. (3) Threads DESABILITADO. Tudo que e criado nasce PAUSED.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "ESP-40 nome: marca, canal, objetivo_tag, periodo (+ produto, rotulo). Criacao de conjunto: plataformas_publicacao OBRIGATORIO; formato_midia_previsto quando Facebook. Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. ESP-40/39: o novo nome e COMPOSTO a partir de marca/canal/objetivo_tag/papel(TESTE|ESCALA)/periodo (+ produto/rotulo opcionais) no padrao [MARCA][CANAL][OBJ][PROD?][PAPEL][ROT?][PER] — novo_nome livre foi aposentado. Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (obrigatorio ESP-39)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "canal", "papel", "periodo"] } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, escalar_criativo, pausar_campanha, pausar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR conjunto/campanha/criativo continua MANUAL no Gerenciador — nao existe ativar_* neste sistema. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. ESP-40/39 NOMENCLATURA: o nome do objeto NOVO e COMPOSTO — params.marca (default LEV), params.canal, params.objetivo_tag (ou objetivo ODAX), params.periodo obrigatorios; params.produto e params.rotulo opcionais. CAMPANHA exige tambem params.papel=TESTE|ESCALA (ESP-39: vencedores e testes em campanhas SEPARADAS). Padrao [MARCA][CANAL][OBJ][PROD?][PAPEL?][ROT?][PER]. Nome livre (target_name/nome_novo soltos) e RECUSADO. Para criar_campanha, target_name pode ser \"composto\". escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce PAUSED; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de, OBRIGATORIO tambem: (1) PERGUNTE ao gestor as plataformas_publicacao (facebook|instagram|audience_network|messenger). (2) Se Facebook fizer parte, informe formato_midia_previsto=video|imagem. (3) Threads DESABILITADO. Tudo que e criado nasce PAUSED.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "ESP-40/39 nome: marca, canal, objetivo_tag, periodo, papel(TESTE|ESCALA em campanha) (+ produto, rotulo). Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao OBRIGATORIO; formato_midia_previsto quando Facebook. Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },

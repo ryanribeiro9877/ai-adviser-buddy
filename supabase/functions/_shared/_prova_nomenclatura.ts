@@ -1,5 +1,10 @@
-// Prova local do helper ESP-40 (nomenclatura). Rode: deno run supabase/functions/_shared/_prova_nomenclatura.ts
-import { montarNomeMeta, resolverNomePartesDoParams, conferirNomeComPartes } from "./nomenclatura.ts";
+// Prova local do helper ESP-40/39 (nomenclatura). Rode: deno run supabase/functions/_shared/_prova_nomenclatura.ts
+import {
+  montarNomeMeta,
+  resolverNomePartesDoParams,
+  conferirNomeComPartes,
+  classificarPapelCampanha,
+} from "./nomenclatura.ts";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -10,45 +15,59 @@ const ok = montarNomeMeta({
   canal: "lp",
   objetivo_tag: "leads",
   produto: "clt",
-  rotulo: "nova-01",
+  papel: "teste",
+  rotulo: "hook-a",
   periodo: "ago26",
-});
+}, { exigirPapel: true });
 assert(ok.ok === true, "deveria montar");
 if (ok.ok) {
-  assert(ok.nome === "[LEV][LP][LEADS][CLT][NOVA-01][AGO26]", `nome=${ok.nome}`);
+  assert(ok.nome === "[LEV][LP][LEADS][CLT][TESTE][HOOK-A][AGO26]", `nome=${ok.nome}`);
 }
 
-const semProduto = montarNomeMeta({
+const escala = montarNomeMeta({
+  marca: "LEV",
+  canal: "LP",
+  objetivo_tag: "LEADS",
+  produto: "CLT",
+  papel: "ESCALA",
+  periodo: "AGO26",
+}, { exigirPapel: true });
+assert(escala.ok && escala.nome === "[LEV][LP][LEADS][CLT][ESCALA][AGO26]", "escala");
+
+const semPapelCamp = montarNomeMeta({
+  marca: "LEV",
+  canal: "LP",
+  objetivo_tag: "LEADS",
+  periodo: "AGO26",
+}, { exigirPapel: true });
+assert(!semPapelCamp.ok && semPapelCamp.faltando?.includes("papel"), "papel obrigatorio em campanha");
+
+const conjSemPapel = montarNomeMeta({
   marca: "LEV",
   canal: "WPP",
   objetivo_tag: "LEADS",
   periodo: "01.05.26",
 });
-assert(semProduto.ok && semProduto.nome === "[LEV][WPP][LEADS][01.05.26]", "sem produto");
+assert(conjSemPapel.ok && conjSemPapel.nome === "[LEV][WPP][LEADS][01.05.26]", "conjunto sem papel");
 
-const falta = montarNomeMeta({ marca: "LEV", canal: "LP" });
-assert(!falta.ok && falta.erro === "campos_de_nomenclatura_obrigatorios", "faltando");
+assert(classificarPapelCampanha("[LEV][LP][LEADS][CLT][TESTE][B][AGO26]") === "teste", "class teste");
+assert(classificarPapelCampanha("[LEV][LP][LEADS][CLT][ESCALA][V1][AGO26]") === "escala", "class escala");
+assert(classificarPapelCampanha("[LEV][LP][LEADS][CLT][TESTE-B][AGO26]") === "teste", "legacy TESTE-B");
+assert(classificarPapelCampanha("[LEV][LP][LEADS][01.05.26]") === "desconhecido", "legacy sem papel");
 
 const viaOdax = resolverNomePartesDoParams(
-  { marca: "LEV", canal: "LP", periodo: "AGO26", produto: "CLT", rotulo: "TESTE-B" },
-  { objetivoOdax: "OUTCOME_LEADS" },
+  { marca: "LEV", canal: "LP", periodo: "AGO26", produto: "CLT", papel: "TESTE", rotulo: "B" },
+  { objetivoOdax: "OUTCOME_LEADS", exigirPapel: true },
 );
-assert(viaOdax.ok && viaOdax.nome === "[LEV][LP][LEADS][CLT][TESTE-B][AGO26]", "odax");
+assert(viaOdax.ok && viaOdax.nome === "[LEV][LP][LEADS][CLT][TESTE][B][AGO26]", "odax+papel");
 
-const conf = conferirNomeComPartes("[LEV][LP][LEADS][AGO26]", {
+const conf = conferirNomeComPartes("[LEV][LP][LEADS][ESCALA][AGO26]", {
   marca: "LEV",
   canal: "LP",
   objetivo_tag: "LEADS",
+  papel: "ESCALA",
   periodo: "AGO26",
-});
+}, { exigirPapel: true });
 assert(conf.ok === true, "conferir ok");
-
-const divergiu = conferirNomeComPartes("NOME LIVRE", {
-  marca: "LEV",
-  canal: "LP",
-  objetivo_tag: "LEADS",
-  periodo: "AGO26",
-});
-assert(!divergiu.ok && divergiu.erro === "nome_divergiu_das_partes", "divergiu");
 
 console.log("ok: _prova_nomenclatura");

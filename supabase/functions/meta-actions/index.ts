@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.21)
+// supabase/functions/meta-actions/index.ts (v5.22)
+// v5.22 (12/08/2026) - ESP-39: campanha exige papel TESTE|ESCALA no nome_partes; escalar_duplicar
+//   recusa destino TESTE (vencedores em campanha ESCALA separada).
 // v5.21 (12/08/2026) - ESP-40: na criacao/renomeacao, se o payload traz nome_partes, o nome_novo
 //   TEM de bater com o composto; grava nome_partes no espelho. Nome livre sem partes: recusa.
 // v5.20 (12/08/2026) - ESP-25: escalar_duplicar. Criacao de conjunto com +20% so se
@@ -300,7 +302,7 @@ import {
   destinoDoPedidoCompat,
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
-import { conferirNomeComPartes } from "../_shared/nomenclatura.ts";
+import { conferirNomeComPartes, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
   argsAdDeGraph,
@@ -1173,16 +1175,16 @@ export async function montarCriacao(
     const nome = String(p?.nome_novo ?? "").trim();
     if (!nome) return { erro: "payload sem nome_novo" };
 
-    // ESP-40: nome_partes obrigatorias na criacao; nome_novo tem de bater com o composto.
+    // ESP-40/39: nome_partes obrigatorias; campanha exige papel TESTE|ESCALA.
     const partes = (p?.nome_partes ?? null) as Record<string, unknown> | null;
     if (!partes || typeof partes !== "object") {
       return {
         erro: "nome_partes_obrigatorias",
         detalhe:
-          "ESP-40: criacao exige nome_partes (marca/canal/objetivo_tag/periodo). Cards antigos sem partes nao executam — emita card novo.",
+          "ESP-40/39: criacao de campanha exige nome_partes (marca/canal/objetivo_tag/papel/periodo). Cards antigos sem partes nao executam — emita card novo.",
       };
     }
-    const conf = conferirNomeComPartes(nome, partes);
+    const conf = conferirNomeComPartes(nome, partes, { exigirPapel: true });
     if (!conf.ok) {
       return { erro: conf.erro, detalhe: conf.detalhe };
     }
@@ -1258,6 +1260,7 @@ export async function montarCriacao(
       };
     }
     // ESP-25: escala revalida aptidao na execucao (fail-closed se ajanela mudou).
+    // ESP-39: destino nao pode ser campanha TESTE.
     if (acao === "escalar_duplicar") {
       const { data: aval, error: avalErr } = await supa.rpc("avaliar_escala", {
         p_company_id: companyId,
@@ -1282,6 +1285,39 @@ export async function montarCriacao(
           erro: "orcamento_de_escala_divergiu_da_escada",
           detalhe: `Pedido R$ ${reais} vs escada atual R$ ${proposto}. Escala nao aceita orcamento livre — emita card novo.`,
           avaliacao_escala: aval,
+        };
+      }
+
+      const nomeDestPayload = String(p?.campanha_destino_nome ?? "").trim();
+      let nomeDest = nomeDestPayload;
+      if (!nomeDest) {
+        const campMeta = await g(`/${campanha}?fields=name`);
+        if (campMeta.status === 200) {
+          nomeDest = String((campMeta.body as any)?.name ?? "").trim();
+        }
+      }
+      const papelDest = classificarPapelCampanha(nomeDest || String(p?.campanha_destino_papel ?? ""));
+      const papelPayload = String(p?.campanha_destino_papel ?? "").trim().toLowerCase();
+      if (papelDest === "teste" || papelPayload === "teste") {
+        return {
+          erro: "escala_nao_vai_em_campanha_teste",
+          detalhe:
+            `ESP-39: campanha destino "${nomeDest || campanha}" e TESTE. Escala/vencedores ficam em campanha ESCALA separada. Emita card com campanha_destino ESCALA.`,
+          papel_destino: papelDest || papelPayload,
+        };
+      }
+      const papelOrig = String(p?.campanha_origem_papel ?? "").trim().toLowerCase()
+        || classificarPapelCampanha(String(p?.campanha_origem_nome ?? ""));
+      const mesmaCampanha =
+        String(p?.campanha_origem_external_id ?? "") === campanha
+        || String(p?.campanha_origem_nome ?? "") === nomeDest;
+      if (papelOrig === "teste" && (!nomeDest || mesmaCampanha || papelDest !== "escala")) {
+        return {
+          erro: "escala_exige_campanha_escala",
+          detalhe:
+            "ESP-39: origem TESTE exige destino ESCALA explicito (campanha_destino). Nao crio a copia na mesma campanha de teste.",
+          papel_origem: papelOrig,
+          papel_destino: papelDest,
         };
       }
     }
@@ -3126,18 +3162,18 @@ Deno.serve(async (req) => {
         });
         continue;
       }
-      // ESP-40: renomear exige nome_partes alinhadas.
+      // ESP-40/39: renomear exige nome_partes alinhadas + papel TESTE|ESCALA.
       const partesRen = (r.payload?.nome_partes ?? null) as Record<string, unknown> | null;
       if (!partesRen || typeof partesRen !== "object") {
         const motivo = "nome_partes_obrigatorias";
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
-          motivo, detalhe: "ESP-40: renomear exige nome_partes. Emita card novo.",
+          motivo, detalhe: "ESP-40/39: renomear exige nome_partes com papel. Emita card novo.",
           acao, driver_escrita: driver,
         });
         resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
         continue;
       }
-      const confRen = conferirNomeComPartes(novoNome, partesRen);
+      const confRen = conferirNomeComPartes(novoNome, partesRen, { exigirPapel: true });
       if (!confRen.ok) {
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
           motivo: confRen.erro, detalhe: confRen.detalhe, acao, driver_escrita: driver,
