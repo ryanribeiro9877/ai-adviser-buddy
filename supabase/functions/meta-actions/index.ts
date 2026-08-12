@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.20)
+// supabase/functions/meta-actions/index.ts (v5.21)
+// v5.21 (12/08/2026) - ESP-40: na criacao/renomeacao, se o payload traz nome_partes, o nome_novo
+//   TEM de bater com o composto; grava nome_partes no espelho. Nome livre sem partes: recusa.
 // v5.20 (12/08/2026) - ESP-25: escalar_duplicar. Criacao de conjunto com +20% so se
 //   avaliar_escala.apto na proposta E de novo na execucao; orcamento travado na escada;
 //   targeting herdado do molde (sem redes livres). redistribuir fica de fora.
@@ -298,6 +300,7 @@ import {
   destinoDoPedidoCompat,
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
+import { conferirNomeComPartes } from "../_shared/nomenclatura.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
   argsAdDeGraph,
@@ -1170,6 +1173,20 @@ export async function montarCriacao(
     const nome = String(p?.nome_novo ?? "").trim();
     if (!nome) return { erro: "payload sem nome_novo" };
 
+    // ESP-40: nome_partes obrigatorias na criacao; nome_novo tem de bater com o composto.
+    const partes = (p?.nome_partes ?? null) as Record<string, unknown> | null;
+    if (!partes || typeof partes !== "object") {
+      return {
+        erro: "nome_partes_obrigatorias",
+        detalhe:
+          "ESP-40: criacao exige nome_partes (marca/canal/objetivo_tag/periodo). Cards antigos sem partes nao executam — emita card novo.",
+      };
+    }
+    const conf = conferirNomeComPartes(nome, partes);
+    if (!conf.ok) {
+      return { erro: conf.erro, detalhe: conf.detalhe };
+    }
+
     // ============ v5.5: REGIME DE ORCAMENTO DECLARADO; ABO REAL PELO PIPEBOARD ============
     // O gestor decide o regime no pedido (regime_orcamento). Hoje o UNICO regime suportado e ABO -
     // orcamento vive em cada CONJUNTO, a campanha fica SEM orcamento -, que e o desenho de todo o
@@ -1192,7 +1209,7 @@ export async function montarCriacao(
     return {
       path: `/${conta}/campaigns`,
       body: {
-        name: nome,
+        name: conf.nome,
         objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
         status: "PAUSED", // v4.3: aprovar CRIA; ativar e ato do gestor no Gerenciador
         special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]), // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
@@ -1201,6 +1218,7 @@ export async function montarCriacao(
         use_adset_level_budgets: "true", // v5.5: ABO real — impede o Pipeboard de injetar orcamento de campanha (CBO)
       } as Record<string, string>,
       regime_orcamento: "abo",
+      nome_partes: conf.partes,
     };
   }
 
@@ -1214,6 +1232,24 @@ export async function montarCriacao(
         erro: "payload incompleto (molde_external_id, campanha_destino_external_id, nome_novo)",
       };
     if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
+
+    // ESP-40: criar_conjunto exige nome_partes. escalar_duplicar herda nome derivado (pode ter ESC+20).
+    let nomeFinal = nome;
+    let nomePartesGravar: Record<string, unknown> | null = null;
+    if (acao === "criar_conjunto_a_partir_de") {
+      const partes = (p?.nome_partes ?? null) as Record<string, unknown> | null;
+      if (!partes || typeof partes !== "object") {
+        return {
+          erro: "nome_partes_obrigatorias",
+          detalhe:
+            "ESP-40: criar conjunto exige nome_partes. Cards antigos sem partes nao executam — emita card novo.",
+        };
+      }
+      const conf = conferirNomeComPartes(nome, partes);
+      if (!conf.ok) return { erro: conf.erro, detalhe: conf.detalhe };
+      nomeFinal = conf.nome;
+      nomePartesGravar = conf.partes;
+    }
     // ESP-26: o juiz e a RPC, nao a comparacao local. Sem companyId nao ha como consultar.
     if (!companyId) {
       return {
@@ -1306,7 +1342,7 @@ export async function montarCriacao(
     const mb: any = m.body ?? {};
 
     const body: Record<string, string> = {
-      name: nome,
+      name: nomeFinal,
       campaign_id: campanha,
       daily_budget: String(Math.round(reais * 100)), // centavos
       status: "PAUSED", // v4.3: aprovar CRIA; ativar e ato do gestor
@@ -1420,13 +1456,13 @@ export async function montarCriacao(
     }
     } // fim else criar_conjunto (plataformas)
 
-    return { path: `/${conta}/adsets`, body, molde_lido: mb, posicionamento };
+    return { path: `/${conta}/adsets`, body, molde_lido: mb, posicionamento, nome_partes: nomePartesGravar };
   }
 
   if (acao === "criar_anuncio_a_partir_de") {
     const creativeMolde = String(p?.creative_id ?? "").trim();
     const adset = String(p?.conjunto_destino_external_id ?? "");
-    const nome = String(p?.nome_novo ?? "").trim();
+    let nome = String(p?.nome_novo ?? "").trim();
     const urlTags = String(p?.url_tags ?? "").trim();
     const videoNovo = String(p?.meta_video_id ?? "").trim(); // v4.4: peca nova video
     const imagemNova = String(p?.meta_image_hash ?? "").trim(); // v5.9: peca nova imagem
@@ -1438,6 +1474,19 @@ export async function montarCriacao(
       return { erro: "payload incompleto (conjunto_destino_external_id, nome_novo)" };
     if (!creativeMolde && !pecaNovaSemMolde)
       return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
+
+    // ESP-40: anuncio novo exige nome_partes alinhado ao nome_novo.
+    const partesAd = (p?.nome_partes ?? null) as Record<string, unknown> | null;
+    if (!partesAd || typeof partesAd !== "object") {
+      return {
+        erro: "nome_partes_obrigatorias",
+        detalhe:
+          "ESP-40: criar anuncio exige nome_partes. Cards antigos sem partes nao executam — emita card novo.",
+      };
+    }
+    const confAd = conferirNomeComPartes(nome, partesAd);
+    if (!confAd.ok) return { erro: confAd.erro, detalhe: confAd.detalhe };
+    nome = confAd.nome;
 
     // ============ v5.1 / v5.9: FORMATOS ============
     // Carrossel CONTINUA recusado por nome. Foto deixa de ser recusa fixa: v5.9 monta link_data.
@@ -2022,6 +2071,7 @@ async function espelhar(
           special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"],
           criado_pelo_sistema: true,
           criado_por_approval_id: approvalId,
+          nome_partes: p?.nome_partes ?? null,
         },
         { onConflict: "provider,external_id" },
       );
@@ -2052,6 +2102,7 @@ async function espelhar(
           targeting: moldeLido?.targeting ?? null,
           criado_pelo_sistema: true,
           criado_por_approval_id: approvalId,
+          nome_partes: p?.nome_partes ?? null,
         },
         { onConflict: "provider,external_id" },
       );
@@ -2084,6 +2135,7 @@ async function espelhar(
           status: statusMeta.toUpperCase(), // ads = MAIUSCULO
           criado_pelo_sistema: true,
           criado_por_approval_id: approvalId,
+          nome_partes: p?.nome_partes ?? null,
           // v4.4 (GT-13): PROCEDENCIA DO TEXTO. Sem isso, um anuncio criado pelo sistema fica
           // indistinguivel de um sincronizado, e a pergunta "quem escreveu esta legenda" nao tem
           // resposta no banco - so no card, que expira. legenda_fonte vem da verificacao
@@ -3074,13 +3126,32 @@ Deno.serve(async (req) => {
         });
         continue;
       }
+      // ESP-40: renomear exige nome_partes alinhadas.
+      const partesRen = (r.payload?.nome_partes ?? null) as Record<string, unknown> | null;
+      if (!partesRen || typeof partesRen !== "object") {
+        const motivo = "nome_partes_obrigatorias";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo, detalhe: "ESP-40: renomear exige nome_partes. Emita card novo.",
+          acao, driver_escrita: driver,
+        });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+        continue;
+      }
+      const confRen = conferirNomeComPartes(novoNome, partesRen);
+      if (!confRen.ok) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: confRen.erro, detalhe: confRen.detalhe, acao, driver_escrita: driver,
+        });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo: confRen.erro, driver_escrita: driver });
+        continue;
+      }
       if (driver !== "pipeboard") {
         const motivo = `renomear_campanha_exige_pipeboard (driver atual: ${driver})`;
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao, driver_escrita: driver });
         resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
         continue;
       }
-      post = { name: novoNome };
+      post = { name: confRen.nome };
     }
     if (acao === "alterar_orcamento") {
       const reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
