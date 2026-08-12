@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.20)
+// supabase/functions/traffic-chat/index.ts (v28.21)
+// v28.21 (12/08/2026) - ESP-37: tool gerar_legendas (framework Hook→Beneficio→CTA+CET, N=3).
+//   Proxy para edge gerar-legendas; nao emite card. Pedido de legendas usa a tool, nao improvisa.
 // v28.20 (12/08/2026) - ESP-39: papel TESTE|ESCALA obrigatorio em criar/renomear campanha;
 //   escalar_duplicar nao permanece em campanha TESTE (exige campanha_destino ESCALA).
 // v28.19 (12/08/2026) - ESP-40: nomenclatura por campos. criar_campanha / criar_conjunto /
@@ -425,7 +427,7 @@ const MAX_TOOLS_TURNO = 12;
 // v28.7: get_estrutura_conjuntos com teto 3. Sao 46 conjuntos relevantes em paginas de 20 - com o
 // default 2 o agente ficaria ESTRUTURALMENTE impedido de ver o universo completo, recriando o
 // problema do universo parcial numa forma nova, agora causada pelo proprio limite.
-const MAX_POR_FERRAMENTA: Record<string, number> = { check_compliance: 3, get_estrutura_conjuntos: 3 };
+const MAX_POR_FERRAMENTA: Record<string, number> = { check_compliance: 3, gerar_legendas: 1, get_estrutura_conjuntos: 3 };
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
 const MAX_TOKENS = 12000;
 // v21: orcamento de raciocinio. max_tokens cobre raciocinio + texto; sem teto, o modelo
@@ -1759,6 +1761,44 @@ async function t_check_compliance(legenda: string, imgAtts: { mime: string; b64:
   try { return JSON.parse(t); } catch { return { erro: `compliance-check falhou (${r.status})` }; }
 }
 
+// ESP-37: motor de legenda (N=3). Nao cria anuncio — so devolve variantes com veredito.
+async function t_gerar_legendas(
+  companyId: string,
+  mcpKey: string,
+  args: { produto?: string; objetivo?: string; eixo?: string; drive_file_id?: string; referencias?: string[] },
+) {
+  const objetivo = String(args?.objetivo ?? args?.eixo ?? "").trim();
+  if (!objetivo) {
+    return {
+      erro: "objetivo_obrigatorio",
+      detalhe: "Informe objetivo (o que a legenda deve comunicar). Ex.: 'CLT — simulacao rapida sem burocracia'.",
+    };
+  }
+  const body: Record<string, unknown> = {
+    company_id: companyId,
+    produto: String(args?.produto ?? "CLT").trim() || "CLT",
+    objetivo,
+  };
+  const drive = String(args?.drive_file_id ?? "").trim();
+  if (drive) body.drive_file_id = drive;
+  if (Array.isArray(args?.referencias) && args.referencias.length) {
+    body.referencias = args.referencias.map((r) => String(r)).filter(Boolean).slice(0, 5);
+  }
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/gerar-legendas`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+    body: JSON.stringify(body),
+  });
+  const t = await r.text();
+  let j: any;
+  try {
+    j = JSON.parse(t);
+  } catch {
+    return { ok: false, erro: `gerar-legendas falhou (${r.status}): ${t.slice(0, 200)}` };
+  }
+  return j;
+}
+
 // Sobe peca do Drive para a biblioteca Meta (adimages/advideos) via edge upload-midia.
 // Respeita flag upload_midia e teto por hora DENTRO da edge. Idempotente.
 async function t_upload_midia(companyId: string, driveFileId: string, mcpKey: string, accountId?: string) {
@@ -1877,6 +1917,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. ESP-40/39: o novo nome e COMPOSTO a partir de marca/canal/objetivo_tag/papel(TESTE|ESCALA)/periodo (+ produto/rotulo opcionais) no padrao [MARCA][CANAL][OBJ][PROD?][PAPEL][ROT?][PER] — novo_nome livre foi aposentado. Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (obrigatorio ESP-39)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "canal", "papel", "periodo"] } } },
   { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, escalar_criativo, pausar_campanha, pausar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR conjunto/campanha/criativo continua MANUAL no Gerenciador — nao existe ativar_* neste sistema. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. ESP-40/39 NOMENCLATURA: o nome do objeto NOVO e COMPOSTO — params.marca (default LEV), params.canal, params.objetivo_tag (ou objetivo ODAX), params.periodo obrigatorios; params.produto e params.rotulo opcionais. CAMPANHA exige tambem params.papel=TESTE|ESCALA (ESP-39: vencedores e testes em campanhas SEPARADAS). Padrao [MARCA][CANAL][OBJ][PROD?][PAPEL?][ROT?][PER]. Nome livre (target_name/nome_novo soltos) e RECUSADO. Para criar_campanha, target_name pode ser \"composto\". escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce PAUSED; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de, OBRIGATORIO tambem: (1) PERGUNTE ao gestor as plataformas_publicacao (facebook|instagram|audience_network|messenger). (2) Se Facebook fizer parte, informe formato_midia_previsto=video|imagem. (3) Threads DESABILITADO. Tudo que e criado nasce PAUSED.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "ESP-40/39 nome: marca, canal, objetivo_tag, periodo, papel(TESTE|ESCALA em campanha) (+ produto, rotulo). Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao OBRIGATORIO; formato_midia_previsto quando Facebook. Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA+CET (FIN-04). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true e passe em propose_action criar_anuncio_a_partir_de com params.legenda, legenda_fonte=agente e legenda_referencias. Nao improvise legendas soltas no chat — chame esta ferramenta.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: CLT (default)." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
@@ -1976,7 +2017,7 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeSaudeIntegracao && nome === "saude_das_integracoes") return 0;
   if (pedeTeto && nome === "teto_vigente") return 0;
   if (pedeConhecimento && nome === "get_conhecimento") return 0;
-  if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "upload_midia" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
+  if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "upload_midia" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "gerar_legendas" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
   const base: Record<string, number> = {
@@ -2131,6 +2172,7 @@ async function runTool(name: string, args: any, ctx: any) {
       }
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
+      case "gerar_legendas": return await t_gerar_legendas(ctx.companyId, ctx.mcpKey, args);
       case "get_criativos_conteudo": {
         const buscaNome = String(args?.busca_nome ?? "").trim();
         // v28.11: COM BUSCA, o default de somente_ativas inverte para false. Medido: 'Reel02' com
@@ -2222,7 +2264,7 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
 - Criacao em lote e degrau, nao rajada: proponha em etapas com leitura entre elas (motivo documentavel: limite de chamada e reinicio de aprendizado - nao invoque teoria de deteccao de automacao).
 - Divergencia persistente se registra, nao se vence: se o gestor sobrepor sem novo dado, declare a divergencia, registre a evidencia e execute a decisao dele.
 - Atribuicao com canais fora do sistema e DISPUTADA, nao apenas conservadora: outro canal pode ter originado o contato. Nao use atribuicao de canal unico como base para escalar.
-- Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar. Pedido de criar legendas se cumpre ENTREGANDO legendas (via compliance), nao so analisando as existentes.
+- Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar. Pedido de criar legendas: chame gerar_legendas (ESP-37, N=3, framework Hook→Beneficio→CTA+CET). Entregue as 3 com veredito; so apto_para_card=true pode ir ao card. NAO invente legendas no chat sem a ferramenta.
 
 == LIMITES DUROS (nao negociaveis, mesmo se pedirem) ==
 - ATO SO EXISTE COM RETORNO DE FERRAMENTA: voce so pode afirmar que emitiu card, criou, alterou ou executou QUALQUER coisa se a ferramenta correspondente foi chamada NESTA resposta e devolveu sucesso - e ao afirmar, cite o identificador devolvido. Se a ferramenta nao foi chamada ou falhou, diga exatamente isso. Escrever "emiti/criei/esta pendente" sem retorno de ferramenta e FABRICAR um ato - a mentira mais grave que voce pode cometer, porque o gestor decide dinheiro em cima dela. Tabela de "estado real" sem fonte de ferramenta na mesma resposta e proibida.

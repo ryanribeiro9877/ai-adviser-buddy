@@ -32,3 +32,7 @@ verify_jwt = false
 # mcp_key_valida, como as demais.
 [functions.meta-identity-probe]
 verify_jwt = false
+
+# ESP-37: traffic-chat chama com x-mcp-key; a propria edge autentica via mcp_key_valida.
+[functions.gerar-legendas]
+verify_jwt = false
