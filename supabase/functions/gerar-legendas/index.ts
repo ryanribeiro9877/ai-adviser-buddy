@@ -1,8 +1,11 @@
-// supabase/functions/gerar-legendas/index.ts (v1)
+// supabase/functions/gerar-legendas/index.ts (v2)
 // ESP-37 (12/08/2026): motor de legenda Meta Ads — framework A (Hook → Benefício/prova →
 //   CTA + CET na legenda FIN-04), N=3 fixo. Redator OpenRouter + guardião compliance-check
 //   por variante (+ checar_par_texto_e_peca quando drive_file_id). NÃO emite card e NÃO
 //   escreve na Meta. Auth: x-mcp-key (mcp_key_valida).
+// v2 - ESP-36 (12/08/2026): consome ler_brand_identity(company_id) — voz/tom, dos/donts,
+//   disclaimers e linhas de produto entram no prompt do redator (marca deixa de ser hardcoded).
+//   Fix: promessas_proibidas usa a coluna 'seguro' (antes 'substituto_seguro', que vinha vazio).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
@@ -110,14 +113,42 @@ Deno.serve(async (req) => {
   // Amostra de promessas proibidas (texto curto) para o redator nao inventar.
   const { data: promessas } = await supa
     .from("promessas_proibidas")
-    .select("padrao,substituto_seguro")
+    .select("proibido,seguro")
     .limit(40);
   const listaPromessas = (promessas ?? [])
-    .map((p: any) => `- "${p.padrao}" → use "${p.substituto_seguro}"`)
+    .map((p: any) => `- "${p.proibido}" → use "${p.seguro}"`)
     .slice(0, 25)
     .join("\n");
 
-  const sys = `Voce e redator de legendas de Meta Ads para Legal e Viver (credito consignado Brasil).
+  // ESP-36: identidade de marca da empresa (voz/tom, dos/donts, disclaimers, produtos).
+  let brandBloco = "";
+  let marcaNome = "a marca (credito consignado Brasil)";
+  try {
+    const { data: bi } = await supa.rpc("ler_brand_identity", { p_company_id: companyId });
+    const brand = (bi as any)?.brand;
+    if (brand) {
+      marcaNome = String(brand?.marca_nome ?? marcaNome);
+      const voz = brand?.voz_tom ?? {};
+      const dos: string[] = Array.isArray(brand?.dos) ? brand.dos : [];
+      const donts: string[] = Array.isArray(brand?.donts) ? brand.donts : [];
+      const discl: string[] = Array.isArray(brand?.disclaimers_obrigatorios) ? brand.disclaimers_obrigatorios : [];
+      const linhas: string[] = Array.isArray(brand?.linhas_produto) ? brand.linhas_produto : [];
+      brandBloco = [
+        `\n=== IDENTIDADE DE MARCA (ESP-36 — ${marcaNome}) ===`,
+        voz?.tom ? `Tom: ${voz.tom}` : "",
+        voz?.persona ? `Persona: ${voz.persona}` : "",
+        voz?.pessoa ? `Voz: ${voz.pessoa}` : "",
+        dos.length ? `FACA:\n${dos.map((d) => `- ${d}`).join("\n")}` : "",
+        donts.length ? `NAO FACA:\n${donts.map((d) => `- ${d}`).join("\n")}` : "",
+        discl.length ? `Disclaimers obrigatorios:\n${discl.map((d) => `- ${d}`).join("\n")}` : "",
+        linhas.length ? `Linhas de produto: ${linhas.join(", ")}` : "",
+      ].filter(Boolean).join("\n");
+    }
+  } catch {
+    /* brand nao bloqueia: cai no tom padrao + promessas_proibidas */
+  }
+
+  const sys = `Voce e redator de legendas de Meta Ads para ${marcaNome}.
 Framework OBRIGATORIO (ESP-37, opcao A), nesta ordem em CADA legenda:
 1) HOOK — primeira linha que para o scroll (use tatica de hook distinta em cada variante).
 2) BENEFICIO/PROVA — o que o produto entrega, sem promessa ilegal.
@@ -133,6 +164,7 @@ Regras duras:
 {"variantes":[{"texto":"...","hook_tactic":"nome curto da tatica","notas":"1 frase"}]}
 
 Produto: ${produto}
+${brandBloco}
 ${listaPromessas ? `Substitutos seguros (promessas_proibidas):\n${listaPromessas}` : ""}
 ${referencias.length ? `Referencias de estilo (nao copie literal):\n${referencias.map((r, i) => `${i + 1}. ${r.slice(0, 280)}`).join("\n")}` : ""}
 ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.slice(0, 800)}` : ""}`;
