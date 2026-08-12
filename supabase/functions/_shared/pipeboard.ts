@@ -493,6 +493,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
     case "criar_conjunto_a_partir_de":
     case "alterar_orcamento":
     case "ajustar_posicionamentos_do_conjunto":
+    case "pausar_conjunto":
       return "conjunto";
     case "criar_anuncio_a_partir_de":
     case "pausar_criativo":

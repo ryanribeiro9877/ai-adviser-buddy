@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.18)
+// supabase/functions/meta-actions/index.ts (v5.19)
+// v5.19 (12/08/2026) - ESP-24: pausar_conjunto (ad set → PAUSED via update_adset/Graph).
+//   Ativar continua FORA do sistema (gestor no Gerenciador). Sem ativar_*.
 // v5.18 (12/08/2026) - ESP-35: PECA NOVA SEM MOLDE. Quando creative_id ausente e ha
 //   meta_video_id ou meta_image_hash, monta object_story_spec do zero com page_id + CTA +
 //   destino_url vindos do payload/config (meta_execution_config.page_id / cta_padrao).
@@ -321,6 +323,7 @@ const GRAPH = "https://graph.facebook.com/v21.0";
 const EXECUTAVEIS = [
   "pausar_criativo",
   "pausar_campanha",
+  "pausar_conjunto",
   "alterar_orcamento",
   "renomear_campanha",
   "ajustar_posicionamentos_do_conjunto",
@@ -541,7 +544,11 @@ async function escreverUpdate(
 
   let tool = "update_ad";
   if (acao === "pausar_campanha" || acao === "renomear_campanha") tool = "update_campaign";
-  if (acao === "alterar_orcamento" || acao === "ajustar_posicionamentos_do_conjunto") {
+  if (
+    acao === "alterar_orcamento" ||
+    acao === "ajustar_posicionamentos_do_conjunto" ||
+    acao === "pausar_conjunto"
+  ) {
     tool = "update_adset";
   }
 
@@ -3004,7 +3011,9 @@ Deno.serve(async (req) => {
       : { status: 0, body: null };
 
     let post: Record<string, string> | null = null;
-    if (acao === "pausar_criativo" || acao === "pausar_campanha") post = { status: "PAUSED" };
+    if (acao === "pausar_criativo" || acao === "pausar_campanha" || acao === "pausar_conjunto") {
+      post = { status: "PAUSED" };
+    }
     if (acao === "renomear_campanha") {
       const novoNome = String(r.payload?.novo_nome ?? "").trim();
       if (!novoNome) {
