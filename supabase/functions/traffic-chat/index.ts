@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.15)
+// supabase/functions/traffic-chat/index.ts (v28.16)
+// v28.16 (12/08/2026) - ESP-35: peca nova SEM molde (target_name=sem_molde / params.sem_molde).
+//   page_id + CTA + destino_url vindos da config/pedido; replicacao pura continua exigindo molde.
 // v28.15 (12/08/2026) - ESP-33: tool casar_criativo_performance (RPC read-only peca↔anuncio↔metricas+amostra).
 // v28.14 (12/08/2026) - ESP-26: alterar_orcamento tambem passa por avaliar_orcamento_diario
 //   ANTES de emitir o card (mesma RPC da criacao de conjunto e da execucao em meta-actions).
@@ -1100,7 +1102,14 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     ).trim();
     const utmCampaign = String(params?.utm_campaign ?? "").trim();
     const driveFileId = String(params?.drive_file_id ?? "").trim();   // v28.10 (GT-13): peca nova
-    if (!nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar" };
+    // ESP-35: peca nova pode omitir molde (target_name vazio / "sem_molde" / params.sem_molde).
+    const semMolde = !!driveFileId && (
+      params?.sem_molde === true ||
+      !nomeAlvo ||
+      norm(nomeAlvo) === "sem_molde" ||
+      norm(nomeAlvo) === "_sem_molde"
+    );
+    if (!semMolde && !nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar (ou 'sem_molde' + drive_file_id para peca nova sem herdar molde)" };
     if (!nomeNovo) return { erro: "params.nome_novo obrigatorio (nome do anuncio que vai nascer)" };
     if (!conjuntoDestino) {
       return {
@@ -1110,10 +1119,13 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     }
     if (!utmCampaign) return { erro: "params.utm_campaign obrigatorio: e o valor que aparece no Dash como identificacao da campanha (ex.: AGOSTO26). Pergunte ao gestor se nao souber." };
 
-    const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id").eq("company_id", companyId);
-    const molde = (anuncios ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
-    if (!molde) return { erro: `anuncio molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato.` };
-    if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde.` };
+    let molde: any = null;
+    if (!semMolde) {
+      const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id").eq("company_id", companyId);
+      molde = (anuncios ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
+      if (!molde) return { erro: `anuncio molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato.` };
+      if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
+    }
 
     const { data: sets } = await supa.from("ad_sets").select("id,name,external_id").eq("company_id", companyId);
     const dest = (sets ?? []).find((x) => x.external_id === conjuntoDestino)
@@ -1131,11 +1143,53 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     let legenda = String(params?.legenda ?? "").trim();
     const legendaRefs = Array.isArray(params?.legenda_referencias) ? params.legenda_referencias : null;
     if (!driveFileId) {
-      legenda = String(molde.body ?? "").trim();
+      legenda = String(molde?.body ?? "").trim();
       legendaFonte = "herdada_do_molde";
     } else if (!legenda && legendaFonte === "herdada_do_molde") {
+      if (semMolde) {
+        return { erro: "sem_molde_nao_herda_legenda", detalhe: "Peca nova sem molde nao tem legenda a herdar. Informe params.legenda e legenda_fonte=humano (ou agente com referencias)." };
+      }
       // O gestor autorizou herdar: o texto e o do molde, e a procedencia diz exatamente isso.
       legenda = String(molde.body ?? "").trim();
+    }
+
+    // ESP-35: config da empresa preenche page/CTA quando sem molde.
+    let pageIdPedido: string | null = String(params?.page_id ?? "").trim() || null;
+    let ctaPedido: string | null = String(params?.call_to_action_type ?? "").trim() || null;
+    let destinoUrlPedido: string | null = String(params?.destino_url ?? "").trim() || null;
+    if (semMolde) {
+      const { data: confEmp } = await supa
+        .from("meta_execution_config")
+        .select("instagram_identity_page_id, page_id, cta_padrao")
+        .eq("company_id", companyId)
+        .maybeSingle();
+      if (!pageIdPedido) {
+        pageIdPedido = String(confEmp?.page_id ?? confEmp?.instagram_identity_page_id ?? "").trim() || null;
+      }
+      if (!ctaPedido) {
+        ctaPedido = String(confEmp?.cta_padrao ?? "LEARN_MORE").trim() || null;
+      }
+      // Destino: so CLT tem LP canonica. Se o agente/gestor nao passou destino_url, tenta produto.
+      if (!destinoUrlPedido) {
+        const produtoHint = String(params?.produto ?? "").trim().toLowerCase();
+        if (produtoHint.includes("clt") || produtoHint.includes("consignado")) {
+          const { data: destP } = await supa
+            .from("destino_por_produto")
+            .select("url_canonica")
+            .eq("company_id", companyId)
+            .eq("produto", "consignado_clt")
+            .eq("vigente", true)
+            .maybeSingle();
+          destinoUrlPedido = String(destP?.url_canonica ?? "").trim() || null;
+        }
+      }
+      if (!pageIdPedido || !ctaPedido || !destinoUrlPedido) {
+        return {
+          erro: "peca_nova_sem_molde_incompleta",
+          detalhe:
+            `Sem molde faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "destino_url (ou produto CLT)"].filter(Boolean).join(", ")}. Configure meta_execution_config ou passe no params. So CLT tem LP canonica hoje.`,
+        };
+      }
     }
 
     // O pedido usa o vocabulario do contrato (que veio de montarCriacao), nao um dialeto local:
@@ -1147,13 +1201,28 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       nome_novo: nomeNovo,
       conjunto_destino_external_id: dest.external_id,
       conta_destino: contaDaEmpresa,
-      creative_id: molde.creative_id,
     };
+    if (molde?.creative_id) pedido.creative_id = molde.creative_id;
     if (driveFileId) {
       pedido.drive_file_id = driveFileId;
       pedido.legenda = legenda;
       pedido.legenda_fonte = legendaFonte;
       if (legendaRefs) pedido.legenda_referencias = legendaRefs;
+      pedido.tipo_de_pedido = "peca_nova";
+    }
+    if (semMolde) {
+      pedido.page_id = pageIdPedido;
+      pedido.call_to_action_type = ctaPedido;
+      pedido.destino_url = destinoUrlPedido;
+      pedido.destino_do_anuncio = {
+        caso: "clt",
+        produto: "consignado_clt",
+        url_final: destinoUrlPedido,
+        url_canonica: destinoUrlPedido,
+        corrigir: false,
+        aplicavel: true,
+        mensagem: "ESP-35: peca nova sem molde; destino informado/resolvido na emissao (sem heranca de URL de molde).",
+      };
     }
     const { data: ver, error: verErr } = await supa.rpc("pedido_de_anuncio_completo", { p_company_id: companyId, p_pedido: pedido });
     // Falha de verificacao NAO emite card - mesmo tratamento de pode_executar_acao e
@@ -1250,7 +1319,13 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // v25 TRAVA 3: compliance BLOQUEANTE, agora sobre a legenda DECIDIDA acima - do molde na
     // replicacao, do gestor ou herdada na peca nova. Quem escreveu nao muda a exposicao
     // regulatoria de um anuncio de credito, e por isso as duas passam pelas mesmas 16 regras.
-    if (!legenda) return { erro: `o anuncio molde '${molde.name}' nao tem legenda sincronizada; sem ela nao e possivel validar compliance, e criar anuncio financeiro sem essa validacao nao e permitido.` };
+    if (!legenda) {
+      return {
+        erro: semMolde
+          ? "peca_nova_sem_molde_exige_legenda"
+          : `o anuncio molde '${molde?.name}' nao tem legenda sincronizada; sem ela nao e possivel validar compliance, e criar anuncio financeiro sem essa validacao nao e permitido.`,
+      };
+    }
     const comp: any = await t_check_compliance(legenda, [], mcpKey);
     const vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
     if (!vereditoOk) {
@@ -1269,21 +1344,29 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // a URL escolhida. So corrige para /simulacao-clt quando o produto e CLT; produto diferente
     // ou indeterminado preserva a URL do molde. O card carrega a decisao inteira em
     // destino_do_anuncio; a executora HONRA essa decisao (nao reinfere por dominio).
-    const destAnuncio = v.destino_do_anuncio ?? null;
-    const destinoUrlCard = destAnuncio?.url_final ?? destAnuncio?.url_do_molde ?? null;
+    const destAnuncio = (semMolde ? pedido.destino_do_anuncio : null) ?? v.destino_do_anuncio ?? null;
+    const destinoUrlCard = destAnuncio?.url_final ?? destAnuncio?.url_do_molde ?? destinoUrlPedido ?? null;
 
-    const cabeca = driveFileId
+    const cabeca = semMolde
+      ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", SEM molde (ESP-35: page/CTA/destino da config) - compliance de texto aprovado, nasce PAUSADO`
+      : driveFileId
       ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", usando "${molde.name}" como molde de configuracao - compliance de texto aprovado, nasce PAUSADO`
       : `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce PAUSADO`;
     const summary = `${cabeca}\n\n${String(v.mensagem_para_o_gestor ?? "")}`.trim();
-    return await gravarCard(companyId, convId, requestedBy, action, "ad", molde.id, summary, {
-      nome_novo: nomeNovo, molde_external_id: molde.external_id, molde_nome: molde.name,
-      creative_id: molde.creative_id, conjunto_destino_external_id: dest.external_id,
+    return await gravarCard(companyId, convId, requestedBy, action, "ad", molde?.id ?? dest.id, summary, {
+      nome_novo: nomeNovo,
+      molde_external_id: molde?.external_id ?? null,
+      molde_nome: molde?.name ?? null,
+      creative_id: molde?.creative_id ?? null,
+      sem_molde: semMolde,
+      page_id: pageIdPedido,
+      call_to_action_type: ctaPedido,
+      conjunto_destino_external_id: dest.external_id,
       conjunto_destino_nome: dest.name, url_tags: urlTags, utm_campaign: slug(utmCampaign),
       conta_destino: contaDaEmpresa, status_inicial: "PAUSED",  // v28.6: aprovar CRIA pausado; ativar e ato do gestor
       // v28.10 (GT-13): a executora le meta_video_id para trocar a midia no spec do molde.
       // Ausente = replicacao pura, e ela replica o criativo inteiro como sempre fez.
-      tipo_de_pedido: v.tipo_de_pedido ?? null,
+      tipo_de_pedido: v.tipo_de_pedido ?? (driveFileId ? "peca_nova" : null),
       drive_file_id: driveFileId || null, meta_video_id: metaVideoId, meta_image_hash: metaImageHash,
       legenda, legenda_fonte: legendaFonte || null, legenda_referencias: legendaRefs,
       nota_visual_da_peca: v.nota_visual_da_peca ?? null,

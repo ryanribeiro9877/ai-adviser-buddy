@@ -1,4 +1,9 @@
-// supabase/functions/meta-actions/index.ts (v5.17)
+// supabase/functions/meta-actions/index.ts (v5.18)
+// v5.18 (12/08/2026) - ESP-35: PECA NOVA SEM MOLDE. Quando creative_id ausente e ha
+//   meta_video_id ou meta_image_hash, monta object_story_spec do zero com page_id + CTA +
+//   destino_url vindos do payload/config (meta_execution_config.page_id / cta_padrao).
+//   Replicacao pura continua exigindo molde. Destino sem molde: so URL explicita no payload
+//   (CLT via destino_do_anuncio na emissao). Fail-closed se page/CTA/URL faltarem.
 // v5.17 (12/08/2026) - ESP-26: TETO DE ORCAMENTO NA EXECUCAO, NAO SO NA PROPOSTA.
 //   criar_conjunto_a_partir_de e alterar_orcamento passam a chamar a MESMA RPC
 //   avaliar_orcamento_diario (via _shared/avaliar_orcamento.ts) antes de escrever na Meta.
@@ -1114,10 +1119,11 @@ async function resolverIdentidadeInstagram(
   companyId: string | null,
   creativeMolde: string,
 ): Promise<IdentidadeInstagramResolvida> {
-  if (!companyId || !creativeMolde) return SEM_IDENTIDADE_INSTAGRAM;
+  // ESP-35: creativeMolde pode ser vazio — a RPC ja prioriza meta_execution_config.
+  if (!companyId) return SEM_IDENTIDADE_INSTAGRAM;
   const { data, error } = await supa.rpc("identidade_instagram_para_criacao", {
     p_company_id: companyId,
-    p_creative_id: creativeMolde,
+    p_creative_id: creativeMolde || null,
   });
   if (error || !data || typeof data !== "object") return SEM_IDENTIDADE_INSTAGRAM;
   const id = String((data as any).instagram_actor_id ?? "").trim();
@@ -1360,14 +1366,19 @@ export async function montarCriacao(
   }
 
   if (acao === "criar_anuncio_a_partir_de") {
-    const creativeMolde = String(p?.creative_id ?? "");
+    const creativeMolde = String(p?.creative_id ?? "").trim();
     const adset = String(p?.conjunto_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
     const urlTags = String(p?.url_tags ?? "").trim();
     const videoNovo = String(p?.meta_video_id ?? "").trim(); // v4.4: peca nova video
     const imagemNova = String(p?.meta_image_hash ?? "").trim(); // v5.9: peca nova imagem
     const legendaNova = String(p?.legenda ?? "").trim();
-    if (!creativeMolde || !adset || !nome)
+    // ESP-35: peca nova (video|imagem) pode nascer SEM creative_id quando page/CTA/URL
+    // vierem no payload ou na config da empresa. Replicacao pura continua exigindo molde.
+    const pecaNovaSemMolde = !creativeMolde && !!(videoNovo || imagemNova);
+    if (!adset || !nome)
+      return { erro: "payload incompleto (conjunto_destino_external_id, nome_novo)" };
+    if (!creativeMolde && !pecaNovaSemMolde)
       return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
 
     // ============ v5.1 / v5.9: FORMATOS ============
@@ -1428,6 +1439,153 @@ export async function montarCriacao(
         erro: "conjunto_destino_criativo_dinamico",
         detalhe:
           "Nao emiti o anuncio porque o conjunto de destino esta configurado para Criativo Dinamico. Esse tipo de conjunto nao aceita a criacao de um anuncio avulso. Escolha um conjunto com Criativo Dinamico desativado ou crie um novo conjunto a partir do molde; as replicas criadas pelo sistema nascem com essa opcao desativada.",
+      };
+    }
+
+    // ============ v5.18 / ESP-35: PECA NOVA SEM MOLDE ============
+    if (pecaNovaSemMolde) {
+      const { data: confEmp } = await supa
+        .from("meta_execution_config")
+        .select("instagram_identity_page_id, page_id, cta_padrao")
+        .eq("company_id", companyId)
+        .maybeSingle();
+      const pageId = String(
+        p?.page_id ?? confEmp?.page_id ?? confEmp?.instagram_identity_page_id ?? "",
+      ).trim();
+      const ctaTipo = String(p?.call_to_action_type ?? confEmp?.cta_padrao ?? "").trim();
+      const destinoPedido = destinoDoPedidoCompat(p);
+      const linkFinal = String(
+        (destinoPedido.aplicavel && destinoPedido.url_final
+          ? destinoPedido.url_final
+          : null) ??
+          p?.destino_url ??
+          destinoPedido.url_final ??
+          "",
+      ).trim();
+      if (!pageId) {
+        return {
+          erro: "page_id_ausente_sem_molde",
+          detalhe:
+            "Peca nova sem molde exige page_id (Pagina emissora). Configure meta_execution_config.page_id / instagram_identity_page_id ou envie page_id no payload. Sem pagina a Meta recusa o adcreative.",
+        };
+      }
+      if (!ctaTipo) {
+        return {
+          erro: "cta_ausente_sem_molde",
+          detalhe:
+            "Peca nova sem molde exige call_to_action_type (ex.: LEARN_MORE). Configure meta_execution_config.cta_padrao ou envie no payload.",
+        };
+      }
+      if (!linkFinal) {
+        return {
+          erro: "destino_url_ausente_sem_molde",
+          detalhe:
+            "Peca nova sem molde nao tem URL para herdar. Informe destino_url no pedido ou emita com destino_do_anuncio resolvido (hoje so CLT tem LP canonica em destino_por_produto).",
+        };
+      }
+      if (!legendaNova) {
+        return {
+          erro: "legenda_obrigatoria_peca_nova",
+          detalhe: "Peca nova (com ou sem molde) exige legenda no payload — nao ha texto a herdar de lugar nenhum.",
+        };
+      }
+
+      const identidadeInstagram = await resolverIdentidadeInstagram(companyId, "");
+
+      if (videoNovo) {
+        const th = await escolherThumbnail(videoNovo, String(p?.thumbnail_url ?? ""));
+        if (th.erro) {
+          return { erro: "thumbnail_obrigatoria_nao_resolvida", detalhe: th.erro };
+        }
+        let novoVd: any = {
+          video_id: videoNovo,
+          image_url: th.url,
+          message: legendaNova,
+          link: linkFinal,
+          call_to_action: { type: ctaTipo, value: { link: linkFinal } },
+        };
+        let novoSpec: any = { page_id: pageId, video_data: novoVd };
+        novoSpec = aplicarIdentidadeInstagramNoSpec(novoSpec, identidadeInstagram);
+        const avisosVeiculacao: string[] = [
+          "Anuncio de VIDEO sem molde (ESP-35): object_story_spec montado da config/pedido (page_id + CTA + destino). A Coluna da direita do Facebook nao veicula video.",
+        ];
+        avisosVeiculacao.push(avisoIdentidadeInstagram(identidadeInstagram));
+        return {
+          path: `/${conta}/ads`,
+          body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+          criativo: {
+            modo: "novo_adcreative_peca_nova_sem_molde",
+            path: `/${conta}/adcreatives`,
+            body: {
+              name: `${nome} - creative`,
+              object_story_spec: JSON.stringify(novoSpec),
+              ...(urlTags ? { url_tags: urlTags } : {}),
+            } as Record<string, string>,
+          },
+          peca_nova: {
+            meta_video_id: videoNovo,
+            link_publicado: linkFinal,
+            destino_url_lp: destinoPedido,
+            legenda_substituida: true,
+            creative_molde: null,
+            fonte_da_config: "config_empresa_sem_molde",
+            identidade_ig_herdada: false,
+            identidade_instagram_preenchida: identidadeInstagram.encontrada,
+            identidade_instagram: identidadeInstagram,
+            identidade_instagram_campo_spec: identidadeInstagram.instagram_actor_id
+              ? campoIdentidadeInstagramPorFormato(identidadeInstagram.instagram_actor_id)
+              : null,
+            formato: "video",
+            page_id: pageId,
+            call_to_action_type: ctaTipo,
+          },
+          avisos_de_veiculacao: avisosVeiculacao,
+        };
+      }
+
+      // imagem sem molde
+      let novoLd: any = {
+        image_hash: imagemNova,
+        message: legendaNova,
+        link: linkFinal,
+        call_to_action: { type: ctaTipo, value: { link: linkFinal } },
+      };
+      let novoSpecImg: any = { page_id: pageId, link_data: novoLd };
+      novoSpecImg = aplicarIdentidadeInstagramNoSpec(novoSpecImg, identidadeInstagram);
+      const avisosImg: string[] = [
+        "Anuncio de IMAGEM sem molde (ESP-35): object_story_spec montado da config/pedido. A Coluna da direita do Facebook ACEITA imagem.",
+      ];
+      avisosImg.push(avisoIdentidadeInstagram(identidadeInstagram));
+      return {
+        path: `/${conta}/ads`,
+        body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+        criativo: {
+          modo: "novo_adcreative_peca_nova_imagem_sem_molde",
+          path: `/${conta}/adcreatives`,
+          body: {
+            name: `${nome} - creative`,
+            object_story_spec: JSON.stringify(novoSpecImg),
+            ...(urlTags ? { url_tags: urlTags } : {}),
+          } as Record<string, string>,
+        },
+        peca_nova: {
+          meta_image_hash: imagemNova,
+          link_publicado: linkFinal,
+          destino_url_lp: destinoPedido,
+          legenda_substituida: true,
+          creative_molde: null,
+          fonte_da_config: "config_empresa_sem_molde",
+          identidade_ig_herdada: false,
+          identidade_instagram_preenchida: identidadeInstagram.encontrada,
+          identidade_instagram: identidadeInstagram,
+          identidade_instagram_campo_spec: identidadeInstagram.instagram_actor_id
+            ? campoIdentidadeInstagramPorFormato(identidadeInstagram.instagram_actor_id)
+            : null,
+          formato: "imagem",
+          page_id: pageId,
+          call_to_action_type: ctaTipo,
+        },
+        avisos_de_veiculacao: avisosImg,
       };
     }
 
