@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.21)
+// supabase/functions/traffic-chat/index.ts (v28.22)
+// v28.22 (12/08/2026) - ESP-34: tools computar_perfil_vencedor / ler_perfil_vencedor (RPC
+//   read-only). Versiona por empresa o perfil do vencedor (regua evaluate_winners/ESP-01 +
+//   procedencia ESP-33). Nao substitui get_recommendations nem aprovacao humana de escala.
 // v28.21 (12/08/2026) - ESP-37: tool gerar_legendas (framework Hook→Beneficio→CTA+CET, N=3).
 //   Proxy para edge gerar-legendas; nao emite card. Pedido de legendas usa a tool, nao improvisa.
 // v28.20 (12/08/2026) - ESP-39: papel TESTE|ESCALA obrigatorio em criar/renomear campanha;
@@ -1902,6 +1905,8 @@ const TOOLS = [
   { type: "function", function: { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id da conversa e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e problema depois do clique e apenas apontado porque esta fora do escopo.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   { type: "function", function: { name: "avaliar_fadiga", description: "Avalia se uma peca cansou, teve queda sem saturacao, esta com frequencia alta antes da queda ou nao tem sinal de fadiga. Exige company_id da conversa e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e declara que frequencia deduplicada de 30 dias nao pode ser derivada das linhas diarias.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca do Drive com os anuncios criados PELO SISTEMA a partir dela e devolve metricas da janela (gasto, formularios, conversas, custo/formulario) + amostra_pequena (<20 resultados). Passe drive_file_id e/ou ad_external_id; sem filtro lista os pares existentes da empresa. Anuncios feitos so no Gerenciador NAO entram (lacuna declarada). Use ANTES de julgar peca do acervo por performance; ranking medio isolado nao prescreve pausa. Para fadiga, chame avaliar_fadiga com o ad_external_id devolvido.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer", description: "Janela em dias (default 7)." } } } } },
+  { type: "function", function: { name: "computar_perfil_vencedor", description: "ESP-34: computa e VERSIONA o perfil do vencedor da empresa da conversa e devolve a versao gravada. Usa a MESMA regua de evaluate_winners/ESP-01 (janela, >=30 resultados e >=30 gasto, custo <= teto_vigente*0,80) e enriquece com a peca do Drive de origem (ESP-33). Grava uma nova versao (dedup no mesmo dia salvo forcar=true). NAO publica nada, NAO substitui get_recommendations (fila acionavel) e NAO dispensa aprovacao humana de escala (vencedor mora em ESCALA, ESP-39). Use quando o usuario quer consolidar/atualizar 'o que esta vencendo'.", parameters: { type: "object", properties: { dias: { type: "integer", description: "Janela em dias (default 7)." }, forcar: { type: "boolean", description: "Regrava mesmo se identico ao perfil de hoje (default false)." } } } } },
+  { type: "function", function: { name: "ler_perfil_vencedor", description: "ESP-34: le a ultima versao (ou uma versao especifica) do perfil do vencedor ja computado para a empresa da conversa, com vencedores, padroes agregados, criterio, procedencia e lacunas. Se nunca foi computado, avisa para chamar computar_perfil_vencedor. Leitura pura: nao recalcula.", parameters: { type: "object", properties: { versao: { type: "integer", description: "Versao especifica; se ausente, retorna a mais recente." } } } } },
   { type: "function", function: { name: "pode_pausar_por_custo", description: "Verifica se um anuncio pode ser avaliado para pausa por custo: libera quando maduro ou pela excecao dura de zero resultado, CTR baixo e piso de gasto. Exige company_id da conversa e ad_external_id. Nao verifica a guarda do unico conjunto/alternativa ativa; permitido aqui NAO significa seguro pausar.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   { type: "function", function: { name: "decidir_sobre_conjunto", description: "Decide manter, maturar, trocar criativo ou preparar reversao para um conjunto usando custo, volume e tendencia. Exige company_id da conversa e adset_external_id. A guarda do unico conjunto entregando sobrescreve pausa. Declara a lacuna: sem regua de IDEAL separada do teto, esta funcao nao prescreve escala.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
   { type: "function", function: { name: "avaliar_escala", description: "Avalia se um conjunto esta apto a escala por duplicacao com no maximo +20%, usando a arvore de decisao, custo ate 80% do teto, volume e espera. Exige company_id da conversa e adset_external_id. Nao cobre CBO sem orcamento proprio; a espera enxerga apenas escalas registradas pelo sistema, nao alteracoes manuais.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
@@ -2155,6 +2160,15 @@ async function runTool(name: string, args: any, ctx: any) {
         p_drive_file_id: args?.drive_file_id == null || String(args.drive_file_id).trim() === "" ? null : String(args.drive_file_id),
         p_ad_external_id: args?.ad_external_id == null || String(args.ad_external_id).trim() === "" ? null : String(args.ad_external_id),
         p_dias: Number(args?.dias ?? 7),
+      });
+      case "computar_perfil_vencedor": return await t_rpc("computar_perfil_vencedor", {
+        p_company_id: ctx.companyId,
+        p_dias: Number(args?.dias ?? 7),
+        p_forcar: args?.forcar === true,
+      });
+      case "ler_perfil_vencedor": return await t_rpc("ler_perfil_vencedor", {
+        p_company_id: ctx.companyId,
+        p_versao: args?.versao == null || String(args.versao).trim() === "" ? null : Number(args.versao),
       });
       case "pode_pausar_por_custo": return await t_rpc("pode_pausar_por_custo", { p_company_id: ctx.companyId, p_ad_external_id: String(args?.ad_external_id ?? "") });
       case "decidir_sobre_conjunto": return await t_rpc("decidir_sobre_conjunto", { p_company_id: ctx.companyId, p_adset_external_id: String(args?.adset_external_id ?? "") });
