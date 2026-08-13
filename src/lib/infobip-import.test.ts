@@ -86,7 +86,15 @@ describe("parseDataBR", () => {
     // "15000" nao entra no ramo de serial (precisa > 20000), cai em new Date(s)
     // e o V8 le como ANO 15000. Tambem recusado pelo Postgres ("22009 time zone
     // displacement out of range"), com o mesmo efeito de derrubar o lote.
-    expect(parseDataBR("15000")).toBe("+015000-01-01T03:00:00.000Z");
+    //
+    // A assercao e sobre o ANO, que e o defeito, e nao sobre o instante exato:
+    // "15000" nao e ISO, entao o V8 interpreta em hora LOCAL e o `toISOString`
+    // desloca conforme o fuso. A primeira execucao do CI falhou justamente aqui
+    // (03:00Z na maquina do dev em UTC-3, 00:00Z no runner em UTC). O fuso agora
+    // esta fixado em src/test/setup.ts, e esta assercao nao depende mais dele.
+    const saida = parseDataBR("15000");
+    expect(saida).toMatch(/^\+015000-01-01T\d{2}:00:00\.000Z$/);
+    expect(new Date(saida!).getUTCFullYear()).toBe(15000);
   });
 
   it("aceita ISO solto (o export as vezes traz formato diferente)", () => {

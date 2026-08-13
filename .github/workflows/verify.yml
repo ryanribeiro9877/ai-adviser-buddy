@@ -66,6 +66,10 @@ jobs:
           name: cobertura
           path: coverage/
           retention-days: 14
+          # Teste vermelho faz o vitest nem chegar a escrever o relatorio; sem
+          # isto o passo de upload avisa "no files found" e polui o log com um
+          # falso problema em cima do problema de verdade.
+          if-no-files-found: ignore
 
   edges:
     name: edge functions (deno)
