@@ -19,6 +19,18 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+// O jsdom não implementa ResizeObserver, e o Recharts o usa no
+// ResponsiveContainer — sem o stub, QUALQUER tela com gráfico estoura com
+// "ResizeObserver is not defined", que não tem nada a ver com o defeito sob teste.
+// Fica aqui, e não em cada arquivo, porque é lacuna do ambiente e não de um teste.
+if (!globalThis.ResizeObserver) {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}
+
 // jsdom não implementa matchMedia, e use-mobile.tsx chama no primeiro render.
 if (!window.matchMedia) {
   window.matchMedia = ((query: string) => ({
