@@ -214,7 +214,9 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
 
   const porNumeroAtivo = (porNumero.data ?? []).length > 0;
 
-  const phones = numeros.data ?? [];
+  // Mesmo motivo de app-context: `?? []` novo a cada render anulava os useMemo
+  // de `vivos` e `resumo`, que recalculavam sempre.
+  const phones = useMemo(() => numeros.data ?? [], [numeros.data]);
   const vivos = useMemo(() => phones.filter((p) => p.platform_type === CLOUD), [phones]);
   const resumo = useMemo(() => {
     const conta = (q: string) => vivos.filter((p) => (p.quality_rating ?? "UNKNOWN") === q).length;

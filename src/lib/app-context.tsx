@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import type { User } from "@supabase/supabase-js";
@@ -54,7 +54,10 @@ export function AppProvider({ user, children }: { user: User; children: ReactNod
     },
   });
 
-  const companies = companiesQuery.data ?? [];
+  // Sem o memo, `?? []` devolve um array novo a cada render enquanto a query nao
+  // resolve, e o useEffect abaixo (que depende de `companies`) reexecutava em
+  // TODO render em vez de so quando a lista muda.
+  const companies = useMemo(() => companiesQuery.data ?? [], [companiesQuery.data]);
   const role: AppRole = rolesQuery.data?.includes("admin") ? "admin" : "viewer";
 
   useEffect(() => {
