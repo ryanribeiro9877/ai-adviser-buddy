@@ -24,18 +24,30 @@ export default defineConfig({
       // (wrappers de Radix, sem lógica própria) e o routeTree.gen.ts, que é
       // gerado — incluí-los mediria ruído em vez de risco. Não se recorta este
       // escopo por conveniência: encolher a lista para o número subir é maquiar.
-      include: ["src/lib/**/*.{ts,tsx}", "src/hooks/**/*.{ts,tsx}", "src/components/**/*.tsx"],
+      include: [
+        "src/lib/**/*.{ts,tsx}",
+        "src/hooks/**/*.{ts,tsx}",
+        "src/components/**/*.tsx",
+        // routes/ entra porque tem lógica de aplicação de verdade — o login vive
+        // em routes/auth.tsx. Incluir AUMENTA o denominador e derruba o número;
+        // é o número honesto.
+        "src/routes/**/*.tsx",
+      ],
       exclude: ["src/components/ui/**", "src/lib/error-capture.ts", "src/lib/error-page.ts"],
-      // MEDIDOS em 13/08/2026 com 87 testes, não estimados: lines 8.47%,
-      // statements 8.67%, functions 5.69%, branches 8.71%. O piso fica um passo
-      // abaixo de cada um para o portão não ser instável.
+      // MEDIDOS em 13/08/2026 com 238 testes, não estimados: lines 13.38%,
+      // statements 13.86%, functions 9.58%, branches 15.06%. O piso fica um
+      // passo abaixo de cada um para o portão não ser instável.
       //
-      // São números BAIXOS e é assim que devem ser lidos: a suíte cobre hoje
-      // filters, infobip-import, decideApproval e a orquestração da fila de
-      // aprovações — não o resto. O valor deste portão é ser CATRACA (impedir
-      // que caia), não atestar que o front está testado. Subir junto com a
-      // cobertura, nunca antes dela.
-      thresholds: { lines: 8, functions: 5, statements: 8, branches: 8 },
+      // Histórico do número, que explica por que ele se move: 8.47% com 87
+      // testes; subiu para 15.12% com breakdown + notificacoes; CAIU para 13.38%
+      // ao incluir routes/ no escopo — mais código medido, não menos testado.
+      //
+      // São números BAIXOS e é assim que devem ser lidos. Cobrem hoje: filters,
+      // infobip-import, breakdown, notificacoes, decideApproval, a orquestração
+      // da fila de aprovações e a tela de login. O valor deste portão é ser
+      // CATRACA (impedir que caia), não atestar que o front está testado. Subir
+      // junto com a cobertura, nunca antes dela.
+      thresholds: { lines: 13, functions: 9, statements: 13, branches: 14 },
     },
   },
 });
