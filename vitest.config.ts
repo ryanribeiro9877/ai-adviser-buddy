@@ -34,21 +34,26 @@ export default defineConfig({
         "src/routes/**/*.tsx",
       ],
       exclude: ["src/components/ui/**", "src/lib/error-capture.ts", "src/lib/error-page.ts"],
-      // MEDIDOS em 13/08/2026 com 367 testes, não estimados: lines 26.28%,
-      // statements 26.46%, functions 17.99%, branches 20.62%. O piso fica um
+      // MEDIDOS em 13/08/2026 com 394 testes, não estimados: lines 28.38%,
+      // statements 28.65%, functions 20.5%, branches 22.38%. O piso fica um
       // passo abaixo de cada um para o portão não ser instável.
       //
       // Histórico do número, que explica por que ele se move: 8.47% (87 testes)
       // → 15.12% (+breakdown, notificacoes) → 13.38% ao incluir routes/ no
       // escopo (mais código medido, não menos testado) → 24.05% (+relatorio-xlsx,
-      // integracoes, attachments, xlsx-export, utils) → 26.28% (+hooks).
+      // integracoes, attachments, xlsx-export, utils) → 26.28% (+hooks) →
+      // 28.38% (+app-context, guarda de rota).
       //
-      // Ainda é BAIXO e é assim que deve ser lido: `src/lib` está praticamente
-      // todo coberto e os hooks de filtro/período também, mas os ~30 componentes
-      // e as demais rotas não. O valor deste portão é ser CATRACA (impedir que
-      // caia), não atestar que o front está testado. Subir junto com a
-      // cobertura, nunca antes dela.
-      thresholds: { lines: 26, functions: 17, statements: 26, branches: 20 },
+      // Como ler o 28%: NÃO é "o front está 28% testado". Por diretório —
+      //   src/lib          99.8% de linhas  (praticamente completo)
+      //   src/routes       ~54%
+      //   src/hooks        ~15%   (use-dictation, 228 linhas, ficou fora: depende
+      //                            da Web Speech API, que o jsdom não implementa)
+      //   src/components   ~5.6%  (~30 arquivos — é aqui que está a lacuna)
+      // A lógica de decisão e de formatação está coberta; a árvore de UI não.
+      // O valor deste portão é ser CATRACA (impedir que caia), não atestado.
+      // Subir junto com a cobertura, nunca antes dela.
+      thresholds: { lines: 28, functions: 20, statements: 28, branches: 22 },
     },
   },
 });
