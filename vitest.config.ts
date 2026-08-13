@@ -34,20 +34,21 @@ export default defineConfig({
         "src/routes/**/*.tsx",
       ],
       exclude: ["src/components/ui/**", "src/lib/error-capture.ts", "src/lib/error-page.ts"],
-      // MEDIDOS em 13/08/2026 com 338 testes, não estimados: lines 24.05%,
-      // statements 24.15%, functions 15.48%, branches 19.22%. O piso fica um
+      // MEDIDOS em 13/08/2026 com 367 testes, não estimados: lines 26.28%,
+      // statements 26.46%, functions 17.99%, branches 20.62%. O piso fica um
       // passo abaixo de cada um para o portão não ser instável.
       //
       // Histórico do número, que explica por que ele se move: 8.47% (87 testes)
       // → 15.12% (+breakdown, notificacoes) → 13.38% ao incluir routes/ no
       // escopo (mais código medido, não menos testado) → 24.05% (+relatorio-xlsx,
-      // integracoes, attachments, xlsx-export, utils).
+      // integracoes, attachments, xlsx-export, utils) → 26.28% (+hooks).
       //
-      // Ainda é BAIXO e é assim que deve ser lido: `src/lib` está quase todo
-      // coberto, mas os componentes e as demais rotas não. O valor deste portão
-      // é ser CATRACA (impedir que caia), não atestar que o front está testado.
-      // Subir junto com a cobertura, nunca antes dela.
-      thresholds: { lines: 24, functions: 15, statements: 24, branches: 19 },
+      // Ainda é BAIXO e é assim que deve ser lido: `src/lib` está praticamente
+      // todo coberto e os hooks de filtro/período também, mas os ~30 componentes
+      // e as demais rotas não. O valor deste portão é ser CATRACA (impedir que
+      // caia), não atestar que o front está testado. Subir junto com a
+      // cobertura, nunca antes dela.
+      thresholds: { lines: 26, functions: 17, statements: 26, branches: 20 },
     },
   },
 });
