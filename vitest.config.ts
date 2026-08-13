@@ -56,7 +56,7 @@ export default defineConfig({
       //
       // O valor deste portão é ser CATRACA (impedir que caia), não atestado.
       // Subir junto com a cobertura, nunca antes dela.
-      thresholds: { lines: 40, functions: 30, statements: 40, branches: 30 },
+      thresholds: { lines: 43, functions: 30, statements: 43, branches: 30 },
     },
   },
 });
