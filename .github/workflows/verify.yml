@@ -1,0 +1,130 @@
+name: verify
+
+# Portão de qualidade. Antes disto o projeto não tinha CI nenhum: tipo, lint e
+# teste dependiam de alguém lembrar de rodar na própria máquina — e foi
+# exatamente assim que 5 variáveis mortas, 2 bugs silenciosos e 9 edges que não
+# passavam no `deno check` ficaram meses sem ninguém ver.
+#
+# Roda em push na main e em todo PR. Cada job é independente de propósito: um
+# lint vermelho não deve esconder um teste vermelho, e vice-versa.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Um PR que recebe vários pushes seguidos cancela as execuções anteriores.
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  front:
+    name: front (tipo, lint, teste, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Instalar dependências (lockfile congelado)
+        # --frozen-lockfile: o CI falha se o bun.lock não casar com o
+        # package.json, em vez de resolver versão diferente da que foi testada.
+        run: bun install --frozen-lockfile
+
+      - name: Integridade da instalação
+        # O xlsx vem de tarball do CDN do SheetJS e o bun às vezes o extrai
+        # incompleto, o que aparece como um TS7016 incompreensível três passos
+        # depois. Esta guarda falha aqui, com o conserto escrito.
+        run: bun run check:deps
+
+      - name: Tipos
+        run: bun run typecheck
+
+      - name: Lint
+        # --max-warnings deliberadamente ausente: os 7 warnings restantes são
+        # react-refresh (DX de dev) e travar neles hoje só ensinaria a gente a
+        # ignorar o CI. Erro continua derrubando.
+        run: bun run lint
+
+      - name: Formatação
+        run: bunx prettier --check src
+
+      - name: Testes + cobertura
+        run: bun run test:coverage
+
+      - name: Build de produção
+        run: bun run build
+
+      - name: Guardar relatório de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cobertura
+          path: coverage/
+          retention-days: 14
+
+  edges:
+    name: edge functions (deno)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.3
+
+      - name: deno check nas 24 edges
+        # Passa em 24/24 desde a auditoria de 13/08. Falha aqui é regressão real.
+        run: |
+          set -e
+          falhas=0
+          for d in supabase/functions/*/; do
+            [ -f "${d}index.ts" ] || continue
+            echo "::group::deno check ${d}"
+            if ! deno check "${d}index.ts"; then
+              echo "::error::deno check falhou em ${d}"
+              falhas=$((falhas+1))
+            fi
+            echo "::endgroup::"
+          done
+          echo "edges com falha: $falhas"
+          [ "$falhas" -eq 0 ]
+
+      - name: Provas do _shared
+        # As 4 provas usam Deno.exit(1)/throw, então exit code já é o veredito.
+        run: |
+          set -e
+          for f in supabase/functions/_shared/_prova_*.ts; do
+            echo "::group::$f"
+            deno run --allow-all "$f"
+            echo "::endgroup::"
+          done
+
+      - name: deno lint (informativo)
+        # O eslint ignora supabase/functions (código Deno tem toolchain própria);
+        # este passo é o dono legítimo desses achados. NÃO bloqueia: são 498
+        # problemas, ~490 de no-explicit-any, e um job que nasce vermelho ensina
+        # a ignorar o CI. Vira bloqueante quando o `any` for reduzido.
+        continue-on-error: true
+        run: deno lint supabase/functions
+
+  seguranca:
+    name: auditoria de dependências
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - name: bun audit
+        # Informativo por ora: as 18 pendentes são de ferramenta de build/dev,
+        # nenhuma alcançável por entrada de usuário em produção. Vira bloqueante
+        # quando esse conjunto estiver zerado, senão o job nasce vermelho e
+        # ensina a ignorar.
+        continue-on-error: true
+        run: bun audit

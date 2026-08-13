@@ -6,7 +6,28 @@ import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", ".output", ".vinxi"] },
+  {
+    ignores: [
+      "dist",
+      ".output",
+      ".vinxi",
+      // Código Deno: tem toolchain própria (`deno check` + `deno lint`) e é
+      // essa que o CI roda nele. Sob as regras daqui davam 480 erros — 473 de
+      // no-explicit-any — e `eslint .` nascia vermelho, o que ensina a ignorar
+      // a saída em vez de lê-la. Mesmo critério já aplicado no .prettierignore
+      // (printWidth 100 do prettier vs 80 do deno fmt).
+      //
+      // O que sai de vista aqui NÃO desaparece: 5 prefer-const e 2
+      // no-unused-expressions (ternário usado como statement em
+      // traffic-agent-job — os dois ramos têm efeito, não é bug) seguem
+      // reportados pelo `deno lint` no job de edges. Não foram consertados de
+      // propósito: são cosméticos, estão em edges JÁ DEPLOYADAS, e hoje repo e
+      // produção estão idênticos nas 24 — mexer por estilo quebraria essa
+      // propriedade e redeployar produção por let→const não se paga.
+      "supabase/functions",
+      "docs/edges-descontinuadas",
+    ],
+  },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ["**/*.{ts,tsx}"],
