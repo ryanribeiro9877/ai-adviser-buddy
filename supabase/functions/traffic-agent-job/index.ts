@@ -197,7 +197,9 @@ const CORS = {
 function json(obj: unknown, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json", ...CORS } });
 }
-const today = () => new Date().toISOString().slice(0, 10);
+// Data no fuso da operacao (BRT). Em UTC, depois das 21h de Brasilia a data virava o dia
+// seguinte e o agente passava a tratar amanha como hoje.
+const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
 const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const deacc = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
@@ -302,10 +304,42 @@ async function t_campaign_detail(companyId: string, name_like: string) {
   if (!camps.length) return { erro: `nenhuma campanha com nome contendo '${name_like}'` };
   const c = camps[0];
   const from = new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10);
-  const { data: serie } = await supa.from("metric_snapshots").select("snapshot_date,spend,impressions,link_clicks,form_leads,messaging_started").eq("campaign_id", c.id).gte("snapshot_date", from).order("snapshot_date");
-  return { campanha: { nome: c.name, status: c.status, categoria: c.category, gasto_acumulado: brl(Number(c.spend || 0)) },
-    serie_diaria_14d: (serie ?? []).map((s) => ({ dia: s.snapshot_date, gasto: brl(Number(s.spend || 0)), impressoes: s.impressions, formularios: s.form_leads, conversas: s.messaging_started })),
-    outras_encontradas: camps.slice(1).map((x) => x.name) };
+  const { data: serie } = await supa.from("metric_snapshots")
+    .select("snapshot_date,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,frequency,landing_page_views")
+    .eq("campaign_id", c.id).gte("snapshot_date", from).order("snapshot_date");
+  const rows = serie ?? [];
+  const num = (v: unknown) => Number(v || 0);
+  const pct = (n: number, d: number) => d > 0 ? `${(100 * n / d).toFixed(2)}%` : null;
+  const linhaDia = (s: Record<string, unknown>) => {
+    const spend = num(s.spend), imp = num(s.impressions), clk = num(s.clicks);
+    return {
+      dia: s.snapshot_date, gasto: brl(spend), impressoes: imp, alcance: num(s.reach),
+      frequencia: s.frequency != null ? Number(num(s.frequency).toFixed(2)) : null,
+      cliques: clk, cliques_no_link: num(s.link_clicks), visualizacoes_lp: num(s.landing_page_views),
+      formularios: num(s.form_leads), conversas: num(s.messaging_started),
+      ctr: pct(clk, imp), cpc: clk ? brl(spend / clk) : null, cpm: imp ? brl(1000 * spend / imp) : null,
+    };
+  };
+  const tot = rows.reduce((a, s: Record<string, unknown>) => ({
+    spend: a.spend + num(s.spend), imp: a.imp + num(s.impressions), reach: a.reach + num(s.reach),
+    clk: a.clk + num(s.clicks), link: a.link + num(s.link_clicks), lpv: a.lpv + num(s.landing_page_views),
+    forms: a.forms + num(s.form_leads), msg: a.msg + num(s.messaging_started),
+  }), { spend: 0, imp: 0, reach: 0, clk: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
+  return {
+    campanha: { nome: c.name, status: c.status, categoria: c.category, gasto_acumulado: brl(num(c.spend)) },
+    serie_diaria_14d: rows.map(linhaDia),
+    totais_periodo: {
+      dias_com_dado: rows.length, gasto: brl(tot.spend), impressoes: tot.imp, alcance: tot.reach,
+      cliques: tot.clk, cliques_no_link: tot.link, visualizacoes_lp: tot.lpv,
+      formularios: tot.forms, conversas: tot.msg,
+      ctr: pct(tot.clk, tot.imp), cpc: tot.clk ? brl(tot.spend / tot.clk) : null,
+      cpm: tot.imp ? brl(1000 * tot.spend / tot.imp) : null,
+      custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
+      alcance_e_soma_dos_dias: true,
+    },
+    outras_encontradas: camps.slice(1).map((x) => x.name),
+    nota: "serie diaria e totais vem de metric_snapshots (D-1, provider windsor/meta). alcance, cliques, frequencia, CTR, CPC, CPM e visualizacoes_lp SAO expostos aqui - NUNCA declare essas metricas indisponiveis. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero. ATENCAO no total: alcance e SOMA dos dias, nao alcance unico desduplicado (a mesma pessoa alcancada em 2 dias conta 2x) - declare isso ao reportar alcance acumulado; alcance por dia e confiavel.",
+  };
 }
 
 const TETO_TOOL_JSON = 11500;
@@ -628,7 +662,7 @@ const DEF: Record<string, any> = {
   validar_pedido_contra_contrato: { type: "function", function: { name: "validar_pedido_contra_contrato", description: "Valida pedido jsonb contra contrato_de_execucao. Assinatura: (acao, pedido). contrato_desconhecido se acao sem linhas; recusa obrigatorios faltantes; extras nao invalidam. Lacunas: contrato de anuncio veio do codigo montarCriacao; url_tags opcional no adcreative; NAO substitui pedido_de_anuncio_completo.", parameters: { type: "object", properties: { acao: { type: "string" }, pedido: { type: "object" } }, required: ["acao", "pedido"] } } },
   get_funnel: { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "RECORTE por custo MEDIO (Breakdown Effect: serve p/ ENTENDER, proibido prescrever pausa so por isto).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
-  get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria 14d de uma campanha pelo nome.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
+  get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria 14d de UMA campanha pelo nome, com totais do periodo. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques, cliques_no_link, visualizacoes_lp, formularios, conversas, CTR, CPC e CPM (derivados). Esta e a fonte por-campanha de metricas basicas E avancadas - se pedirem alcance/cliques/CTR/CPC/CPM/frequencia de uma campanha, use ESTA tool e NUNCA diga que sao indisponiveis. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios. Sem busca_nome: PAGINADO por gasto (20). Com busca_nome: sobrecarga (somente_ativas, company, offset, limit, busca_nome) para achar molde sem folhear; default somente_ativas=false quando busca. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, busca_nome: { type: "string", description: "Parte do nome do anuncio (ex.: LPV2_A2_Reel02 ou TESTE-GT02 no molde)." }, pagina: { type: "integer", description: "Pagina de 20, comecando em 1." } } } } },
   get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto.", parameters: { type: "object", properties: {} } } },
   check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL).", parameters: { type: "object", properties: { legenda: { type: "string" } }, required: ["legenda"] } } },
@@ -985,7 +1019,7 @@ Ao terminar a coleta, escreva um RELATORIO conciso e denso em markdown com numer
 async function sintetizar(pergunta: string, relatorios: { nome: string; relatorio: string; completo: boolean }[], estilo: string, memoria: string, prazo: () => number, tel: any) {
   const sys = `Voce e o Gestor de Trafego IA da Legal e Viver. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
 ESCOPO RIGIDO: somente trafego pago (midia, criativo, publico, orcamento, custo). Bancos, esteira interna, politica de credito, atendimento humano e conversao final do CRM estao FORA - se a pergunta tocar nisso, declare fora de escopo e siga.
-REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao disponivel'; NUNCA estime nem complete com plausibilidade. (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) alguns relatorios chegam marcados como INCOMPLETOS (cortados por limite de tamanho): o que nao esta neles pode MUITO BEM existir no sistema. Para esses, escreva 'o levantamento do especialista veio incompleto nesta rodada' - e PROIBIDO dizer 'nao disponivel', 'retornou vazio' ou tratar a ausencia como inexistencia. (R4) nao misture janelas. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes: se uma acao for recomendavel, descreva-a e diga que o gestor pode pedi-la no chat para virar pedido de aprovacao. (R9) incoerencia entre numeros: aponte. Sem jargao interno (nomes de ferramenta, codigos de regra, limites de implementacao).
+REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao disponivel'; NUNCA estime nem complete com plausibilidade. (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) alguns relatorios chegam marcados como INCOMPLETOS (cortados por limite de tamanho): o que nao esta neles pode MUITO BEM existir no sistema. Para esses, escreva 'o levantamento do especialista veio incompleto nesta rodada' - e PROIBIDO dizer 'nao disponivel', 'retornou vazio' ou tratar a ausencia como inexistencia. (R4) nao misture janelas. (R4b) HOJE e a data declarada na primeira linha deste prompt - NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar a janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes: se uma acao for recomendavel, descreva-a e diga que o gestor pode pedi-la no chat para virar pedido de aprovacao. (R9) incoerencia entre numeros: aponte. Sem jargao interno (nomes de ferramenta, codigos de regra, limites de implementacao).
 FORMATO (regras vigentes do sistema):
 ${estilo}
 MEMORIA INSTITUCIONAL (fatos verificados):

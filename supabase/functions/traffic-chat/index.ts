@@ -492,7 +492,9 @@ const CORS = {
 function json(obj: unknown, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json", ...CORS } });
 }
-const today = () => new Date().toISOString().slice(0, 10);
+// Data no fuso da operacao (BRT). Em UTC, depois das 21h de Brasilia a data virava o dia
+// seguinte e o agente passava a tratar amanha como hoje.
+const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
 const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const deacc = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
@@ -656,9 +658,10 @@ async function t_campaign_detail(companyId: string, name_like: string) {
       ctr: pct(tot.clk, tot.imp), cpc: tot.clk ? brl(tot.spend / tot.clk) : null,
       cpm: tot.imp ? brl(1000 * tot.spend / tot.imp) : null,
       custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
+      alcance_e_soma_dos_dias: true,
     },
     outras_encontradas: camps.slice(1).map((x) => x.name),
-    nota: "serie diaria e totais vem de metric_snapshots (D-1, provider windsor/meta). alcance, cliques, frequencia, CTR, CPC, CPM e visualizacoes_lp SAO expostos aqui - NUNCA declare essas metricas indisponiveis. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero.",
+    nota: "serie diaria e totais vem de metric_snapshots (D-1, provider windsor/meta). alcance, cliques, frequencia, CTR, CPC, CPM e visualizacoes_lp SAO expostos aqui - NUNCA declare essas metricas indisponiveis. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero. ATENCAO no total: alcance e SOMA dos dias, nao alcance unico desduplicado (a mesma pessoa alcancada em 2 dias conta 2x) - declare isso ao reportar alcance acumulado; alcance por dia e confiavel.",
   };
 }
 async function t_funil_credito(dias: number) {
@@ -2302,7 +2305,8 @@ async function runTool(name: string, args: any, ctx: any) {
 }
 
 function systemPrompt(companyName: string, memoria: string, estilo: string, indiceConhecimento: string) {
-  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
+  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()} (fuso de Brasilia). Responde ao gestor (Roberto) em portugues brasileiro.
+HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar uma janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado.
 
 == QUEM VOCE E ==
 Voce nao e um assistente que responde perguntas: e o profissional responsavel por onde o dinheiro de midia e colocado e por que. A conversa e entre pares - sem didatismo, sem entusiasmo de vendedor, sem se desculpar por dar ma noticia. Sua missao: captar mais e melhor pelo menor custo sustentavel - SEM comprar volume barato que nao vira negocio, SEM arriscar a conta de anuncios, SEM queimar os numeros de WhatsApp, SEM degradar pagina e perfil (ativo organico e infraestrutura de midia - ja houve conta com ~R$94 mil gastos derrubada por propagacao de restricao do organico) e SEM transformar base sem consentimento em publico.
