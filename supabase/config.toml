@@ -18,6 +18,28 @@ verify_jwt = false
 [functions.drive-audio-transcribe]
 verify_jwt = false
 
+# 13/08/2026 (auditoria) - estas duas JA estavam com verify_jwt=false no projeto, mas sem
+# declaracao aqui: exatamente a armadilha descrita no bloco do upload-midia acima. Um
+# `supabase functions deploy` destas sem esta linha aplicaria o DEFAULT true e o portao
+# passaria a recusar os chamadores por x-mcp-key antes de a edge autenticar.
+# Ambas autenticam dentro, via mcpKeyValida (_shared/mcp_auth.ts) - verificado por chamada
+# sem chave: mcp-server responde JSON-RPC -32001 e meta-actions responde
+# 401 chave_ausente_ou_curta.
+[functions.mcp-server]
+verify_jwt = false
+
+[functions.meta-actions]
+verify_jwt = false
+
+[functions.traffic-chat]
+verify_jwt = false
+
+[functions.traffic-agent-job]
+verify_jwt = false
+
+[functions.meta-health]
+verify_jwt = false
+
 # ditado do chat (Bearer do usuario) E chamada interna da drive-audio-transcribe (x-mcp-key,
 # sem Authorization). Precisa continuar com o gateway aberto - a propria edge autentica.
 [functions.transcribe-audio]
