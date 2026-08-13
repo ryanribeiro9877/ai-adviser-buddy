@@ -39,7 +39,8 @@ export function EmptyCompany() {
     <Card className="p-8 text-center">
       <div className="text-lg font-semibold">Selecione ou cadastre uma empresa</div>
       <p className="mt-2 text-sm text-muted-foreground">
-        Adicione sua primeira empresa em <span className="text-foreground">Empresas e contas</span> para visualizar métricas e conectar plataformas.
+        Adicione sua primeira empresa em <span className="text-foreground">Empresas e contas</span>{" "}
+        para visualizar métricas e conectar plataformas.
       </p>
     </Card>
   );

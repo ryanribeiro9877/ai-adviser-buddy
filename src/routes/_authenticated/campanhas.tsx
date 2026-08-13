@@ -6,19 +6,37 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from "@/components/ui/table";
 import { TypeBadge } from "@/components/type-badge";
 import { GlobalFilters } from "@/components/global-filters";
 import { useGlobalFilters, useSnapshotMinDate } from "@/hooks/use-filters";
 import { usePeriodCampaigns } from "@/hooks/use-period";
-import { fmtBRL, fmtInt, fmtPct, fmtDec, TIPO_ORDER, type CampaignRow, type TipoConta } from "@/lib/breakdown";
+import {
+  fmtBRL,
+  fmtInt,
+  fmtPct,
+  fmtDec,
+  TIPO_ORDER,
+  type CampaignRow,
+  type TipoConta,
+} from "@/lib/breakdown";
 import { matchesStatus, resolveRange, validateFilterSearch } from "@/lib/filters";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { Pause, Play, TrendingUp, ShieldAlert } from "lucide-react";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogTrigger,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { useMemo, useState } from "react";
 import { Input } from "@/components/ui/input";
@@ -116,8 +134,10 @@ function Campanhas() {
           <p className="text-sm text-muted-foreground">
             {selectedCompany.name} · alterações precisam ser aprovadas por um administrador —{" "}
             <span className="inline-flex items-center gap-1">
-              <ShieldAlert className="h-3.5 w-3.5" />leitura por padrão
-            </span>.
+              <ShieldAlert className="h-3.5 w-3.5" />
+              leitura por padrão
+            </span>
+            .
           </p>
         </div>
       </div>
@@ -164,14 +184,20 @@ function Campanhas() {
                   const isActive = c.status.toLowerCase() === "active";
                   return (
                     <TableRow key={c.campaign_id}>
-                      <TableCell className="font-medium max-w-[260px] truncate">{c.campanha}</TableCell>
+                      <TableCell className="font-medium max-w-[260px] truncate">
+                        {c.campanha}
+                      </TableCell>
                       <TableCell className="max-w-[160px] truncate text-sm text-muted-foreground">
                         {c.account_name}
                       </TableCell>
-                      <TableCell><TypeBadge tipo={c.tipo} /></TableCell>
+                      <TableCell>
+                        <TypeBadge tipo={c.tipo} />
+                      </TableCell>
                       <TableCell className="text-sm">Meta Ads</TableCell>
                       <TableCell>
-                        <Badge variant={isActive ? "default" : "secondary"}>{statusLabel(c.status)}</Badge>
+                        <Badge variant={isActive ? "default" : "secondary"}>
+                          {statusLabel(c.status)}
+                        </Badge>
                       </TableCell>
                       <TableCell className="text-right tabular-nums">{fmtBRL(c.spend)}</TableCell>
                       <TableCell className="text-right tabular-nums">{ctr(c)}</TableCell>
@@ -181,21 +207,28 @@ function Campanhas() {
                       </TableCell>
                       {hasRevenue && (
                         <TableCell className="text-right tabular-nums">
-                          {c.revenue > 0
-                            ? `${fmtDec(c.revenue / Math.max(c.spend, 1))}x`
-                            : "—"}
+                          {c.revenue > 0 ? `${fmtDec(c.revenue / Math.max(c.spend, 1))}x` : "—"}
                         </TableCell>
                       )}
                       <TableCell className="text-right">
-                        <Dialog open={reqOpen === c.campaign_id} onOpenChange={(o) => setReqOpen(o ? c.campaign_id : null)}>
+                        <Dialog
+                          open={reqOpen === c.campaign_id}
+                          onOpenChange={(o) => setReqOpen(o ? c.campaign_id : null)}
+                        >
                           <DialogTrigger asChild>
                             <Button size="sm" variant="outline">
-                              {isActive ? <Pause className="h-3.5 w-3.5 mr-1" /> : <Play className="h-3.5 w-3.5 mr-1" />}
+                              {isActive ? (
+                                <Pause className="h-3.5 w-3.5 mr-1" />
+                              ) : (
+                                <Play className="h-3.5 w-3.5 mr-1" />
+                              )}
                               Solicitar mudança
                             </Button>
                           </DialogTrigger>
                           <DialogContent>
-                            <DialogHeader><DialogTitle>Solicitar alteração — {c.campanha}</DialogTitle></DialogHeader>
+                            <DialogHeader>
+                              <DialogTitle>Solicitar alteração — {c.campanha}</DialogTitle>
+                            </DialogHeader>
                             <form
                               onSubmit={(e) => {
                                 e.preventDefault();
@@ -207,24 +240,41 @@ function Campanhas() {
                             >
                               <div>
                                 <Label>Ação</Label>
-                                <select name="action" className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm">
-                                  <option value={isActive ? "pause" : "activate"}>{isActive ? "Pausar campanha" : "Ativar campanha"}</option>
+                                <select
+                                  name="action"
+                                  className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+                                >
+                                  <option value={isActive ? "pause" : "activate"}>
+                                    {isActive ? "Pausar campanha" : "Ativar campanha"}
+                                  </option>
                                   <option value="update_budget">Ajustar orçamento diário</option>
                                 </select>
                               </div>
                               <div>
                                 <Label>Novo orçamento diário (R$)</Label>
-                                <Input name="budget" type="number" min="0" step="0.01" placeholder="Opcional" />
+                                <Input
+                                  name="budget"
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  placeholder="Opcional"
+                                />
                               </div>
                               <div>
                                 <Label>Justificativa</Label>
                                 <Textarea name="note" placeholder="Explique o motivo…" required />
                               </div>
                               <DialogFooter>
-                                <Button type="submit"><TrendingUp className="h-4 w-4 mr-2" />Enviar para aprovação</Button>
+                                <Button type="submit">
+                                  <TrendingUp className="h-4 w-4 mr-2" />
+                                  Enviar para aprovação
+                                </Button>
                               </DialogFooter>
                               {!isAdmin && (
-                                <p className="text-xs text-muted-foreground">Você é visualizador. Um administrador precisará aprovar antes que a mudança ocorra.</p>
+                                <p className="text-xs text-muted-foreground">
+                                  Você é visualizador. Um administrador precisará aprovar antes que
+                                  a mudança ocorra.
+                                </p>
                               )}
                             </form>
                           </DialogContent>

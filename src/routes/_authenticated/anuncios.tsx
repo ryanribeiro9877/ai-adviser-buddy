@@ -8,7 +8,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { GlobalFilters } from "@/components/global-filters";
 import { useGlobalFilters } from "@/hooks/use-filters";
 import { useAds, useCampaignBreakdown } from "@/hooks/use-breakdown";
-import { fmtBRL, fmtInt, fmtPct, metaStatus, TIPO_ORDER, type AdRow, type TipoConta } from "@/lib/breakdown";
+import {
+  fmtBRL,
+  fmtInt,
+  fmtPct,
+  metaStatus,
+  TIPO_ORDER,
+  type AdRow,
+  type TipoConta,
+} from "@/lib/breakdown";
 import { matchesStatus, validateFilterSearch } from "@/lib/filters";
 import { Image as ImageIcon, ExternalLink } from "lucide-react";
 
@@ -45,7 +53,9 @@ function AdCard({ ad }: { ad: AdRow }) {
       </div>
       <div className="mt-3 flex items-start justify-between gap-2">
         <div className="font-semibold text-sm line-clamp-2">{ad.name}</div>
-        <Badge variant={st.variant} className="shrink-0">{st.label}</Badge>
+        <Badge variant={st.variant} className="shrink-0">
+          {st.label}
+        </Badge>
       </div>
       <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
         {ad.object_type && <span className="uppercase">{ad.object_type}</span>}

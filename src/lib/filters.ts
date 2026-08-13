@@ -33,7 +33,9 @@ export type FilterSearch = {
 };
 
 // Estado normalizado (com defaults aplicados) que os componentes consomem.
-export type GlobalFilterState = Required<Pick<FilterSearch, "preset" | "status" | "tipo" | "platform">> & {
+export type GlobalFilterState = Required<
+  Pick<FilterSearch, "preset" | "status" | "tipo" | "platform">
+> & {
   company?: string;
   start?: ISODate;
   end?: ISODate;
@@ -92,8 +94,7 @@ export function isPeriodNarrowed(f: GlobalFilterState): boolean {
   return f.preset !== "all";
 }
 
-const isUuid = (v: unknown): v is string =>
-  typeof v === "string" && /^[0-9a-f-]{36}$/i.test(v);
+const isUuid = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f-]{36}$/i.test(v);
 
 const isISODate = (v: unknown): v is ISODate =>
   typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);

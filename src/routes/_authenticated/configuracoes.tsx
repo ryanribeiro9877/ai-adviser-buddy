@@ -23,7 +23,10 @@ function Configuracoes() {
       <Card className="p-5">
         <h2 className="font-semibold mb-3">Perfil</h2>
         <div className="grid grid-cols-2 gap-3 text-sm">
-          <div><div className="text-muted-foreground text-xs">Email</div>{user.email}</div>
+          <div>
+            <div className="text-muted-foreground text-xs">Email</div>
+            {user.email}
+          </div>
           <div>
             <div className="text-muted-foreground text-xs">Papel</div>
             <Badge variant={isAdmin ? "default" : "secondary"} className="gap-1">
@@ -41,7 +44,12 @@ function Configuracoes() {
           <div className="text-sm">
             <div className="font-medium">Modo somente leitura ativo</div>
             <div className="text-muted-foreground">
-              Nenhuma campanha, orçamento, anúncio, público ou configuração pode ser alterado sem aprovação explícita de um administrador em <Link className="underline" to="/aprovacoes">Aprovações pendentes</Link>.
+              Nenhuma campanha, orçamento, anúncio, público ou configuração pode ser alterado sem
+              aprovação explícita de um administrador em{" "}
+              <Link className="underline" to="/aprovacoes">
+                Aprovações pendentes
+              </Link>
+              .
             </div>
           </div>
         </div>
@@ -53,10 +61,17 @@ function Configuracoes() {
           {[
             { id: "alerts", label: "Receber alertas por email", icon: Bell },
             { id: "recos", label: "Notificar novas recomendações da IA", icon: Sparkles },
-            { id: "approvals", label: "Avisar sobre solicitações pendentes de aprovação", icon: ShieldCheck },
+            {
+              id: "approvals",
+              label: "Avisar sobre solicitações pendentes de aprovação",
+              icon: ShieldCheck,
+            },
           ].map((n) => (
             <div key={n.id} className="flex items-center justify-between">
-              <Label htmlFor={n.id} className="flex items-center gap-2"><n.icon className="h-4 w-4 text-muted-foreground" />{n.label}</Label>
+              <Label htmlFor={n.id} className="flex items-center gap-2">
+                <n.icon className="h-4 w-4 text-muted-foreground" />
+                {n.label}
+              </Label>
               <Switch id={n.id} defaultChecked disabled={!isAdmin} />
             </div>
           ))}
@@ -66,7 +81,11 @@ function Configuracoes() {
       <Card className="p-5">
         <h2 className="font-semibold mb-1">Integrações</h2>
         <p className="text-sm text-muted-foreground mb-3">
-          Conecte contas de mídia em <Link to="/empresas" className="underline">Empresas e contas</Link>. Suportado: Meta Ads.
+          Conecte contas de mídia em{" "}
+          <Link to="/empresas" className="underline">
+            Empresas e contas
+          </Link>
+          . Suportado: Meta Ads.
         </p>
       </Card>
     </div>

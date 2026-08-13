@@ -51,7 +51,10 @@ function AdSetCard({ s }: { s: AdSetRow }) {
         <div className="flex flex-col items-end gap-1 shrink-0">
           <Badge variant={st.variant}>{st.label}</Badge>
           {advantagePlus && (
-            <Badge className="gap-1 bg-violet-500/15 text-violet-400 border-violet-500/30" variant="outline">
+            <Badge
+              className="gap-1 bg-violet-500/15 text-violet-400 border-violet-500/30"
+              variant="outline"
+            >
               <Sparkles className="h-3 w-3" /> Advantage+
             </Badge>
           )}
@@ -76,7 +79,10 @@ function AdSetCard({ s }: { s: AdSetRow }) {
       <div className="mt-3 grid grid-cols-3 gap-2 border-t border-border pt-3">
         <Stat label="Orç. diário" value={fmtBudget(s.daily_budget)} />
         <Stat label="Orç. total" value={fmtBudget(s.lifetime_budget)} />
-        <Stat label="Lance" value={s.bid_strategy ? s.bid_strategy.replace(/_/g, " ").toLowerCase() : "—"} />
+        <Stat
+          label="Lance"
+          value={s.bid_strategy ? s.bid_strategy.replace(/_/g, " ").toLowerCase() : "—"}
+        />
       </div>
 
       {/* Métricas */}

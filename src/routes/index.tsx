@@ -32,7 +32,9 @@ function Landing() {
             </div>
             <span className="font-semibold">Gestor de Tráfego IA</span>
           </div>
-          <Button asChild size="sm"><Link to="/auth">Entrar</Link></Button>
+          <Button asChild size="sm">
+            <Link to="/auth">Entrar</Link>
+          </Button>
         </div>
       </header>
 
@@ -49,16 +51,34 @@ function Landing() {
           auditoria completa e recomendações de IA para escalar campanhas com segurança.
         </p>
         <div className="mt-8 flex gap-3 justify-center">
-          <Button asChild size="lg"><Link to="/auth">Começar agora</Link></Button>
+          <Button asChild size="lg">
+            <Link to="/auth">Começar agora</Link>
+          </Button>
         </div>
       </section>
 
       <section className="max-w-6xl mx-auto px-6 pb-24 grid md:grid-cols-4 gap-4">
         {[
-          { icon: BarChart3, title: "Dashboard executivo", text: "Investimento, leads, CPL e conversas por WhatsApp em tempo real." },
-          { icon: Workflow, title: "Multi-plataforma", text: "Conecte Meta Ads, GA4, GSC e GTM por empresa." },
-          { icon: CheckSquare, title: "Fila de aprovação", text: "Nada muda em campanhas, orçamentos ou anúncios sem confirmação." },
-          { icon: Sparkles, title: "IA guiada", text: "Recomendações práticas para pausar, escalar ou reajustar verba." },
+          {
+            icon: BarChart3,
+            title: "Dashboard executivo",
+            text: "Investimento, leads, CPL e conversas por WhatsApp em tempo real.",
+          },
+          {
+            icon: Workflow,
+            title: "Multi-plataforma",
+            text: "Conecte Meta Ads, GA4, GSC e GTM por empresa.",
+          },
+          {
+            icon: CheckSquare,
+            title: "Fila de aprovação",
+            text: "Nada muda em campanhas, orçamentos ou anúncios sem confirmação.",
+          },
+          {
+            icon: Sparkles,
+            title: "IA guiada",
+            text: "Recomendações práticas para pausar, escalar ou reajustar verba.",
+          },
         ].map((f) => (
           <div key={f.title} className="rounded-xl border border-border bg-card p-5">
             <f.icon className="h-5 w-5 text-primary" />

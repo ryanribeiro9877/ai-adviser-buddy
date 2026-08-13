@@ -36,7 +36,12 @@ function Aprovacoes() {
       .update({ status, reviewed_by: user.id, reviewed_at: new Date().toISOString() })
       .eq("id", id);
     if (error) return toast.error(error.message);
-    await logAudit({ companyId: selectedCompany!.id, action: `approval.${status}`, targetType: "approval", targetId: id });
+    await logAudit({
+      companyId: selectedCompany!.id,
+      action: `approval.${status}`,
+      targetType: "approval",
+      targetId: id,
+    });
     toast.success(status === "approved" ? "Aprovado" : "Rejeitado");
     q.refetch();
   };
@@ -63,7 +68,11 @@ function Aprovacoes() {
               }
               variant={r.status === "pending" ? "secondary" : "default"}
             >
-              {r.status === "pending" ? "Pendente" : r.status === "approved" ? "Aprovado" : "Rejeitado"}
+              {r.status === "pending"
+                ? "Pendente"
+                : r.status === "approved"
+                  ? "Aprovado"
+                  : "Rejeitado"}
             </Badge>
           </div>
           <div className="text-xs text-muted-foreground mt-1 flex items-center gap-2">
@@ -78,14 +87,22 @@ function Aprovacoes() {
           {r.ultima_falha && <FalhaDaExecucao falha={r.ultima_falha as unknown as UltimaFalha} />}
           {r.status === "approved" && !r.ultima_falha && (
             <p className="mt-2 text-xs text-muted-foreground">
-              {r.executed_at ? `Executado em ${new Date(r.executed_at).toLocaleString("pt-BR")}.` : "Aprovado — aguardando execução."}
+              {r.executed_at
+                ? `Executado em ${new Date(r.executed_at).toLocaleString("pt-BR")}.`
+                : "Aprovado — aguardando execução."}
             </p>
           )}
         </div>
         {reviewable && (
           <div className="flex gap-2">
-            <Button size="sm" variant="ghost" onClick={() => review(r.id, "rejected")}><X className="h-4 w-4 mr-1" />Rejeitar</Button>
-            <Button size="sm" onClick={() => review(r.id, "approved")}><Check className="h-4 w-4 mr-1" />Aprovar</Button>
+            <Button size="sm" variant="ghost" onClick={() => review(r.id, "rejected")}>
+              <X className="h-4 w-4 mr-1" />
+              Rejeitar
+            </Button>
+            <Button size="sm" onClick={() => review(r.id, "approved")}>
+              <Check className="h-4 w-4 mr-1" />
+              Aprovar
+            </Button>
           </div>
         )}
       </div>
@@ -99,7 +116,8 @@ function Aprovacoes() {
           <ShieldCheck className="h-6 w-6 text-primary" /> Aprovações pendentes
         </h1>
         <p className="text-sm text-muted-foreground">
-          Toda alteração em campanhas, orçamentos, anúncios e públicos passa por aqui antes de ser aplicada.
+          Toda alteração em campanhas, orçamentos, anúncios e públicos passa por aqui antes de ser
+          aplicada.
         </p>
       </div>
 
@@ -108,16 +126,24 @@ function Aprovacoes() {
           Pendentes ({pending.length})
         </h2>
         <div className="space-y-3">
-          {pending.map((r) => <Row key={r.id} r={r} reviewable={isAdmin} />)}
-          {pending.length === 0 && <Card className="p-6 text-sm text-muted-foreground">Nenhuma solicitação pendente.</Card>}
+          {pending.map((r) => (
+            <Row key={r.id} r={r} reviewable={isAdmin} />
+          ))}
+          {pending.length === 0 && (
+            <Card className="p-6 text-sm text-muted-foreground">Nenhuma solicitação pendente.</Card>
+          )}
         </div>
       </section>
 
       {others.length > 0 && (
         <section>
-          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-2">Histórico</h2>
+          <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+            Histórico
+          </h2>
           <div className="space-y-3">
-            {others.map((r) => <Row key={r.id} r={r} reviewable={false} />)}
+            {others.map((r) => (
+              <Row key={r.id} r={r} reviewable={false} />
+            ))}
           </div>
         </section>
       )}

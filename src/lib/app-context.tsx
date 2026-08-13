@@ -45,7 +45,10 @@ export function AppProvider({ user, children }: { user: User; children: ReactNod
   const companiesQuery = useQuery({
     queryKey: ["companies", user.id],
     queryFn: async () => {
-      const { data, error } = await supabase.from("companies").select("id, name, industry").order("created_at");
+      const { data, error } = await supabase
+        .from("companies")
+        .select("id, name, industry")
+        .order("created_at");
       if (error) throw error;
       return (data ?? []) as Company[];
     },
@@ -55,7 +58,10 @@ export function AppProvider({ user, children }: { user: User; children: ReactNod
   const role: AppRole = rolesQuery.data?.includes("admin") ? "admin" : "viewer";
 
   useEffect(() => {
-    if (companies.length > 0 && (!selectedCompanyId || !companies.find((c) => c.id === selectedCompanyId))) {
+    if (
+      companies.length > 0 &&
+      (!selectedCompanyId || !companies.find((c) => c.id === selectedCompanyId))
+    ) {
       setSelectedCompanyIdState(companies[0].id);
       localStorage.setItem(STORAGE_KEY, companies[0].id);
     }

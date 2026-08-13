@@ -230,8 +230,7 @@ export const fmtBRL = (n: number | null | undefined) =>
     : SEM_DADO;
 export const fmtInt = (n: number | null | undefined) =>
   finito(n) ? Math.round(n).toLocaleString("pt-BR") : SEM_DADO;
-export const fmtPct = (n: number | null | undefined) =>
-  finito(n) ? `${n.toFixed(2)}%` : SEM_DADO;
+export const fmtPct = (n: number | null | undefined) => (finito(n) ? `${n.toFixed(2)}%` : SEM_DADO);
 export const fmtDec = (n: number | null | undefined, d = 2) =>
   finito(n) ? n.toFixed(d) : SEM_DADO;
 
@@ -335,9 +334,7 @@ export function summarizeTargeting(t: Targeting | null): {
     const regions = Array.isArray(geo.regions)
       ? geo.regions.map((r) => r?.name).filter(Boolean)
       : [];
-    const cities = Array.isArray(geo.cities)
-      ? geo.cities.map((c) => c?.name).filter(Boolean)
-      : [];
+    const cities = Array.isArray(geo.cities) ? geo.cities.map((c) => c?.name).filter(Boolean) : [];
     if (regions.length) parts.push(regions.join(", "));
     if (cities.length) parts.push(cities.join(", "));
     if (parts.length) chips.push(parts.join(" · "));
@@ -365,9 +362,7 @@ export function summarizeTargeting(t: Targeting | null): {
     }
   }
   if (interests.length) {
-    chips.push(
-      `Interesses: ${interests.slice(0, 4).join(", ")}${interests.length > 4 ? "…" : ""}`,
-    );
+    chips.push(`Interesses: ${interests.slice(0, 4).join(", ")}${interests.length > 4 ? "…" : ""}`);
   }
 
   // Públicos personalizados

@@ -6,3 +6,9 @@ pnpm-lock.yaml
 package-lock.json
 bun.lock
 routeTree.gen.ts
+
+# Codigo Deno: formatado por `deno fmt`, nao por prettier. Sem esta linha o
+# prettier (printWidth 100) briga com o deno fmt (80) e gera ~2.400
+# divergencias que nao sao defeito nenhum.
+supabase/functions
+docs/edges-descontinuadas

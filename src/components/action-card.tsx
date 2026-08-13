@@ -102,8 +102,7 @@ export function FalhaDaExecucao({ falha }: { falha: UltimaFalha }) {
   return (
     <div className="mt-2 space-y-1 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs">
       <div className="flex items-center gap-1.5 font-medium text-destructive">
-        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-        A última tentativa de execução falhou
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />A última tentativa de execução falhou
       </div>
       {motivo && <p className="text-foreground">{motivo}</p>}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
@@ -288,12 +287,13 @@ export function ActionCard({
               Aparece só quando o banco tem a falha — card sem ela e sem executed_at segue "aguardando". */}
           {approval.ultima_falha && <FalhaDaExecucao falha={approval.ultima_falha} />}
 
-          {approval.status === "approved" && !approval.ultima_falha && (
-            approval.executed_at ? (
+          {approval.status === "approved" &&
+            !approval.ultima_falha &&
+            (approval.executed_at ? (
               approval.execution_result && approval.execution_result.ok === false ? (
                 <p className="mt-2 text-xs text-destructive">
-                  A execução terminou com escrita parcial em {fmtWhen(approval.executed_at)} — confira no
-                  Gerenciador antes de tentar de novo.
+                  A execução terminou com escrita parcial em {fmtWhen(approval.executed_at)} —
+                  confira no Gerenciador antes de tentar de novo.
                 </p>
               ) : (
                 <p className="mt-2 text-xs text-muted-foreground">
@@ -301,11 +301,8 @@ export function ActionCard({
                 </p>
               )
             ) : (
-              <p className="mt-2 text-xs text-muted-foreground">
-                Aprovado — aguardando execução.
-              </p>
-            )
-          )}
+              <p className="mt-2 text-xs text-muted-foreground">Aprovado — aguardando execução.</p>
+            ))}
           {approval.status === "rejected" && approval.review_note && (
             <p className="mt-2 text-xs text-muted-foreground">
               <span className="font-medium">Motivo:</span> {approval.review_note}

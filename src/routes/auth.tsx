@@ -78,7 +78,13 @@ function AuthPage() {
                 </div>
                 <div>
                   <Label htmlFor="password">Senha</Label>
-                  <Input id="password" name="password" type="password" required autoComplete="current-password" />
+                  <Input
+                    id="password"
+                    name="password"
+                    type="password"
+                    required
+                    autoComplete="current-password"
+                  />
                 </div>
                 <Button type="submit" className="w-full" disabled={loading}>
                   {loading ? "Entrando…" : "Entrar"}
@@ -97,13 +103,21 @@ function AuthPage() {
                 </div>
                 <div>
                   <Label htmlFor="password2">Senha</Label>
-                  <Input id="password2" name="password" type="password" minLength={8} required autoComplete="new-password" />
+                  <Input
+                    id="password2"
+                    name="password"
+                    type="password"
+                    minLength={8}
+                    required
+                    autoComplete="new-password"
+                  />
                 </div>
                 <Button type="submit" className="w-full" disabled={loading}>
                   {loading ? "Criando…" : "Criar conta"}
                 </Button>
                 <p className="text-xs text-muted-foreground">
-                  O primeiro usuário criado assume o papel de administrador. Demais entram como visualizadores.
+                  O primeiro usuário criado assume o papel de administrador. Demais entram como
+                  visualizadores.
                 </p>
               </form>
             </TabsContent>

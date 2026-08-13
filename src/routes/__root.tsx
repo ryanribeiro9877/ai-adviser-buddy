@@ -76,8 +76,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { property: "og:title", content: "Gestor de Tráfego IA" },
       {
         property: "og:description",
-        content:
-          "Dashboard executivo, aprovações e auditoria para gestores de tráfego pago.",
+        content: "Dashboard executivo, aprovações e auditoria para gestores de tráfego pago.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },

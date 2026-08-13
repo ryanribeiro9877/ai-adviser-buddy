@@ -147,7 +147,10 @@ export function GlobalFilters({
         </Select>
 
         {/* Tipo (categoria da campanha) */}
-        <Select value={filters.tipo} onValueChange={(v) => setFilters({ tipo: v as TipoConta | "all" })}>
+        <Select
+          value={filters.tipo}
+          onValueChange={(v) => setFilters({ tipo: v as TipoConta | "all" })}
+        >
           <SelectTrigger className="h-8 w-[160px]">
             <SelectValue placeholder="Tipo" />
           </SelectTrigger>
