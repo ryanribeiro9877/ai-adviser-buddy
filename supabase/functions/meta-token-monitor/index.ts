@@ -154,7 +154,10 @@ async function coletarModelo(companyId: string) {
       contas.push({ account_id: acct, bm_id: String(b.id), status: STATUS_LABEL[st] ?? st });
     }
   }
-  return { businesses: bms.length, contas: contas.length, bms, contas };
+  // `contas` aparecia duas vezes neste literal (contagem e depois array): a
+  // segunda vencia em silencio e a contagem nunca chegava ao consumidor.
+  // Mantido o comportamento de runtime (contas = array) e a contagem nomeada.
+  return { businesses: bms.length, total_contas: contas.length, bms, contas };
 }
 
 Deno.serve(async (req) => {

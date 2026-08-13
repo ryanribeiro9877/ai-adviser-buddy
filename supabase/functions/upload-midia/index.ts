@@ -48,7 +48,6 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const META_ADS_TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
-const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? "").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
 const MAX_IMG_BYTES = 8 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 45 * 1024 * 1024;

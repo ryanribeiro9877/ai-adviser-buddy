@@ -1015,7 +1015,6 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
   // que ja compara contra o teto da empresa - manter a leitura aqui deixaria uma variavel pronta
   // para alguem reintroduzir a comparacao local ao lado da RPC.
   if (!contasOk.length) return { erro: "criacao bloqueada: nenhuma conta desta empresa esta habilitada para criacao. Isso e configuracao do sistema, nao algo que voce possa contornar." };
-  const avisoDryRun = (perm!.aviso_dry_run as string | null) ?? null;
 
   // v25 CORRECAO CRITICA (28/07): a conta de destino tem de vir da EMPRESA DESTA CONVERSA,
   // nunca do primeiro item da lista branca. Existem 2 empresas no banco (Legal e Viver e
@@ -1196,7 +1195,6 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       ? (camps ?? []).find((c) => String(c.external_id ?? "") === campanhaDestino)
       : ((camps ?? []).find((c) => norm(c.name) === norm(campanhaDestino))
          ?? (camps ?? []).filter((c) => norm(c.name).includes(norm(campanhaDestino)))[0]);
-    let destOrigem = dest ? "espelho" : "";
     if (!dest) {
       // Ultimo recurso: card de criacao JA EXECUTADO. O identificador que a Meta devolveu fica
       // gravado no proprio pedido, entao a campanha existe de fato mesmo se o espelho atrasar.
@@ -1212,7 +1210,6 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       if (hit) {
         dest = { id: null as any, name: String(hit.execution_result?.objeto?.name ?? campanhaDestino),
                  external_id: String(hit.execution_result?.id_criado) };
-        destOrigem = "pedido_executado";
       }
     }
     if (!dest) return { erro: `campanha de destino '${campanhaDestino}' nao encontrada nem no sistema nem entre as criadas por pedido aprovado. Se ela ainda nao existe, proponha criar_campanha primeiro e aguarde a aprovacao. NAO invente o identificador.` };

@@ -18,11 +18,15 @@ export type AvaliacaoOrcamento =
       avaliacao: Record<string, unknown> | null;
     };
 
+// PromiseLike, nao Promise: supabase-js devolve um PostgrestFilterBuilder, que e
+// awaitable mas nao tem catch/finally/Symbol.toStringTag. Exigir Promise aqui
+// fazia o deno check recusar todo chamador real (traffic-chat, meta-actions),
+// sem que houvesse qualquer problema em runtime - o codigo so faz `await`.
 type RpcClient = {
   rpc: (
     fn: string,
     args: Record<string, unknown>,
-  ) => Promise<{ data: unknown; error: { message?: string } | null }>;
+  ) => PromiseLike<{ data: unknown; error: { message?: string } | null }>;
 };
 
 /** Chama a RPC e devolve ok/motivo. Nunca inventa permitido=true. */

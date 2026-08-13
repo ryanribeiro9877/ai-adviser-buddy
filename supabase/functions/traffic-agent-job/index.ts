@@ -1308,9 +1308,23 @@ async function executarLote(
     const res = resultados[i];
     if (res.status === "fulfilled") {
       saida.push({ nome: res.value.nome, relatorio: res.value.relatorio, completo: res.value.completo });
-      tel.subagentes.push({ nome: res.value.nome, tools: res.value.tools, tokens_in: res.value.tokens_in,
-        tokens_out: res.value.tokens_out, reasoning_tokens: res.value.reasoning_tokens, finish: res.value.finish,
-        partes_relatorio: res.value.partes, relatorio_completo: res.value.completo });
+      // rodarAnaliseVisual devolve so { nome, relatorio, completo }; rodarSubagente
+      // devolve tambem tools/tokens/finish/partes. Acessar os campos de token no
+      // primeiro caso gravava undefined em silencio na telemetria - agora a ausencia
+      // e declarada no tipo e o campo simplesmente nao entra no registro.
+      const t = res.value as Partial<{
+        tools: unknown; tokens_in: number; tokens_out: number;
+        reasoning_tokens: number; finish: string; partes: number;
+      }>;
+      tel.subagentes.push({
+        nome: res.value.nome, relatorio_completo: res.value.completo,
+        ...(t.tools !== undefined ? { tools: t.tools } : {}),
+        ...(t.tokens_in !== undefined ? { tokens_in: t.tokens_in } : {}),
+        ...(t.tokens_out !== undefined ? { tokens_out: t.tokens_out } : {}),
+        ...(t.reasoning_tokens !== undefined ? { reasoning_tokens: t.reasoning_tokens } : {}),
+        ...(t.finish !== undefined ? { finish: t.finish } : {}),
+        ...(t.partes !== undefined ? { partes_relatorio: t.partes } : {}),
+      });
     } else {
       saida.push({ nome: lote[i].nome, relatorio: `(especialista falhou: ${String(res.reason).slice(0, 200)} - trate como LACUNA)`, completo: false });
       tel.subagentes.push({ nome: lote[i].nome, erro: String(res.reason).slice(0, 200), relatorio_completo: false });

@@ -127,7 +127,7 @@ function SidebarContent({
 }
 
 export function AppShell() {
-  const { user, role, isAdmin, companies, selectedCompany, setSelectedCompanyId } = useApp();
+  const { user, isAdmin, companies, selectedCompany, setSelectedCompanyId } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);

@@ -2003,7 +2003,6 @@ export async function montarCriacao(
     if (temStorySpec) {
       const spec: any = cb.object_story_spec;
       const vdRep: any = spec?.video_data ?? null;
-      const linkRep = vdRep?.call_to_action?.value?.link ?? vdRep?.link ?? null;
       // Destino POR PRODUTO (decidido na emissao): so corrige quando CLT; preserva o resto.
       const destinoRep = destinoDoPedidoCompat(p);
       let specFinal = spec;
