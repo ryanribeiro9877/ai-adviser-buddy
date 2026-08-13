@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogTrigger,
@@ -23,7 +24,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Plus, Building2, Link2, RefreshCw, AlertTriangle } from "lucide-react";
+import {
+  Plus,
+  Building2,
+  Link2,
+  RefreshCw,
+  AlertTriangle,
+  Pencil,
+  CheckCircle2,
+  Loader2,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   AVISO_NAO_VERIFICADA,
@@ -50,6 +60,17 @@ const PROVIDERS = [
   // ESP-45: GA4 / Search Console / Tag Manager ocultos na UI — nao ha integracao real.
 ] as const;
 
+type PipeboardAccount = {
+  id: string;
+  external_id: string;
+  name: string;
+  status: string;
+  currency: string | null;
+  timezone: string | null;
+  already_linked_company_id: string | null;
+  selected_company: boolean;
+};
+
 /** Badge de estado — mesma aparência na grade de provedores e na tabela. */
 function BadgeEstado({ estado }: { estado: EstadoExibido }) {
   const meta = ESTADO_META[estado];
@@ -68,6 +89,15 @@ function BadgeEstado({ estado }: { estado: EstadoExibido }) {
 function EmpresasPage() {
   const { isAdmin, companies, refreshCompanies, selectedCompanyId } = useApp();
   const [open, setOpen] = useState(false);
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [editingIntegration, setEditingIntegration] = useState<Integracao | null>(null);
+  const [accounts, setAccounts] = useState<PipeboardAccount[]>([]);
+  const [selectedAccount, setSelectedAccount] = useState<PipeboardAccount | null>(null);
+  const [displayName, setDisplayName] = useState("");
+  const [loadingAccounts, setLoadingAccounts] = useState(false);
+  const [savingLink, setSavingLink] = useState(false);
+  const [pipeboardStatus, setPipeboardStatus] = useState<string | null>(null);
+  const [contractLimit, setContractLimit] = useState(10);
 
   const integrations = useQuery({
     queryKey: ["integrations", selectedCompanyId],
@@ -131,31 +161,55 @@ function EmpresasPage() {
     setOpen(false);
   };
 
-  // Registrar ≠ conectar. A linha nasce `nao_verificada` / `quarentena` pelos
-  // defaults do banco (migração 20260803121910) e não coleta nada até o
-  // handshake real existir (GT-24). O texto e o toast dizem isso.
-  const registrar = async (provider: string) => {
+  const openLinkDialog = async (integration: Integracao | null) => {
     if (!selectedCompanyId) return;
-    const label = PROVIDERS.find((p) => p.id === provider)?.label ?? provider;
-    const hoje = new Date().toLocaleDateString("pt-BR");
-    const { error } = await supabase.from("integrations").insert({
-      company_id: selectedCompanyId,
-      provider: provider as never,
-      account_name: label,
-      external_id: null,
-      estado_motivo: `Registrada pelo painel em ${hoje}, sem handshake com a plataforma. Nenhum dado será coletado até a conexão ser verificada.`,
+    setEditingIntegration(integration);
+    setSelectedAccount(null);
+    setDisplayName(
+      integration && !ehFantasma(integration, "Meta Ads") ? integration.account_name : "",
+    );
+    setAccounts([]);
+    setPipeboardStatus(null);
+    setLinkOpen(true);
+    setLoadingAccounts(true);
+    const { data, error } = await supabase.functions.invoke("integration-verify", {
+      body: { action: "list", company_id: selectedCompanyId },
     });
-    if (error) return toast.error(error.message);
-    await logAudit({
-      companyId: selectedCompanyId,
-      action: "integration.connect",
-      targetType: "integration",
-      details: { provider, verificada: false },
+    setLoadingAccounts(false);
+    if (error || data?.error) {
+      toast.error(data?.error ?? error?.message ?? "Não foi possível consultar o Pipeboard.");
+      return;
+    }
+    setAccounts((data?.accounts ?? []) as PipeboardAccount[]);
+    setPipeboardStatus(data?.pipeboard?.token_status ?? null);
+    setContractLimit(Number(data?.contract_limit ?? 10));
+  };
+
+  const chooseAccount = (account: PipeboardAccount) => {
+    setSelectedAccount(account);
+    if (!displayName.trim()) setDisplayName(account.name);
+  };
+
+  const saveLink = async () => {
+    if (!selectedCompanyId || !selectedAccount || !displayName.trim()) return;
+    setSavingLink(true);
+    const { data, error } = await supabase.functions.invoke("integration-verify", {
+      body: {
+        action: "link",
+        company_id: selectedCompanyId,
+        integration_id: editingIntegration?.id ?? "",
+        account_id: selectedAccount.id,
+        account_name: displayName.trim(),
+      },
     });
+    setSavingLink(false);
+    if (error || data?.error) {
+      toast.error(data?.error ?? error?.message ?? "Não foi possível vincular a conta.");
+      return;
+    }
     await integrations.refetch();
-    toast.warning("Integração registrada — ainda não verificada.", {
-      description: AVISO_NAO_VERIFICADA,
-    });
+    toast.success("Conta Meta vinculada e verificada.");
+    setLinkOpen(false);
   };
 
   return (
@@ -264,26 +318,22 @@ function EmpresasPage() {
                     size="sm"
                     variant="outline"
                     className="mt-3 w-full"
-                    onClick={() => registrar(p.id)}
+                    onClick={() => openLinkDialog(null)}
                   >
                     <Link2 className="mr-1 h-3.5 w-3.5" />
-                    Conectar
+                    Vincular conta do Pipeboard
                   </Button>
                 )}
 
                 {isAdmin && naoVerificadas > 0 && (
-                  // O endpoint de verificação é a edge integration-verify (GT-24),
-                  // que ainda não existe. Botão desabilitado com o motivo em vez de
-                  // um clique que não faz nada.
                   <Button
                     size="sm"
                     variant="outline"
                     className="mt-3 w-full"
-                    disabled
-                    title="A verificação com a plataforma ainda não está disponível (edge integration-verify)"
+                    onClick={() => openLinkDialog(doProvedor[0])}
                   >
                     <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                    Verificar conexão
+                    Escolher conta no Pipeboard
                   </Button>
                 )}
               </Card>
@@ -308,6 +358,7 @@ function EmpresasPage() {
                   <TableHead className="w-[150px]">Estado</TableHead>
                   <TableHead>Motivo</TableHead>
                   <TableHead className="w-[170px]">Desde</TableHead>
+                  {isAdmin && <TableHead className="w-[130px] text-right">Ação</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -347,6 +398,14 @@ function EmpresasPage() {
                       <TableCell className="text-xs text-muted-foreground">
                         {desde ?? "—"}
                       </TableCell>
+                      {isAdmin && (
+                        <TableCell className="text-right">
+                          <Button size="sm" variant="ghost" onClick={() => openLinkDialog(i)}>
+                            <Pencil className="mr-1 h-3.5 w-3.5" />
+                            Editar / vincular
+                          </Button>
+                        </TableCell>
+                      )}
                     </TableRow>
                   );
                 })}
@@ -355,6 +414,103 @@ function EmpresasPage() {
           </div>
         </div>
       )}
+
+      <Dialog open={linkOpen} onOpenChange={setLinkOpen}>
+        <DialogContent className="max-h-[86vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Vincular conta Meta via Pipeboard</DialogTitle>
+            <DialogDescription>
+              Escolha uma conta acessível pelo conector e confirme o nome usado neste painel.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">Contas disponíveis no conector</span>
+                <span className="text-xs text-muted-foreground">
+                  {accounts.length}/{contractLimit} visíveis · Pipeboard{" "}
+                  {pipeboardStatus ?? "consultando"}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                O login com a Meta continua protegido no Pipeboard. Aqui você escolhe qual conta
+                pertence à empresa ativa e como ela aparecerá no sistema.
+              </p>
+            </div>
+
+            {loadingAccounts ? (
+              <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Consultando contas no Pipeboard…
+              </div>
+            ) : accounts.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-5 text-center text-sm text-muted-foreground">
+                Nenhuma conta foi devolvida. Confirme a conexão em pipeboard.co/connections.
+              </div>
+            ) : (
+              <div className="grid gap-2">
+                {accounts.map((account) => {
+                  const unavailable =
+                    !!account.already_linked_company_id &&
+                    account.already_linked_company_id !== selectedCompanyId;
+                  const selected = selectedAccount?.external_id === account.external_id;
+                  return (
+                    <button
+                      key={account.external_id}
+                      type="button"
+                      disabled={unavailable}
+                      onClick={() => chooseAccount(account)}
+                      className={cn(
+                        "flex w-full items-center justify-between gap-3 rounded-lg border p-3 text-left transition-colors",
+                        selected
+                          ? "border-primary bg-primary/5 ring-1 ring-primary"
+                          : "hover:bg-muted/50",
+                        unavailable && "cursor-not-allowed opacity-50",
+                      )}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium">{account.name}</span>
+                        <span className="block text-[11px] text-muted-foreground">
+                          {account.id} · {account.status}
+                          {unavailable ? " · vinculada a outra empresa" : ""}
+                        </span>
+                      </span>
+                      {selected && <CheckCircle2 className="h-5 w-5 shrink-0 text-primary" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            <div>
+              <Label htmlFor="meta-account-display-name">Nome exibido no sistema</Label>
+              <Input
+                id="meta-account-display-name"
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                placeholder="Ex.: Conta de anúncios — Cliente"
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Este nome é local. Ele não renomeia a conta dentro da Meta.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLinkOpen(false)}>
+              Cancelar
+            </Button>
+            <Button
+              onClick={saveLink}
+              disabled={!selectedAccount || !displayName.trim() || savingLink}
+            >
+              {savingLink && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+              Vincular conta
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

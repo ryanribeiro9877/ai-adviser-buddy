@@ -68,3 +68,8 @@ verify_jwt = false
 # Bearer get_mcp_api_key(); a propria edge autentica via mcp_key_valida.
 [functions.enviar-digest]
 verify_jwt = false
+
+# GT-24: chamada exclusiva do painel autenticado. O gateway valida o JWT e a edge
+# ainda confirma getUser + papel admin antes de revelar contas ou gravar vínculos.
+[functions.integration-verify]
+verify_jwt = true
