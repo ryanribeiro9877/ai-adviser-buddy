@@ -34,26 +34,29 @@ export default defineConfig({
         "src/routes/**/*.tsx",
       ],
       exclude: ["src/components/ui/**", "src/lib/error-capture.ts", "src/lib/error-page.ts"],
-      // MEDIDOS em 13/08/2026 com 394 testes, não estimados: lines 28.38%,
-      // statements 28.65%, functions 20.5%, branches 22.38%. O piso fica um
-      // passo abaixo de cada um para o portão não ser instável.
+      // MEDIDOS em 13/08/2026 com 477 testes, não estimados: lines 40.47%. O
+      // piso fica um passo abaixo para o portão não ser instável.
       //
       // Histórico do número, que explica por que ele se move: 8.47% (87 testes)
       // → 15.12% (+breakdown, notificacoes) → 13.38% ao incluir routes/ no
-      // escopo (mais código medido, não menos testado) → 24.05% (+relatorio-xlsx,
-      // integracoes, attachments, xlsx-export, utils) → 26.28% (+hooks) →
-      // 28.38% (+app-context, guarda de rota).
+      // escopo (mais código medido, não menos testado) → 24.05% (+lib restante)
+      // → 26.28% → 28.38% (+app-context, guarda de rota) → 40.47% (+hooks).
       //
-      // Como ler o 28%: NÃO é "o front está 28% testado". Por diretório —
-      //   src/lib          99.8% de linhas  (praticamente completo)
-      //   src/routes       ~54%
-      //   src/hooks        ~15%   (use-dictation, 228 linhas, ficou fora: depende
-      //                            da Web Speech API, que o jsdom não implementa)
-      //   src/components   ~5.6%  (~30 arquivos — é aqui que está a lacuna)
-      // A lógica de decisão e de formatação está coberta; a árvore de UI não.
+      // NÃO leia o agregado como "o front está 40% testado". Por diretório:
+      //   src/lib          99.8%  praticamente completo
+      //   src/hooks        94.1%  praticamente completo
+      //   src/routes       ~54%   login e guarda cobertos; telas, não
+      //   src/components   ~5.6%  ~30 arquivos — é aqui que está a lacuna
+      //
+      // CORREÇÃO de uma nota anterior deste arquivo: dizia que use-dictation
+      // ficaria fora "porque depende da Web Speech API". Está errado — o próprio
+      // docstring do hook diz que a Web Speech foi REMOVIDA; ele usa
+      // MediaRecorder e recebe a transcrição por injeção de dependência, o que o
+      // torna testável. Hoje está a 96% (25 testes).
+      //
       // O valor deste portão é ser CATRACA (impedir que caia), não atestado.
       // Subir junto com a cobertura, nunca antes dela.
-      thresholds: { lines: 28, functions: 20, statements: 28, branches: 22 },
+      thresholds: { lines: 40, functions: 30, statements: 40, branches: 30 },
     },
   },
 });
