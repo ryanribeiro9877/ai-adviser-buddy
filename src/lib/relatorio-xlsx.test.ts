@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import {
   nomeArquivo,
   montarWorkbook,
@@ -6,6 +6,18 @@ import {
   type DadosExport,
   type SerieDia,
 } from "./relatorio-xlsx";
+
+// `montarWorkbook` faz `await import("exceljs")`, e o ExcelJS é grande: a PRIMEIRA
+// chamada paga a carga do módulo, que sob instrumentação de cobertura passou de
+// 5s e estourou o timeout padrão — teste verde nas execuções normais e vermelho
+// sob `--coverage`, que é o pior tipo de flaky.
+//
+// A carga é aquecida aqui, num hook com orçamento próprio e generoso, em vez de
+// afrouxar o `testTimeout` global: o padrão de 5s é o que pega travamento de
+// verdade nos outros 470 testes, e não vale perdê-lo por causa de um import.
+beforeAll(async () => {
+  await import("exceljs");
+}, 120_000);
 
 // Este e o relatorio que vai para o CLIENTE. Duas coisas o definem e sao o que
 // estes testes protegem:
