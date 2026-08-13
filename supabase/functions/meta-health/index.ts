@@ -157,7 +157,10 @@ async function sondaPendencias(limparOrfaos: boolean) {
   let next: string | null =
     `/${AD_ACCOUNT}/adsets?fields=id,name,status,effective_status,daily_budget,is_dynamic_creative,campaign_id&limit=100`;
   while (next) {
-    const page = next.startsWith("http")
+    // Anotacao explicita: o inicializador le `next` dentro da propria closure e
+    // o TS caia em circularidade (TS7022), inferindo any em silencio. Os dois
+    // ramos devolvem a mesma forma, a de g().
+    const page: { status: number; body: unknown } = next.startsWith("http")
       ? await (async () => {
           const url = next!.includes("access_token=")
             ? next!

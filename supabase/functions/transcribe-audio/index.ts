@@ -93,7 +93,12 @@ async function getOpenAIKey(): Promise<string> {
 // ---------- caminho principal: OpenAI /v1/audio/transcriptions ----------
 async function transcreverOpenAI(key: string, bytes: Uint8Array, mime: string) {
   const form = new FormData();
-  form.append("file", new File([bytes], `audio.${extFromMime(mime)}`, { type: mime }));
+  // Cast so para o checador (mesmo motivo de drive-audio-transcribe): BlobPart
+  // exige Uint8Array<ArrayBuffer> e a lib do Deno 2.9 tipa ArrayBufferLike.
+  form.append(
+    "file",
+    new File([bytes as Uint8Array<ArrayBuffer>], `audio.${extFromMime(mime)}`, { type: mime }),
+  );
   form.append("model", OPENAI_AUDIO_MODEL);
   form.append("language", "pt");
   form.append("prompt", GLOSSARIO);

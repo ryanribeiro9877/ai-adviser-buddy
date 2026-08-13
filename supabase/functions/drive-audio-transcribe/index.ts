@@ -158,7 +158,11 @@ function extrairAudio(input: Uint8Array): { out: Uint8Array | null; codec: strin
 
 async function transcrever(key: string, bytes: Uint8Array, mime: string, nomeArquivo: string) {
   const form = new FormData();
-  form.append("file", new File([bytes], nomeArquivo, { type: mime }));
+  // BlobPart exige Uint8Array<ArrayBuffer>; a lib do Deno 2.9 tipa o retorno como
+  // Uint8Array<ArrayBufferLike>, que inclui SharedArrayBuffer. Aqui os bytes vem
+  // sempre de um ArrayBuffer comum, entao o cast e so para o checador - nao muda
+  // nada em runtime e nao copia o buffer.
+  form.append("file", new File([bytes as Uint8Array<ArrayBuffer>], nomeArquivo, { type: mime }));
   form.append("mime", mime);
   const resp = await fetch(`${SUPABASE_URL}/functions/v1/transcribe-audio`, {
     method: "POST",

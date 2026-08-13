@@ -41,7 +41,9 @@
 // recusa explica que o envio em partes e v2. Video grande nao e "erro silencioso".
 // =============================================================================
 
-import { createClient } from "npm:@supabase/supabase-js@2";
+// esm.sh, nao npm:, para casar com _shared/mcp_auth.ts e com as outras 22 edges
+// (mesmo motivo registrado em mcp-server/index.ts).
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -133,7 +135,8 @@ async function metaUploadVideo(account: string, nome: string, bytes: Uint8Array,
   const fd = new FormData();
   fd.set("name", nome);
   fd.set("access_token", META_ADS_TOKEN);
-  fd.set("source", new Blob([bytes], { type: mime || "video/mp4" }), nome);
+  // Cast so para o checador (mesmo motivo de drive-audio-transcribe).
+  fd.set("source", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mime || "video/mp4" }), nome);
   const r = await fetch(`${GRAPH}/${account}/advideos`, { method: "POST", body: fd });
   const j = await r.json();
   if (!r.ok || !j.id) throw new Error(`advideos ${r.status}: ${JSON.stringify(j).slice(0, 220)}`);

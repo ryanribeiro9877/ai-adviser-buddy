@@ -282,7 +282,10 @@
 //   escalar_criativo segue NAO automatizado (pulado com nota — decisão manual).
 // Token: META_ADS_TOKEN (redigido de qualquer saída). Auth: x-mcp-key.
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+// Alinhado com as outras 24 edges e com _shared/mcp_auth.ts, que tipam contra
+// @2. O pin antigo em 2.49.1 fazia o SupabaseClient desta edge ser um tipo
+// diferente do que mcpKeyValida/julgarOrcamentoDiario esperam.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
 import {

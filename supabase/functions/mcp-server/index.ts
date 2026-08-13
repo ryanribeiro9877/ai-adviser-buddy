@@ -1,4 +1,8 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+// esm.sh, nao npm:, para casar com _shared/mcp_auth.ts e com as outras 22 edges.
+// Com o especificador npm: o Deno resolvia pelo node_modules do repo e o
+// SupabaseClient resultante era um tipo nominalmente diferente do que
+// mcpKeyValida espera - o deno check nao passava nesta edge.
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { situacaoDoCard } from "../_shared/aprovacoes.ts";
 
