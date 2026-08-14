@@ -265,22 +265,45 @@ async function t_rpc(nome: string, parametros: Record<string, unknown>) {
   return error ? { erro: `falha ao chamar ${nome}: ${error.message}` } : data;
 }
 async function t_funnel(companyId: string, date_from?: string, date_to?: string) {
-  let q = supa.from("metric_snapshots").select("snapshot_date,spend,impressions,clicks,link_clicks,landing_page_views,form_leads,messaging_started").eq("company_id", companyId);
+  let q = supa.from("metric_snapshots").select("campaign_id,snapshot_date,spend,impressions,clicks,link_clicks,landing_page_views,form_leads,messaging_started").eq("company_id", companyId);
   if (date_from) q = q.gte("snapshot_date", date_from);
   if (date_to) q = q.lte("snapshot_date", date_to);
   const { data } = await q;
-  const s = (data ?? []).reduce((a, r) => ({
+  const linhas = data ?? [];
+  const s = linhas.reduce((a, r) => ({
     spend: a.spend + Number(r.spend || 0), imp: a.imp + Number(r.impressions || 0), clk: a.clk + Number(r.clicks || 0),
     link: a.link + Number(r.link_clicks || 0), lpv: a.lpv + Number(r.landing_page_views || 0),
     forms: a.forms + Number(r.form_leads || 0), msg: a.msg + Number(r.messaging_started || 0),
   }), { spend: 0, imp: 0, clk: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
-  const datas = (data ?? []).map((r) => r.snapshot_date).sort();
+  // v29 (14/08): custo por resultado escopado as campanhas que registram o evento (auditoria COHAPM:
+  // gasto de engajamento sem conversa inflava o custo por conversa de R$ 21,13 para R$ 31,89).
+  const porCampanha = new Map<string, { spend: number; forms: number; msg: number }>();
+  for (const r of linhas) {
+    const k = String(r.campaign_id ?? "sem_campanha");
+    const cur = porCampanha.get(k) ?? { spend: 0, forms: 0, msg: 0 };
+    cur.spend += Number(r.spend || 0);
+    cur.forms += Number(r.form_leads || 0);
+    cur.msg += Number(r.messaging_started || 0);
+    porCampanha.set(k, cur);
+  }
+  const gastoOnde = (tem: (v: { forms: number; msg: number }) => boolean) =>
+    [...porCampanha.values()].filter(tem).reduce((a, v) => a + v.spend, 0);
+  const gastoComForm = gastoOnde((v) => v.forms > 0);
+  const gastoComConversa = gastoOnde((v) => v.msg > 0);
+  const semEvento = [...porCampanha.values()].filter((v) => v.spend > 0 && v.forms === 0 && v.msg === 0);
+  const datas = linhas.map((r) => r.snapshot_date).sort();
   return { periodo_solicitado: { de: date_from ?? "inicio", ate: date_to ?? "hoje" },
+    janela_sem_data_informada: !date_from && !date_to ? "ATENCAO: nenhuma data foi passada, entao esta e a serie INTEIRA da empresa (veja cobertura_real). NAO chame isso de '7 dias' nem atribua a uma campanha especifica." : undefined,
     cobertura_real: { primeiro_dia: datas[0] ?? null, ultimo_dia: datas[datas.length - 1] ?? null, dias_com_dado: new Set(datas).size },
     funil_midia: { impressoes: s.imp, cliques_todos: s.clk, cliques_no_link: s.link, visualizacoes_lp: s.lpv, formularios: s.forms, conversas_whatsapp: s.msg },
     gasto: brl(s.spend),
-    custos: { por_clique_no_link: s.link ? brl(s.spend / s.link) : null, por_visualizacao_lp: s.lpv ? brl(s.spend / s.lpv) : null, por_formulario: s.forms ? brl(s.spend / s.forms) : null, por_conversa: s.msg ? brl(s.spend / s.msg) : null },
-    nota: "funil de MIDIA agregado da conta. cliques_todos = todos os cliques; cliques_no_link = so os que levam ao destino - nao misture as bases. visualizacoes_lp e resultado valido, reporte. Conversao final (CRM) esta fora de escopo por decisao de 28/07." };
+    custos: { por_clique_no_link: s.link ? brl(s.spend / s.link) : null, por_visualizacao_lp: s.lpv ? brl(s.spend / s.lpv) : null,
+      por_formulario: s.forms ? brl(gastoComForm / s.forms) : null, por_conversa: s.msg ? brl(gastoComConversa / s.msg) : null,
+      gasto_base_do_por_formulario: s.forms ? brl(gastoComForm) : null,
+      gasto_base_do_por_conversa: s.msg ? brl(gastoComConversa) : null },
+    gasto_de_campanhas_sem_formulario_nem_conversa: semEvento.length ? brl(semEvento.reduce((a, v) => a + v.spend, 0)) : null,
+    campanhas_sem_formulario_nem_conversa: semEvento.length,
+    nota: "funil de MIDIA agregado da conta. cliques_todos = todos os cliques; cliques_no_link = so os que levam ao destino - nao misture as bases. visualizacoes_lp e resultado valido, reporte. CUSTO POR RESULTADO: por_formulario e por_conversa usam SO o gasto das campanhas que registraram aquele evento (veja gasto_base_do_*); e PROIBIDO recalcular dividindo `gasto` total pelo evento. Se a janela mistura objetivos, diga QUAL campanha sustenta o custo antes de usar como benchmark. Conversao final (CRM) esta fora de escopo por decisao de 28/07." };
 }
 async function t_ads_ranking(companyId: string, days = 7) {
   const from = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
@@ -320,6 +343,9 @@ async function t_campaign_detail(companyId: string, name_like: string) {
   const rows = serie ?? [];
   const num = (v: unknown) => Number(v || 0);
   const pct = (n: number, d: number) => d > 0 ? `${(100 * n / d).toFixed(2)}%` : null;
+  // v30 (14/08): nome do campo carrega a semantica (alcance_soma_diaria_nao_deduplicada) e
+  // media diaria sai pronta so com dias fechados - vide comentario em traffic-chat.
+  const hoje = new Date().toISOString().slice(0, 10);
   const linhaDia = (s: Record<string, unknown>) => {
     const spend = num(s.spend), imp = num(s.impressions), clkTodos = num(s.clicks), clkLink = num(s.link_clicks);
     return {
@@ -330,6 +356,7 @@ async function t_campaign_detail(companyId: string, name_like: string) {
       ctr_todos: pct(clkTodos, imp), ctr_link: pct(clkLink, imp),
       cpc_todos: clkTodos ? brl(spend / clkTodos) : null, cpc_link: clkLink ? brl(spend / clkLink) : null,
       cpm: imp ? brl(1000 * spend / imp) : null,
+      ...(String(s.snapshot_date) === hoje ? { dia_parcial_em_coleta: true } : {}),
     };
   };
   const tot = rows.reduce((a, s: Record<string, unknown>) => ({
@@ -337,21 +364,26 @@ async function t_campaign_detail(companyId: string, name_like: string) {
     clkTodos: a.clkTodos + num(s.clicks), link: a.link + num(s.link_clicks), lpv: a.lpv + num(s.landing_page_views),
     forms: a.forms + num(s.form_leads), msg: a.msg + num(s.messaging_started),
   }), { spend: 0, imp: 0, reach: 0, clkTodos: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
+  const fechados = rows.filter((s: Record<string, unknown>) => String(s.snapshot_date) < hoje);
+  const gastoFechado = fechados.reduce((a, s: Record<string, unknown>) => a + num(s.spend), 0);
   return {
     campanha: { nome: c.name, status: c.status, categoria: c.category, gasto_acumulado: brl(num(c.spend)) },
     serie_diaria_14d: rows.map(linhaDia),
     totais_periodo: {
-      dias_com_dado: rows.length, gasto: brl(tot.spend), impressoes: tot.imp, alcance: tot.reach,
+      dias_com_dado: rows.length, dias_fechados: fechados.length,
+      inclui_dia_parcial: rows.some((s: Record<string, unknown>) => String(s.snapshot_date) === hoje),
+      gasto: brl(tot.spend),
+      gasto_medio_por_dia_fechado: fechados.length ? brl(gastoFechado / fechados.length) : null,
+      impressoes: tot.imp, alcance_soma_diaria_nao_deduplicada: tot.reach,
       cliques_todos: tot.clkTodos, cliques_no_link: tot.link, visualizacoes_lp: tot.lpv,
       formularios: tot.forms, conversas: tot.msg,
       ctr_todos: pct(tot.clkTodos, tot.imp), ctr_link: pct(tot.link, tot.imp),
       cpc_todos: tot.clkTodos ? brl(tot.spend / tot.clkTodos) : null, cpc_link: tot.link ? brl(tot.spend / tot.link) : null,
       cpm: tot.imp ? brl(1000 * tot.spend / tot.imp) : null,
       custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
-      alcance_e_soma_dos_dias: true,
     },
     outras_encontradas: camps.slice(1).map((x) => x.name),
-    nota: "serie diaria e totais vem de metric_snapshots (D-1, coletor oficial pipeboard:meta). DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques (curtida, comentario, expandir, foto, link); cliques_no_link = SO cliques que levam ao destino. Por isso ctr_todos/cpc_todos usam todos os cliques e ctr_link/cpc_link usam so os de link - ao falar de 'CTR/CPC de link' cite ctr_link/cpc_link; ao falar de engajamento amplo cite ctr_todos/cpc_todos. visualizacoes_lp (landing_page_views) e RESULTADO valido e deve ser reportado, principalmente em campanha de engajamento/trafego. alcance, cliques, frequencia, CTR, CPC, CPM e visualizacoes_lp SAO expostos aqui - NUNCA declare essas metricas indisponiveis. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero. ATENCAO no total: alcance e SOMA dos dias, nao alcance unico desduplicado (mesma pessoa em 2 dias conta 2x) - declare isso ao reportar alcance acumulado; alcance por dia e confiavel.",
+    nota: "serie diaria e totais vem de metric_snapshots (D-1, coletor oficial pipeboard:meta). DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques; cliques_no_link = SO cliques que levam ao destino - ao falar de 'CTR/CPC de link' cite ctr_link/cpc_link. visualizacoes_lp e RESULTADO valido e deve ser reportado. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero. ALCANCE: alcance_soma_diaria_nao_deduplicada e a SOMA dos alcances diarios (mesma pessoa em 2 dias conta 2x) - e PROIBIDO apresenta-la como 'alcance do periodo reportado pela plataforma' ou pessoas unicas; alcance unico do periodo so ao vivo via ler_pipeboard (insights com time_range inteiro, sem quebra por dia). MEDIA DIARIA: use gasto_medio_por_dia_fechado para pacing e comparacao com orcamento - o dia corrente e parcial e dividir por ele dilui a media e esconde estouro de verba.",
   };
 }
 
@@ -438,12 +470,13 @@ async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, p
     tem_imagem: c.tem_imagem ?? null,
     gasto_acumulado: c.gasto_acumulado ?? null,
     formularios: c.formularios ?? null,
-    legenda_resumo: String(c.legenda ?? "").slice(0, 180),
+    legenda_resumo: String(c.legenda ?? "").slice(0, 300),
+    legenda_foi_cortada: String(c.legenda ?? "").length > 300,
   }));
-  const cortado = cortarLista({ ...obj, criativos: compactos }, "criativos", 8000) as Record<string, unknown>;
+  const cortado = cortarLista({ ...obj, criativos: compactos }, "criativos", 11000) as Record<string, unknown>;
   const comUnicas = cortarLista({ ...cortado, legendas_unicas: unicas,
     total_legendas_distintas: unicas.length,
-    nota_legendas: "legendas_unicas traz o texto INTEGRAL de cada legenda distinta (compliance). Em 'criativos', legenda_resumo e so os ~180 primeiros chars; para o texto inteiro use legendas_unicas ou busca_nome.",
+    nota_legendas: "legendas_unicas traz o texto INTEGRAL de cada legenda distinta e e a UNICA fonte valida para compliance - audite por aqui, nunca por legenda_resumo. legenda_foi_cortada=true apenas indica que o recorte de ~300 chars nao cobre a peca; o texto inteiro esta em legendas_unicas.",
   }, "legendas_unicas", 6500);
   return { ...comUnicas, somente_campanhas_ativas: somenteAtivas };
 }
