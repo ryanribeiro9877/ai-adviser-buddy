@@ -579,21 +579,22 @@ async function t_rpc(nome: string, parametros: Record<string, unknown>) {
   return error ? { erro: `falha ao chamar ${nome}: ${error.message}` } : data;
 }
 async function t_funnel(companyId: string, date_from?: string, date_to?: string) {
-  let q = supa.from("metric_snapshots").select("snapshot_date,spend,impressions,clicks,link_clicks,form_leads,messaging_started").eq("company_id", companyId);
+  let q = supa.from("metric_snapshots").select("snapshot_date,spend,impressions,clicks,link_clicks,landing_page_views,form_leads,messaging_started").eq("company_id", companyId);
   if (date_from) q = q.gte("snapshot_date", date_from);
   if (date_to) q = q.lte("snapshot_date", date_to);
   const { data } = await q;
   const s = (data ?? []).reduce((a, r) => ({
     spend: a.spend + Number(r.spend || 0), imp: a.imp + Number(r.impressions || 0), clk: a.clk + Number(r.clicks || 0),
-    link: a.link + Number(r.link_clicks || 0), forms: a.forms + Number(r.form_leads || 0), msg: a.msg + Number(r.messaging_started || 0),
-  }), { spend: 0, imp: 0, clk: 0, link: 0, forms: 0, msg: 0 });
+    link: a.link + Number(r.link_clicks || 0), lpv: a.lpv + Number(r.landing_page_views || 0),
+    forms: a.forms + Number(r.form_leads || 0), msg: a.msg + Number(r.messaging_started || 0),
+  }), { spend: 0, imp: 0, clk: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
   const datas = (data ?? []).map((r) => r.snapshot_date).sort();
   return { periodo_solicitado: { de: date_from ?? "inicio", ate: date_to ?? "hoje" },
     cobertura_real: { primeiro_dia: datas[0] ?? null, ultimo_dia: datas[datas.length - 1] ?? null, dias_com_dado: new Set(datas).size },
-    funil_midia: { impressoes: s.imp, cliques: s.clk, cliques_no_link_lead: s.link, formularios: s.forms, conversas_whatsapp: s.msg },
+    funil_midia: { impressoes: s.imp, cliques_todos: s.clk, cliques_no_link: s.link, visualizacoes_lp: s.lpv, formularios: s.forms, conversas_whatsapp: s.msg },
     gasto: brl(s.spend),
-    custos: { por_lead_lp: s.link ? brl(s.spend / s.link) : null, por_formulario: s.forms ? brl(s.spend / s.forms) : null, por_conversa: s.msg ? brl(s.spend / s.msg) : null },
-    nota: "funil de MIDIA. Proposta/contrato/receita estao FORA do escopo do sistema desde 28/07/2026 - nao existe fonte de conversao final; trate CPL como proxy e declare isso." };
+    custos: { por_clique_no_link: s.link ? brl(s.spend / s.link) : null, por_visualizacao_lp: s.lpv ? brl(s.spend / s.lpv) : null, por_formulario: s.forms ? brl(s.spend / s.forms) : null, por_conversa: s.msg ? brl(s.spend / s.msg) : null },
+    nota: "funil de MIDIA agregado da conta. cliques_todos = todos os cliques; cliques_no_link = so os que levam ao destino - nao misture as bases. visualizacoes_lp e resultado valido, reporte. Proposta/contrato/receita estao FORA do escopo desde 28/07/2026 - nao existe fonte de conversao final; trate custo por clique/LP como proxy e declare isso." };
 }
 async function t_ads_ranking(companyId: string, days = 7) {
   const from = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
@@ -634,34 +635,37 @@ async function t_campaign_detail(companyId: string, name_like: string) {
   const num = (v: unknown) => Number(v || 0);
   const pct = (n: number, d: number) => d > 0 ? `${(100 * n / d).toFixed(2)}%` : null;
   const linhaDia = (s: Record<string, unknown>) => {
-    const spend = num(s.spend), imp = num(s.impressions), clk = num(s.clicks);
+    const spend = num(s.spend), imp = num(s.impressions), clkTodos = num(s.clicks), clkLink = num(s.link_clicks);
     return {
       dia: s.snapshot_date, gasto: brl(spend), impressoes: imp, alcance: num(s.reach),
       frequencia: s.frequency != null ? Number(num(s.frequency).toFixed(2)) : null,
-      cliques: clk, cliques_no_link: num(s.link_clicks), visualizacoes_lp: num(s.landing_page_views),
+      cliques_todos: clkTodos, cliques_no_link: clkLink, visualizacoes_lp: num(s.landing_page_views),
       formularios: num(s.form_leads), conversas: num(s.messaging_started),
-      ctr: pct(clk, imp), cpc: clk ? brl(spend / clk) : null, cpm: imp ? brl(1000 * spend / imp) : null,
+      ctr_todos: pct(clkTodos, imp), ctr_link: pct(clkLink, imp),
+      cpc_todos: clkTodos ? brl(spend / clkTodos) : null, cpc_link: clkLink ? brl(spend / clkLink) : null,
+      cpm: imp ? brl(1000 * spend / imp) : null,
     };
   };
   const tot = rows.reduce((a, s: Record<string, unknown>) => ({
     spend: a.spend + num(s.spend), imp: a.imp + num(s.impressions), reach: a.reach + num(s.reach),
-    clk: a.clk + num(s.clicks), link: a.link + num(s.link_clicks), lpv: a.lpv + num(s.landing_page_views),
+    clkTodos: a.clkTodos + num(s.clicks), link: a.link + num(s.link_clicks), lpv: a.lpv + num(s.landing_page_views),
     forms: a.forms + num(s.form_leads), msg: a.msg + num(s.messaging_started),
-  }), { spend: 0, imp: 0, reach: 0, clk: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
+  }), { spend: 0, imp: 0, reach: 0, clkTodos: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
   return {
     campanha: { nome: c.name, status: c.status, categoria: c.category, gasto_acumulado: brl(num(c.spend)) },
     serie_diaria_14d: rows.map(linhaDia),
     totais_periodo: {
       dias_com_dado: rows.length, gasto: brl(tot.spend), impressoes: tot.imp, alcance: tot.reach,
-      cliques: tot.clk, cliques_no_link: tot.link, visualizacoes_lp: tot.lpv,
+      cliques_todos: tot.clkTodos, cliques_no_link: tot.link, visualizacoes_lp: tot.lpv,
       formularios: tot.forms, conversas: tot.msg,
-      ctr: pct(tot.clk, tot.imp), cpc: tot.clk ? brl(tot.spend / tot.clk) : null,
+      ctr_todos: pct(tot.clkTodos, tot.imp), ctr_link: pct(tot.link, tot.imp),
+      cpc_todos: tot.clkTodos ? brl(tot.spend / tot.clkTodos) : null, cpc_link: tot.link ? brl(tot.spend / tot.link) : null,
       cpm: tot.imp ? brl(1000 * tot.spend / tot.imp) : null,
       custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
       alcance_e_soma_dos_dias: true,
     },
     outras_encontradas: camps.slice(1).map((x) => x.name),
-    nota: "serie diaria e totais vem de metric_snapshots (D-1, provider windsor/meta). alcance, cliques, frequencia, CTR, CPC, CPM e visualizacoes_lp SAO expostos aqui - NUNCA declare essas metricas indisponiveis. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero. ATENCAO no total: alcance e SOMA dos dias, nao alcance unico desduplicado (a mesma pessoa alcancada em 2 dias conta 2x) - declare isso ao reportar alcance acumulado; alcance por dia e confiavel.",
+    nota: "serie diaria e totais vem de metric_snapshots (D-1, provider windsor/meta). DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques (curtida, comentario, expandir, foto, link); cliques_no_link = SO cliques que levam ao destino. Por isso ctr_todos/cpc_todos usam todos os cliques e ctr_link/cpc_link usam so os de link - ao falar de 'CTR/CPC de link' cite ctr_link/cpc_link; ao falar de engajamento amplo cite ctr_todos/cpc_todos. visualizacoes_lp (landing_page_views) e RESULTADO valido e deve ser reportado, principalmente em campanha de engajamento/trafego. alcance, cliques, frequencia, CTR, CPC, CPM e visualizacoes_lp SAO expostos aqui - NUNCA declare essas metricas indisponiveis. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero. ATENCAO no total: alcance e SOMA dos dias, nao alcance unico desduplicado (mesma pessoa em 2 dias conta 2x) - declare isso ao reportar alcance acumulado; alcance por dia e confiavel.",
   };
 }
 async function t_funil_credito(dias: number) {
@@ -1959,7 +1963,7 @@ const TOOLS = [
   { type: "function", function: { name: "validar_pedido_contra_contrato", description: "Valida um pedido (json) contra o contrato declarado em contrato_de_execucao para a acao. Assinatura real: (acao text, pedido jsonb). Se nao houver linhas vigentes para a acao, devolve valido=false com motivo contrato_desconhecido (nao inventa campos). Se faltar campo obrigatorio, recusa com faltando[]. Campos extras NAO invalidam - vao em nao_previstos_no_contrato para decisao humana. O contrato de criar_anuncio_a_partir_de e o MESMO vocabulario que pedido_de_anuncio_completo aceita: um pedido valido aqui e entendido la, e vice-versa. LACUNAS HONESTAS: o contrato foi derivado do codigo montarCriacao (meta-actions), nao de card executado; url_tags e opcional e vai no adcreative, nao no ad; meta_video_id/legenda/thumbnail_url sao opcionais da rota peca nova; status_inicial e opcional porque o executor FORCA PAUSED no body e nao le o payload. NAO substitui pedido_de_anuncio_completo (biblioteca, compliance, procedencia).", parameters: { type: "object", properties: { acao: { type: "string", description: "Ex.: criar_anuncio_a_partir_de, criar_conjunto_a_partir_de, criar_campanha." }, pedido: { type: "object", description: "Objeto com os campos do payload que o executor leria." } }, required: ["acao", "pedido"] } } },
   { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real (dias efetivamente com dado). Nao contem proposta/contrato.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   { type: "function", function: { name: "get_ads_ranking", description: "RECORTE de criativos por custo MEDIO de midia numa janela de dias. ATENCAO - este e um recorte (breakdown) e serve para ENTENDER, nunca para PRESCREVER: a Meta aloca verba por custo MARGINAL (do proximo resultado), entao um criativo com media mais alta pode estar segurando o custo total. E PROIBIDO propor pausar ou reduzir um criativo com base apenas nesta ordenacao; prescricao exige teste isolado ou tendencia temporal. Para decidir escala ou corte, cruze com get_funil_credito (contrato pago por criativo) e consulte get_conhecimento(tema=otimizacao).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
-  { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de UMA campanha pelo nome, com totais do periodo. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques, cliques_no_link, visualizacoes_lp, formularios, conversas, CTR, CPC e CPM (derivados). Esta e a fonte por-campanha de metricas basicas E avancadas - se o usuario pedir alcance/cliques/CTR/CPC/CPM/frequencia de uma campanha, use ESTA tool e NUNCA diga que sao indisponiveis. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
+  { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de UMA campanha pelo nome, com totais do periodo. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture: ctr_link/cpc_link usam SO cliques no link (use ao falar de 'CTR/CPC de link'); ctr_todos/cpc_todos usam TODOS os cliques (engajamento amplo). visualizacoes_lp e resultado valido e deve ser reportado (nao omita), sobretudo em engajamento/trafego. Esta e a fonte por-campanha de metricas basicas E avancadas - NUNCA diga que sao indisponiveis. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_acervo_para_anuncio", description: "ACERVO DO DRIVE PRONTO PARA VIRAR ANUNCIO NOVO. Esta e a ferramenta certa quando o gestor pede para MONTAR anuncio novo, ESCOLHER peca ou saber quais pecas do acervo servem para um produto - NAO use get_criativos_conteudo para isso (aquela le SO os anuncios ja no ar em public.ads e por isso nunca propoe peca nova). Deduplicada por arquivo e filtravel por produto (ex.: 'CLT'). Por peca: nome, drive_file_id, meta_video_id (se video ja na Meta), meta_image_hash (se imagem ja na Meta), o que a peca DIZ, analise visual, na_biblioteca_da_meta/apta, bloqueio de compliance SEMPRE marcado e se ja foi usada. Se na_biblioteca_da_meta=false, chame upload_midia com o drive_file_id ANTES de propor o card - nao diga que o sistema nao sabe subir. Video recem-enviado pode ainda processar: so emita card com status ready.", parameters: { type: "object", properties: { produto: { type: "string" }, incluir_inaptas: { type: "boolean" } } } } },
