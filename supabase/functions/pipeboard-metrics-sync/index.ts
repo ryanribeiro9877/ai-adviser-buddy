@@ -1,6 +1,6 @@
-// Fase A: coleta Pipeboard em paralelo ao Windsor.
-// Escreve SOMENTE em ad_metric_snapshots_paralelo; não toca nas tabelas reais.
-// O conector autentica a conta: access_token nunca é enviado.
+// Fase B (14/08/2026): Windsor aposentado. Pipeboard e o coletor oficial.
+// Escreve em ad_metric_snapshots (producao) E em ad_metric_snapshots_paralelo (espelho),
+// depois faz rollup para metric_snapshots.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
@@ -436,8 +436,8 @@ Deno.serve(async (req) => {
         ok: false,
         error: "missing_pipeboard_api_token",
         PIPEBOARD_API_TOKEN: "ausente no Edge Secret e em integration_secrets",
-        fase: "A",
-        windsor_desligado: false,
+        fase: "B",
+        windsor_desligado: true,
       },
       400,
     );
@@ -577,16 +577,25 @@ Deno.serve(async (req) => {
 
     const rows = [...rowsByKey.values()];
     let upserted = 0;
+    let upsertedProd = 0;
     for (let start = 0; start < rows.length; start += 500) {
       const chunk = rows.slice(start, start + 500);
-      const { error } = await supa
+      const { error: errPar } = await supa
         .from("ad_metric_snapshots_paralelo")
         .upsert(chunk, { onConflict: "ad_external_id,snapshot_date" });
-      if (error) {
-        accountError = `staging_upsert_failed: ${error.message}`;
+      if (errPar) {
+        accountError = `staging_upsert_failed: ${errPar.message}`;
+        break;
+      }
+      const { error: errProd } = await supa
+        .from("ad_metric_snapshots")
+        .upsert(chunk, { onConflict: "ad_external_id,snapshot_date" });
+      if (errProd) {
+        accountError = `production_upsert_failed: ${errProd.message}`;
         break;
       }
       upserted += chunk.length;
+      upsertedProd += chunk.length;
     }
     totalUpserted += upserted;
     reports.push({
@@ -597,22 +606,29 @@ Deno.serve(async (req) => {
       pipeboard_rows: collected,
       unique_rows: rows.length,
       upserted,
+      upserted_producao: upsertedProd,
       error: accountError,
     });
   }
 
+  const { data: rollup, error: rollupErr } = await supa.rpc("rollup_metric_snapshots_from_ads", {
+    p_from: dateFrom,
+    p_to: dateTo,
+  });
+
   return json({
-    ok: reports.every((item) => !item.error),
-    fase: "A",
+    ok: reports.every((item) => !item.error) && !rollupErr,
+    fase: "B",
     fonte: FONTE,
     PIPEBOARD_API_TOKEN: "presente na Edge (valor não exposto)",
     window: { date_from: dateFrom, date_to: dateTo },
     level: "ad",
     time_breakdown: "day",
     access_token_enviado: false,
-    destino: "ad_metric_snapshots_paralelo",
-    tabela_real_alterada: false,
+    destino: ["ad_metric_snapshots", "ad_metric_snapshots_paralelo", "metric_snapshots(rollup)"],
+    tabela_real_alterada: true,
     total_upserted: totalUpserted,
+    rollup: rollupErr ? { ok: false, erro: rollupErr.message } : rollup,
     report: reports,
   });
 });

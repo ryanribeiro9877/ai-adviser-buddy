@@ -550,7 +550,7 @@ begin
     v_count := v_count + 1;
   end loop;
 
-  -- ---- F) Video: thruplay / avg baixo (paralelo Pipeboard) ----
+  -- ---- F) Video: thruplay / avg baixo (AMS producao = Pipeboard) ----
   for r in
     with vid as (
       select p.company_id, p.ad_external_id, a.name as ad_name, c.name as camp_name,
@@ -560,12 +560,13 @@ begin
              avg(nullif(p.video_avg_time_watched,0)) as avg_watch,
              sum(coalesce(p.video_p25_watched,0)) as p25,
              sum(coalesce(p.impressions,0)) as impr
-      from public.ad_metric_snapshots_paralelo p
+      from public.ad_metric_snapshots p
       join public.ads a on a.external_id = p.ad_external_id and a.company_id = p.company_id
       join public.campaigns c on c.id = a.campaign_id
       where c.status = 'active'
         and upper(coalesce(a.object_type,'')) like '%VIDEO%'
         and p.snapshot_date >= v_hoje - 7
+        and coalesce(p.fonte, '') like 'pipeboard%'
         and (p.video_thruplay is not null or p.video_avg_time_watched is not null or p.video_plays is not null)
       group by p.company_id, p.ad_external_id, a.name, c.name
       having count(*) filter (where coalesce(p.spend,0) > 0) >= 3
@@ -591,7 +592,7 @@ begin
       v_dedupe := 'video.retencao_baixa|' || r.ad_external_id || '|' || v_dedupe_dia;
       v_title := 'Video com retencao fraca: ' || left(coalesce(r.ad_name, r.ad_external_id), 80);
       v_desc := format(
-        'Video "%s" (campanha %s): thruplay_rate=%s (mediana conta %s), avg_watch=%ss, p25/plays=%s. Leituras abaixo do esperado para manter atencao — revisar hook dos primeiros segundos. Maturidade: %s dias. Fonte: Pipeboard paralelo. [auto: detector]',
+        'Video "%s" (campanha %s): thruplay_rate=%s (mediana conta %s), avg_watch=%ss, p25/plays=%s. Leituras abaixo do esperado para manter atencao — revisar hook dos primeiros segundos. Maturidade: %s dias. Fonte: Pipeboard. [auto: detector]',
         coalesce(r.ad_name,'?'), coalesce(r.camp_name,'?'),
         coalesce(to_char(round(r.thruplay_rate::numeric, 3), 'FM999990.000'), 'n/d'),
         coalesce(to_char(round(r.med_thruplay_rate::numeric, 3), 'FM999990.000'), 'n/d'),
@@ -607,7 +608,7 @@ begin
         coalesce(to_char(round((r.p25::numeric/nullif(r.plays,0)),2),'FM999990.00'),'n/d')
       );
       v_ev := jsonb_build_object(
-        'fonte', 'ad_metric_snapshots_paralelo',
+        'fonte', 'ad_metric_snapshots',
         'thruplay', r.thruplay,
         'plays', r.plays,
         'thruplay_rate', round(coalesce(r.thruplay_rate,0)::numeric, 3),
