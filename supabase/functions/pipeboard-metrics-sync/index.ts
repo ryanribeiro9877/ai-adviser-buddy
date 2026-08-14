@@ -80,6 +80,26 @@ function actionValue(row: any, names: string[]): number {
   return total;
 }
 
+function videoActionValue(row: any, fieldNames: string[]): number {
+  for (const name of fieldNames) {
+    const raw = row?.[name];
+    if (raw == null) continue;
+    if (typeof raw === "number" || typeof raw === "string") {
+      const n = number(raw);
+      if (n > 0) return n;
+      continue;
+    }
+    if (Array.isArray(raw) && raw.length) {
+      let total = 0;
+      for (const item of raw) {
+        total += number(item?.value ?? item?.count ?? item);
+      }
+      if (total > 0) return total;
+    }
+  }
+  return 0;
+}
+
 function mapRow(row: any, companyId: string, accountFallback: string) {
   const source = row?.metrics && typeof row.metrics === "object" ? { ...row, ...row.metrics } : row;
   const adId = String(source?.ad_id ?? source?.ad_external_id ?? "").trim();
@@ -129,6 +149,13 @@ function mapRow(row: any, companyId: string, accountFallback: string) {
     quality_ranking: rank(source?.quality_ranking),
     engagement_rate_ranking: rank(source?.engagement_rate_ranking),
     conversion_rate_ranking: rank(source?.conversion_rate_ranking),
+    video_p25_watched: integer(videoActionValue(source, ["video_p25_watched_actions", "video_p25_watched"])) || null,
+    video_p50_watched: integer(videoActionValue(source, ["video_p50_watched_actions", "video_p50_watched"])) || null,
+    video_p75_watched: integer(videoActionValue(source, ["video_p75_watched_actions", "video_p75_watched"])) || null,
+    video_p100_watched: integer(videoActionValue(source, ["video_p100_watched_actions", "video_p100_watched"])) || null,
+    video_thruplay: integer(videoActionValue(source, ["video_thruplay_watched_actions", "video_thruplay"])) || null,
+    video_avg_time_watched: number(videoActionValue(source, ["video_avg_time_watched_actions", "video_avg_time_watched"])) || null,
+    video_plays: integer(videoActionValue(source, ["video_play_actions", "video_plays"])) || null,
     fonte: FONTE,
   };
 }
@@ -312,7 +339,7 @@ function buildArgs(
   if (has("level") || !tool) args.level = "ad";
   if (has("time_breakdown") || !tool) args.time_breakdown = "day";
   if (has("compact") || !tool) args.compact = true;
-  if (has("fields") || !tool) args.fields = FIELDS;
+  if (has("fields") || !tool) args.fields = [...FIELDS, ...VIDEO_FIELDS];
   if (has("limit") || !tool) args.limit = Math.min(Math.max(integer(body?.limit) || 500, 1), 1000);
 
   if (has("time_range")) args.time_range = { since: dateFrom, until: dateTo };

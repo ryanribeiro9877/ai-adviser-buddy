@@ -237,9 +237,10 @@ export function OperacaoChat() {
 
   // ?conv=<id> vem do link "ver a conversa que originou" no cartão de aprovação.
   // Abre a conversa uma vez e limpa o parâmetro, para não travar a navegação manual.
-  const search = useSearch({ strict: false }) as { conv?: string };
+  const search = useSearch({ strict: false }) as { conv?: string; reco?: string };
   const navigate = useNavigate();
   const convAplicadaRef = useRef<string | null>(null);
+  const recoAplicadaRef = useRef<string | null>(null);
   useEffect(() => {
     const alvo = search.conv;
     if (!alvo || convAplicadaRef.current === alvo) return;
@@ -673,6 +674,56 @@ export function OperacaoChat() {
       setSending(false);
     }
   };
+
+  // ?reco=<id> vem do botao Chat no card de recomendacao: abre conversa NOVA e
+  // envia automaticamente o suggested_prompt (ou title+description) como primeira mensagem.
+  useEffect(() => {
+    const recoId = search.reco;
+    if (!recoId || !companyId || sending) return;
+    if (recoAplicadaRef.current === recoId) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error } = await supabase
+        .from("ai_recommendations")
+        .select("id, title, description, suggested_prompt, evidence_json, entity_name, signal_key")
+        .eq("id", recoId)
+        .eq("company_id", companyId)
+        .maybeSingle();
+      if (cancelled) return;
+      if (error || !data) {
+        toast.error("Não encontrei a recomendação para abrir no chat.");
+        recoAplicadaRef.current = recoId;
+        navigate({
+          to: ".",
+          search: (prev: Record<string, unknown>) => {
+            const { reco: _r, ...resto } = prev;
+            return { ...resto, tab: "chat" };
+          },
+          replace: true,
+        });
+        return;
+      }
+      const prompt =
+        (data.suggested_prompt && String(data.suggested_prompt).trim()) ||
+        `Quero discutir esta recomendação da IA:\n\nTítulo: ${data.title}\n\n${data.description}\n\nO que você propõe com base nas evidências?`;
+      recoAplicadaRef.current = recoId;
+      setActiveId(null);
+      navigate({
+        to: ".",
+        search: (prev: Record<string, unknown>) => {
+          const { reco: _r, ...resto } = prev;
+          return { ...resto, tab: "chat" };
+        },
+        replace: true,
+      });
+      await send(prompt);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // send e estavel o suficiente no fluxo; evitamos reabrir o mesmo reco.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search.reco, companyId]);
 
   // Reenvia a última pergunta que ficou sem resposta (turno estourado).
   const reenviarOrfa = () => {

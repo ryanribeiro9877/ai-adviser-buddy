@@ -73,3 +73,8 @@ verify_jwt = false
 # ainda confirma getUser + papel admin antes de revelar contas ou gravar vínculos.
 [functions.integration-verify]
 verify_jwt = true
+
+# 14/08/2026 — job hibrido de Recomendacoes da IA (SQL detecta + LLM redige/valida).
+# Cron 09:35 UTC autentica via x-mcp-key; gateway JWT aberto.
+[functions.traffic-reco-job]
+verify_jwt = false
