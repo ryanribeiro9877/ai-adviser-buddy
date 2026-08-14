@@ -49,6 +49,16 @@ verify_jwt = false
 [functions.pipeboard-metrics-sync]
 verify_jwt = false
 
+# 14/08/2026 — coleta estrutural oficial (campaigns/adsets/ads) via Pipeboard.
+# Crons autenticam dentro da edge por x-mcp-key.
+[functions.pipeboard-structure-sync]
+verify_jwt = false
+
+# 14/08/2026 — leitura ao vivo do Pipeboard (somente get/list/search/...).
+# traffic-chat e ops autenticam por x-mcp-key / Bearer; a edge valida mcp_key_valida.
+[functions.pipeboard-read]
+verify_jwt = false
+
 # Sonda de identidade (somente leitura). Sem esta linha o deploy nasce com verify_jwt=true
 # e o gateway rejeita a x-mcp-key antes de a edge validar — a propria edge autentica por
 # mcp_key_valida, como as demais.

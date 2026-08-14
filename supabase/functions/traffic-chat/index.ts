@@ -419,6 +419,15 @@ import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { situacaoDoCard } from "../_shared/aprovacoes.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import { resolverNomePartesDoParams, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
+import { pipeboardToken } from "../_shared/pipeboard.ts";
+import {
+  callReadTool,
+  companyMetaAccounts,
+  isReadOnlyTool,
+  listReadTools,
+  scopeArgsToCompany,
+  truncatePipeboardPayload,
+} from "../_shared/pipeboard_read.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -440,7 +449,13 @@ const MAX_TOOLS_TURNO = 12;
 // v28.7: get_estrutura_conjuntos com teto 3. Sao 46 conjuntos relevantes em paginas de 20 - com o
 // default 2 o agente ficaria ESTRUTURALMENTE impedido de ver o universo completo, recriando o
 // problema do universo parcial numa forma nova, agora causada pelo proprio limite.
-const MAX_POR_FERRAMENTA: Record<string, number> = { check_compliance: 3, gerar_legendas: 1, get_estrutura_conjuntos: 3 };
+const MAX_POR_FERRAMENTA: Record<string, number> = {
+  check_compliance: 3,
+  gerar_legendas: 1,
+  get_estrutura_conjuntos: 3,
+  listar_ferramentas_pipeboard: 2,
+  ler_pipeboard: 5,
+};
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
 const MAX_TOKENS = 12000;
 // v21: orcamento de raciocinio. max_tokens cobre raciocinio + texto; sem teto, o modelo
@@ -504,12 +519,12 @@ const slug = (s: string) => deacc(String(s).toLowerCase()).replace(/[^a-z0-9]+/g
 
 async function resolveCompany(name?: string): Promise<{ id: string; name: string } | null> {
   const { data } = await supa.from("companies").select("id,name");
-  if (!data?.length) return null;
-  if (name) {
-    const hit = data.find((c) => norm(c.name).includes(norm(name)));
-    if (hit) return hit;
-  }
-  return data.find((c) => c.name.toLowerCase().includes("legal")) ?? data[0];
+  if (!data?.length || !name?.trim()) return null;
+  const needle = norm(name);
+  const exact = data.filter((c) => norm(c.name) === needle);
+  if (exact.length === 1) return exact[0];
+  const partial = data.filter((c) => norm(c.name).includes(needle) || needle.includes(norm(c.name)));
+  return partial.length === 1 ? partial[0] : null;
 }
 
 const IMG_MIMES = ["image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"];
@@ -764,15 +779,108 @@ async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, b
     }
   }
   const unicas = [...grupos.values()].sort((a, b) => Number(b.gasto_total) - Number(a.gasto_total));
-  // v20: lista bruta cortada em 4.000 (era 11.500). O dedupe do v19 tornou legendas_unicas
-  // a fonte util para compliance; a lista peca-por-peca serve so para contexto.
-  const cortado = cortarLista(obj, "criativos", 4000) as Record<string, unknown>;
+  // v29 (14/08): a lista peca-por-peca agora e COMPACTA. A legenda inteira consumia o teto e
+  // derrubava justamente os campos de classificacao (o agente concluiu "todos imagem" e
+  // "numero nao confirmado" a partir de item cortado). Aqui cada item leva legenda_resumo
+  // (~180 chars) e SEMPRE os campos estruturais (object_type/cta/destino/destino_url), entao
+  // os ativos cabem inteiros. legendas_unicas continua com o texto INTEGRAL para compliance.
+  const compactos = lista.map((c) => ({
+    anuncio: c.anuncio ?? null,
+    campanha: c.campanha ?? null,
+    campanha_ativa: c.campanha_ativa === true,
+    status_anuncio: c.status_anuncio ?? null,
+    object_type: c.object_type ?? null,
+    cta: c.cta ?? null,
+    destino: c.destino ?? null,
+    destino_url: c.destino_url ?? null,
+    tem_imagem: c.tem_imagem ?? null,
+    gasto_acumulado: c.gasto_acumulado ?? null,
+    formularios: c.formularios ?? null,
+    legenda_resumo: String(c.legenda ?? "").slice(0, 180),
+  }));
+  const cortado = cortarLista({ ...obj, criativos: compactos }, "criativos", 8000) as Record<string, unknown>;
   const comUnicas = cortarLista({ ...cortado, legendas_unicas: unicas,
     total_legendas_distintas: unicas.length,
-    nota_legendas: "legendas_unicas cobre TODOS os criativos coletados, inclusive os omitidos da lista 'criativos'. Use esta lista para auditoria de compliance completa: cada texto distinto precisa ser checado uma vez, nao uma vez por anuncio.",
+    nota_legendas: "legendas_unicas traz o texto INTEGRAL de cada legenda distinta (fonte para compliance, cobre TODOS os criativos coletados). Na lista 'criativos', legenda_resumo e so os ~180 primeiros chars; para o texto inteiro use legendas_unicas ou busca_nome.",
   }, "legendas_unicas", 6500);
   return { ...comUnicas, somente_campanhas_ativas: somenteAtivas };
 }
+// Leitura ao vivo do Pipeboard (hibrido): sync diario no DB + catalogo/call sob demanda.
+async function pipeboardTokenFromDb(): Promise<string> {
+  const { data: secret } = await supa
+    .from("integration_secrets")
+    .select("value")
+    .eq("name", "pipeboard_api_token")
+    .maybeSingle();
+  return await pipeboardToken(async () => String(secret?.value ?? ""));
+}
+
+async function t_listar_ferramentas_pipeboard() {
+  const token = await pipeboardTokenFromDb();
+  if (!token) return { erro: "PIPEBOARD_API_TOKEN ausente" };
+  const catalog = await listReadTools(token);
+  if (!catalog.ok) return { erro: catalog.erro ?? "falha ao listar ferramentas Pipeboard" };
+  const cut = truncatePipeboardPayload({
+    ok: true,
+    source: "pipeboard:meta",
+    total_pipeboard: catalog.total_pipeboard,
+    total_leitura: catalog.total_leitura,
+    tools: catalog.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      argumentos: t.properties,
+      obrigatorios: t.required,
+    })),
+    nota: "Estas sao as ferramentas de LEITURA do Pipeboard. Para chamar uma, use ler_pipeboard com o nome exato. Preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo) quando bastarem; use Pipeboard ao vivo quando faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca).",
+  });
+  return cut.data;
+}
+
+async function t_ler_pipeboard(companyId: string, ferramenta: string, argumentos: Record<string, unknown> = {}) {
+  if (!companyId) return { erro: "company_id_obrigatorio" };
+  const name = String(ferramenta ?? "").trim();
+  if (!name) return { erro: "ferramenta_obrigatoria", dica: "chame listar_ferramentas_pipeboard antes" };
+  if (!isReadOnlyTool(name)) {
+    return {
+      erro: "ferramenta_nao_e_leitura",
+      ferramenta: name,
+      nota: "ler_pipeboard so executa get_/list_/search_/estimate_/resolve_/check_/compute_/bulk_get_/fetch. Escrita = propose_action / meta-actions.",
+    };
+  }
+  const token = await pipeboardTokenFromDb();
+  if (!token) return { erro: "PIPEBOARD_API_TOKEN ausente" };
+  let allowed: string[] = [];
+  try {
+    allowed = await companyMetaAccounts(supa, companyId);
+  } catch (error) {
+    return { erro: String((error as Error).message ?? error) };
+  }
+  if (!allowed.length) return { erro: "empresa_sem_conta_meta_vinculada" };
+
+  const catalog = await listReadTools(token);
+  const toolMeta = catalog.tools.find((t) => t.name === name);
+  const properties = Object.fromEntries((toolMeta?.properties ?? []).map((p) => [p, {}]));
+  const scoped = scopeArgsToCompany(name, argumentos ?? {}, allowed, properties);
+  if (!scoped.ok) {
+    return {
+      erro: scoped.erro,
+      contas_da_empresa: scoped.contas_da_empresa ?? allowed,
+    };
+  }
+  const result = await callReadTool(name, scoped.args, token);
+  const cut = truncatePipeboardPayload({
+    ok: result.ok,
+    source: "pipeboard:meta",
+    company_id: companyId,
+    ferramenta: name,
+    args_usados: scoped.args,
+    status: result.status ?? null,
+    erro: result.erro ?? null,
+    resultado: result.body ?? null,
+  });
+  return cut.data;
+}
+
 // v28.7 (04/08/2026): a RPC ganhou empresa e paginacao. Sem p_company_id ela devolve lista vazia
 // com AVISO_CRITICO de proposito - a sobrecarga antiga e alarme, nao compatibilidade. Antes disso
 // a funcao nao tinha filtro de empresa NENHUM: devolvia os 46 conjuntos da Legal misturados com os
@@ -1084,14 +1192,14 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const objetivo = ODAX.includes(bruto) ? bruto : (SINONIMOS[bruto] ?? "");
     if (!objetivo) return { erro: `objetivo '${bruto}' nao e valido na Meta. Use um destes: ${ODAX.join(", ")}. Para geracao de lead em landing page o correto e OUTCOME_LEADS.` };
 
-    // ESP-40: marca default LEV (Legal e Viver). Sem canal/periodo o card NAO emite.
+    // Marca vem da empresa ou do pedido; nunca cai em LEV para outra empresa.
     const { data: cfgNome } = await supa
       .from("meta_execution_config")
       .select("marca_tag")
       .eq("company_id", companyId)
       .maybeSingle();
     const montado = resolverNomePartesDoParams(params, {
-      defaultMarca: (cfgNome as any)?.marca_tag || "LEV",
+      defaultMarca: (cfgNome as any)?.marca_tag || undefined,
       objetivoOdax: objetivo,
       exigirPapel: true,
     });
@@ -1101,7 +1209,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
         detalhe: montado.detalhe,
         faltando: montado.faltando,
         instrucao:
-          "ESP-40/39: informe params.marca (ou usa LEV), params.canal, params.objetivo_tag (ou objetivo ODAX), params.papel (TESTE|ESCALA), params.periodo. Opcional: produto, rotulo. Vencedores e testes em campanhas SEPARADAS.",
+          "Informe params.marca quando a empresa nao tiver marca_tag, params.canal, params.objetivo_tag (ou objetivo ODAX), params.papel (TESTE|ESCALA) e params.periodo. Opcional: produto, rotulo.",
       };
     }
     const nomeAlvoComposto = montado.nome;
@@ -1259,8 +1367,8 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // v28.15: summary declara plataformas + regras automaticas (FB+video sem Coluna; Threads off).
     const redesTxt = plataformas.join(", ");
     const notaPosicionamento = plataformas.includes("facebook") && formatoPrevisto === "video"
-      ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: identidade oficial @jcr2_legaleviver." : ""}`
-      : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoPrevisto === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: identidade oficial @jcr2_legaleviver." : ""}`;
+      ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}`
+      : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoPrevisto === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}`;
     const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO` +
       (avisoOrcamento ? ` — ${avisoOrcamento}` : "") + notaPosicionamento;
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
@@ -1725,7 +1833,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
           : `o anuncio molde '${molde?.name}' nao tem legenda sincronizada; sem ela nao e possivel validar compliance, e criar anuncio financeiro sem essa validacao nao e permitido.`,
       };
     }
-    const comp: any = await t_check_compliance(legenda, [], mcpKey);
+    const comp: any = await t_check_compliance(companyId, legenda, [], mcpKey);
     const vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
     if (!vereditoOk) {
       return { erro: "compliance_bloqueou_a_criacao",
@@ -1798,10 +1906,10 @@ async function gravarCard(companyId: string, convId: string, requestedBy: string
     aviso: "Pedido PENDENTE. Nada foi criado na Meta ainda. Ao ser aprovado por um administrador, o objeto nasce PAUSADO e precisa ser ativado manualmente no Gerenciador. O pedido expira em 24h se nao for decidido." };
 }
 
-async function t_check_compliance(legenda: string, imgAtts: { mime: string; b64: string }[], mcpKey: string) {
+async function t_check_compliance(companyId: string, legenda: string, imgAtts: { mime: string; b64: string }[], mcpKey: string) {
   const img = imgAtts[0];
   if (!legenda && !img) return { erro: "forneca a legenda e/ou anexe o criativo" };
-  const body: any = {};
+  const body: any = { company_id: companyId };
   if (legenda) body.legenda = legenda;
   if (img) { body.image_base64 = img.b64; body.mime = img.mime; }
   const r = await fetch(`${SUPABASE_URL}/functions/v1/compliance-check`, { method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey }, body: JSON.stringify(body) });
@@ -1824,9 +1932,10 @@ async function t_gerar_legendas(
   }
   const body: Record<string, unknown> = {
     company_id: companyId,
-    produto: String(args?.produto ?? "CLT").trim() || "CLT",
+    produto: String(args?.produto ?? "").trim(),
     objetivo,
   };
+  if (!body.produto) return { erro: "produto_obrigatorio", detalhe: "Informe o produto da empresa; o sistema nao usa CLT como fallback." };
   const drive = String(args?.drive_file_id ?? "").trim();
   if (drive) body.drive_file_id = drive;
   if (Array.isArray(args?.referencias) && args.referencias.length) {
@@ -1973,9 +2082,11 @@ const TOOLS = [
   { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, escalar_criativo, pausar_campanha, pausar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR conjunto/campanha/criativo continua MANUAL no Gerenciador — nao existe ativar_* neste sistema. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. ESP-40/39 NOMENCLATURA: o nome do objeto NOVO e COMPOSTO — params.marca (default LEV), params.canal, params.objetivo_tag (ou objetivo ODAX), params.periodo obrigatorios; params.produto e params.rotulo opcionais. CAMPANHA exige tambem params.papel=TESTE|ESCALA (ESP-39: vencedores e testes em campanhas SEPARADAS). Padrao [MARCA][CANAL][OBJ][PROD?][PAPEL?][ROT?][PER]. Nome livre (target_name/nome_novo soltos) e RECUSADO. Para criar_campanha, target_name pode ser \"composto\". escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce PAUSED; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de, OBRIGATORIO tambem: (1) PERGUNTE ao gestor as plataformas_publicacao (facebook|instagram|audience_network|messenger). (2) Se Facebook fizer parte, informe formato_midia_previsto=video|imagem. (3) Threads DESABILITADO. Tudo que e criado nasce PAUSED.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "ESP-40/39 nome: marca, canal, objetivo_tag, periodo, papel(TESTE|ESCALA em campanha) (+ produto, rotulo). Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao OBRIGATORIO; formato_midia_previsto quando Facebook. Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA+CET (FIN-04). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true e passe em propose_action criar_anuncio_a_partir_de com params.legenda, legenda_fonte=agente e legenda_referencias. Nao improvise legendas soltas no chat — chame esta ferramenta.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: CLT (default)." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
-  { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
+  { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Traz tambem destino_url (link do CTA do criativo) e destino (whatsapp quando wa.me/api.whatsapp, senao site): O NUMERO DE WHATSAPP DE DESTINO de cada peca SAI DAQUI (ex.: wa.me/5571993451315). Isso e CONFIG do criativo coletada do Pipeboard - NAO confunda com a analitica de conversa WABA (pos-clique), que esta congelada; o numero de destino do anuncio E legivel e voce DEVE informa-lo quando perguntado. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
-  { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, estrategia de lance, orcamento (no conjunto = ABO, na campanha = CBO), segmentacao com pais, faixa de idade, interesses e PUBLICOS PERSONALIZADOS, gasto e formularios. Vem PAGINADO em 20 por vez, ordenado por gasto. Se o campo 'restantes' vier maior que zero, chame de novo com a pagina seguinte ANTES de concluir qualquer coisa sobre o conjunto de conjuntos - e NUNCA afirme percentual sobre o total a partir de uma pagina so. NAO contem historico de ALTERACOES de orcamento (exigiria o endpoint /activities da Graph).", parameters: { type: "object", properties: { pagina: { type: "number", description: "Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero." } } } } },
+  { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, estrategia de lance, orcamento (no conjunto = ABO, na campanha = CBO), segmentacao com pais, faixa de idade, interesses e PUBLICOS PERSONALIZADOS, gasto e formularios. Traz tambem, por conjunto, a PEGADA do anuncio a partir da config coletada: optimization_goal (evento que a Meta otimiza), destination_type, pegada (engajamento_topo | trafego | trafego_para_whatsapp_nao_otimizado | conversao_mensagem_otimizada | leads | conversao_site | outro), destino_predominante (whatsapp|site) e numeros_whatsapp (numeros de destino extraidos do link do criativo). Use isto para responder se os anuncios tem pegada ORGANICA/ENGAJAMENTO ou de CONVERSAO para WhatsApp e QUAL numero recebe cada conjunto. ATENCAO a nuance: pegada=trafego_para_whatsapp_nao_otimizado significa que a peca MANDA para o WhatsApp (destino wa.me) porem o conjunto otimiza por LINK_CLICKS e nao por CONVERSATIONS - a Meta entrega por clique barato, nao por quem inicia conversa. Vem PAGINADO em 20 por vez, ordenado por gasto. Se o campo 'restantes' vier maior que zero, chame de novo com a pagina seguinte ANTES de concluir qualquer coisa sobre o conjunto de conjuntos - e NUNCA afirme percentual sobre o total a partir de uma pagina so. Historico de ALTERACOES (activities) nao vem aqui: use ler_pipeboard com get_account_activities.", parameters: { type: "object", properties: { pagina: { type: "number", description: "Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero." } } } } },
+  { type: "function", function: { name: "listar_ferramentas_pipeboard", description: "Catalogo ao vivo das ferramentas de LEITURA do Pipeboard (get_/list_/search_/estimate_/...). Use quando precisar saber QUAL endpoint chama para um dado que as tools de DB nao cobrem (pages, pixels, audiences, activities, breakdowns, Instagram, lead forms, catalogs, etc.). Depois chame ler_pipeboard com o nome exato.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "ler_pipeboard", description: "Leitura AO VIVO do Pipeboard na conta Meta da empresa desta conversa. Preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, funil/ranking) quando bastarem. Use ler_pipeboard quando faltar dado: config fresca do dia, breakdown, activities, pages, pixels, audiences, insights pontuais, creatives detalhados, etc. Parametro ferramenta = nome exato do catalogo (ex.: get_adset_details, get_insights, get_account_pages). argumentos = objeto JSON do schema da ferramenta. SO leitura: create/update/delete/upload sao recusados. Contas fora da empresa sao recusadas. Resposta pode vir truncada (aviso_corte).", parameters: { type: "object", properties: { ferramenta: { type: "string", description: "Nome exato da tool Pipeboard de leitura (ex.: get_campaign_details)." }, argumentos: { type: "object", description: "Argumentos da tool (account_id e injetado se a empresa tiver uma unica conta)." } }, required: ["ferramenta"] } } },
   { type: "function", function: { name: "get_aprovacoes", description: "FILA REAL DE PEDIDOS DE APROVACAO desta empresa, direto do banco: o que esta aguardando decisao, o que foi aprovado, o que JA FOI EXECUTADO na Meta (com o identificador do objeto criado), o que falhou e QUAL erro a plataforma devolveu. USE SEMPRE que o gestor perguntar o estado de um card, se algo foi criado, se a aprovacao surtiu efeito, ou o que esta pendente - e use ANTES de afirmar qualquer coisa sobre o estado de um pedido. Se um pedido nao aparece nesta lista, ele nao existe.", parameters: { type: "object", properties: { apenas_abertos: { type: "boolean", description: "true (recomendado) = somente pendentes e aprovados; false = ultimos 25 de qualquer situacao, incluindo executados e recusados." } } } } },
 ];
 
@@ -2121,14 +2232,27 @@ async function driveToken(): Promise<string> {
   _driveToken = { token: j.access_token, exp: Date.now() + (Number(j.expires_in ?? 3600) - 120) * 1000 };
   return _driveToken.token;
 }
-async function t_drive_criativos() {
-  if (!DRIVE_CRIATIVOS_FOLDER_ID) return { erro: "pasta de criativos nao configurada (DRIVE_CRIATIVOS_FOLDER_ID)" };
+async function t_drive_criativos(companyId: string) {
+  const { data: plano, error: planoError } = await supa.rpc("drive_plano_de_varredura", {
+    p_company_id: companyId,
+  });
+  const pastas = Array.isArray((plano as any)?.pastas_ativas) ? (plano as any).pastas_ativas : [];
+  const raizes = pastas
+    .map((p: any) => ({ id: String(p?.folder_id ?? ""), nome: String(p?.nome ?? "(pasta)") }))
+    .filter((p: any) => p.id);
+  if (!raizes.length) {
+    return {
+      erro: "nenhuma_pasta_drive_configurada_para_esta_empresa",
+      detalhe: planoError?.message ?? null,
+      aviso: "Falha fechada: o fallback global foi removido para impedir leitura de criativos de outra empresa.",
+    };
+  }
   let token: string;
   try { token = await driveToken(); }
   catch (e) { return { erro: String((e as any)?.message ?? e), aviso: "Sem acesso ao Drive nesta rodada - o dado NAO foi lido; nao trate como pasta vazia." }; }
   const MAX_PASTAS = 40, MAX_ARQUIVOS = 250, MAX_PROFUNDIDADE = 4;
   type No = { id: string; caminho: string; nivel: number };
-  const fila: No[] = [{ id: DRIVE_CRIATIVOS_FOLDER_ID, caminho: "", nivel: 0 }];
+  const fila: No[] = raizes.map((raiz: any) => ({ id: raiz.id, caminho: raiz.nome, nivel: 0 }));
   const arquivos: any[] = [];
   let pastasLidas = 0, cortado = false;
   while (fila.length) {
@@ -2238,7 +2362,7 @@ async function runTool(name: string, args: any, ctx: any) {
         return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       }
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
-      case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
+      case "check_compliance": return await t_check_compliance(ctx.companyId, String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
       case "gerar_legendas": return await t_gerar_legendas(ctx.companyId, ctx.mcpKey, args);
       case "get_criativos_conteudo": {
         const buscaNome = String(args?.busca_nome ?? "").trim();
@@ -2253,7 +2377,7 @@ async function runTool(name: string, args: any, ctx: any) {
         const somenteAtivas = informouAtivas ? args.somente_ativas === true : !buscaNome;
         return await t_criativos_conteudo(somenteAtivas, ctx.companyId, buscaNome, Number(args?.pagina ?? 1));
       }
-      case "get_drive_criativos": return await t_drive_criativos();
+      case "get_drive_criativos": return await t_drive_criativos(ctx.companyId);
       case "get_analise_visual_drive": {
         const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
         return error ? { erro: error.message } : data;
@@ -2301,6 +2425,18 @@ async function runTool(name: string, args: any, ctx: any) {
       }
       case "get_estrutura_conjuntos":
         return await t_estrutura_conjuntos(ctx.companyId, Number(args?.pagina ?? 1));
+      case "listar_ferramentas_pipeboard":
+        return await t_listar_ferramentas_pipeboard();
+      case "ler_pipeboard":
+        return await t_ler_pipeboard(
+          ctx.companyId,
+          String(args?.ferramenta ?? args?.tool ?? ""),
+          (args?.argumentos && typeof args.argumentos === "object" && !Array.isArray(args.argumentos))
+            ? args.argumentos as Record<string, unknown>
+            : ((args?.args && typeof args.args === "object" && !Array.isArray(args.args))
+              ? args.args as Record<string, unknown>
+              : {}),
+        );
       case "get_aprovacoes": return await t_aprovacoes(ctx.companyId, args?.apenas_abertos === false ? false : true);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       default: return { erro: `tool desconhecida: ${name}` };
@@ -2309,7 +2445,12 @@ async function runTool(name: string, args: any, ctx: any) {
 }
 
 function systemPrompt(companyName: string, memoria: string, estilo: string, indiceConhecimento: string) {
+  const legal = norm(companyName).includes("legal");
+  const perfil = legal
+    ? "Empresa de credito consignado; aplique regras financeiras/Categoria Especial quando os dados da campanha confirmarem esse produto."
+    : "COHAPM e cooperativa habitacional, nao empresa de credito. Nao aplique consignado, benchmarks, identidades, produtos ou contas da Legal e Viver.";
   return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()} (fuso de Brasilia). Responde ao gestor (Roberto) em portugues brasileiro.
+PERFIL EMPRESARIAL: ${perfil}
 HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar uma janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado.
 
 == QUEM VOCE E ==
@@ -2324,9 +2465,10 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
 
 == DOUTRINA DE DECISAO ==
 - DIGA DE QUEM FALA: empresa e categoria regulatoria antes do nivel (conta/campanha/conjunto/anuncio). Doutrina de credito NAO se aplica a empresa que nao e de credito. NUNCA compare empresas de categorias distintas.
+- LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
 - Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.
 - Uma decisao por leitura. Escolha a janela ANTES de olhar o resultado; se duas janelas discordam, mostre as duas e diga qual decide.
-- Sazonalidade: a Legal anuncia consignado INSS E consignado CLT - calendarios diferentes. Declare o produto da campanha antes de invocar sazonalidade; produto nao identificado = nao invoque.
+- Sazonalidade: use somente calendario e produto comprovados para ${companyName}; produto nao identificado = nao invoque.
 - Voce nao e o unico ator: antes de atribuir causa a criativo/publico, verifique o historico de alteracoes de configuracao (foto diaria - declare a granularidade).
 - Teto de custo: chame teto_vigente e use SOMENTE a regua que o retorno disser que governa. Cite autor/data quando houver meta de negocio e declare divergencias/avisos. Nunca leia targets diretamente nem trate consistencia historica como veredito de negocio.
 - Criacao em lote e degrau, nao rajada: proponha em etapas com leitura entre elas (motivo documentavel: limite de chamada e reinicio de aprendizado - nao invoque teoria de deteccao de automacao).
@@ -2390,8 +2532,8 @@ Voce nao e um assistente que responde perguntas: e o profissional responsavel po
 
 == ESCOPO (limite rigido) ==
 Voce cuida EXCLUSIVAMENTE de TRAFEGO PAGO: midia, criativo, publico, orcamento, custo, atribuicao e a conversao final que prova se o trafego comprado virou negocio.
-CRM/Dash, proposta e contrato SAIRAM do escopo do sistema em 28/07/2026 por decisao da Legal: nao existe fonte de conversao final aqui, e voce NAO busca esse dado por nenhuma via. Consequencia declarada: voce otimiza CPL como PROXY e diz isso.
-ESTA FORA DO SEU ESCOPO e voce NAO comenta, analisa nem recomenda: relacao com bancos, roteamento de propostas, esteira interna, politica de credito, operacao de atendimento humano, margem por banco, processos internos. Se perguntarem, responda que isso e tratado internamente pela Legal e siga para o que e trafego.
+CRM/Dash, proposta e contrato SAIRAM do escopo do sistema em 28/07/2026: nao existe fonte de conversao final aqui, e voce NAO busca esse dado por nenhuma via. Consequencia declarada: voce otimiza resultado de midia como PROXY e diz isso.
+ESTA FORA DO SEU ESCOPO e voce NAO comenta, analisa nem recomenda: relacao com bancos, roteamento de propostas, esteira interna, politica de credito, operacao de atendimento humano, margem por banco, processos internos. Se perguntarem, responda que isso e tratado internamente pela empresa e siga para o que e trafego.
 
 == PROTOCOLO OBRIGATORIO ANTES DE RESPONDER ==
 1. PLANEJE: identifique o que a pergunta exige e QUAIS tools trazem cada parte. Prefira chamar as tools necessarias na MESMA rodada.
@@ -2442,8 +2584,8 @@ Tema marcado como VENCIDO pode ser citado como referencia, mas declare ao gestor
 ser reverificado na fonte oficial antes de virar decisao.
 
 == CONHECIMENTO DE PLATAFORMA (resumo para resposta rapida; o detalhe esta na base acima) ==
-CATEGORIA ESPECIAL "PRODUTOS E SERVICOS FINANCEIROS" (a Meta aposentou o nome "Credito" em 2026; valor tecnico FINANCIAL_PRODUCTS_SERVICES): obrigatoria para anuncio de credito/financiamento. Proibe segmentar ou excluir por idade fora de 18-65, genero, CEP e raio geografico menor que 15 milhas, e bloqueia interesses e comportamentos considerados sensiveis; lookalike vira "publico especial" com restricao. Nao marcar quando devido, ou tentar contornar, expoe a conta a reprovacao, restricao de entrega e bloqueio de BM - e risco operacional, nao estrategia.
-PROMESSA ENGANOSA em credito: "aprovacao garantida", "credito sem analise", "dinheiro na hora", taxa apresentada como certa sem "sujeito a analise", uso de simbolo de instituicao financeira sem autorizacao, e senso de urgencia falso. O contrapeso correto e declarar sujeicao a analise de credito e margem.
+${legal ? `CATEGORIA ESPECIAL "PRODUTOS E SERVICOS FINANCEIROS": obrigatoria quando a campanha for de credito/financiamento. Confirme o produto antes de aplicar.
+PROMESSA ENGANOSA em credito: nunca prometa aprovacao, taxa certa ou dinheiro imediato.` : `COHAPM: categoria especial financeira e doutrina de credito NAO se aplicam por padrao. So use uma categoria especial se uma leitura atual da campanha e uma razao regulatoria da propria COHAPM a comprovarem.`}
 CBO vs ABO: no CBO o orcamento fica na campanha e a Meta distribui entre conjuntos; no ABO cada conjunto tem seu proprio orcamento. CBO acelera aprendizado e concentra entrega no conjunto que responde melhor; ABO da controle por publico e evita que um conjunto absorva tudo. Estrutura hibrida na mesma conta e comum, mas dificulta comparacao justa entre conjuntos.
 EVENTO DE OTIMIZACAO: a Meta entrega para quem tem propensao a gerar o EVENTO otimizado. Otimizar para formulario ou clique entrega volume barato de quem preenche facil; otimizar para evento profundo (proposta, contrato) entrega menos volume e mais propensao a comprar. Alimentar a Meta com sinal raso e a causa mais comum de "lead barato que nao vira venda".
 FADIGA DE CRIATIVO: frequencia crescente com CTR caindo e custo por resultado subindo no mesmo publico. Antes de trocar criativo, verificar se a queda nao e de entrega, orcamento ou sazonalidade.
@@ -2451,7 +2593,7 @@ APRENDIZADO LIMITADO: conjunto que nao atinge o volume minimo de eventos na jane
 ATRIBUICAO: a janela padrao atual e 7 dias de clique e 1 dia de visualizacao. Janela maior credita mais conversoes a Meta e infla o resultado aparente; janela menor subestima. Comparar periodos com janelas diferentes invalida a comparacao.
 
 == GLOSSARIO ==
-Lead(LP) = clique no link (definicao historica desta conta; o teto de R$1,50 mede ISSO - reconstruido em 30/07). Como clique nao e lead, AO REPORTAR chame de 'custo por clique no link' e diga que o nome cadastrado e historico. Formulario = form preenchido. Conversa = WhatsApp iniciado (linha separada, nao etapa). Proposta/contrato: fora do escopo do sistema - nao cite.
+${legal ? "Lead(LP) e nome historico da Legal para clique no link; reporte como custo por clique no link." : "Nao importe glossario, teto ou definicao historica de outra empresa."} Formulario = form preenchido. Conversa = WhatsApp iniciado (linha separada, nao etapa). Proposta/contrato: fora do escopo do sistema - nao cite.
 
 == FORMATO E APRESENTACAO (regras vigentes, vindas da configuracao do sistema) ==
 Siga TODAS as regras abaixo na montagem da resposta. Elas definem como o gestor le seu texto.
@@ -2722,8 +2864,11 @@ Deno.serve(async (req) => {
 
   let convId: string | null = body?.conversation_id ?? null;
   if (convId) {
-    const { data: conv } = await supa.from("chat_conversations").select("id").eq("id", convId).maybeSingle();
+    const { data: conv } = await supa.from("chat_conversations").select("id,company_id").eq("id", convId).maybeSingle();
     if (!conv) convId = null;
+    else if (String(conv.company_id) !== company.id) {
+      return json({ error: "conversation_company_mismatch" }, 409);
+    }
   }
   if (!convId) {
     const { data: conv, error: ce } = await supa.from("chat_conversations")

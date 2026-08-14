@@ -150,6 +150,15 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import { pipeboardToken } from "../_shared/pipeboard.ts";
+import {
+  callReadTool,
+  companyMetaAccounts,
+  isReadOnlyTool,
+  listReadTools,
+  scopeArgsToCompany,
+  truncatePipeboardPayload,
+} from "../_shared/pipeboard_read.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -206,12 +215,12 @@ const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
 
 async function resolveCompany(name?: string): Promise<{ id: string; name: string } | null> {
   const { data } = await supa.from("companies").select("id,name");
-  if (!data?.length) return null;
-  if (name) {
-    const hit = data.find((c) => norm(c.name).includes(norm(name)));
-    if (hit) return hit;
-  }
-  return data.find((c) => c.name.toLowerCase().includes("legal")) ?? data[0];
+  if (!data?.length || !name?.trim()) return null;
+  const needle = norm(name);
+  const exact = data.filter((c) => norm(c.name) === needle);
+  if (exact.length === 1) return exact[0];
+  const partial = data.filter((c) => norm(c.name).includes(needle) || needle.includes(norm(c.name)));
+  return partial.length === 1 ? partial[0] : null;
 }
 
 // ============================================================================
@@ -414,22 +423,110 @@ async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, p
     }
   }
   const unicas = [...grupos.values()].sort((a, b) => Number(b.gasto_total) - Number(a.gasto_total));
-  const cortado = cortarLista(obj, "criativos", 4000) as Record<string, unknown>;
+  // v29 (14/08): lista peca-por-peca COMPACTA (legenda_resumo ~180) com campos estruturais
+  // (object_type/cta/destino/destino_url) SEMPRE presentes, para os ativos caberem inteiros.
+  // legendas_unicas segue com o texto INTEGRAL (compliance).
+  const compactos = lista.map((c) => ({
+    anuncio: c.anuncio ?? null,
+    campanha: c.campanha ?? null,
+    campanha_ativa: c.campanha_ativa === true,
+    status_anuncio: c.status_anuncio ?? null,
+    object_type: c.object_type ?? null,
+    cta: c.cta ?? null,
+    destino: c.destino ?? null,
+    destino_url: c.destino_url ?? null,
+    tem_imagem: c.tem_imagem ?? null,
+    gasto_acumulado: c.gasto_acumulado ?? null,
+    formularios: c.formularios ?? null,
+    legenda_resumo: String(c.legenda ?? "").slice(0, 180),
+  }));
+  const cortado = cortarLista({ ...obj, criativos: compactos }, "criativos", 8000) as Record<string, unknown>;
   const comUnicas = cortarLista({ ...cortado, legendas_unicas: unicas,
     total_legendas_distintas: unicas.length,
-    nota_legendas: "legendas_unicas cobre TODOS os criativos coletados. Para auditoria de compliance completa, cheque cada texto distinto UMA vez.",
+    nota_legendas: "legendas_unicas traz o texto INTEGRAL de cada legenda distinta (compliance). Em 'criativos', legenda_resumo e so os ~180 primeiros chars; para o texto inteiro use legendas_unicas ou busca_nome.",
   }, "legendas_unicas", 6500);
   return { ...comUnicas, somente_campanhas_ativas: somenteAtivas };
 }
-async function t_estrutura_conjuntos() {
-  const { data, error } = await supa.rpc("get_estrutura_conjuntos");
+async function pipeboardTokenFromDb(): Promise<string> {
+  const { data: secret } = await supa
+    .from("integration_secrets")
+    .select("value")
+    .eq("name", "pipeboard_api_token")
+    .maybeSingle();
+  return await pipeboardToken(async () => String(secret?.value ?? ""));
+}
+
+async function t_listar_ferramentas_pipeboard() {
+  const token = await pipeboardTokenFromDb();
+  if (!token) return { erro: "PIPEBOARD_API_TOKEN ausente" };
+  const catalog = await listReadTools(token);
+  if (!catalog.ok) return { erro: catalog.erro ?? "falha ao listar ferramentas Pipeboard" };
+  const cut = truncatePipeboardPayload({
+    ok: true,
+    source: "pipeboard:meta",
+    total_pipeboard: catalog.total_pipeboard,
+    total_leitura: catalog.total_leitura,
+    tools: catalog.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      argumentos: t.properties,
+      obrigatorios: t.required,
+    })),
+    nota: "Ferramentas de LEITURA do Pipeboard. Chame ler_pipeboard com o nome exato. Preferir DB quando bastar; live quando faltar.",
+  });
+  return cut.data;
+}
+
+async function t_ler_pipeboard(companyId: string, ferramenta: string, argumentos: Record<string, unknown> = {}) {
+  if (!companyId) return { erro: "company_id_obrigatorio" };
+  const name = String(ferramenta ?? "").trim();
+  if (!name) return { erro: "ferramenta_obrigatoria" };
+  if (!isReadOnlyTool(name)) {
+    return { erro: "ferramenta_nao_e_leitura", ferramenta: name };
+  }
+  const token = await pipeboardTokenFromDb();
+  if (!token) return { erro: "PIPEBOARD_API_TOKEN ausente" };
+  let allowed: string[] = [];
+  try {
+    allowed = await companyMetaAccounts(supa, companyId);
+  } catch (error) {
+    return { erro: String((error as Error).message ?? error) };
+  }
+  if (!allowed.length) return { erro: "empresa_sem_conta_meta_vinculada" };
+  const catalog = await listReadTools(token);
+  const toolMeta = catalog.tools.find((t) => t.name === name);
+  const properties = Object.fromEntries((toolMeta?.properties ?? []).map((p) => [p, {}]));
+  const scoped = scopeArgsToCompany(name, argumentos ?? {}, allowed, properties);
+  if (!scoped.ok) {
+    return { erro: scoped.erro, contas_da_empresa: scoped.contas_da_empresa ?? allowed };
+  }
+  const result = await callReadTool(name, scoped.args, token);
+  const cut = truncatePipeboardPayload({
+    ok: result.ok,
+    source: "pipeboard:meta",
+    company_id: companyId,
+    ferramenta: name,
+    args_usados: scoped.args,
+    status: result.status ?? null,
+    erro: result.erro ?? null,
+    resultado: result.body ?? null,
+  });
+  return cut.data;
+}
+
+async function t_estrutura_conjuntos(companyId: string) {
+  const { data, error } = await supa.rpc("get_estrutura_conjuntos", {
+    p_company_id: companyId,
+    p_offset: 0,
+    p_limit: 100,
+  });
   if (error) return { erro: `falha ao ler estrutura dos conjuntos: ${error.message}` };
   if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
   return cortarLista(data as Record<string, unknown>, "conjuntos");
 }
-async function t_check_compliance(legenda: string, mcpKey: string) {
+async function t_check_compliance(companyId: string, legenda: string, mcpKey: string) {
   if (!legenda) return { erro: "forneca a legenda" };
-  const r = await fetch(`${SUPABASE_URL}/functions/v1/compliance-check`, { method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey }, body: JSON.stringify({ legenda }) });
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/compliance-check`, { method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey }, body: JSON.stringify({ company_id: companyId, legenda }) });
   const t = await r.text();
   try { return JSON.parse(t); } catch { return { erro: `compliance-check falhou (${r.status})` }; }
 }
@@ -583,7 +680,18 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
         const somenteAtivas = informouAtivas ? args.somente_ativas === true : !buscaNome;
         return await t_criativos_conteudo(somenteAtivas, ctx.companyId, Number(args?.pagina ?? 1), buscaNome);
       }
-      case "get_estrutura_conjuntos": return await t_estrutura_conjuntos();
+      case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId);
+      case "listar_ferramentas_pipeboard": return await t_listar_ferramentas_pipeboard();
+      case "ler_pipeboard":
+        return await t_ler_pipeboard(
+          ctx.companyId,
+          String(args?.ferramenta ?? args?.tool ?? ""),
+          (args?.argumentos && typeof args.argumentos === "object" && !Array.isArray(args.argumentos))
+            ? args.argumentos as Record<string, unknown>
+            : ((args?.args && typeof args.args === "object" && !Array.isArray(args.args))
+              ? args.args as Record<string, unknown>
+              : {}),
+        );
       case "get_drive_criativos": return await t_drive_criativos(ctx.companyId);
       case "get_analise_visual_drive": {
         const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
@@ -626,7 +734,7 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
           nota: j?.nota ?? null,
         };
       }
-      case "check_compliance": return await t_check_compliance(String(args?.legenda ?? "").trim(), ctx.mcpKey);
+      case "check_compliance": return await t_check_compliance(ctx.companyId, String(args?.legenda ?? "").trim(), ctx.mcpKey);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       case "get_waba_status": return await t_waba_status(ctx.companyId);
       case "get_waba_template_insights": return await t_waba_template_insights(ctx.companyId, Number(args?.days ?? 30));
@@ -667,8 +775,10 @@ const DEF: Record<string, any> = {
   get_funnel: { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "RECORTE por custo MEDIO (Breakdown Effect: serve p/ ENTENDER, proibido prescrever pausa so por isto).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
   get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria 14d de UMA campanha pelo nome, com totais do periodo. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture: ctr_link/cpc_link usam SO cliques no link (use ao falar de 'CTR/CPC de link'); ctr_todos/cpc_todos usam TODOS os cliques (engajamento amplo). visualizacoes_lp e resultado valido e deve ser reportado (nao omita), sobretudo em engajamento/trafego. Esta e a fonte por-campanha de metricas basicas E avancadas - NUNCA diga que sao indisponiveis. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
-  get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios. Sem busca_nome: PAGINADO por gasto (20). Com busca_nome: sobrecarga (somente_ativas, company, offset, limit, busca_nome) para achar molde sem folhear; default somente_ativas=false quando busca. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, busca_nome: { type: "string", description: "Parte do nome do anuncio (ex.: LPV2_A2_Reel02 ou TESTE-GT02 no molde)." }, pagina: { type: "integer", description: "Pagina de 20, comecando em 1." } } } } },
-  get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto.", parameters: { type: "object", properties: {} } } },
+  get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios; traz tambem destino_url e destino (whatsapp quando wa.me, senao site) - o numero de WhatsApp de destino da peca sai daqui (CONFIG do criativo, nao a analitica WABA congelada). Sem busca_nome: PAGINADO por gasto (20). Com busca_nome: sobrecarga (somente_ativas, company, offset, limit, busca_nome) para achar molde sem folhear; default somente_ativas=false quando busca. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, busca_nome: { type: "string", description: "Parte do nome do anuncio (ex.: LPV2_A2_Reel02 ou TESTE-GT02 no molde)." }, pagina: { type: "integer", description: "Pagina de 20, comecando em 1." } } } } },
+  get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto. Traz tambem a PEGADA por conjunto (optimization_goal, destination_type, pegada=engajamento_topo|trafego|trafego_para_whatsapp_nao_otimizado|conversao_mensagem_otimizada|leads|conversao_site, destino_predominante e numeros_whatsapp): use para classificar organico/engajamento x conversao-WhatsApp e dizer QUAL numero recebe cada conjunto.", parameters: { type: "object", properties: {} } } },
+  listar_ferramentas_pipeboard: { type: "function", function: { name: "listar_ferramentas_pipeboard", description: "Catalogo ao vivo das ferramentas de LEITURA do Pipeboard. Use antes de ler_pipeboard quando nao souber o nome do endpoint.", parameters: { type: "object", properties: {} } } },
+  ler_pipeboard: { type: "function", function: { name: "ler_pipeboard", description: "Leitura AO VIVO do Pipeboard (so get_/list_/search_/...). Preferir DB quando bastar; use ao vivo para breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca. Escopo: contas da empresa do job.", parameters: { type: "object", properties: { ferramenta: { type: "string" }, argumentos: { type: "object" } }, required: ["ferramenta"] } } },
   check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL).", parameters: { type: "object", properties: { legenda: { type: "string" } }, required: ["legenda"] } } },
   get_conhecimento: { type: "function", function: { name: "get_conhecimento", description: "Base tecnica: politicas Meta, metricas, otimizacao, criativo. Use 'secao' p/ temas extensos.", parameters: { type: "object", properties: { tema: { type: "string" }, secao: { type: "string" } }, required: ["tema"] } } },
   get_waba_status: { type: "function", function: { name: "get_waba_status", description: "Numeros WhatsApp vivos: tier de envio (caminho p/ TIER_UNLIMITED), qualidade (GREEN/YELLOW/RED) e status, por numero e agregado.", parameters: { type: "object", properties: {} } } },
@@ -680,14 +790,14 @@ const DEF: Record<string, any> = {
 // especialista nao atende fora do proprio dominio, recusa e registra em LACUNAS).
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
-    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing"],
-    maxPorTool: { get_campaign_detail: 3, computar_perfil_vencedor: 1 }, maxToolsTotal: 9,
-    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Respeitar literalmente lacunas e guardas das RPCs; ranking medio isolado nunca prescreve pausa.",
+    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "listar_ferramentas_pipeboard", "ler_pipeboard"],
+    maxPorTool: { get_campaign_detail: 3, computar_perfil_vencedor: 1, ler_pipeboard: 5, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 11,
+    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir DB; se faltar dado use listar_ferramentas_pipeboard + ler_pipeboard. Respeitar literalmente lacunas e guardas das RPCs; ranking medio isolado nunca prescreve pausa.",
   },
   criativos: {
-    tools: ["get_criativos_conteudo", "get_conhecimento", "validar_pedido_contra_contrato"],
-    maxPorTool: { get_criativos_conteudo: 4, get_conhecimento: 3, validar_pedido_contra_contrato: 2 }, maxToolsTotal: 8,
-    missao: "CONTEUDO REAL DAS PECAS em operacao: legendas, titulos, CTAs, gasto e formularios por legenda distinta, hooks e formatos (fundamentar na base de conhecimento de criativo). Pode validar pedido contra contrato_de_execucao antes de propor criacao. NAO faz auditoria de compliance (dominio do especialista compliance) nem analisa metricas de campanha (dominio do desempenho_campanhas).",
+    tools: ["get_criativos_conteudo", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard"],
+    maxPorTool: { get_criativos_conteudo: 4, get_conhecimento: 3, validar_pedido_contra_contrato: 2, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 10,
+    missao: "CONTEUDO REAL DAS PECAS em operacao: legendas, titulos, CTAs, gasto e formularios por legenda distinta, hooks e formatos (fundamentar na base de conhecimento de criativo). Pode validar pedido contra contrato_de_execucao antes de propor criacao. Se o sync nao trouxe o detalhe, use ler_pipeboard (get_creative_details/get_ad_details). NAO faz auditoria de compliance (dominio do especialista compliance) nem analisa metricas de campanha (dominio do desempenho_campanhas).",
   },
   compliance: {
     tools: ["check_compliance", "checar_par_texto_e_peca", "get_criativos_conteudo", "get_conhecimento"],
@@ -695,9 +805,9 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "AUDITORIA DE COMPLIANCE: validar o PAR legenda+peca quando houver drive_file_id, declarando exatamente a cobertura e lacunas; para acervo em operacao, validar cada legenda distinta. Deteccao automatica nao e aprovacao.",
   },
   estrutura_conta: {
-    tools: ["get_estrutura_conjuntos", "get_conhecimento"],
-    maxPorTool: { get_estrutura_conjuntos: 1, get_conhecimento: 2 }, maxToolsTotal: 3,
-    missao: "ESTRUTURA da conta: CBO vs ABO, orcamentos por conjunto, estrategia de lance, targeting e compatibilidade com Categoria Especial de Credito. Apontar riscos com o dado visivel, sem inventar configuracao nao coletada.",
+    tools: ["get_estrutura_conjuntos", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard"],
+    maxPorTool: { get_estrutura_conjuntos: 1, get_conhecimento: 2, ler_pipeboard: 5, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 7,
+    missao: "ESTRUTURA da conta: CBO vs ABO, orcamentos por conjunto, estrategia de lance, targeting, pegada e destino. Preferir get_estrutura_conjuntos; se faltar (activities, config fresca, pages), use ler_pipeboard. Apontar riscos com o dado visivel, sem inventar configuracao nao coletada.",
   },
   whatsapp_waba: {
     tools: ["get_waba_status", "get_waba_template_insights", "get_conhecimento"],
@@ -780,12 +890,11 @@ async function t_drive_criativos(companyId: string) {
     .filter((p) => p.folder_id);
   let avisoFallback: string | null = null;
   if (!raizes.length) {
-    if (!DRIVE_CRIATIVOS_FOLDER_ID) {
-      return { erro: "nenhuma pasta monitorada para esta empresa e o segredo DRIVE_CRIATIVOS_FOLDER_ID esta vazio - nao ha o que varrer",
-        detalhe_rpc: ePlano?.message ?? null };
-    }
-    raizes = [{ folder_id: DRIVE_CRIATIVOS_FOLDER_ID, nome: "(fallback: segredo DRIVE_CRIATIVOS_FOLDER_ID)" }];
-    avisoFallback = `FALLBACK: a lista de pastas monitoradas veio vazia${ePlano ? ` (erro na leitura: ${ePlano.message})` : ""}, entao a varredura usou o id fixo do segredo. A cobertura desta rodada NAO e a cadastrada - declare isso.`;
+    return {
+      erro: "nenhuma_pasta_drive_configurada_para_esta_empresa",
+      detalhe_rpc: ePlano?.message ?? null,
+      aviso: "Falha fechada: o fallback global foi removido para impedir leitura de criativos de outra empresa.",
+    };
   }
 
   let token: string;
@@ -943,10 +1052,14 @@ Para auditoria ampla da conta, inclua todos os pertinentes.`;
 // ============================================================================
 // FASE 2 - SUBAGENTE (loop restrito, relatorio final)
 // ============================================================================
-async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx: { companyId: string; mcpKey: string }, prazo: () => number) {
+async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx: { companyId: string; companyName: string; mcpKey: string }, prazo: () => number) {
   const cfg = SUBAGENTES[nome];
   const tools = cfg.tools.map((t) => DEF[t]);
-  const sys = `Voce e o subagente '${nome}' de um gestor de trafego Meta Ads (credito consignado, Categoria Especial CREDIT).
+  const isLegal = norm(ctx.companyName).includes("legal");
+  const perfil = isLegal
+    ? "empresa de credito consignado; aplique categoria especial somente quando o objeto lido confirmar esse produto"
+    : "COHAPM/cooperativa habitacional; nao aplique doutrina, benchmark, identidade ou produto de credito da Legal e Viver";
+  const sys = `Voce e o subagente '${nome}' do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).
 MISSAO: ${cfg.missao}
 FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio (ex.: metricas de campanha para um especialista de criativo), NAO tente responder com suas ferramentas - registre na linha LACUNAS que aquilo e de outro especialista e siga apenas com a sua parte.
@@ -1020,8 +1133,13 @@ Ao terminar a coleta, escreva um RELATORIO conciso e denso em markdown com numer
 // ============================================================================
 // FASE 3 - SINTESE com continuacao INTERNA (contexto preservado, zero re-coleta)
 // ============================================================================
-async function sintetizar(pergunta: string, relatorios: { nome: string; relatorio: string; completo: boolean }[], estilo: string, memoria: string, prazo: () => number, tel: any) {
-  const sys = `Voce e o Gestor de Trafego IA da Legal e Viver. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
+async function sintetizar(companyName: string, pergunta: string, relatorios: { nome: string; relatorio: string; completo: boolean }[], estilo: string, memoria: string, prazo: () => number, tel: any) {
+  const isLegal = norm(companyName).includes("legal");
+  const perfil = isLegal
+    ? "empresa de credito consignado; regras financeiras so valem quando o produto estiver comprovado"
+    : "cooperativa habitacional; doutrina, benchmarks e identidades da Legal e Viver nao se aplicam";
+  const sys = `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
+PERFIL EMPRESARIAL: ${perfil}.
 ESCOPO RIGIDO: somente trafego pago (midia, criativo, publico, orcamento, custo). Bancos, esteira interna, politica de credito, atendimento humano e conversao final do CRM estao FORA - se a pergunta tocar nisso, declare fora de escopo e siga.
 REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao disponivel'; NUNCA estime nem complete com plausibilidade. (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) alguns relatorios chegam marcados como INCOMPLETOS (cortados por limite de tamanho): o que nao esta neles pode MUITO BEM existir no sistema. Para esses, escreva 'o levantamento do especialista veio incompleto nesta rodada' - e PROIBIDO dizer 'nao disponivel', 'retornou vazio' ou tratar a ausencia como inexistencia. (R4) nao misture janelas. (R4b) HOJE e a data declarada na primeira linha deste prompt - NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar a janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes: se uma acao for recomendavel, descreva-a e diga que o gestor pode pedi-la no chat para virar pedido de aprovacao. (R9) incoerencia entre numeros: aponte. Sem jargao interno (nomes de ferramenta, codigos de regra, limites de implementacao).
 FORMATO (regras vigentes do sistema):
@@ -1335,7 +1453,7 @@ async function pushProgresso(jobId: string, fase: string, detalhe: string) {
 // v2: helpers de lote, checkpoint e reinvocacao ------------------------------
 async function executarLote(
   lote: { nome: string; foco: string }[], pergunta: string,
-  ctx: { companyId: string; mcpKey: string }, prazo: () => number, tel: any,
+  ctx: { companyId: string; companyName: string; mcpKey: string }, prazo: () => number, tel: any,
 ): Promise<{ nome: string; relatorio: string; completo: boolean }[]> {
   const resultados = await Promise.allSettled(lote.map((p) =>
     p.nome === "analise_visual_drive"
@@ -1395,6 +1513,9 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.9", subagentes: [] };
   tel.versao = "job-v2.4";
   try {
+    const { data: companyRow } = await supa.from("companies").select("name").eq("id", companyId).maybeSingle();
+    const companyName = String(companyRow?.name ?? "").trim();
+    if (!companyName) throw new Error("empresa_do_job_nao_encontrada");
     await supa.from("chat_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId);
 
     // v2: RETOMADA DE CHECKPOINT - pula direto para o ponto onde o segmento anterior parou.
@@ -1413,7 +1534,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           retomada.devolver.map((d: any) => ({ nome: String(d.nome),
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${String(d.motivo)}\nCorrija exatamente isso.` })),
-          pergunta, { companyId, mcpKey }, prazo, tel,
+          pergunta, { companyId, companyName, mcpKey }, prazo, tel,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -1431,7 +1552,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           }
           const refeitos2 = await executarLote(
             devolver2.map((d) => ({ nome: d.nome, foco: `DEVOLUCAO DA COORDENACAO (rodada ${rodada}): ${d.motivo}. Corrija exatamente isso.` })),
-            pergunta, { companyId, mcpKey }, prazo, tel,
+            pergunta, { companyId, companyName, mcpKey }, prazo, tel,
           );
           for (const novo of refeitos2) {
             const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -1442,7 +1563,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       tel.rodadas_devolucao = rodada;
       tel.segmento = segmento;
       await pushProgresso(jobId, "sintese", "escrevendo a resposta final");
-      const texto0 = await sintetizar(pergunta, relatorios, estilo0, memoria0, prazo, tel);
+      const texto0 = await sintetizar(companyName, pergunta, relatorios, estilo0, memoria0, prazo, tel);
       tel.ms_total = Date.now() - t0;
       const finishSint0 = tel.sintese?.finish_reason ?? "stop";
       await supa.from("chat_messages").insert({
@@ -1477,7 +1598,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
     // FASE 2 - subagentes em paralelo
     await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
-    let relatorios = await executarLote(plano, pergunta, { companyId, mcpKey }, prazo, tel);
+    let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey }, prazo, tel);
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
 
     // FASE 2.5 (v2) - VALIDACAO DA COORDENACAO + DEVOLUCAO (com segmentacao se o prazo apertar)
@@ -1497,7 +1618,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       const refeitos = await executarLote(
         devolver.map((d) => ({ nome: d.nome,
           foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${d.motivo}\nCorrija exatamente isso; o que ja estava certo nao precisa ser repetido do zero.` })),
-        pergunta, { companyId, mcpKey }, prazo, tel,
+        pergunta, { companyId, companyName, mcpKey }, prazo, tel,
       );
       for (const novo of refeitos) {
         const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -1527,7 +1648,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
     // FASE 3 - sintese
     await pushProgresso(jobId, "sintese", "escrevendo a resposta final");
-    const texto = await sintetizar(pergunta, relatorios, estilo, memoria, prazo, tel);
+    const texto = await sintetizar(companyName, pergunta, relatorios, estilo, memoria, prazo, tel);
 
     tel.ms_total = Date.now() - t0;
     const finishSint = tel.sintese?.finish_reason ?? "stop";
@@ -1659,8 +1780,11 @@ Deno.serve(async (req) => {
 
   let convId: string | null = body?.conversation_id ?? null;
   if (convId) {
-    const { data: conv } = await supa.from("chat_conversations").select("id").eq("id", convId).maybeSingle();
+    const { data: conv } = await supa.from("chat_conversations").select("id,company_id").eq("id", convId).maybeSingle();
     if (!conv) convId = null;
+    else if (String(conv.company_id) !== company.id) {
+      return json({ error: "conversation_company_mismatch" }, 409);
+    }
   }
   if (!convId) {
     const { data: conv, error: ce } = await supa.from("chat_conversations")
