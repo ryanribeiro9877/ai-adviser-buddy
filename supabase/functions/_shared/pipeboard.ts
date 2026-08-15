@@ -516,6 +516,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
       return "conjunto";
     case "criar_anuncio_a_partir_de":
     case "pausar_criativo":
+    case "ativar_criativo":
       return "anuncio";
     default:
       return null;

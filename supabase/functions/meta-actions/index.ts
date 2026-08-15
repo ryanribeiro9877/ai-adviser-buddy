@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.24)
+// supabase/functions/meta-actions/index.ts (v5.25)
+// v5.25 (15/08/2026) - criar_anuncio nasce ACTIVE na aprovacao; ativar_criativo (update_ad ACTIVE).
+//   Campanha/conjunto continuam PAUSED.
 // v5.24 (15/08/2026) - Identidade Instagram oficial Legal = @legaleviver_ (IBA).
 //   Hard-block de identidades proibidas em resolverIdentidadeInstagram. Campo do spec
 //   continua pelo FORMATO do id (IBA 1784... → instagram_user_id; legado → instagram_actor_id).
@@ -328,6 +330,7 @@ const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
 const EXECUTAVEIS = [
   "pausar_criativo",
+  "ativar_criativo",
   "pausar_campanha",
   "pausar_conjunto",
   "alterar_orcamento",
@@ -1659,7 +1662,7 @@ export async function montarCriacao(
         avisosVeiculacao.push(avisoIdentidadeInstagram(identidadeInstagram));
         return {
           path: `/${conta}/ads`,
-          body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+          body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)
           criativo: {
             modo: "novo_adcreative_peca_nova_sem_molde",
             path: `/${conta}/adcreatives`,
@@ -1705,7 +1708,7 @@ export async function montarCriacao(
       avisosImg.push(avisoIdentidadeInstagram(identidadeInstagram));
       return {
         path: `/${conta}/ads`,
-        body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+        body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)
         criativo: {
           modo: "novo_adcreative_peca_nova_imagem_sem_molde",
           path: `/${conta}/adcreatives`,
@@ -1864,7 +1867,7 @@ export async function montarCriacao(
 
       return {
         path: `/${conta}/ads`,
-        body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+        body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)
         criativo: {
           modo: "novo_adcreative_peca_nova",
           path: `/${conta}/adcreatives`,
@@ -1967,7 +1970,7 @@ export async function montarCriacao(
 
       return {
         path: `/${conta}/ads`,
-        body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+        body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)
         criativo: {
           modo: "novo_adcreative_peca_nova_imagem",
           path: `/${conta}/adcreatives`,
@@ -2015,7 +2018,7 @@ export async function montarCriacao(
       }
       return {
         path: `/${conta}/ads`,
-        body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>,
+        body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)
         criativo: {
           modo: "novo_adcreative",
           path: `/${conta}/adcreatives`,
@@ -2043,7 +2046,7 @@ export async function montarCriacao(
 
     return {
       path: `/${conta}/ads`,
-      body: { name: nome, adset_id: adset, status: "PAUSED" } as Record<string, string>, // v4.3: anuncio nasce pausado - a entrega so comeca quando o gestor ativar
+      body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)
       criativo: {
         modo: "reusar_creative_id",
         creative_id: creativeMolde,
@@ -3156,6 +3159,9 @@ Deno.serve(async (req) => {
     let post: Record<string, string> | null = null;
     if (acao === "pausar_criativo" || acao === "pausar_campanha" || acao === "pausar_conjunto") {
       post = { status: "PAUSED" };
+    }
+    if (acao === "ativar_criativo") {
+      post = { status: "ACTIVE" };
     }
     if (acao === "renomear_campanha") {
       const novoNome = String(r.payload?.novo_nome ?? "").trim();
