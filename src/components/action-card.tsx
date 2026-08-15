@@ -3,6 +3,8 @@ import { Link } from "@tanstack/react-router";
 import {
   Pause,
   PauseCircle,
+  Play,
+  PlayCircle,
   TrendingUp,
   DollarSign,
   Check,
@@ -61,9 +63,12 @@ export type Decision = "approved" | "rejected";
 
 const ACTION_META: Record<string, { label: string; icon: typeof Pause }> = {
   pausar_criativo: { label: "Pausar criativo", icon: Pause },
+  ativar_criativo: { label: "Ativar criativo", icon: Play },
   escalar_criativo: { label: "Escalar criativo", icon: TrendingUp },
   pausar_campanha: { label: "Pausar campanha", icon: PauseCircle },
+  ativar_campanha: { label: "Ativar campanha", icon: PlayCircle },
   pausar_conjunto: { label: "Pausar conjunto", icon: PauseCircle },
+  ativar_conjunto: { label: "Ativar conjunto", icon: PlayCircle },
   escalar_duplicar: { label: "Escalar (duplicar +20%)", icon: TrendingUp },
   alterar_orcamento: { label: "Alterar orçamento", icon: DollarSign },
   renomear_campanha: { label: "Renomear campanha", icon: Pencil },

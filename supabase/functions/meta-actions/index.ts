@@ -1,6 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.25)
+// supabase/functions/meta-actions/index.ts (v5.26)
+// v5.26 (15/08/2026) - campanha/conjunto tambem nascem ACTIVE; ativar_campanha / ativar_conjunto.
 // v5.25 (15/08/2026) - criar_anuncio nasce ACTIVE na aprovacao; ativar_criativo (update_ad ACTIVE).
-//   Campanha/conjunto continuam PAUSED.
 // v5.24 (15/08/2026) - Identidade Instagram oficial Legal = @legaleviver_ (IBA).
 //   Hard-block de identidades proibidas em resolverIdentidadeInstagram. Campo do spec
 //   continua pelo FORMATO do id (IBA 1784... → instagram_user_id; legado → instagram_actor_id).
@@ -332,7 +332,9 @@ const EXECUTAVEIS = [
   "pausar_criativo",
   "ativar_criativo",
   "pausar_campanha",
+  "ativar_campanha",
   "pausar_conjunto",
+  "ativar_conjunto",
   "alterar_orcamento",
   "renomear_campanha",
   "ajustar_posicionamentos_do_conjunto",
@@ -552,11 +554,14 @@ async function escreverUpdate(
   }
 
   let tool = "update_ad";
-  if (acao === "pausar_campanha" || acao === "renomear_campanha") tool = "update_campaign";
+  if (acao === "pausar_campanha" || acao === "ativar_campanha" || acao === "renomear_campanha") {
+    tool = "update_campaign";
+  }
   if (
     acao === "alterar_orcamento" ||
     acao === "ajustar_posicionamentos_do_conjunto" ||
-    acao === "pausar_conjunto"
+    acao === "pausar_conjunto" ||
+    acao === "ativar_conjunto"
   ) {
     tool = "update_adset";
   }
@@ -1220,7 +1225,7 @@ export async function montarCriacao(
       body: {
         name: conf.nome,
         objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
-        status: "PAUSED", // v4.3: aprovar CRIA; ativar e ato do gestor no Gerenciador
+        status: "ACTIVE", // v5.26: aprovar criar_campanha = cria ACTIVE
         special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]), // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
         buying_type: "AUCTION",
         is_adset_budget_sharing_enabled: "false", // v4: exigido pela Meta em ABO; false = sem compartilhamento de orcamento entre conjuntos
@@ -1388,7 +1393,7 @@ export async function montarCriacao(
       name: nomeFinal,
       campaign_id: campanha,
       daily_budget: String(Math.round(reais * 100)), // centavos
-      status: "PAUSED", // v4.3: aprovar CRIA; ativar e ato do gestor
+      status: "ACTIVE", // v5.26: aprovar criar_conjunto / escalar_duplicar = cria ACTIVE
     };
     // Replica apenas o que o molde realmente tem - nada e inventado.
     if (mb.optimization_goal) body.optimization_goal = String(mb.optimization_goal);
@@ -3160,7 +3165,7 @@ Deno.serve(async (req) => {
     if (acao === "pausar_criativo" || acao === "pausar_campanha" || acao === "pausar_conjunto") {
       post = { status: "PAUSED" };
     }
-    if (acao === "ativar_criativo") {
+    if (acao === "ativar_criativo" || acao === "ativar_campanha" || acao === "ativar_conjunto") {
       post = { status: "ACTIVE" };
     }
     if (acao === "renomear_campanha") {
@@ -3275,7 +3280,11 @@ Deno.serve(async (req) => {
 
     if (conf.dry_run) {
       let ensaioPipeboard: ResultadoEscrita | null = null;
-      if (driver === "pipeboard" && (acao === "pausar_campanha" || acao === "renomear_campanha") && post) {
+      if (
+        driver === "pipeboard" &&
+        (acao === "pausar_campanha" || acao === "ativar_campanha" || acao === "renomear_campanha") &&
+        post
+      ) {
         ensaioPipeboard = await escreverUpdate(driver, acao, alvoExt, post, pbToken, {
           dry_run: true,
         });
@@ -3292,7 +3301,10 @@ Deno.serve(async (req) => {
         pipeboard_resposta: ensaioPipeboard?.body ?? null,
         pipeboard_nota:
           ensaioPipeboard?.nota_dry_run ??
-          (driver === "pipeboard" && acao !== "pausar_campanha" && acao !== "renomear_campanha"
+          (driver === "pipeboard" &&
+          acao !== "pausar_campanha" &&
+          acao !== "ativar_campanha" &&
+          acao !== "renomear_campanha"
             ? "dry_run nativo so em create_campaign/update_campaign; neste nivel a simulacao e local"
             : null),
         pipeboard_conexao: pipeboardMonitor,
@@ -3464,6 +3476,40 @@ Deno.serve(async (req) => {
             reconciliacao_estado: reconciliacao?.estado ?? null,
           },
         );
+      }
+      // Espelho de status apos ativar/pausar — evita UI stale ate o proximo sync.
+      if (
+        acao === "pausar_criativo" ||
+        acao === "ativar_criativo" ||
+        acao === "pausar_campanha" ||
+        acao === "ativar_campanha" ||
+        acao === "pausar_conjunto" ||
+        acao === "ativar_conjunto"
+      ) {
+        const statusLido = String(
+          (alvoLido as any)?.status ?? post?.status ?? "",
+        ).trim();
+        if (statusLido) {
+          if (acao === "pausar_criativo" || acao === "ativar_criativo") {
+            await supa
+              .from("ads")
+              .update({ status: statusLido.toUpperCase() })
+              .eq("provider", "meta_ads")
+              .eq("external_id", alvoExt);
+          } else if (acao === "pausar_campanha" || acao === "ativar_campanha") {
+            await supa
+              .from("campaigns")
+              .update({ status: statusLido.toLowerCase() })
+              .eq("provider", "meta_ads")
+              .eq("external_id", alvoExt);
+          } else {
+            await supa
+              .from("ad_sets")
+              .update({ status: statusLido.toUpperCase() })
+              .eq("provider", "meta_ads")
+              .eq("external_id", alvoExt);
+          }
+        }
       }
       await supa
         .from("approval_requests")
