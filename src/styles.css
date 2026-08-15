@@ -98,19 +98,37 @@
   }
 }
 
-/* Scrollbar fina e discreta (usada no textarea auto-grow do chat). */
+/* Scrollbar fina e discreta (textarea auto-grow e thread do chat). */
 .chat-scroll {
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklch, var(--color-muted-foreground) 40%, transparent) transparent;
 }
 .chat-scroll::-webkit-scrollbar {
   width: 6px;
-  height: 6px;
+  height: 0; /* sem barra horizontal no textarea */
 }
 .chat-scroll::-webkit-scrollbar-thumb {
   background-color: color-mix(in oklch, var(--color-muted-foreground) 40%, transparent);
   border-radius: 9999px;
 }
 .chat-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Thread do chat: só vertical; nunca barra horizontal na base do painel. */
+.chat-thread {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--color-muted-foreground) 40%, transparent) transparent;
+  overflow-x: hidden;
+}
+.chat-thread::-webkit-scrollbar {
+  width: 6px;
+  height: 0;
+}
+.chat-thread::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklch, var(--color-muted-foreground) 40%, transparent);
+  border-radius: 9999px;
+}
+.chat-thread::-webkit-scrollbar-track {
   background: transparent;
 }

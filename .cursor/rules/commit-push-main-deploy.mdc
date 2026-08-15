@@ -1,0 +1,20 @@
+---
+description: Após alterações de código, commit e push no main para deploy Vercel
+alwaysApply: true
+---
+
+# Commit e deploy no main (padrão do projeto)
+
+Sempre que concluir alterações **no código deste repositório** (frontend, edges, migrations/espelhos, configs que afetam produção):
+
+1. **Commit no `main`** com mensagem clara (por quê, não só o quê), no estilo do repo (`feat:` / `fix:` / `chore:`).
+2. **Push para `origin/main`** na mesma sequência — o Vercel publica a partir do `main`. Não deixar mudança “só local” se o objetivo é ficar visível em produção.
+3. Não pedir confirmação extra para esse fluxo: o padrão já está autorizado pelo gestor do projeto.
+4. Exceções (não commit/push automático):
+   - o usuário pediu explicitamente para **não** commitir ou **não** pushar;
+   - há só rascunho/exploração incompleta;
+   - arquivos com segredos (`.env`, credenciais) — avisar e excluir do commit.
+5. Edges Supabase: além do commit, fazer **deploy da function** quando a mudança for de edge (o Vercel não publica edges).
+6. Migrations: aplicar no projeto remoto quando fizerem parte da entrega; incluir arquivo em `supabase/migrations/` e espelho em `supabase/espelhos/`.
+
+Ordem típica ao fechar uma entrega: mudanças prontas → commit → `git push -u origin main` → (se edge) `supabase functions deploy …` → informar ao usuário que o Vercel vai publicar.

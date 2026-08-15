@@ -43,21 +43,25 @@ const components: Components = {
     />
   ),
   pre: ({ node: _n, ...p }) => (
-    <pre className="my-2 overflow-x-auto rounded-md bg-muted p-3 text-xs" {...p} />
+    <pre className="my-2 max-w-full overflow-x-auto rounded-md bg-muted p-3 text-xs" {...p} />
   ),
   table: ({ node: _n, ...p }) => (
-    <div className="my-2 overflow-x-auto">
-      <table className="w-full border-collapse text-sm" {...p} />
+    <div className="my-2 max-w-full overflow-x-auto">
+      <table className="w-full min-w-0 border-collapse text-sm" {...p} />
     </div>
   ),
   thead: ({ node: _n, ...p }) => <thead className="border-b border-border" {...p} />,
-  th: ({ node: _n, ...p }) => <th className="px-2 py-1.5 text-left font-semibold" {...p} />,
-  td: ({ node: _n, ...p }) => <td className="border-b border-border/50 px-2 py-1.5" {...p} />,
+  th: ({ node: _n, ...p }) => (
+    <th className="px-2 py-1.5 text-left font-semibold whitespace-nowrap" {...p} />
+  ),
+  td: ({ node: _n, ...p }) => (
+    <td className="max-w-[18rem] border-b border-border/50 px-2 py-1.5 break-words" {...p} />
+  ),
 };
 
 export function Markdown({ children, className }: { children: string; className?: string }) {
   return (
-    <div className={cn("text-sm", className)}>
+    <div className={cn("max-w-full min-w-0 break-words text-sm [overflow-wrap:anywhere]", className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {children}
       </ReactMarkdown>

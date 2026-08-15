@@ -252,7 +252,7 @@ function Operacao() {
   if (!selectedCompany) return <EmptyCompany />;
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 max-w-full overflow-x-hidden">
       <div>
         <h1 className="text-2xl font-semibold flex items-center gap-2">
           <MessagesSquare className="h-6 w-6 text-primary" />
@@ -282,7 +282,7 @@ function Operacao() {
           <TabsTrigger value="aprovacoes">Aprovações</TabsTrigger>
           <TabsTrigger value="recomendacoes">Recomendações da IA</TabsTrigger>
         </TabsList>
-        <TabsContent value="chat" className="mt-4">
+        <TabsContent value="chat" className="mt-4 max-w-full overflow-x-hidden">
           <OperacaoChat />
         </TabsContent>
         <TabsContent value="aprovacoes" className="mt-4">

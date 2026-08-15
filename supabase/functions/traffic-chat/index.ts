@@ -1,4 +1,12 @@
-// supabase/functions/traffic-chat/index.ts (v28.26)
+// supabase/functions/traffic-chat/index.ts (v28.27)
+// v28.27 (15/08/2026) - Autonomia do super-gestor na emissao de criar_anuncio:
+//   (1) legenda_fonte=agente: legenda_referencias autofill (molde / anuncio do conjunto /
+//       anuncio_substituido) — NUNCA devolver essa trava como pergunta ao humano;
+//   (2) ESP-40: defaults marca/canal/objetivo/periodo/produto quando omitidos;
+//   (3) utm_campaign: deriva do rotulo/periodo se o gestor nao deu identificador;
+//   (4) plataformas de conjunto: default facebook+instagram (Threads continua bloqueado);
+//   (5) molde inexistente com cara de nome composto = erro de invencao, lista candidatos reais;
+//   (6) prompt: montar a solucao e emitir o card; humano so aprova atos drasticos.
 // v28.26 (12/08/2026) - ESP-41: tool ler_entregas_digest (RPC read-only) — config de cadencia/
 //   destino do digest + entregas recentes (digest e alerta critico) com status por entrega.
 // v28.25 (12/08/2026) - ESP-30: tool saude_dos_tokens (RPC read-only) — dias para expirar/
@@ -516,6 +524,73 @@ const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
 // v25: slug para UTM. Gerado no CODIGO - a cobertura de UTM e KPI e nao pode depender de o
 // modelo lembrar de montar a string certa.
 const slug = (s: string) => deacc(String(s).toLowerCase()).replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+
+/** Periodo Meta no padrao AGO26 a partir de hoje (BRT). */
+function periodoMetaAtual(): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    month: "short",
+    year: "2-digit",
+  }).formatToParts(new Date());
+  const mon = (parts.find((p) => p.type === "month")?.value ?? "Jan").slice(0, 3).toUpperCase();
+  const map: Record<string, string> = {
+    JAN: "JAN", FEB: "FEV", MAR: "MAR", APR: "ABR", MAY: "MAI", JUN: "JUN",
+    JUL: "JUL", AUG: "AGO", SEP: "SET", OCT: "OUT", NOV: "NOV", DEC: "DEZ",
+  };
+  const yy = parts.find((p) => p.type === "year")?.value ?? "26";
+  return `${map[mon] ?? mon}${yy}`;
+}
+
+/**
+ * Autofill de legenda_referencias quando a autoria e do agente.
+ * A trava de rastreio e para o CARD (humano aprova), nao para entrevista no chat.
+ */
+async function resolverLegendaReferenciasAgente(opts: {
+  companyId: string;
+  refsExplicitas: unknown;
+  moldeNome?: string | null;
+  nomeAlvo?: string | null;
+  semMolde: boolean;
+  adsetExternalId?: string | null;
+  params: Record<string, unknown>;
+}): Promise<{ refs: string[]; origem: string }> {
+  const out: string[] = [];
+  let origem = "vazio";
+  const push = (raw: unknown, origemHint: string) => {
+    const s = String(raw ?? "").trim();
+    if (!s) return;
+    if (out.some((x) => norm(x) === norm(s))) return;
+    out.push(s);
+    if (origem === "vazio") origem = origemHint;
+  };
+
+  if (Array.isArray(opts.refsExplicitas)) {
+    for (const r of opts.refsExplicitas) push(r, "params");
+  }
+  push(opts.params?.anuncio_base, "anuncio_base");
+  push(opts.params?.anuncio_substituido, "anuncio_substituido");
+  push(opts.params?.referencia_legenda, "referencia_legenda");
+  push(opts.params?.peca_substituida, "peca_substituida");
+  if (opts.moldeNome) push(opts.moldeNome, "molde");
+  if (!opts.semMolde && opts.nomeAlvo && norm(String(opts.nomeAlvo)) !== "semmolde") {
+    push(opts.nomeAlvo, "target_name");
+  }
+
+  if (out.length === 0 && opts.adsetExternalId) {
+    const { data: ads } = await supa
+      .from("ads")
+      .select("name,status,updated_at")
+      .eq("company_id", opts.companyId)
+      .eq("adset_external_id", opts.adsetExternalId)
+      .order("updated_at", { ascending: false })
+      .limit(5);
+    const prefer = (ads ?? []).find((a: any) => /PAUSED/i.test(String(a.status ?? "")))
+      ?? (ads ?? [])[0];
+    if (prefer?.name) push(prefer.name, "anuncio_do_mesmo_conjunto");
+  }
+
+  return { refs: out, origem: out.length ? origem : "vazio" };
+}
 
 async function resolveCompany(name?: string): Promise<{ id: string; name: string } | null> {
   const { data } = await supa.from("companies").select("id,name");
@@ -1316,20 +1391,15 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
         nome_partes: montadoConj.partes,
       };
     }
-    // v28.15: plataformas_publicacao obrigatoria. O agente PERGUNTA ao gestor. Threads recusado.
-    const plataformasRaw = params?.plataformas_publicacao ?? params?.publisher_platforms ?? null;
-    if (plataformasRaw == null) {
-      return {
-        erro: "plataformas_de_publicacao_obrigatorias",
-        detalhe:
-          "PERGUNTE ao gestor em quais redes publicar antes de emitir o card. Opcoes: facebook, instagram, audience_network, messenger. Threads esta desabilitado (empresa sem cadastro). Quando Facebook+video, a Coluna da direita e excluida automaticamente.",
-      };
-    }
+    // v28.27: default facebook+instagram. Threads continua bloqueado. Nao entrevista o gestor
+    // so para escolher redes padrao da casa — ele revisa no card.
+    const plataformasRaw = params?.plataformas_publicacao ?? params?.publisher_platforms ?? ["facebook", "instagram"];
     const plataformas = Array.isArray(plataformasRaw)
       ? plataformasRaw.map((p: unknown) => String(p ?? "").trim().toLowerCase()).filter(Boolean)
       : [];
+    const plataformasDefaultAplicado = params?.plataformas_publicacao == null && params?.publisher_platforms == null;
     if (!plataformas.length) {
-      return { erro: "plataformas_de_publicacao_obrigatorias", detalhe: "A lista veio vazia. Pergunte ao gestor." };
+      return { erro: "plataformas_de_publicacao_obrigatorias", detalhe: "A lista veio vazia. Use facebook e/ou instagram (padrao da casa)." };
     }
     if (plataformas.includes("threads")) {
       return {
@@ -1343,7 +1413,10 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (invalidas.length) {
       return { erro: "plataforma_de_publicacao_nao_suportada", detalhe: `Invalidas: ${invalidas.join(", ")}` };
     }
-    if (plataformas.includes("facebook") && !formatoPrevisto) {
+    // Video e o formato mais comum em LP/CLT; se Facebook veio no default e formato omitido, assume video
+    // (exclui Coluna da direita). Se o gestor/agente passou imagem, respeita.
+    const formatoEfetivo = formatoPrevisto || (plataformas.includes("facebook") ? "video" : "");
+    if (plataformas.includes("facebook") && !formatoEfetivo) {
       return {
         erro: "formato_de_midia_obrigatorio_quando_facebook_selecionado",
         detalhe: "Facebook foi escolhido: informe params.formato_midia_previsto=video|imagem (video exclui a Coluna da direita automaticamente).",
@@ -1403,9 +1476,9 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // conversa ja rolou para cima quando a decisao acontece.
     // v28.15: summary declara plataformas + regras automaticas (FB+video sem Coluna; Threads off).
     const redesTxt = plataformas.join(", ");
-    const notaPosicionamento = plataformas.includes("facebook") && formatoPrevisto === "video"
-      ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}`
-      : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoPrevisto === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}`;
+    const notaPosicionamento = plataformas.includes("facebook") && formatoEfetivo === "video"
+      ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`
+      : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoEfetivo === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`;
     const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce PAUSADO` +
       (avisoOrcamento ? ` — ${avisoOrcamento}` : "") + notaPosicionamento;
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
@@ -1414,10 +1487,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       molde_external_id: molde.external_id, molde_nome: molde.name,
       campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
       orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "PAUSED",  // v28.6: aprovar CRIA pausado; ativar e ato do gestor
-      formato_midia_previsto: formatoPrevisto || null,
+      formato_midia_previsto: formatoEfetivo || null,
       plataformas_publicacao: plataformas,
+      plataformas_default_aplicado: plataformasDefaultAplicado,
       threads_desabilitado: true,
-      posicionamento_padrao_video: formatoPrevisto === "video" && plataformas.includes("facebook") ? {
+      posicionamento_padrao_video: formatoEfetivo === "video" && plataformas.includes("facebook") ? {
         publisher_platforms: plataformas,
         facebook_positions: ["feed", "instream_video", "marketplace", "story", "search", "facebook_reels", "facebook_reels_overlay", "profile_feed"],
         coluna_direita_excluida: true,
@@ -1611,14 +1685,27 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
 
   // -------- criar_anuncio_a_partir_de (compliance BLOQUEANTE) --------
   if (action === "criar_anuncio_a_partir_de") {
-    // ESP-40: nome do anuncio novo vem das partes.
+    // ESP-40: nome do anuncio novo vem das partes. v28.27: defaults da casa quando omitidos —
+    // o agente monta a solucao; o humano revisa no card.
     const { data: cfgNomeAd } = await supa
       .from("meta_execution_config")
       .select("marca_tag")
       .eq("company_id", companyId)
       .maybeSingle();
-    const montadoAd = resolverNomePartesDoParams(params, {
-      defaultMarca: (cfgNomeAd as any)?.marca_tag || "LEV",
+    const marcaDefault = String((cfgNomeAd as any)?.marca_tag || "LEV").trim() || "LEV";
+    const paramsNomeAd = {
+      ...params,
+      marca: String(params?.marca ?? "").trim() || marcaDefault,
+      canal: String(params?.canal ?? "").trim() || "LP",
+      objetivo_tag: String(params?.objetivo_tag ?? "").trim() || "LEADS",
+      produto: String(params?.produto ?? "").trim() || "CLT",
+      periodo: String(params?.periodo ?? "").trim() || periodoMetaAtual(),
+      rotulo: String(params?.rotulo ?? "").trim()
+        || String(params?.utm_campaign ?? "").trim()
+        || "NOVO",
+    };
+    const montadoAd = resolverNomePartesDoParams(paramsNomeAd, {
+      defaultMarca: marcaDefault,
     });
     if (!montadoAd.ok) {
       return {
@@ -1626,7 +1713,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
         detalhe: montadoAd.detalhe,
         faltando: montadoAd.faltando,
         instrucao:
-          "ESP-40: informe params.marca/canal/objetivo_tag/periodo (+ produto/rotulo). params.nome_novo livre foi aposentado.",
+          "ESP-40: preencha marca/canal/objetivo_tag/periodo (+ produto/rotulo) VOCE MESMO com os defaults da casa se o gestor nao especificou. Nao peca ao gestor para montar o nome.",
       };
     }
     const nomeNovo = montadoAd.nome;
@@ -1645,7 +1732,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const conjuntoDestino = String(
       params?.conjunto_destino ?? params?.conjunto_destino_external_id ?? "",
     ).trim();
-    const utmCampaign = String(params?.utm_campaign ?? "").trim();
+    let utmCampaign = String(params?.utm_campaign ?? "").trim();
+    if (!utmCampaign) {
+      // v28.27: deriva do rotulo/periodo — nao entrevista o gestor por identificador generico.
+      utmCampaign = String(montadoAd.partes.rotulo || montadoAd.partes.periodo || nomeNovo).trim();
+    }
     const driveFileId = String(params?.drive_file_id ?? "").trim();   // v28.10 (GT-13): peca nova
     // ESP-35: peca nova pode omitir molde (target_name vazio / "sem_molde" / params.sem_molde).
     const semMolde = !!driveFileId && (
@@ -1658,16 +1749,35 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!conjuntoDestino) {
       return {
         erro:
-          "params.conjunto_destino (nome) ou params.conjunto_destino_external_id obrigatorio â€” conjunto que recebe o anuncio",
+          "params.conjunto_destino (nome) ou params.conjunto_destino_external_id obrigatorio — conjunto que recebe o anuncio",
       };
     }
-    if (!utmCampaign) return { erro: "params.utm_campaign obrigatorio: e o valor que aparece no Dash como identificacao da campanha (ex.: AGOSTO26). Pergunte ao gestor se nao souber." };
 
     let molde: any = null;
     if (!semMolde) {
-      const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id").eq("company_id", companyId);
+      const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id,adset_external_id").eq("company_id", companyId);
       molde = (anuncios ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
-      if (!molde) return { erro: `anuncio molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato.` };
+      if (!molde) {
+        const pareceInventado = String(nomeAlvo).includes("[") || /LEV|LP|LEADS|TESTE|ESCALA|AGO\d{2}/i.test(String(nomeAlvo));
+        const candidatos = (anuncios ?? [])
+          .filter((a: any) => a.adset_external_id && String(conjuntoDestino).includes(String(a.adset_external_id)))
+          .slice(0, 8)
+          .map((a: any) => a.name);
+        const { data: setsTmp } = await supa.from("ad_sets").select("external_id,name").eq("company_id", companyId);
+        const destTmp = (setsTmp ?? []).find((x) => x.external_id === conjuntoDestino)
+          ?? (setsTmp ?? []).find((x) => norm(x.name) === norm(conjuntoDestino));
+        const noConjunto = destTmp?.external_id
+          ? (anuncios ?? []).filter((a: any) => a.adset_external_id === destTmp.external_id).map((a: any) => a.name).slice(0, 8)
+          : candidatos;
+        return {
+          erro: pareceInventado ? "molde_parece_nome_composto_inventado" : "anuncio_molde_nao_encontrado",
+          detalhe: pareceInventado
+            ? `target_name='${nomeAlvo}' nao existe no espelho e parece NOME INVENTADO (composto). E PROIBIDO inventar molde. Use o nome EXATO de um anuncio real (ex.: AD_LP_TESTE-RR_Rotativo_Video10) OU sem_molde=true + drive_file_id da peca do acervo.`
+            : `anuncio molde '${nomeAlvo}' nao encontrado. NAO invente: use um nome real do espelho.`,
+          candidatos_no_conjunto: noConjunto,
+          instrucao: "Corrija target_name com um anuncio REAL listado em candidatos_no_conjunto, ou use sem_molde=true com drive_file_id. Nao peca ao gestor para inventar o molde — leia o espelho.",
+        };
+      }
       if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
     }
 
@@ -1685,7 +1795,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // nem em tabela. As tres procedencias legitimas (humano, herdada_do_molde, agente) sao da RPC.
     let legendaFonte = String(params?.legenda_fonte ?? "").trim();
     let legenda = String(params?.legenda ?? "").trim();
-    const legendaRefs = Array.isArray(params?.legenda_referencias) ? params.legenda_referencias : null;
+    if (driveFileId && legenda && !legendaFonte) legendaFonte = "agente";
+    let legendaRefs: string[] | null = Array.isArray(params?.legenda_referencias)
+      ? (params.legenda_referencias as unknown[]).map((r) => String(r ?? "").trim()).filter(Boolean)
+      : null;
+    let legendaRefsOrigem: string | null = Array.isArray(params?.legenda_referencias) ? "params" : null;
     if (!driveFileId) {
       legenda = String(molde?.body ?? "").trim();
       legendaFonte = "herdada_do_molde";
@@ -1695,6 +1809,30 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       }
       // O gestor autorizou herdar: o texto e o do molde, e a procedencia diz exatamente isso.
       legenda = String(molde.body ?? "").trim();
+    }
+
+    // v28.27: se a legenda e do agente, autofill referencias — NUNCA pedir isso ao humano.
+    if (driveFileId && (legendaFonte === "agente" || (!legendaFonte && legenda))) {
+      if (legendaFonte !== "agente") legendaFonte = "agente";
+      const resolvido = await resolverLegendaReferenciasAgente({
+        companyId,
+        refsExplicitas: legendaRefs,
+        moldeNome: molde?.name ?? null,
+        nomeAlvo,
+        semMolde,
+        adsetExternalId: dest.external_id,
+        params: (params ?? {}) as Record<string, unknown>,
+      });
+      legendaRefs = resolvido.refs;
+      legendaRefsOrigem = resolvido.origem;
+      if (!legendaRefs.length) {
+        return {
+          erro: "legenda_referencias_indisponiveis",
+          detalhe:
+            "Autoria agente exige rastreio, mas nao ha anuncio-base no conjunto/molde para autofill. Use um molde real (target_name de anuncio existente) OU informe anuncio_substituido com o nome do anuncio que motivou a legenda. NAO peca ao gestor para 'confirmar a referencia' — resolva no espelho.",
+          instrucao: "Releia get_criativos_conteudo / ads do conjunto e preencha anuncio_substituido ou use molde real. Nao entreviste o gestor sobre o contrato.",
+        };
+      }
     }
 
     // ESP-35: config da empresa preenche page/CTA quando sem molde.
@@ -1751,7 +1889,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       pedido.drive_file_id = driveFileId;
       pedido.legenda = legenda;
       pedido.legenda_fonte = legendaFonte;
-      if (legendaRefs) pedido.legenda_referencias = legendaRefs;
+      if (legendaRefs && legendaRefs.length) pedido.legenda_referencias = legendaRefs;
       pedido.tipo_de_pedido = "peca_nova";
     }
     if (semMolde) {
@@ -1793,11 +1931,18 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     }
     if (v.completo !== true) {
       // A mensagem e dela, nao minha: recusa inventada aqui seria a doutrina em dois lugares.
+      const faltandoTxt = JSON.stringify(v.faltando ?? []);
+      const soRastreio = /legenda_referencias|anuncios existentes voce se baseou/i.test(faltandoTxt + String(v.mensagem_para_o_gestor ?? ""));
       return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
         auto_resolucao_estado_conjunto: autoResConjunto,
         faltando: v.faltando ?? null, mensagem_para_o_gestor: v.mensagem_para_o_gestor,
         destino_do_anuncio: v.destino_do_anuncio ?? null,
-        instrucao: "Repasse esta mensagem ao gestor e peca o que falta. NAO monte card e NAO preencha o que falta por conta propria." };
+        legenda_referencias_autofill: legendaRefs,
+        legenda_referencias_origem: legendaRefsOrigem,
+        instrucao: soRastreio
+          ? "Falha de rastreio da legenda: NAO pergunte ao gestor. Reemitir com molde real ou anuncio_substituido preenchido a partir do espelho; o codigo tambem tenta autofill."
+          : "Complete VOCE o que o contrato permite (molde real, drive_file_id, partes ESP-40, legenda_referencias via autofill). So devolva ao gestor decisao DELE (orcamento nao informado, escolha entre pecas equivalentes que voce ja listou). NUNCA peca ao gestor para te ensinar o contrato nem para montar o card.",
+      };
     }
     // A RPC declara peca_ja_na_biblioteca=false e AVISA, mas nao recusa - a decisao e do fluxo.
     // Aqui ela e recusa: aprovar um card e o ato que inicia gasto, e este card falharia na
@@ -1914,6 +2059,8 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       tipo_de_pedido: v.tipo_de_pedido ?? (driveFileId ? "peca_nova" : null),
       drive_file_id: driveFileId || null, meta_video_id: metaVideoId, meta_image_hash: metaImageHash,
       legenda, legenda_fonte: legendaFonte || null, legenda_referencias: legendaRefs,
+      legenda_referencias_origem: legendaRefsOrigem,
+      utm_campaign_origem: String(params?.utm_campaign ?? "").trim() ? "gestor" : "derivado_do_rotulo",
       nota_visual_da_peca: v.nota_visual_da_peca ?? null,
       destino_url: destinoUrlCard,
       destino_do_anuncio: destAnuncio,
@@ -2118,7 +2265,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. ESP-40/39: o novo nome e COMPOSTO a partir de marca/canal/objetivo_tag/papel(TESTE|ESCALA)/periodo (+ produto/rotulo opcionais) no padrao [MARCA][CANAL][OBJ][PROD?][PAPEL][ROT?][PER] — novo_nome livre foi aposentado. Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (obrigatorio ESP-39)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "canal", "papel", "periodo"] } } },
   { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, escalar_criativo, pausar_campanha, pausar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR conjunto/campanha/criativo continua MANUAL no Gerenciador — nao existe ativar_* neste sistema. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. ESP-40/39 NOMENCLATURA: o nome do objeto NOVO e COMPOSTO — params.marca (default LEV), params.canal, params.objetivo_tag (ou objetivo ODAX), params.periodo obrigatorios; params.produto e params.rotulo opcionais. CAMPANHA exige tambem params.papel=TESTE|ESCALA (ESP-39: vencedores e testes em campanhas SEPARADAS). Padrao [MARCA][CANAL][OBJ][PROD?][PAPEL?][ROT?][PER]. Nome livre (target_name/nome_novo soltos) e RECUSADO. Para criar_campanha, target_name pode ser \"composto\". escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce PAUSED; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de, OBRIGATORIO tambem: (1) PERGUNTE ao gestor as plataformas_publicacao (facebook|instagram|audience_network|messenger). (2) Se Facebook fizer parte, informe formato_midia_previsto=video|imagem. (3) Threads DESABILITADO. Tudo que e criado nasce PAUSED.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "ESP-40/39 nome: marca, canal, objetivo_tag, periodo, papel(TESTE|ESCALA em campanha) (+ produto, rotulo). Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao OBRIGATORIO; formato_midia_previsto quando Facebook. Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
-  { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA+CET (FIN-04). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true e passe em propose_action criar_anuncio_a_partir_de com params.legenda, legenda_fonte=agente e legenda_referencias. Nao improvise legendas soltas no chat — chame esta ferramenta.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: CLT (default)." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
+  { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA+CET (FIN-04). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true e passe em propose_action criar_anuncio_a_partir_de com params.legenda, legenda_fonte=agente e legenda_referencias=[nome EXATO do anuncio que motivou a copy]. VOCE preenche legenda_referencias — NUNCA peca ao gestor para confirmar a referencia. Nao improvise legendas soltas no chat — chame esta ferramenta.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: CLT (default)." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida legenda e/ou criativo contra base de regras versionada.", parameters: { type: "object", properties: { legenda: { type: "string" } } } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Traz tambem destino_url (link do CTA do criativo) e destino (whatsapp quando wa.me/api.whatsapp, senao site): O NUMERO DE WHATSAPP DE DESTINO de cada peca SAI DAQUI (ex.: wa.me/5571993451315). Isso e CONFIG do criativo coletada do Pipeboard - NAO confunda com a analitica de conversa WABA (pos-clique), que esta congelada; o numero de destino do anuncio E legivel e voce DEVE informa-lo quando perguntado. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
@@ -2504,6 +2651,14 @@ HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia co
 
 == QUEM VOCE E ==
 Voce nao e um assistente que responde perguntas: e o profissional responsavel por onde o dinheiro de midia e colocado e por que. A conversa e entre pares - sem didatismo, sem entusiasmo de vendedor, sem se desculpar por dar ma noticia. Sua missao: captar mais e melhor pelo menor custo sustentavel - SEM comprar volume barato que nao vira negocio, SEM arriscar a conta de anuncios, SEM queimar os numeros de WhatsApp, SEM degradar pagina e perfil (ativo organico e infraestrutura de midia - ja houve conta com ~R$94 mil gastos derrubada por propagacao de restricao do organico) e SEM transformar base sem consentimento em publico.
+Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao completa, decide o caminho operacional padrao e emite o card pronto. O humano aprova (ou recusa) atos drasticos — ele NAO monta o card por voce, NAO te ensina o contrato e NAO preenche campos que o espelho/config ja tem.
+
+== AUTONOMIA vs APROVACAO (15/08/2026 — incidente criar criativo) ==
+- DECIDA E EMITA: legenda_referencias (quando legenda_fonte=agente), partes ESP-40 (marca/canal/objetivo/periodo/produto/rotulo com defaults da casa), molde REAL do espelho ou sem_molde+drive_file_id, identidade Instagram da config, Threads OFF, Coluna da direita OFF em video, plataformas padrao facebook+instagram, utm_campaign (use o que o gestor deu; se nao deu, derive do rotulo/periodo).
+- NUNCA INVENTE: nome de molde, creative_id, external_id, meta_video_id, anuncio que nao existe no espelho. Inventar e falta grave — releia get_criativos_conteudo / get_acervo_para_anuncio / get_aprovacoes.
+- NUNCA ENTREVISTE O CONTRATO: nao peca ao gestor "confirme que a legenda foi baseada no Video10", "qual molde uso", "me diga as partes do nome". Isso e trabalho SEU. Se faltou dado tecnico, consulte a tool de novo e reemitir.
+- SO PERGUNTE o que e DECISÃO DE NEGOCIO do gestor e nao da para inferir: orcamento diario quando ele nao informou; escolha entre pecas EQUIVALENTES que voce ja listou com veredito; identificador UTM quando ele quiser um rotulo especifico no Dash (senao derive).
+- Card e o produto: a solucao chega montada no ActionCard. Texto de chat explica o plano em 1 bloco; a ferramenta propose_action fecha o ato.
 
 == HIERARQUIA DE PRIORIDADES (quando duas coisas boas se contradizem, esta ordem decide) ==
 1. Nao causar dano irreversivel: conta de anuncios, qualidade de numero de WhatsApp, ativo organico, exposicao regulatoria.
@@ -2613,12 +2768,19 @@ R10. Ao repassar dados de uma tool que traz campo 'avisos' ou 'nota', incorpore 
 == CRIAR CAMPANHA, CONJUNTO E ANUNCIO ==
 Voce pode PROPOR criacao, nunca executar. A ordem e uma escada e cada degrau exige o anterior
 aprovado: campanha -> conjunto -> anuncio. Conjunto e anuncio sao REPLICADOS de um molde que
-ja funciona (voce informa o nome do molde), porque configuracao de conjunto nao pode ser
-inventada. Tudo nasce PAUSADO: o gestor ativa no Gerenciador depois de revisar.
-ORCAMENTO: nao existe valor padrao. Se o gestor nao disse quanto quer gastar por dia, PERGUNTE
-antes de propor - nunca escolha um numero por conta propria.
-UTM: nao escreva a string de UTM; o sistema monta. Voce so precisa do identificador que o
-gestor quer ver no Dash (ex.: AGOSTO26), em params.utm_campaign.
+ja funciona (voce informa o nome EXATO do molde no espelho), porque configuracao de conjunto nao
+pode ser inventada — ou, em peca nova, sem_molde=true + drive_file_id do acervo. Tudo nasce
+PAUSADO: o gestor ativa no Gerenciador depois de revisar.
+ORCAMENTO: se o gestor nao disse quanto quer gastar por dia, PERGUNTE (unico valor que nao se
+inventa). Se ele ja disse (ex.: 60 no conjunto), use isso e nao reabra.
+UTM: o sistema monta a string. Se o gestor deu identificador (ex.: TEST-RR-AGO262), use em
+params.utm_campaign; se nao deu, o codigo deriva do rotulo/periodo — nao trave a emissao por isso.
+LEGENDA DO AGENTE: ao emitir criar_anuncio com legenda gerada por voce, passe legenda_fonte=agente
+e legenda_referencias com o anuncio que motivou a copy (ex.: o Video10 que sera substituido). Se
+omitir, o codigo tenta autofill — MAS voce deve preencher. NUNCA peca ao gestor para "confirmar a
+referencia da legenda".
+PLATAFORMAS: padrao facebook+instagram; Threads proibido; video no Facebook exclui Coluna da
+direita. Nao entreviste o gestor so para repetir o padrao da casa — declare no card.
 Se a legenda do molde reprovar em compliance, a criacao e recusada automaticamente - relate o
 veredito ao gestor e sugira ajuste de texto, sem tentar contornar.
 

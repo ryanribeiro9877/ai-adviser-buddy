@@ -877,7 +877,7 @@ export function OperacaoChat() {
   );
 
   return (
-    <div className="flex h-[calc(100vh-16rem)] min-h-[420px] gap-4 rounded-lg border border-border">
+    <div className="flex h-[calc(100vh-16rem)] min-h-[420px] max-w-full overflow-hidden rounded-lg border border-border">
       {/* Sidebar de conversas (md+) */}
       <aside className="hidden w-64 shrink-0 flex-col border-r border-border md:flex">
         <div className="border-b border-border p-2">
@@ -886,13 +886,13 @@ export function OperacaoChat() {
             Nova conversa
           </Button>
         </div>
-        <div className="flex-1 overflow-y-auto p-2">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-2">
           <ConversationList />
         </div>
       </aside>
 
       {/* Coluna direita: thread + input */}
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* Controle mobile: dropdown de conversa + nova */}
         <div className="flex items-center gap-2 border-b border-border p-2 md:hidden">
           <Select value={activeId ?? ""} onValueChange={(v) => setActiveId(v)}>
@@ -917,8 +917,8 @@ export function OperacaoChat() {
           </Button>
         </div>
 
-        {/* Thread */}
-        <div ref={threadRef} className="flex-1 overflow-y-auto p-4">
+        {/* Thread — só scroll vertical; conteúdo largo fica contido nas bolhas */}
+        <div ref={threadRef} className="chat-thread flex-1 overflow-y-auto overflow-x-hidden p-4">
           {!activeId && !showPending ? (
             <div className="flex h-full flex-col items-center justify-center text-center text-muted-foreground">
               <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/15 text-primary">
@@ -933,7 +933,7 @@ export function OperacaoChat() {
               </p>
             </div>
           ) : (
-            <div className="mx-auto flex max-w-3xl flex-col gap-4">
+            <div className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4">
               {messages.isLoading &&
                 activeId &&
                 [0, 1].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
@@ -951,11 +951,11 @@ export function OperacaoChat() {
 
               {showPending && !pendingNoBanco && (
                 <div className="flex justify-end">
-                  <div className="max-w-[85%] space-y-1 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
+                  <div className="max-w-[min(85%,100%)] min-w-0 space-y-1 break-words rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
                     {pending!.attachments.length > 0 && (
                       <AttachmentChips items={pending!.attachments} onPrimary />
                     )}
-                    {pending!.text && <div className="whitespace-pre-wrap">{pending!.text}</div>}
+                    {pending!.text && <div className="whitespace-pre-wrap break-words">{pending!.text}</div>}
                     {/* Só quando o roteamento foi automático: explica por que não
                         veio resposta imediata. Com o toggle ligado o usuário já sabe.
                         Texto neutro de propósito: aqui o gestor NÃO pediu análise
@@ -972,12 +972,12 @@ export function OperacaoChat() {
 
               {/* Resposta longa sendo costurada: uma bolha só que cresce. */}
               {live && (
-                <div className="flex gap-2">
+                <div className="flex min-w-0 gap-2">
                   <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
                     <Bot className="h-4 w-4" />
                   </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="rounded-lg bg-muted px-3 py-2">
+                  <div className="min-w-0 flex-1 overflow-hidden">
+                    <div className="max-w-full break-words rounded-lg bg-muted px-3 py-2 [overflow-wrap:anywhere]">
                       <Markdown>{live.text}</Markdown>
                     </div>
                     {live.continuing > 0 && (
@@ -1055,8 +1055,8 @@ export function OperacaoChat() {
         </div>
 
         {/* Compositor */}
-        <div className="border-t border-border p-3">
-          <div className="mx-auto max-w-3xl space-y-2">
+        <div className="shrink-0 border-t border-border p-3">
+          <div className="mx-auto w-full min-w-0 max-w-3xl space-y-2">
             {/* Anexos pendentes */}
             {attachments.length > 0 && !sending && (
               <div className="flex flex-wrap gap-2">
@@ -1298,26 +1298,30 @@ function MessageBubble({
 
   if (isUser) {
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[85%] space-y-1 rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
+      <div className="flex min-w-0 justify-end">
+        <div className="max-w-[min(85%,100%)] min-w-0 space-y-1 break-words rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground">
           {files.length > 0 && <AttachmentChips items={files} onPrimary />}
-          {message.content && <div className="whitespace-pre-wrap">{message.content}</div>}
+          {message.content && (
+            <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+              {message.content}
+            </div>
+          )}
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex gap-2">
+    <div className="flex min-w-0 gap-2">
       <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary">
         <Bot className="h-4 w-4" />
       </div>
-      <div className="min-w-0 flex-1">
-        <div className="rounded-lg bg-muted px-3 py-2">
+      <div className="min-w-0 flex-1 overflow-hidden">
+        <div className="max-w-full break-words rounded-lg bg-muted px-3 py-2 [overflow-wrap:anywhere]">
           <Markdown>{message.content ?? ""}</Markdown>
         </div>
         {cardIds.length > 0 && (
-          <div className="mt-2 space-y-2">
+          <div className="mt-2 max-w-full space-y-2">
             {cardIds.map((id) => {
               const ap = approvalsById[id];
               return ap ? (
@@ -1333,18 +1337,18 @@ function MessageBubble({
           </div>
         )}
         {(tools.length > 0 || message.model) && (
-          <div className="mt-1 flex flex-wrap items-center gap-1">
+          <div className="mt-1 flex max-w-full flex-wrap items-center gap-1">
             {tools.map((t, i) => (
               <Badge
                 key={`${t}-${i}`}
                 variant="outline"
-                className="h-5 px-1.5 text-[11px] font-normal"
+                className="h-5 max-w-full px-1.5 text-[11px] font-normal"
               >
-                {t}
+                <span className="truncate">{t}</span>
               </Badge>
             ))}
             {message.model && (
-              <span className="ml-1 text-[11px] text-muted-foreground">{message.model}</span>
+              <span className="ml-1 truncate text-[11px] text-muted-foreground">{message.model}</span>
             )}
           </div>
         )}
