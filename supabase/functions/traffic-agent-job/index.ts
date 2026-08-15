@@ -672,6 +672,17 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       case "get_overview": return await t_overview(ctx.companyId);
       case "get_alerts": return await t_alerts(ctx.companyId);
       case "get_recommendations": return await t_recos(ctx.companyId);
+      case "get_meta_dicas": {
+        const dias = Math.max(1, Math.min(90, Number(args?.dias ?? 14) || 14));
+        const veredito = args?.veredito != null ? String(args.veredito) : null;
+        const { data, error } = await supa.rpc("get_meta_dicas", {
+          p_company_id: ctx.companyId,
+          p_dias: dias,
+          p_veredito: veredito,
+        });
+        if (error) return { erro: error.message };
+        return data;
+      }
       case "teto_vigente": return await t_rpc("teto_vigente", { p_company_id: ctx.companyId, p_metric: String(args?.metric ?? "") });
       case "checar_par_texto_e_peca": return await t_rpc("checar_par_texto_e_peca", { p_company_id: ctx.companyId, p_legenda: String(args?.legenda ?? ""), p_drive_file_id: String(args?.drive_file_id ?? "") });
       case "saude_das_integracoes": return await t_rpc("saude_das_integracoes", { p_company_id: ctx.companyId, p_dias_tolerancia: Number(args?.dias_tolerancia ?? 3) });
@@ -785,6 +796,7 @@ const DEF: Record<string, any> = {
   get_overview: { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real), gasto/resultados 7d, dias_com_dado.", parameters: { type: "object", properties: {} } } },
   get_alerts: { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema.", parameters: { type: "object", properties: {} } } },
   get_recommendations: { type: "function", function: { name: "get_recommendations", description: "Recomendacoes pendentes da IA (regua = custo de midia).", parameters: { type: "object", properties: {} } } },
+  get_meta_dicas: { type: "function", function: { name: "get_meta_dicas", description: "Dicas da Meta com veredito interno (concorda/discorda/sem_regua). Cite sempre o veredito; nao repita a dica como se fosse nossa.", parameters: { type: "object", properties: { dias: { type: "integer" }, veredito: { type: "string" } } } } },
   teto_vigente: { type: "function", function: { name: "teto_vigente", description: "FONTE PRIORITARIA para teto vigente. Exige company_id do job e metrica; declara regua governante, denominador, autor/data/citacao, historico, aspiracao e divergencias. Targets isolado NAO e veredito de negocio.", parameters: { type: "object", properties: { metric: { type: "string" } }, required: ["metric"] } } },
   checar_par_texto_e_peca: { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia legenda + peca juntas no company_id do job. Devolve PAR, leituras separadas, cobertura e lacunas. E deteccao por texto, NAO aprovacao; audio sem transcricao fica declarado como nao lido.", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
   saude_das_integracoes: { type: "function", function: { name: "saude_das_integracoes", description: "Mede integracoes Meta do company_id por ads, snapshots, breakdown e relogios; declara divergencias com status sem altera-lo. Nao cobre alem do retorno.", parameters: { type: "object", properties: { dias_tolerancia: { type: "integer" } } } } },
@@ -848,8 +860,8 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "CANAL WHATSAPP: tier de envio dos numeros (caminho para o TIER_UNLIMITED), qualidade GREEN/YELLOW/RED, envios, entregas, leituras e CLIQUES por template com taxa de clique. Declarar que o recorte por numero ainda nao e coletado quando relevante.",
   },
   alertas_recomendacoes: {
-    tools: ["get_alerts", "get_recommendations", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest"],
-    maxPorTool: { get_alerts: 1, get_recommendations: 1, saude_das_integracoes: 1, custo_llm_periodo: 2, score_de_prontidao: 1, saude_dos_tokens: 1, ler_entregas_digest: 1 }, maxToolsTotal: 7,
+    tools: ["get_alerts", "get_recommendations", "get_meta_dicas", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest"],
+    maxPorTool: { get_alerts: 1, get_recommendations: 1, get_meta_dicas: 1, saude_das_integracoes: 1, custo_llm_periodo: 2, score_de_prontidao: 1, saude_dos_tokens: 1, ler_entregas_digest: 1 }, maxToolsTotal: 8,
     missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes, saude das integracoes por evidencia, custo LLM derivado dos tokens, score de prontidao (ESP-38), saude dos tokens Meta (ESP-30: expiracao/escopo) e entregas do digest/alerta critico (ESP-41), tudo read-only. Repetir as divergencias, premissas e lacunas declaradas pelos retornos.",
   },
   analise_visual_drive: {

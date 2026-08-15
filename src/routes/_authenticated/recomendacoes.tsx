@@ -187,6 +187,22 @@ function Recomendacoes() {
                 <div className="flex gap-1.5 flex-wrap">
                   <Badge variant="secondary">{r.family ?? r.category ?? "geral"}</Badge>
                   {r.signal_key && <Badge variant="outline">{r.signal_key}</Badge>}
+                  {r.family === "meta_dica" && r.evidence_json?.veredito != null && (
+                    <Badge
+                      variant={
+                        String(r.evidence_json.veredito) === "discorda"
+                          ? "destructive"
+                          : String(r.evidence_json.veredito) === "concorda"
+                            ? "default"
+                            : "outline"
+                      }
+                    >
+                      Meta → {String(r.evidence_json.veredito)}
+                    </Badge>
+                  )}
+                  {r.family === "meta_dica" && r.evidence_json?.first_seen_on != null && (
+                    <Badge variant="outline">desde {String(r.evidence_json.first_seen_on)}</Badge>
+                  )}
                 </div>
                 <div className="flex gap-2">
                   {(r.status === "new" || r.status === "accepted") && (

@@ -2086,6 +2086,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real da Meta), gasto e resultados dos ultimos 7 dias, com dias_com_dado para checar cobertura.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema (CPL, entrega, BM/politica, cobranca, WABA).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_recommendations", description: "Recomendacoes pendentes da IA (regua = custo de midia, nao contrato pago).", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "get_meta_dicas", description: "Dicas da Meta (Graph recommendations) coletadas com first_seen_on/last_seen_on e referencia de campanha/conjunto/anuncio, JA COM VEREDITO INTERNO (concorda|discorda|nao_aplicavel|sem_regua). E PROIBIDO repetir a dica da Meta como se fosse nossa: sempre cite o veredito e o motivo. Opportunity Score (API nova) ainda nao entra nesta leitura.", parameters: { type: "object", properties: { dias: { type: "integer", description: "Janela em dias (default 14)." }, veredito: { type: "string", description: "Filtro opcional: concorda|discorda|nao_aplicavel|sem_regua" } } } } },
   { type: "function", function: { name: "teto_vigente", description: "FONTE PRIORITARIA para julgar teto vigente. Exige o company_id da conversa e uma metrica. Devolve qual regua governa, valor, denominador, autor/data/citacao da meta de negocio, consistencia historica, aspiracao e divergencias/avisos. A tabela targets isolada NAO decide teto vigente.", parameters: { type: "object", properties: { metric: { type: "string", description: "Metrica exata, por exemplo custo_por_formulario, custo_por_conversa ou custo_por_lead_lp." } }, required: ["metric"] } } },
   { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia o PAR legenda + peca pela concatenacao do texto disponivel. Exige company_id da conversa, legenda e drive_file_id. Devolve veredito, leituras separadas, cobertura e lacunas; e deteccao por padroes, NAO aprovacao. Audio sem transcricao permanece explicitamente nao lido.", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
   { type: "function", function: { name: "saude_das_integracoes", description: "Mede a saude das integracoes Meta desta empresa por evidencia de ads, snapshots, breakdown e tres relogios. Exige company_id da conversa. Declara divergencias contra status/estado_operacional sem alterar nenhum deles; nao promete diagnosticar provedores fora desse retorno.", parameters: { type: "object", properties: { dias_tolerancia: { type: "integer", description: "Opcional; padrao da RPC = 3 dias." } } } } },
@@ -2227,7 +2228,7 @@ function prioridadeTool(nome: string, pedido: string): number {
     get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
     teto_vigente: 2, checar_par_texto_e_peca: 2, custo_llm_periodo: 2, panorama_utm_anuncios: 2,
     nota_visual_da_peca: 3, saude_das_integracoes: 3, get_acervo_para_anuncio: 3, upload_midia: 3,
-    get_estrutura_conjuntos: 9, get_conhecimento: 9, get_recommendations: 11,
+    get_estrutura_conjuntos: 9, get_conhecimento: 9, get_recommendations: 11, get_meta_dicas: 5,
   };
   return base[nome] ?? 12;
 }
@@ -2347,6 +2348,17 @@ async function runTool(name: string, args: any, ctx: any) {
       case "get_overview": return await t_overview(ctx.companyId);
       case "get_alerts": return await t_alerts(ctx.companyId);
       case "get_recommendations": return await t_recos(ctx.companyId);
+      case "get_meta_dicas": {
+        const dias = Math.max(1, Math.min(90, Number(args?.dias ?? 14) || 14));
+        const veredito = args?.veredito != null ? String(args.veredito) : null;
+        const { data, error } = await supa.rpc("get_meta_dicas", {
+          p_company_id: ctx.companyId,
+          p_dias: dias,
+          p_veredito: veredito,
+        });
+        if (error) return { erro: error.message };
+        return data;
+      }
       case "teto_vigente": return await t_rpc("teto_vigente", { p_company_id: ctx.companyId, p_metric: String(args?.metric ?? "") });
       case "checar_par_texto_e_peca": return await t_rpc("checar_par_texto_e_peca", { p_company_id: ctx.companyId, p_legenda: String(args?.legenda ?? ""), p_drive_file_id: String(args?.drive_file_id ?? "") });
       case "saude_das_integracoes": return await t_rpc("saude_das_integracoes", { p_company_id: ctx.companyId, p_dias_tolerancia: Number(args?.dias_tolerancia ?? 3) });

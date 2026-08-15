@@ -1,4 +1,10 @@
-// supabase/functions/meta-campaign-status/index.ts (v14)
+// supabase/functions/meta-campaign-status/index.ts (v15)
+// v15 (15/08/2026) - DICAS DA META (recommendations). Apos o espelho ESP-13, sonda o campo
+//   `recommendations` isoladamente em campanhas ACTIVE, conjuntos dos anuncios ACTIVE e
+//   anuncios ACTIVE. Cada dica vira linha em meta_recommendations (first_seen_on/last_seen_on
+//   + referencia de campanha/conjunto/criativo) e passa pelo julgamento deterministico
+//   (upsert_meta_recomendacoes). Campo ausente nao fabrica []; um #100 em recommendations
+//   nao derruba o resto da corrida (mesma doutrina GT-12). Opportunity Score fica fase 2.
 // v14 (11/08/2026) - COLETA PONTUAL DE UM CONJUNTO SOB DEMANDA (auto-resolucao de leitura).
 //   A corrida diaria colhe is_dynamic_creative de TODOS os conjuntos, mas conjunto recem-criado
 //   pelo fluxo nasce com is_dynamic_creative NULO e so ganha leitura no dia seguinte - e o portao
@@ -217,7 +223,7 @@ function exemploSeguro(v: unknown): unknown {
 // invalido derrube a leitura dos demais.
 async function lerCampoPorIds(
   ids: string[],
-  nivel: "anuncio" | "criativo" | "conta" | "conjunto",
+  nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
   campo: string,
 ): Promise<ResultadoCampo> {
   const valores = new Map<string, unknown>();
@@ -998,6 +1004,164 @@ Deno.serve(async (req) => {
     }
   }
 
+  // ============ v15: DICAS DA META (recommendations) ============
+  // So objetos ACTIVE: dica mid-flight importa onde ha entrega. Campo sondado isolado.
+  const campanhasAtivasIds = [...reais.entries()]
+    .filter(([, st]) => /ACTIVE/i.test(String(st ?? "")))
+    .map(([id]) => id);
+  const anunciosAtivos = anunciosGraph.filter((a) => /ACTIVE/i.test(String(a.status ?? "")));
+  const adsetsAtivosIds = [
+    ...new Set(
+      anunciosAtivos.map((a) => a.adset_external_id).filter((x): x is string => !!x),
+    ),
+  ];
+  const adsAtivosIds = anunciosAtivos.map((a) => a.id);
+
+  const campRecs = await lerCampoPorIds(campanhasAtivasIds, "campanha", "recommendations");
+  diagnosticoCampos.push(campRecs.diagnostico);
+  const adsetRecs = await lerCampoPorIds(adsetsAtivosIds, "conjunto", "recommendations");
+  diagnosticoCampos.push(adsetRecs.diagnostico);
+  const adRecs = await lerCampoPorIds(adsAtivosIds, "anuncio", "recommendations");
+  diagnosticoCampos.push(adRecs.diagnostico);
+
+  const companyPorConta = new Map<string, string>();
+  for (const a of adsLocais ?? []) {
+    if (a?.account_id && a?.company_id) {
+      companyPorConta.set(String(a.account_id), String(a.company_id));
+    }
+  }
+  const { data: campsLocais } = await supa
+    .from("campaigns")
+    .select("external_id, name, company_id, external_account_id")
+    .in("external_id", campanhasAtivasIds.length ? campanhasAtivasIds : ["__nenhum__"]);
+  const campLocalPorId = new Map(
+    (campsLocais ?? []).map((c: any) => [String(c.external_id), c]),
+  );
+  const { data: adsetsLocais } = await supa
+    .from("ad_sets")
+    .select("external_id, name, company_id, campaign_id")
+    .in("external_id", adsetsAtivosIds.length ? adsetsAtivosIds : ["__nenhum__"]);
+  const adsetLocalPorId = new Map(
+    (adsetsLocais ?? []).map((s: any) => [String(s.external_id), s]),
+  );
+  const campPkIds = [
+    ...new Set((adsetsLocais ?? []).map((s: any) => s.campaign_id).filter(Boolean)),
+  ];
+  const { data: campsByPk } = await supa
+    .from("campaigns")
+    .select("id, external_id, name")
+    .in(
+      "id",
+      campPkIds.length ? campPkIds : ["00000000-0000-0000-0000-000000000000"],
+    );
+  const campIdPorUuid = new Map(
+    (campsByPk ?? []).map((c: any) => [
+      String(c.id),
+      { external_id: String(c.external_id), name: String(c.name ?? "") },
+    ]),
+  );
+
+  const linhasDicas: Record<string, unknown>[] = [];
+  const pushRecs = (
+    objectType: "campaign" | "adset" | "ad",
+    objectId: string,
+    lista: unknown,
+    meta: {
+      company_id?: string | null;
+      object_name?: string | null;
+      campaign_external_id?: string | null;
+      campaign_name?: string | null;
+      adset_external_id?: string | null;
+      ad_external_id?: string | null;
+    },
+  ) => {
+    if (!meta.company_id || !Array.isArray(lista) || !lista.length) return;
+    for (const raw of lista) {
+      if (!raw || typeof raw !== "object") continue;
+      const r = raw as Record<string, unknown>;
+      const title = String(r.title ?? r.message ?? "").trim();
+      if (!title && r.message == null) continue;
+      linhasDicas.push({
+        company_id: meta.company_id,
+        object_type: objectType,
+        object_external_id: objectId,
+        object_name: meta.object_name ?? null,
+        campaign_external_id: meta.campaign_external_id ?? null,
+        campaign_name: meta.campaign_name ?? null,
+        adset_external_id: meta.adset_external_id ?? null,
+        ad_external_id: meta.ad_external_id ?? null,
+        recommendation_code: r.code != null ? String(r.code) : null,
+        title: title || "Dica Meta",
+        message: r.message != null ? String(r.message) : null,
+        importance: r.importance != null ? String(r.importance) : null,
+        confidence: r.confidence != null ? String(r.confidence) : null,
+        blame_field: r.blame_field != null ? String(r.blame_field) : null,
+        payload_raw: r,
+      });
+    }
+  };
+
+  for (const [campId, lista] of campRecs.valores.entries()) {
+    const local = campLocalPorId.get(campId);
+    const companyId =
+      local?.company_id ??
+      (local?.external_account_id
+        ? companyPorConta.get(String(local.external_account_id))
+        : null);
+    pushRecs("campaign", campId, lista, {
+      company_id: companyId ? String(companyId) : null,
+      object_name: local?.name ?? nomesReais.get(campId) ?? null,
+      campaign_external_id: campId,
+      campaign_name: local?.name ?? nomesReais.get(campId) ?? null,
+    });
+  }
+  for (const [adsetId, lista] of adsetRecs.valores.entries()) {
+    const local = adsetLocalPorId.get(adsetId);
+    const camp = local?.campaign_id ? campIdPorUuid.get(String(local.campaign_id)) : null;
+    pushRecs("adset", adsetId, lista, {
+      company_id: local?.company_id ? String(local.company_id) : null,
+      object_name: local?.name ?? null,
+      campaign_external_id: camp?.external_id ?? null,
+      campaign_name: camp?.name ?? null,
+      adset_external_id: adsetId,
+    });
+  }
+  for (const [adId, lista] of adRecs.valores.entries()) {
+    const graph = graphPorAd.get(adId);
+    const local = (adsLocais ?? []).find((x: any) => String(x.external_id) === adId);
+    const campLocal = graph?.campaign_external_id
+      ? campLocalPorId.get(graph.campaign_external_id)
+      : null;
+    pushRecs("ad", adId, lista, {
+      company_id: local?.company_id ? String(local.company_id) : null,
+      object_name: graph?.name ?? null,
+      campaign_external_id: graph?.campaign_external_id ?? null,
+      campaign_name: campLocal?.name ?? null,
+      adset_external_id: graph?.adset_external_id ?? null,
+      ad_external_id: adId,
+    });
+  }
+
+  let metaRecosResultado: unknown = { nota: "nenhuma dica coletada nesta corrida" };
+  if (linhasDicas.length) {
+    const { data, error } = await supa.rpc("upsert_meta_recomendacoes", { p: linhasDicas });
+    metaRecosResultado = error
+      ? { erro: error.message, candidatas: linhasDicas.length }
+      : data;
+  } else {
+    metaRecosResultado = {
+      ok: true,
+      inseridas: 0,
+      atualizadas: 0,
+      nota: "Graph nao devolveu recommendations nos objetos ACTIVE (ou campo ausente na sonda)",
+      sonda: {
+        campanhas: campRecs.diagnostico,
+        conjuntos: adsetRecs.diagnostico,
+        anuncios: adRecs.diagnostico,
+      },
+    };
+  }
+
   const { count: ativasAgora } = await supa
     .from("campaigns")
     .select("id", { count: "exact", head: true })
@@ -1080,6 +1244,21 @@ Deno.serve(async (req) => {
       ),
       nota: "com_chave=0 significa campo nao retornado: a coluna nao entra no upsert. Array vazio ou null com chave presente e uma leitura e e preservado. Conta inacessivel nao gera linha.",
     },
-    versao: "meta-campaign-status-v13",
+    meta_recommendations: {
+      resultado: metaRecosResultado,
+      candidatas_montadas: linhasDicas.length,
+      objetos_sondados: {
+        campanhas_active: campanhasAtivasIds.length,
+        conjuntos_de_ads_active: adsetsAtivosIds.length,
+        anuncios_active: adsAtivosIds.length,
+      },
+      sonda: {
+        campanhas: campRecs.diagnostico,
+        conjuntos: adsetRecs.diagnostico,
+        anuncios: adRecs.diagnostico,
+      },
+      nota: "v15: dicas Graph recommendations em objetos ACTIVE. first_seen_on/last_seen_on + veredito interno via upsert_meta_recomendacoes. Espelha em ai_recommendations (family=meta_dica) e alerta HIGH+discorda.",
+    },
+    versao: "meta-campaign-status-v15",
   });
 });
