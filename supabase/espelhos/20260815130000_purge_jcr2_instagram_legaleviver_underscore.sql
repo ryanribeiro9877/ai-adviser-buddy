@@ -1,0 +1,4 @@
+-- ESPELHO DE MIGRACAO APLICADA
+-- version: 20260815130000
+-- name: purge_jcr2_instagram_legaleviver_underscore
+-- Ver migrations/20260815130000_purge_jcr2_instagram_legaleviver_underscore.sql

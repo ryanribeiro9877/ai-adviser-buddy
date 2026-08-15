@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.23)
+// supabase/functions/meta-actions/index.ts (v5.24)
+// v5.24 (15/08/2026) - Identidade Instagram oficial Legal = @legaleviver_ (IBA).
+//   Hard-block de identidades proibidas em resolverIdentidadeInstagram. Campo do spec
+//   continua pelo FORMATO do id (IBA 1784... → instagram_user_id; legado → instagram_actor_id).
 // v5.23 (12/08/2026) - ESP-29: driver de transporte resolvido POR ACAO (driverParaAcao):
 //   override em meta_execution_config.driver_por_acao > driver_escrita (empresa) > graph.
 //   pode_executar_acao/resolver_driver aplicam a matriz de capacidade (renomear=pipeboard-only).
@@ -22,25 +25,13 @@
 //   A comparacao local contra teto_sanidade_orcamento_diario SAIU desses dois caminhos: dois
 //   juizes para a mesma pergunta era o defeito. Fail-closed: RPC indisponivel = nao executa.
 //   A mensagem ao gestor (exposicao acumulada dos conjuntos ACTIVE) fica no audit.
-// v5.16 (11/08/2026) - CAMPO DA IDENTIDADE ESCOLHIDO PELO FORMATO DO ID. O Ryan informou o id
-//   oficial de @jcr2_legaleviver lido na Identidade do Gerenciador: 1296945687078272. Esse id NAO
-//   tem formato de Instagram Business Account (1784 + 13 digitos) - e um ator Instagram LEGADO.
-//   Ate a v5.15 aplicarIdentidadeInstagramNoSpec jogava o valor da config SEMPRE em
-//   instagram_user_id, que e o campo do IBA id; com um id legado esse e o campo errado. Evidencia
-//   do campo certo: tools/list do Pipeboard (request 620) mostra create_ad_creative expondo
-//   "instagram_actor_id" (Instagram Actor Id) e create_existing_post_ad_creative expondo
-//   "instagram_user_id" descrito como "Instagram business account ID". Agora
-//   campoIdentidadeInstagramPorFormato() decide: 1784... -> instagram_user_id; caso contrario ->
-//   instagram_actor_id. Nada de hardcode do id - a escolha e pelo formato, entao o dia em que a
-//   empresa tiver um IBA id ele vai para o campo certo sozinho. A nota ao gestor declara a
-//   ressalva: identidade legada, vinculo com a pagina nao confirmado (token sem
-//   pages_read_engagement; GET direto responde 36106), revalidar se a Meta recusar.
-// v5.15 (11/08/2026) - INSTAGRAM OFICIAL = @jcr2_legaleviver; THREADS OFF; AGENTE PERGUNTA REDES.
-//   Decisoes do Ryan 11/08: (1) unico Instagram restante apos exclusao do intruso = jcr2_legaleviver
-//   (config prevalece; id so entra quando comprovado via Pipeboard/Graph — nao inventar);
-//   (2) Threads desabilitado por padrao (empresa sem cadastro); (3) agente SEMPRE pergunta
-//   plataformas_publicacao (facebook|instagram|audience_network|messenger) antes de criar
-//   conjunto; Facebook+video aplica automaticamente os 8 placements sem right_hand_column.
+// v5.16 (11/08/2026) - CAMPO DA IDENTIDADE ESCOLHIDO PELO FORMATO DO ID.
+//   campoIdentidadeInstagramPorFormato(): 1784... -> instagram_user_id; caso contrario ->
+//   instagram_actor_id. Evidencia Pipeboard tools/list (create_ad_creative vs
+//   create_existing_post_ad_creative). Oficial Legal atual: @legaleviver_ (IBA).
+// v5.15 (11/08/2026) - THREADS OFF; plataformas de publicacao na criacao de conjunto.
+//   Threads desabilitado por padrao (empresa sem cadastro). Facebook+video aplica
+//   automaticamente os 8 placements sem right_hand_column.
 // v5.14 (11/08/2026) - PADRAO OBRIGATORIO DE POSICIONAMENTO DE VIDEO NA CRIACAO DO CONJUNTO
 //   (decisao do Ryan 11/08 + auditoria dos 3 conjuntos de video ACTIVE). criar_conjunto_a_partir_de
 //   com formato_midia_previsto=video nasce ja com publisher_platforms=["facebook"] e os 8
@@ -292,6 +283,7 @@ import {
   aplicarIdentidadeInstagramNoSpec,
   avisoIdentidadeInstagram,
   campoIdentidadeInstagramPorFormato,
+  identidadeInstagramProibida,
   SEM_IDENTIDADE_INSTAGRAM,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
@@ -1148,11 +1140,17 @@ async function resolverIdentidadeInstagram(
   });
   if (error || !data || typeof data !== "object") return SEM_IDENTIDADE_INSTAGRAM;
   const id = String((data as any).instagram_actor_id ?? "").trim();
+  const handle = String((data as any).instagram_handle ?? "").trim() || null;
   if (!id) return SEM_IDENTIDADE_INSTAGRAM;
+  // Hard block: identidades banidas nunca entram no creative (mesmo se reaparecerem na config).
+  if (identidadeInstagramProibida(id) || identidadeInstagramProibida(handle)) {
+    console.error("identidade_instagram_proibida_bloqueada", { companyId, id, handle });
+    return SEM_IDENTIDADE_INSTAGRAM;
+  }
   return {
     encontrada: true,
     instagram_actor_id: id,
-    instagram_handle: String((data as any).instagram_handle ?? "").trim() || null,
+    instagram_handle: handle,
     fonte:
       (data as any).fonte === "molde_creative_estado_graph"
         ? "molde_creative_estado_graph"
@@ -2321,7 +2319,7 @@ Deno.serve(async (req) => {
         : null,
     });
   }
-  // assigned). Serve para cravar identidade oficial com username comprovado (ex.: jcr2), sem
+  // assigned). Serve para cravar identidade oficial com username comprovado (ex.: legaleviver_), sem
   // escrever na Meta. Nao toca approval_requests.
   if (body?.modo === "ler_contas_instagram") {
     const adAccount = String(body?.ad_account ?? "act_3302001729967572").trim();

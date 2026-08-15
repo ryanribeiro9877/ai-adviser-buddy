@@ -6,6 +6,7 @@ import {
   aplicarIdentidadeInstagramNoSpec,
   avisoIdentidadeInstagram,
   campoIdentidadeInstagramPorFormato,
+  identidadeInstagramProibida,
   SEM_IDENTIDADE_INSTAGRAM,
   type IdentidadeInstagramResolvida,
 } from "./identidade_instagram.ts";
@@ -19,45 +20,50 @@ function check(nome: string, cond: boolean, detalhe?: unknown) {
   }
 }
 
-// Identidade oficial hoje: @jcr2_legaleviver, id informado pelo Ryan (11/08/2026), formato legado.
-const JCR2: IdentidadeInstagramResolvida = {
+// Identidade oficial Legal: @legaleviver_ (IBA).
+const OFICIAL: IdentidadeInstagramResolvida = {
   encontrada: true,
-  instagram_actor_id: "1296945687078272",
-  instagram_handle: "@jcr2_legaleviver",
+  instagram_actor_id: "17841428674060566",
+  instagram_handle: "@legaleviver_",
   fonte: "config_empresa",
-  procedencia: "informado pelo Ryan 11/08/2026 (Identidade do Gerenciador)",
+  procedencia: "meta_execution_config oficial",
   vinculo_pagina_confirmado: false,
 };
 
-// Hipotetico IBA id, para provar que a logica e por formato e nao hardcode.
-const IBA: IdentidadeInstagramResolvida = {
-  ...JCR2,
-  instagram_actor_id: "17841423949227215",
-  instagram_handle: "@algum_iba",
+// Ator legado hipotetico — so para provar escolha por formato (nao e identidade oficial).
+const LEGADO_HIPOTETICO: IdentidadeInstagramResolvida = {
+  encontrada: true,
+  instagram_actor_id: "1200000000000000",
+  instagram_handle: "@legado_teste",
+  fonte: "config_empresa",
+  procedencia: "prova de formato",
+  vinculo_pagina_confirmado: false,
 };
 
 console.log("== formato -> campo ==");
 check(
-  "1296945687078272 (legado) -> instagram_actor_id",
-  campoIdentidadeInstagramPorFormato("1296945687078272") === "instagram_actor_id",
+  "1200000000000000 (legado) -> instagram_actor_id",
+  campoIdentidadeInstagramPorFormato("1200000000000000") === "instagram_actor_id",
 );
 check(
-  "17841423949227215 (IBA) -> instagram_user_id",
-  campoIdentidadeInstagramPorFormato("17841423949227215") === "instagram_user_id",
+  "17841428674060566 (IBA) -> instagram_user_id",
+  campoIdentidadeInstagramPorFormato("17841428674060566") === "instagram_user_id",
 );
+check("handle oficial nao e proibido", identidadeInstagramProibida("@legaleviver_") === false);
+check("id oficial nao e proibido", identidadeInstagramProibida("17841428674060566") === false);
 
 console.log("\n== VIDEO: object_story_spec montado ==");
 const specVideo = aplicarIdentidadeInstagramNoSpec(
   {
     page_id: "1095196357012756",
-    instagram_user_id: "17841428674060566", // lixo herdado do molde antigo
+    instagram_actor_id: "1200000000000000",
     video_data: { video_id: "24", message: "legenda", call_to_action: { type: "LEARN_MORE" } },
   },
-  JCR2,
+  OFICIAL,
 );
 console.log(JSON.stringify(specVideo, null, 2));
-check("video: id no instagram_actor_id", specVideo.instagram_actor_id === "1296945687078272");
-check("video: instagram_user_id removido", specVideo.instagram_user_id === undefined);
+check("video: id no instagram_user_id", specVideo.instagram_user_id === "17841428674060566");
+check("video: instagram_actor_id removido", specVideo.instagram_actor_id === undefined);
 check("video: video_data preservado", !!(specVideo as any).video_data?.video_id);
 
 console.log("\n== IMAGEM: object_story_spec montado ==");
@@ -70,42 +76,34 @@ const specImagem = aplicarIdentidadeInstagramNoSpec(
       message: "legenda",
     },
   },
-  JCR2,
+  OFICIAL,
 );
 console.log(JSON.stringify(specImagem, null, 2));
-check("imagem: id no instagram_actor_id", specImagem.instagram_actor_id === "1296945687078272");
-check("imagem: instagram_user_id ausente", specImagem.instagram_user_id === undefined);
+check("imagem: id no instagram_user_id", specImagem.instagram_user_id === "17841428674060566");
+check("imagem: instagram_actor_id ausente", specImagem.instagram_actor_id === undefined);
 check("imagem: link_data preservado", !!(specImagem as any).link_data?.image_hash);
 
-console.log("\n== IBA (nao quebrar o dia em que o id for 1784...) ==");
-const specIba = aplicarIdentidadeInstagramNoSpec({ page_id: "1095196357012756" }, IBA);
-console.log(JSON.stringify(specIba));
-check("IBA: id no instagram_user_id", specIba.instagram_user_id === "17841423949227215");
-check("IBA: instagram_actor_id ausente", specIba.instagram_actor_id === undefined);
+console.log("\n== LEGADO hipotetico (formato) ==");
+const specLegado = aplicarIdentidadeInstagramNoSpec(
+  { page_id: "1095196357012756", instagram_user_id: "17841428674060566" },
+  LEGADO_HIPOTETICO,
+);
+check("legado: campo instagram_actor_id", specLegado.instagram_actor_id === "1200000000000000");
+check("legado: user_id limpo", specLegado.instagram_user_id === undefined);
 
-console.log("\n== SEM identidade: nada e inventado ==");
+console.log("\n== sem identidade ==");
 const specSem = aplicarIdentidadeInstagramNoSpec(
-  { page_id: "1095196357012756" },
+  { page_id: "1095196357012756", instagram_user_id: "x" },
   SEM_IDENTIDADE_INSTAGRAM,
 );
-console.log(JSON.stringify(specSem));
-check(
-  "sem fonte: nenhum campo de identidade",
-  specSem.instagram_actor_id === undefined && specSem.instagram_user_id === undefined,
-);
+check("sem identidade: nao altera spec herdado", specSem.instagram_user_id === "x");
 
-console.log("\n== nota ao gestor ==");
-const nota = avisoIdentidadeInstagram(JCR2);
-console.log(nota);
-check("nota cita @jcr2_legaleviver", nota.includes("@jcr2_legaleviver"));
-check("nota cita o id", nota.includes("1296945687078272"));
-check("nota declara identidade legada", nota.includes("IDENTIDADE LEGADA"));
-check("nota declara vinculo nao confirmado", nota.includes("NAO foi confirmado"));
-check("nota manda revalidar se a Meta recusar", nota.includes("revalidado no Gerenciador"));
-check("nota mantem Threads desabilitado", nota.includes("Threads permanece DESABILITADO"));
+const nota = avisoIdentidadeInstagram(OFICIAL);
+check("nota cita @legaleviver_", nota.includes("@legaleviver_"));
+check("nota cita o id IBA", nota.includes("17841428674060566"));
 
-const notaIba = avisoIdentidadeInstagram(IBA);
-check("nota IBA nao alega legado", !notaIba.includes("IDENTIDADE LEGADA"));
-
-console.log(`\n${falhas === 0 ? "TODAS AS PROVAS PASSARAM" : `${falhas} FALHA(S)`}`);
-if (falhas > 0) Deno.exit(1);
+if (falhas > 0) {
+  console.error(`\n${falhas} falha(s)`);
+  Deno.exit(1);
+}
+console.log("\nTodas as provas OK.");

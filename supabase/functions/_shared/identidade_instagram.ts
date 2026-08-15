@@ -12,10 +12,20 @@
 //     E o UNICO parametro de identidade que o Pipeboard create_ad_creative expoe ("Instagram Actor
 //     Id"), que e a tool usada no caminho de criacao de peca nova.
 //
-// Ate a v5.15 o valor da config ia SEMPRE para instagram_user_id. Com o id oficial informado pelo
-// Ryan em 11/08/2026 (@jcr2_legaleviver = 1296945687078272), que e legado, esse seria o campo
-// errado. A escolha passa a ser pelo FORMATO do id — nunca por hardcode do id —, para que o dia em
-// que a empresa tiver um IBA id ele va para instagram_user_id sozinho.
+// Ate a v5.15 o valor da config ia SEMPRE para instagram_user_id. A escolha do campo do spec
+// passa a ser pelo FORMATO do id — nunca por hardcode —, para que IBA (1784...) va para
+// instagram_user_id e ator legado va para instagram_actor_id. Oficial Legal: @legaleviver_.
+
+/** Handles/ids Instagram banidos — nunca oferecer nem gravar em peca nova. */
+export const INSTAGRAM_HANDLES_PROIBIDOS = ["@jcr2_legaleviver", "jcr2_legaleviver"] as const;
+export const INSTAGRAM_IDS_PROIBIDOS = ["1296945687078272"] as const;
+
+export function identidadeInstagramProibida(idOuHandle: string | null | undefined): boolean {
+  const s = String(idOuHandle ?? "").trim().toLowerCase();
+  if (!s) return false;
+  if (INSTAGRAM_IDS_PROIBIDOS.some((x) => s === x)) return true;
+  return INSTAGRAM_HANDLES_PROIBIDOS.some((h) => s === h.toLowerCase() || s.includes("jcr2_legaleviver"));
+}
 
 export type IdentidadeInstagramResolvida = {
   encontrada: boolean;
