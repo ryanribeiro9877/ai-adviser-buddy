@@ -1,4 +1,8 @@
-// supabase/functions/traffic-chat/index.ts (v28.29)
+// supabase/functions/traffic-chat/index.ts (v28.30)
+// v28.30 (17/08/2026) - Auditoria financeira fechada: get_campaign_detail expoe
+//   special_ad_categories; nova tool auditar_compliance_financeira; prompt proibe
+//   "nao tenho tool" para categoria especial / regras Meta se compliance e Pipeboard
+//   existem. Categoria especial e de CAMPANHA (herdada pelos anuncios).
 // v28.29 (15/08/2026) - Campanha/conjunto nascem ACTIVE na aprovacao; ativar_campanha /
 //   ativar_conjunto espelham ativar_criativo. Pausar ja existia nos tres niveis.
 // v28.28 (15/08/2026) - Aprovar criar_anuncio = nasce ACTIVE (nao PAUSED).
@@ -741,7 +745,10 @@ async function t_ads_ranking(companyId: string, days = 7) {
     nota: "ranking por custo de MIDIA (formulario/conversa). NAO e ranking por contrato pago - para receita use get_funil_credito.por_campanha (campo criativo_utm_content)." };
 }
 async function t_campaign_detail(companyId: string, name_like: string) {
-  const { data: all } = await supa.from("campaigns").select("id,name,status,category,spend").eq("company_id", companyId);
+  const { data: all } = await supa
+    .from("campaigns")
+    .select("id,name,status,category,spend,special_ad_categories,objective,external_id")
+    .eq("company_id", companyId);
   const needle = norm(name_like);
   const camps = (all ?? []).filter((c) => norm(c.name).includes(needle)).slice(0, 3);
   if (!camps.length) return { erro: `nenhuma campanha com nome contendo '${name_like}'` };
@@ -779,8 +786,24 @@ async function t_campaign_detail(companyId: string, name_like: string) {
   }), { spend: 0, imp: 0, reach: 0, clkTodos: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
   const fechados = rows.filter((s: Record<string, unknown>) => String(s.snapshot_date) < hoje);
   const gastoFechado = fechados.reduce((a, s: Record<string, unknown>) => a + num(s.spend), 0);
+  const cats = Array.isArray((c as any).special_ad_categories)
+    ? (c as any).special_ad_categories
+    : [];
   return {
-    campanha: { nome: c.name, status: c.status, categoria: c.category, gasto_acumulado: brl(num(c.spend)) },
+    campanha: {
+      nome: c.name,
+      external_id: (c as any).external_id ?? null,
+      status: c.status,
+      objetivo: (c as any).objective ?? null,
+      categoria_interna: c.category,
+      // v28.30: campo que o agente omitia — especial financeira vive na CAMPANHA e vale para todos os anuncios.
+      special_ad_categories: cats,
+      categoria_especial_financeira:
+        cats.includes("FINANCIAL_PRODUCTS_SERVICES") || cats.includes("CREDIT")
+          ? "marcada_na_campanha"
+          : (cats.length ? "outra_categoria_especial" : "nao_marcada_no_espelho"),
+      gasto_acumulado: brl(num(c.spend)),
+    },
     serie_diaria_14d: rows.map(linhaDia),
     totais_periodo: {
       dias_com_dado: rows.length, dias_fechados: fechados.length,
@@ -796,7 +819,122 @@ async function t_campaign_detail(companyId: string, name_like: string) {
       custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
     },
     outras_encontradas: camps.slice(1).map((x) => x.name),
-    nota: "serie diaria e totais vem de metric_snapshots (D-1, coletor oficial pipeboard:meta). DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques (curtida, comentario, expandir, foto, link); cliques_no_link = SO cliques que levam ao destino. Por isso ctr_todos/cpc_todos usam todos os cliques e ctr_link/cpc_link usam so os de link - ao falar de 'CTR/CPC de link' cite ctr_link/cpc_link; ao falar de engajamento amplo cite ctr_todos/cpc_todos. visualizacoes_lp (landing_page_views) e RESULTADO valido e deve ser reportado. alcance, cliques, frequencia, CTR, CPC, CPM e visualizacoes_lp SAO expostos aqui - NUNCA declare essas metricas indisponiveis. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero. ALCANCE: alcance_soma_diaria_nao_deduplicada e a SOMA dos alcances diarios (mesma pessoa em 2 dias conta 2x) - e PROIBIDO apresenta-la como 'alcance do periodo reportado pela plataforma' ou pessoas unicas; se precisar do alcance unico do periodo, leia ao vivo via ler_pipeboard (insights da campanha com time_range do periodo inteiro, sem quebra por dia) e cite a fonte. MEDIA DIARIA: use gasto_medio_por_dia_fechado para pacing e comparacao com orcamento programado - o dia corrente (dia_parcial_em_coleta/inclui_dia_parcial) e parcial e dividir por ele dilui a media e esconde estouro de verba.",
+    nota: "serie diaria e totais vem de metric_snapshots (D-1, coletor oficial pipeboard:meta). special_ad_categories e campo da CAMPANHA (Meta nao grava isso no anuncio): se a campanha tem FINANCIAL_PRODUCTS_SERVICES, TODOS os anuncios dela estao sob a categoria especial. Para confirmar ao vivo, ler_pipeboard get_campaign_details. DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques; cliques_no_link = SO cliques de destino. ALCANCE: alcance_soma_diaria_nao_deduplicada e SOMA diaria (nao pessoas unicas).",
+  };
+}
+
+/** v28.30: fecha lacuna do agente que dizia "nao da para ler categoria especial / regras Meta". */
+async function t_auditar_compliance_financeira(companyId: string, nameLike: string) {
+  const needle = norm(nameLike);
+  if (!needle) return { erro: "informe name_like da campanha (ex.: CAMPANHA TESTE AGO26 RR)" };
+
+  const { data: camps } = await supa
+    .from("campaigns")
+    .select("id,name,status,objective,external_id,special_ad_categories,criado_pelo_sistema")
+    .eq("company_id", companyId);
+  const hits = (camps ?? []).filter((c) => norm(c.name).includes(needle));
+  if (!hits.length) return { erro: `nenhuma campanha contendo '${nameLike}'` };
+  if (hits.length > 1) {
+    const exact = hits.filter((c) => norm(c.name) === needle);
+    if (exact.length !== 1) {
+      return {
+        ambiguo: true,
+        opcoes: hits.slice(0, 8).map((c) => c.name),
+        instrucao: "peca o nome completo da campanha",
+      };
+    }
+  }
+  const camp = hits.length === 1 ? hits[0] : hits.find((c) => norm(c.name) === needle)!;
+  const cats = Array.isArray(camp.special_ad_categories) ? camp.special_ad_categories : [];
+  const financeira =
+    cats.includes("FINANCIAL_PRODUCTS_SERVICES") || cats.includes("CREDIT");
+
+  const { data: ads } = await supa
+    .from("ads")
+    .select(
+      "name,status,external_id,call_to_action_type,destino_url,destination_url,body,criado_pelo_sistema,criado_por_approval_id",
+    )
+    .eq("campaign_id", camp.id)
+    .eq("company_id", companyId)
+    .order("name");
+
+  const { data: conjuntos } = await supa
+    .from("ad_sets")
+    .select("name,status,external_id,targeting")
+    .eq("campaign_id", camp.id)
+    .eq("company_id", companyId);
+
+  const { data: regras } = await supa
+    .from("compliance_rules")
+    .select("code,regra,severidade,categoria,fonte")
+    .eq("active", true)
+    .or("code.ilike.FIN-%,code.ilike.LGL-%,code.ilike.CRI-%")
+    .order("code");
+
+  const anuncios = (ads ?? []).map((a) => ({
+    nome: a.name,
+    status: a.status,
+    external_id: a.external_id,
+    cta: a.call_to_action_type,
+    destino: a.destino_url || a.destination_url || null,
+    criado_pelo_sistema: a.criado_pelo_sistema === true,
+    tem_approval_de_criacao: !!a.criado_por_approval_id,
+    legenda_presente: !!String(a.body ?? "").trim(),
+    herda_categoria_especial_da_campanha: financeira,
+  }));
+
+  const alertas_segmentacao: string[] = [];
+  for (const s of conjuntos ?? []) {
+    const t = (s.targeting && typeof s.targeting === "object") ? s.targeting as Record<string, unknown> : {};
+    if (t.genders) alertas_segmentacao.push(`conjunto "${s.name}": genders presente (restricao tipica de categoria especial)`);
+    if (Array.isArray(t.custom_audiences) && (t.custom_audiences as unknown[]).length) {
+      alertas_segmentacao.push(
+        `conjunto "${s.name}": tem custom_audiences/LAL — doutrina interna (tema compliance) alerta que lookalike classico fica restrito sob categoria especial; confirme na Central da Meta se este publico ainda e permitido`,
+      );
+    }
+    const ageMin = Number(t.age_min ?? 0);
+    const ageMax = Number(t.age_max ?? 0);
+    if (ageMin && ageMin > 18) {
+      alertas_segmentacao.push(`conjunto "${s.name}": age_min=${ageMin} (>18) — faixa estreita pode conflitar com regras de credito`);
+    }
+    if (ageMax && ageMax < 65) {
+      alertas_segmentacao.push(`conjunto "${s.name}": age_max=${ageMax} (<65) — faixa limitada; sob categoria especial so 18+ costuma ser permitido`);
+    }
+  }
+
+  return {
+    coletado_em: new Date().toISOString(),
+    fonte_categoria: "espelho campaigns.special_ad_categories (+ heranca Meta: nivel campanha)",
+    campanha: {
+      nome: camp.name,
+      external_id: camp.external_id,
+      status: camp.status,
+      objetivo: camp.objective,
+      special_ad_categories: cats,
+      categoria_especial_financeira: financeira,
+      criado_pelo_sistema: camp.criado_pelo_sistema === true,
+    },
+    anuncios,
+    conjuntos: (conjuntos ?? []).map((s) => ({
+      nome: s.name,
+      status: s.status,
+      external_id: s.external_id,
+      age_min: (s.targeting as any)?.age_min ?? null,
+      age_max: (s.targeting as any)?.age_max ?? null,
+      tem_genders: !!(s.targeting as any)?.genders,
+      tem_custom_audiences: Array.isArray((s.targeting as any)?.custom_audiences) &&
+        ((s.targeting as any).custom_audiences as unknown[]).length > 0,
+    })),
+    alertas_segmentacao,
+    regras_internas_ativas: regras ?? [],
+    como_completar_o_quadro: {
+      texto_dos_anuncios: "get_criativos_conteudo(busca_nome=...) + check_compliance(legenda)",
+      regras_oficiais_meta_na_base: "get_conhecimento(tema=compliance) — secoes 'Categoria especial' e 'Politica de produtos e servicos financeiros'",
+      confirmacao_ao_vivo: "ler_pipeboard ferramenta=get_campaign_details args={campaign_id}",
+      audio_e_frames_do_video: "lacuna declarada — check_compliance de video completo ainda nao le fala/frames; nao invente veredito visual",
+    },
+    nota:
+      "PROIBIDO dizer que categoria especial 'nao foi coletada' se special_ad_categories veio aqui ou em get_campaign_detail. A Meta aplica a categoria na CAMPANHA; anuncios herdam. PROIBIDO dizer que regras Meta de financas 'nao existem no sistema' sem chamar get_conhecimento(tema=compliance).",
   };
 }
 async function t_funil_credito(dias: number) {
@@ -2272,7 +2410,8 @@ const TOOLS = [
   { type: "function", function: { name: "validar_pedido_contra_contrato", description: "Valida um pedido (json) contra o contrato declarado em contrato_de_execucao para a acao. Assinatura real: (acao text, pedido jsonb). Se nao houver linhas vigentes para a acao, devolve valido=false com motivo contrato_desconhecido (nao inventa campos). Se faltar campo obrigatorio, recusa com faltando[]. Campos extras NAO invalidam - vao em nao_previstos_no_contrato para decisao humana. O contrato de criar_anuncio_a_partir_de e o MESMO vocabulario que pedido_de_anuncio_completo aceita: um pedido valido aqui e entendido la, e vice-versa. LACUNAS HONESTAS: o contrato foi derivado do codigo montarCriacao (meta-actions), nao de card executado; url_tags e opcional e vai no adcreative, nao no ad; meta_video_id/legenda/thumbnail_url sao opcionais da rota peca nova; status_inicial e opcional porque o executor FORCA ACTIVE no body (campanha/conjunto/anuncio) e nao le o payload. NAO substitui pedido_de_anuncio_completo (biblioteca, compliance, procedencia).", parameters: { type: "object", properties: { acao: { type: "string", description: "Ex.: criar_anuncio_a_partir_de, criar_conjunto_a_partir_de, criar_campanha." }, pedido: { type: "object", description: "Objeto com os campos do payload que o executor leria." } }, required: ["acao", "pedido"] } } },
   { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real (dias efetivamente com dado). Nao contem proposta/contrato.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
   { type: "function", function: { name: "get_ads_ranking", description: "RECORTE de criativos por custo MEDIO de midia numa janela de dias. ATENCAO - este e um recorte (breakdown) e serve para ENTENDER, nunca para PRESCREVER: a Meta aloca verba por custo MARGINAL (do proximo resultado), entao um criativo com media mais alta pode estar segurando o custo total. E PROIBIDO propor pausar ou reduzir um criativo com base apenas nesta ordenacao; prescricao exige teste isolado ou tendencia temporal. Para decidir escala ou corte, cruze com get_funil_credito (contrato pago por criativo) e consulte get_conhecimento(tema=otimizacao).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
-  { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de UMA campanha pelo nome, com totais do periodo. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture: ctr_link/cpc_link usam SO cliques no link (use ao falar de 'CTR/CPC de link'); ctr_todos/cpc_todos usam TODOS os cliques (engajamento amplo). visualizacoes_lp e resultado valido e deve ser reportado (nao omita), sobretudo em engajamento/trafego. Esta e a fonte por-campanha de metricas basicas E avancadas - NUNCA diga que sao indisponiveis. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
+  { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de UMA campanha pelo nome, com totais do periodo. Inclui special_ad_categories da CAMPANHA (FINANCIAL_PRODUCTS_SERVICES quando marcada) — a Meta aplica categoria especial no nivel campanha e os anuncios herdam. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
+  { type: "function", function: { name: "auditar_compliance_financeira", description: "Auditoria de categoria especial + regras financeiras de UMA campanha e seus anuncios. Devolve special_ad_categories do espelho, se e financeira, lista de anuncios (status/CTA/destino/criado_pelo_sistema), alertas de segmentacao (idade/genero/LAL) e as regras ativas FIN/LGL/CRI. Use quando o gestor perguntar se anuncios respeitam finanças/categoria especial/regras da Meta. NAO diga que o campo nao existe: esta tool e get_campaign_detail leem. Complemente com get_conhecimento(tema=compliance) e check_compliance nas legendas. Confirmacao ao vivo: ler_pipeboard get_campaign_details.", parameters: { type: "object", properties: { name_like: { type: "string", description: "Nome (ou trecho) da campanha" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_acervo_para_anuncio", description: "ACERVO DO DRIVE PRONTO PARA VIRAR ANUNCIO NOVO. Esta e a ferramenta certa quando o gestor pede para MONTAR anuncio novo, ESCOLHER peca ou saber quais pecas do acervo servem para um produto - NAO use get_criativos_conteudo para isso (aquela le SO os anuncios ja no ar em public.ads e por isso nunca propoe peca nova). Deduplicada por arquivo e filtravel por produto (ex.: 'CLT'). Por peca: nome, drive_file_id, meta_video_id (se video ja na Meta), meta_image_hash (se imagem ja na Meta), o que a peca DIZ, analise visual, na_biblioteca_da_meta/apta, bloqueio de compliance SEMPRE marcado e se ja foi usada. Se na_biblioteca_da_meta=false, chame upload_midia com o drive_file_id ANTES de propor o card - nao diga que o sistema nao sabe subir. Video recem-enviado pode ainda processar: so emita card com status ready.", parameters: { type: "object", properties: { produto: { type: "string" }, incluir_inaptas: { type: "boolean" } } } } },
@@ -2372,7 +2511,8 @@ function prioridadeTool(nome: string, pedido: string): number {
   const pedeCustoLlm = /custo.*agente|agente.*cust|custo.*llm|token/.test(p);
   const pedeSaudeIntegracao = /conta.*conect|integrac|trazendo dado|coletor/.test(p);
   const pedeTeto = /teto|regua|meta de custo|escal|vencedor/.test(p);
-  const pedeConhecimento = /como funciona|por que|explique|conceito|politica|regra da meta|categoria especial|hook|formato|fadiga|aprendizado|learning|breakdown|metrica|historic|sazonal|sugira|briefing/.test(p);
+  const pedeConhecimento = /como funciona|por que|explique|conceito|politica|regra da meta|categoria especial|financas|financeiro|compliance|hook|formato|fadiga|aprendizado|learning|breakdown|metrica|historic|sazonal|sugira|briefing/.test(p);
+  const pedeComplianceFin = /categoria especial|financ|credit|compliance|fin-0|respeit.*regra|categorizad/.test(p);
   // v28.6: pergunta sobre estado de card/aprovacao/criacao tem prioridade MAXIMA. Era
   // justamente esse tipo de pergunta que o agente respondia de cabeca por nao ter a fila.
   const pedeFila = /card|aprova|pendente|aprovado|criou|criad|emiti|executou|executad|fila|sino|notificac|subiu|apareceu/.test(p);
@@ -2382,6 +2522,7 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeSaudeIntegracao && nome === "saude_das_integracoes") return 0;
   if (pedeTeto && nome === "teto_vigente") return 0;
   if (pedeConhecimento && nome === "get_conhecimento") return 0;
+  if (pedeComplianceFin && (nome === "auditar_compliance_financeira" || nome === "get_campaign_detail" || nome === "check_compliance")) return 0;
   if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "upload_midia" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "gerar_legendas" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
@@ -2390,7 +2531,7 @@ function prioridadeTool(nome: string, pedido: string): number {
     get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
     teto_vigente: 2, checar_par_texto_e_peca: 2, custo_llm_periodo: 2, panorama_utm_anuncios: 2,
     nota_visual_da_peca: 3, saude_das_integracoes: 3, get_acervo_para_anuncio: 3, upload_midia: 3,
-    get_estrutura_conjuntos: 9, get_conhecimento: 9, get_recommendations: 11, get_meta_dicas: 5,
+    get_estrutura_conjuntos: 9, get_conhecimento: 9, auditar_compliance_financeira: 4, get_recommendations: 11, get_meta_dicas: 5,
   };
   return base[nome] ?? 12;
 }
@@ -2573,6 +2714,8 @@ async function runTool(name: string, args: any, ctx: any) {
         return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       }
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "auditar_compliance_financeira":
+        return await t_auditar_compliance_financeira(ctx.companyId, String(args?.name_like ?? ""));
       case "check_compliance": return await t_check_compliance(ctx.companyId, String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
       case "gerar_legendas": return await t_gerar_legendas(ctx.companyId, ctx.mcpKey, args);
       case "get_criativos_conteudo": {
@@ -2764,7 +2907,7 @@ ESTA FORA DO SEU ESCOPO e voce NAO comenta, analisa nem recomenda: relacao com b
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
 R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os dois limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
-R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. A frase correta e: "conceitualmente funciona assim; confirmar como esta configurado aqui exige checar no Gerenciador".
+R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. Para categoria especial financeira: chame get_campaign_detail ou auditar_compliance_financeira (campo special_ad_categories da CAMPANHA) ou ler_pipeboard get_campaign_details — PROIBIDO dizer que "nao ha ferramenta" ou pedir ao gestor para abrir o Gerenciador so por isso. A Meta aplica a categoria na campanha; os anuncios herdam.
 R3. Distinga tres coisas diferentes: (a) o dado e ZERO, (b) o dado NAO EXISTE no sistema, (c) o dado NAO FOI COLETADO no periodo (sync/cobertura). Nunca trate (b) ou (c) como (a).
 R4. PROIBIDO misturar janelas temporais no mesmo raciocinio ou funil. Se as fontes tem janelas diferentes, ou iguale as janelas ou declare explicitamente que a comparacao nao e valida.
 R5. Amostra pequena nao vira conclusao. Poucos resultados = hipotese, e diga o volume.
@@ -2806,6 +2949,10 @@ Voce tem uma base tecnica propria. Consulte-a com get_conhecimento(tema) SEMPRE 
 for conceitual, de politica da Meta, de definicao de metrica, de metodo de diagnostico, ou
 quando for propor/auditar criativo. Nao responda de memoria sobre politica ou metrica quando
 existe tema para consultar - e nao diga "nao disponivel" para assunto coberto abaixo.
+Para regras de ANUNCIOS FINANCEIROS / categoria especial / CREDIT: tema EXATO = compliance
+(secoes "Categoria especial" e "Politica de produtos e servicos financeiros"). Em paralelo use
+auditar_compliance_financeira(name_like=campanha) para o ESTADO desta conta. Nunca diga que a
+lista oficial "nao veio" sem ter chamado get_conhecimento(tema=compliance).
 Temas disponiveis:
 ${indiceConhecimento}
 Tema marcado como VENCIDO pode ser citado como referencia, mas declare ao gestor que precisa
