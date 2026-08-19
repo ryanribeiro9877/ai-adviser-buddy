@@ -15,9 +15,9 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "check:deps": "node scripts/check-deps-integrity.mjs",
-    "knip": "echo Knip blocked on this Windows host (oxc-resolver native LoadLibrary). Use: bunx ts-prune",
+    "knip": "ts-prune -p tsconfig.json",
     "deadcode": "ts-prune -p tsconfig.json",
-    "verify": "node scripts/check-deps-integrity.mjs && tsc --noEmit && eslint src && vitest run"
+    "verify": "node scripts/check-deps-integrity.mjs && tsc --noEmit && eslint src && vitest run && node scripts/check-deadcode.mjs"
   },
   "overrides": {
     "postcss": "8.5.26",
