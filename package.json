@@ -15,7 +15,7 @@
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
     "check:deps": "node scripts/check-deps-integrity.mjs",
-    "knip": "ts-prune -p tsconfig.json",
+    "knip": "knip",
     "deadcode": "ts-prune -p tsconfig.json",
     "verify": "node scripts/check-deps-integrity.mjs && tsc --noEmit && eslint src && vitest run && node scripts/check-deadcode.mjs"
   },
@@ -84,6 +84,7 @@
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^15.15.0",
     "jsdom": "^30.0.1",
+    "knip": "5.61.3",
     "lightningcss": "^1.30.0",
     "nitro": "3.0.260603-beta",
     "prettier": "^3.7.3",
