@@ -193,8 +193,11 @@ export function WeeklyReport({
         </div>
         <div className="flex flex-wrap items-end gap-2">
           <div>
-            <label className="text-[11px] text-muted-foreground">Início</label>
+            <label htmlFor="weekly-inicio" className="text-[11px] text-muted-foreground">
+              Início
+            </label>
             <Input
+              id="weekly-inicio"
               type="date"
               value={inicio}
               onChange={(e) => setInicio(e.target.value)}
@@ -202,8 +205,11 @@ export function WeeklyReport({
             />
           </div>
           <div>
-            <label className="text-[11px] text-muted-foreground">Fim</label>
+            <label htmlFor="weekly-fim" className="text-[11px] text-muted-foreground">
+              Fim
+            </label>
             <Input
+              id="weekly-fim"
               type="date"
               value={fim}
               onChange={(e) => setFim(e.target.value)}

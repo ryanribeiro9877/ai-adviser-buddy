@@ -231,6 +231,8 @@ export function TargetsTable({ companyId }: { companyId: string }) {
                 <TableCell className="text-right tabular-nums">
                   {editing ? (
                     <Input
+                      // Foco imediato no valor ao entrar em edição inline (teclado).
+                      // eslint-disable-next-line jsx-a11y/no-autofocus -- UX de edição tabular
                       autoFocus
                       inputMode="decimal"
                       value={draft}
