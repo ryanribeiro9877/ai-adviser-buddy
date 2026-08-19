@@ -8,13 +8,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  MessagesSquare,
-  Sparkles,
-  Check,
-  X,
-  MessageSquare,
-} from "lucide-react";
+import { MessagesSquare, Sparkles, Check, X, MessageSquare } from "lucide-react";
 import { toast } from "sonner";
 import { OperacaoChat } from "@/components/operacao-chat";
 import { ApprovalsQueue } from "@/components/approvals-queue";
@@ -134,7 +128,13 @@ function Recomendacoes() {
             variant={statusFilter === s ? "default" : "outline"}
             onClick={() => setStatusFilter(s)}
           >
-            {s === "new" ? "Novas" : s === "all" ? "Todas" : s === "accepted" ? "Aceitas" : "Descartadas"}
+            {s === "new"
+              ? "Novas"
+              : s === "all"
+                ? "Todas"
+                : s === "accepted"
+                  ? "Aceitas"
+                  : "Descartadas"}
           </Button>
         ))}
         <span className="text-xs text-muted-foreground ml-2">Família:</span>
@@ -175,7 +175,9 @@ function Recomendacoes() {
                   {r.maturity_days != null ? ` · ${r.maturity_days} dias de entrega` : ""}
                 </p>
               )}
-              <p className="text-sm text-muted-foreground mt-2 whitespace-pre-wrap">{r.description}</p>
+              <p className="text-sm text-muted-foreground mt-2 whitespace-pre-wrap">
+                {r.description}
+              </p>
               {evLines.length > 0 && (
                 <div className="mt-2 rounded-md bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground space-y-0.5">
                   {evLines.map((line) => (

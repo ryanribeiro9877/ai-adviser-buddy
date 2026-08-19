@@ -249,10 +249,10 @@ export function OperacaoChat() {
     setActiveId(alvo);
     navigate({
       to: ".",
-      search: (prev: Record<string, unknown>) => {
+      search: ((prev: Record<string, unknown>) => {
         const { conv: _conv, ...resto } = prev;
         return resto;
-      },
+      }) as never,
       replace: true,
     });
   }, [search.conv, convos.data, navigate]);
@@ -695,10 +695,12 @@ export function OperacaoChat() {
         recoAplicadaRef.current = recoId;
         navigate({
           to: ".",
-          search: (prev: Record<string, unknown>) => {
+          // tab/reco vivem na URL da rota Operação; o search tipado do router
+          // raiz não os declara — cast local evita mentir no tipo global.
+          search: ((prev: Record<string, unknown>) => {
             const { reco: _r, ...resto } = prev;
             return { ...resto, tab: "chat" };
-          },
+          }) as never,
           replace: true,
         });
         return;
@@ -710,10 +712,10 @@ export function OperacaoChat() {
       setActiveId(null);
       navigate({
         to: ".",
-        search: (prev: Record<string, unknown>) => {
+        search: ((prev: Record<string, unknown>) => {
           const { reco: _r, ...resto } = prev;
           return { ...resto, tab: "chat" };
-        },
+        }) as never,
         replace: true,
       });
       await send(prompt);
@@ -955,7 +957,9 @@ export function OperacaoChat() {
                     {pending!.attachments.length > 0 && (
                       <AttachmentChips items={pending!.attachments} onPrimary />
                     )}
-                    {pending!.text && <div className="whitespace-pre-wrap break-words">{pending!.text}</div>}
+                    {pending!.text && (
+                      <div className="whitespace-pre-wrap break-words">{pending!.text}</div>
+                    )}
                     {/* Só quando o roteamento foi automático: explica por que não
                         veio resposta imediata. Com o toggle ligado o usuário já sabe.
                         Texto neutro de propósito: aqui o gestor NÃO pediu análise
@@ -1348,7 +1352,9 @@ function MessageBubble({
               </Badge>
             ))}
             {message.model && (
-              <span className="ml-1 truncate text-[11px] text-muted-foreground">{message.model}</span>
+              <span className="ml-1 truncate text-[11px] text-muted-foreground">
+                {message.model}
+              </span>
             )}
           </div>
         )}

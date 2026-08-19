@@ -5,5 +5,3 @@ export const FEATURES = {
   // Até lá, o menu fica oculto (rota preservada e acessível por URL).
   approvalsMenu: false,
 } as const;
-
-export type FeatureFlag = keyof typeof FEATURES;

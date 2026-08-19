@@ -5,9 +5,6 @@
 // A verdade sempre esteve em `estado_operacional` (e o porquê em `estado_motivo`),
 // e nada disso era exibido. Aqui a precedência é explícita e testável.
 
-export type StatusIntegracao = "connected" | "nao_verificada" | "erro" | "revogada";
-export type EstadoOperacional = "ativa" | "nao_operacional" | "quarentena";
-
 export type Integracao = {
   id: string;
   provider: string;
