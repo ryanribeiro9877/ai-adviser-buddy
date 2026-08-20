@@ -109,6 +109,27 @@ function isProgressOnlyReply(text: string): boolean {
   );
 }
 
+/** Stub gravado pelo traffic-agent-job no catch — nao conta como resposta real. */
+function isJobFailureStub(text: string): boolean {
+  return /processamento em segundo plano falhou/i.test(text ?? "");
+}
+
+/** Há resposta substantiva (não stub/progresso) depois do último user. */
+function hasSubstantiveReplyAfterLastUser(msgs: Message[]): boolean {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role === "user") return false;
+    if (
+      m.role === "assistant" &&
+      !isProgressOnlyReply(m.content ?? "") &&
+      !isJobFailureStub(m.content ?? "")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Resposta que ja fecha o turno (clarificacao / decisao) — front nao deve auto-continuar. */
 function looksLikeCompleteTurn(text: string): boolean {
   const raw = (text ?? "").trim();
@@ -942,6 +963,13 @@ export function OperacaoChat() {
   // Sem resposta do assistente depois da última pergunta: é o que delimita até quando faz
   // sentido mostrar o desfecho de um job. Chegou resposta, o card sai de cena.
   const aguardandoResposta = idadeAtiva !== null;
+  // Resposta real no fio (não stub de erro_job): o card de falha não fica permanente se o
+  // turno já entregou texto — inclusive após rate-limit transitório com reply no banco.
+  const respostaRealJaChegou = hasSubstantiveReplyAfterLastUser(msgs);
+  const soStubDeFalha =
+    !!ultimaMsg &&
+    ultimaMsg.role === "assistant" &&
+    isJobFailureStub(ultimaMsg.content ?? "");
 
   // Job de análise profunda desta conversa. Vem do state (quem enviou) ou do banco (quem só
   // abriu a conversa / voltou depois) — mesmo princípio do indicador síncrono: o estado é
@@ -949,6 +977,8 @@ export function OperacaoChat() {
   // GT-16: 'error' entra na busca. Sem ele, job marcado pelo `expira-chat-jobs` sumia do card
   // ao reabrir a conversa e caía no aviso genérico de 2 min abaixo, que atribui a falha ao
   // "limite de tempo do servidor" — motivo inventado, quando o banco tem o motivo real.
+  // Stub de falha (última msg): ainda mostra card error+Reenviar. Resposta substantiva:
+  // card some mesmo se chat_jobs.status=error (falso negativo na tela).
   const jobDb = useQuery({
     queryKey: ["chat-job-ativo", activeId],
     enabled: !!activeId,
@@ -965,10 +995,12 @@ export function OperacaoChat() {
       return data;
     },
   });
-  const jobAtivo =
-    job && job.convId === activeId
+  const jobAtivo = respostaRealJaChegou
+    ? null
+    : job && job.convId === activeId
       ? job
-      : jobDb.data && (jobDb.data.status !== "error" || aguardandoResposta)
+      : jobDb.data &&
+          (jobDb.data.status !== "error" || aguardandoResposta || soStubDeFalha)
         ? { convId: activeId!, jobId: jobDb.data.id, texto: jobDb.data.message ?? "" }
         : null;
 

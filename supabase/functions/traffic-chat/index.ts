@@ -1,4 +1,15 @@
-// supabase/functions/traffic-chat/index.ts (v28.42)
+// supabase/functions/traffic-chat/index.ts (v28.44)
+// v28.44 (20/08/2026) - LEGENDAS DURAVEIS ANTI-AMNESIA (IMPULSAO):
+//   (1) tabela conversation_legendas + tools get_legendas_da_conversa /
+//   registrar_legenda_da_conversa; gerar_legendas grava ao sucesso;
+//   (2) bloco LEGENDAS DA CONVERSA reinjetado no historico;
+//   (3) HIST_CAP em assistente antigo passa a preservar INICIO+FINAL (legendas
+//   no fim de slate longo nao somem); (4) doutrina: nunca dizer "texto integral
+//   nao disponivel" sem consultar store+historico; nunca pedir re-colar copy
+//   que o agente escreveu nesta conversa.
+// v28.43 (20/08/2026) - RETRY OpenRouter 429/502/503 com backoff no chamar() sincrono,
+//   alinhado ao traffic-agent-job v3.7: rate-limit nao vira 502 imediato se ainda ha
+//   orcamento de parede.
 // v28.42 (20/08/2026) - ENGAGEMENT: summary/doutrina sem OR REACH; ON_POST no payload.
 //   REACH so em reconhecimento. Meta exige destination_type=ON_POST com POST_ENGAGEMENT.
 // v28.41 (20/08/2026) - CONJUNTO DE ENGAJAMENTO: sem_molde OU molde LEADS so para targeting.
@@ -545,7 +556,9 @@ const MAX_TOOLS_TURNO = 24;
 // v28.31: propose_action default=2 matava lote de 5 cards; carve-out dedicado abaixo.
 const MAX_POR_FERRAMENTA: Record<string, number> = {
   check_compliance: 3,
-  gerar_legendas: 1,
+  gerar_legendas: 3,
+  registrar_legenda_da_conversa: 8,
+  get_legendas_da_conversa: 2,
   get_estrutura_conjuntos: 3,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
@@ -567,7 +580,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.40";
+const VERSAO = "chat-v28.44";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -593,11 +606,13 @@ const TOOLRES_CAP_TOTAL = 12000;
 // Listas longas cabem em amostra + contagem declarada; o que nao pode e sumir sem aviso.
 const TOOLRES_ITENS_LISTA = 6;
 const TOOLRES_TEXTO = 400;
-// v27.1: caps do corte de historico. HIST_CAP e o teto por mensagem; a mensagem de USUARIO
-// mais recente tem teto maior porque e a pergunta original que as continuacoes precisam
-// enxergar INTEIRA (o corte em 6000 escondeu os blocos 9-12 do questionario de 28/07).
+// v27.1 / v28.44: caps do corte de historico. HIST_CAP e o teto por mensagem; a mensagem de
+// USUARIO mais recente tem teto maior. Assistente longo usa cabeca+cauda (como user): em
+// 20/08 o corte so no inicio escondeu legendas no FINAL de um slate de 10k chars e o agente
+// inventou "texto integral nao disponivel". Store conversation_legendas e a fonte duravel.
 const HIST_CAP = 6000;
 const HIST_CAP_USER_RECENTE = 12000;
+const HIST_CAP_ASSIST_COM_LEGENDA = 10000;
 // v19/v28.33 - orcamento de tempo (~2 min operacional). Teto da plataforma = ~150s
 // (IDLE_TIMEOUT do gateway Supabase, NAO configuravel no projeto). Pedido do gestor:
 // 120s de orcamento util. HARD_LIMIT 118s deixa folga para gravar a reply antes do corte
@@ -2753,10 +2768,12 @@ async function t_check_compliance(companyId: string, legenda: string, imgAtts: {
 }
 
 // ESP-37: motor de legenda (N=3). Nao cria anuncio — so devolve variantes com veredito.
+// v28.44: persiste variantes em conversation_legendas quando ha conversation_id.
 async function t_gerar_legendas(
   companyId: string,
   mcpKey: string,
-  args: { produto?: string; objetivo?: string; eixo?: string; drive_file_id?: string; referencias?: string[] },
+  args: { produto?: string; objetivo?: string; eixo?: string; drive_file_id?: string; referencias?: string[]; peca_chave?: string },
+  convId?: string | null,
 ) {
   const objetivo = String(args?.objetivo ?? args?.eixo ?? "").trim();
   if (!objetivo) {
@@ -2788,7 +2805,146 @@ async function t_gerar_legendas(
   } catch {
     return { ok: false, erro: `gerar-legendas falhou (${r.status}): ${t.slice(0, 200)}` };
   }
+  if (j?.ok && convId) {
+    const peca = String(args?.peca_chave ?? drive ?? `objetivo:${objetivo.slice(0, 80)}`).trim() || "sem_peca";
+    const variantes = Array.isArray(j.variantes) ? j.variantes : [];
+    const escolhida = variantes.find((v: any) => v?.apto_para_card) ?? variantes[0];
+    const gravado = await upsertLegendaConversa({
+      companyId,
+      convId,
+      pecaChave: peca,
+      driveFileId: drive || null,
+      legenda: String(escolhida?.texto ?? "").trim(),
+      varianteIndice: escolhida?.indice != null ? Number(escolhida.indice) : null,
+      fonte: "gerar_legendas",
+      objetivo,
+      aptoParaCard: escolhida?.apto_para_card === true,
+      variantes,
+      metadata: { n: j.n, aptas: j.aptas, produto: j.produto },
+    });
+    j.persistido = gravado;
+    j.peca_chave = peca;
+    j.nota_memoria =
+      "Legendas gravadas em conversation_legendas desta conversa. Em turnos seguintes use get_legendas_da_conversa — NUNCA diga que o texto sumiu nem peca ao gestor para colar de novo.";
+  }
   return j;
+}
+
+async function upsertLegendaConversa(opts: {
+  companyId: string;
+  convId: string;
+  pecaChave: string;
+  driveFileId?: string | null;
+  legenda: string;
+  varianteIndice?: number | null;
+  fonte: "gerar_legendas" | "agente_proposto" | "gestor" | "seed";
+  objetivo?: string | null;
+  aptoParaCard?: boolean | null;
+  variantes?: unknown;
+  metadata?: Record<string, unknown>;
+  selecionada?: boolean;
+}) {
+  const legenda = String(opts.legenda ?? "").trim();
+  if (!legenda) return { ok: false, erro: "legenda_vazia" };
+  const peca = String(opts.pecaChave ?? "").trim();
+  if (!peca) return { ok: false, erro: "peca_chave_obrigatoria" };
+  const row = {
+    company_id: opts.companyId,
+    conversation_id: opts.convId,
+    peca_chave: peca.slice(0, 200),
+    drive_file_id: opts.driveFileId ? String(opts.driveFileId).trim() : null,
+    legenda,
+    variante_indice: opts.varianteIndice ?? null,
+    selecionada: opts.selecionada !== false,
+    fonte: opts.fonte,
+    objetivo: opts.objetivo ? String(opts.objetivo).slice(0, 500) : null,
+    apto_para_card: opts.aptoParaCard ?? null,
+    variantes: opts.variantes ?? null,
+    metadata: opts.metadata ?? {},
+    updated_at: new Date().toISOString(),
+  };
+  const { data, error } = await supa.from("conversation_legendas")
+    .upsert(row, { onConflict: "conversation_id,peca_chave" })
+    .select("id, peca_chave, drive_file_id, updated_at")
+    .maybeSingle();
+  if (error) return { ok: false, erro: error.message };
+  return { ok: true, id: data?.id, peca_chave: data?.peca_chave, drive_file_id: data?.drive_file_id };
+}
+
+async function t_registrar_legenda_da_conversa(
+  companyId: string,
+  convId: string,
+  args: { peca_chave?: string; legenda?: string; drive_file_id?: string; variante_indice?: number; selecionada?: boolean; objetivo?: string },
+) {
+  if (!convId) return { erro: "conversation_id_ausente", detalhe: "So funciona dentro de uma conversa." };
+  const peca = String(args?.peca_chave ?? args?.drive_file_id ?? "").trim();
+  const legenda = String(args?.legenda ?? "").trim();
+  if (!peca) return { erro: "peca_chave_obrigatoria", detalhe: "Informe peca_chave (ex.: carrossel_5, card_capa_1) ou drive_file_id." };
+  if (!legenda) return { erro: "legenda_obrigatoria" };
+  return await upsertLegendaConversa({
+    companyId,
+    convId,
+    pecaChave: peca,
+    driveFileId: args?.drive_file_id ? String(args.drive_file_id).trim() : null,
+    legenda,
+    varianteIndice: args?.variante_indice != null ? Number(args.variante_indice) : null,
+    fonte: "agente_proposto",
+    objetivo: args?.objetivo ? String(args.objetivo) : null,
+    selecionada: args?.selecionada !== false,
+  });
+}
+
+async function t_get_legendas_da_conversa(
+  companyId: string,
+  convId: string,
+  args?: { peca_chave?: string; drive_file_id?: string },
+) {
+  if (!convId) return { erro: "conversation_id_ausente" };
+  let q = supa.from("conversation_legendas")
+    .select("id, peca_chave, drive_file_id, legenda, variante_indice, selecionada, fonte, objetivo, apto_para_card, variantes, updated_at")
+    .eq("company_id", companyId)
+    .eq("conversation_id", convId)
+    .order("updated_at", { ascending: false })
+    .limit(40);
+  const peca = String(args?.peca_chave ?? "").trim();
+  const drive = String(args?.drive_file_id ?? "").trim();
+  if (peca) q = q.eq("peca_chave", peca);
+  if (drive) q = q.eq("drive_file_id", drive);
+  const { data, error } = await q;
+  if (error) return { erro: error.message };
+  const itens = data ?? [];
+  return {
+    total: itens.length,
+    itens,
+    nota:
+      "Fonte DURAVELdesta conversa. Se total>0, o texto INTEGRAL esta em itens[].legenda — use para compliance/card. PROIBIDO dizer 'nao disponivel' ou pedir ao gestor para colar de novo quando a peca aparece aqui. Se total=0 e a copy estava no chat, registre com registrar_legenda_da_conversa antes de declarar ausencia.",
+  };
+}
+
+async function carregarBlocoLegendasConversa(companyId: string, convId: string): Promise<string> {
+  const { data, error } = await supa.from("conversation_legendas")
+    .select("peca_chave, drive_file_id, legenda, variante_indice, selecionada, fonte, updated_at")
+    .eq("company_id", companyId)
+    .eq("conversation_id", convId)
+    .order("updated_at", { ascending: false })
+    .limit(20);
+  if (error || !data?.length) return "";
+  const linhas = data.map((r: any, i: number) => {
+    const meta = [
+      r.peca_chave,
+      r.drive_file_id ? `drive=${r.drive_file_id}` : null,
+      r.variante_indice != null ? `var=${r.variante_indice}` : null,
+      r.selecionada === false ? "nao_selecionada" : "selecionada",
+      r.fonte,
+    ].filter(Boolean).join(" | ");
+    return `${i + 1}) [${meta}]\n${String(r.legenda ?? "").trim()}`;
+  });
+  return (
+    "[LEGENDAS DA CONVERSA — store duravel; texto INTEGRAL abaixo. " +
+    "Se o gestor pedir compliance/card destas pecas, USE estes textos. " +
+    "PROIBIDO dizer que nao existem ou pedir para colar de novo.]\n" +
+    linhas.join("\n\n")
+  );
 }
 
 // Sobe peca do Drive para a biblioteca Meta (adimages/advideos) via edge upload-midia.
@@ -4209,7 +4365,7 @@ Deno.serve(async (req) => {
     });
   }
 
-  async function chamar(comTools: boolean, maxTokens = MAX_TOKENS, semRaciocinio = false): Promise<any> {
+  async function chamar(comTools: boolean, maxTokens = MAX_TOKENS, semRaciocinio = false, retry429 = 0): Promise<any> {
     const restanteMs = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
     if (restanteMs < 8_000) {
       return { erro: "orcamento_tempo_esgotado", detalhe: `restam ${restanteMs}ms — sem tempo util para nova geracao` };
@@ -4249,11 +4405,24 @@ Deno.serve(async (req) => {
       if (resp.status === 400 || resp.status === 422) {
         if (!reasoningDesativado) {
           reasoningDesativado = true; reasoningRejeitado = true;
-          return await chamar(comTools, maxTokens, semRaciocinio);
+          return await chamar(comTools, maxTokens, semRaciocinio, retry429);
         }
         if (usarCache) {
           cacheDesativado = true; cacheRejeitado = true;
-          return await chamar(comTools, maxTokens, semRaciocinio);
+          return await chamar(comTools, maxTokens, semRaciocinio, retry429);
+        }
+      }
+      // v28.43: 429/502/503 — backoff curto se ainda cabe no HARD_LIMIT.
+      if ((resp.status === 429 || resp.status === 502 || resp.status === 503) && retry429 < 3) {
+        const sobra = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
+        if (sobra > 12_000) {
+          const ra = Number(resp.headers.get("retry-after"));
+          const waitMs = Math.min(
+            Number.isFinite(ra) && ra > 0 ? Math.floor(ra * 1000) : 1000 * (retry429 + 1),
+            Math.min(8_000, sobra - 8_000),
+          );
+          if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+          return await chamar(comTools, maxTokens, semRaciocinio, retry429 + 1);
         }
       }
       return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };

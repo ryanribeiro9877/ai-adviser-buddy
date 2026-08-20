@@ -271,6 +271,15 @@ describe("o BANCO decide — não o relógio", () => {
     expect(onDone).toHaveBeenCalled();
   });
 
+  it("error→done limpa o banner (nao fica preso no primeiro error)", async () => {
+    const { onDone, container } = montar();
+    chegaDoBanco({ status: "error", erro: "sintese_vazia (erro_llm:openrouter_http_429)" });
+    expect(await screen.findByText("A resposta não foi concluída")).toBeInTheDocument();
+    chegaDoBanco({ status: "done", erro: null });
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
+    expect(onDone).toHaveBeenCalled();
+  });
+
   it("job LONGO mas ativo NÃO é reprovado pela tela", async () => {
     // O caso que motivou o GT-16: 10 minutos rodando, emitindo fase. O relogio
     // antigo (7 min) chamava isso de falha enquanto o servidor terminava bem.

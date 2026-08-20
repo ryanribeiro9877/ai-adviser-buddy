@@ -180,7 +180,9 @@ export function JobProgressCard({
       if (row.status) setStatus(row.status);
       if (row.progresso !== undefined) setLista(passos(row.progresso));
       if (row.erro !== undefined) setErro(row.erro ?? null);
-      if (row.status === "done" || row.status === "error") pararReleitura();
+      // done: para a releitura. Em error CONTINUA lendo — se o status voltar a done
+      // (retry no worker / corrida) a tela limpa o banner em vez de ficar presa no 1º erro.
+      if (row.status === "done") pararReleitura();
       // done: a mensagem final chega (ou já chegou) pelo Realtime de chat_messages.
       if (row.status === "done") onDoneRef.current();
     };

@@ -1,4 +1,8 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.6)
+// supabase/functions/traffic-agent-job/index.ts (v3.7)
+// v3.7 (20/08/2026) - RETRY OpenRouter 429/502/503 com backoff na sintese (e demais
+//   chamarLLM): rate-limit transitorio nao vira sintese_vazia/erro_job imediato. Caso
+//   medido: job 123c627d falhou em ~55s com openrouter_http_429 na sintese; reenvio
+//   logo depois concluiu — falso negativo operacional na tela.
 // v3.6 (20/08/2026) - HARDENING LITE/META + SINTESE: RE_META_DICA passa a casar
 //   "musicas"/"recomendacao" (antes so "musica"/"recomendac" com word-boundary quebrava
 //   o forcarPlano); fallback do planner invalido e por tier (lite Meta -> alertas,
@@ -1134,6 +1138,16 @@ async function t_drive_criativos(companyId: string) {
 // ============================================================================
 // LLM
 // ============================================================================
+const OPENROUTER_RETRIAVEL = new Set([429, 502, 503]);
+const OPENROUTER_RETRY_MAX = 4;
+
+function esperaRetryOpenRouter(resp: Response, tentativa: number): number {
+  const ra = Number(resp.headers.get("retry-after"));
+  if (Number.isFinite(ra) && ra > 0) return Math.min(Math.floor(ra * 1000), 20_000);
+  // 1s, 2s, 4s, 8s — rate-limit costuma passar em poucos segundos.
+  return Math.min(1000 * 2 ** Math.max(0, tentativa - 1), 8_000);
+}
+
 async function chamarLLM(messages: any[], opts: { tools?: any[]; maxTokens: number; reasoning?: any; model?: string; timeoutMs?: number }): Promise<any> {
   const payload: any = { model: opts.model ?? MODEL, messages, max_tokens: opts.maxTokens };
   if (opts.tools?.length) { payload.tools = opts.tools; payload.tool_choice = "auto"; }
@@ -1164,6 +1178,12 @@ async function chamarLLM(messages: any[], opts: { tools?: any[]; maxTokens: numb
   if (!resp.ok && (resp.status === 400 || resp.status === 422) && payload.reasoning) {
     // Degradacao: remove reasoning e retenta (mesmo padrao do traffic-chat v21).
     delete payload.reasoning;
+    ({ resp, text, aborted } = await postOnce(payload));
+    if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
+  }
+  // v3.7: 429/502/503 sao transitórios — backoff antes de virar sintese_vazia na tela.
+  for (let t = 1; !resp.ok && OPENROUTER_RETRIAVEL.has(resp.status) && t <= OPENROUTER_RETRY_MAX; t++) {
+    await new Promise((r) => setTimeout(r, esperaRetryOpenRouter(resp, t)));
     ({ resp, text, aborted } = await postOnce(payload));
     if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   }
