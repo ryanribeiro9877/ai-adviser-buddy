@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v28.39)
+// supabase/functions/traffic-chat/index.ts (v28.40)
+// v28.40 (20/08/2026) - ANTI-ALUCINACAO DE CARD EMITIDO (incidente IMPULSAO SOCIAL):
+//   Agente escreveu "## Card emitido — aguardando aprovação" sem approval_id: 1o
+//   propose falhou (target_name="composto"), 2o caiu no deadline, sintese inventou
+//   o ato. Conserto: (1) filtro pos-sintese reescreve claim sem actionCards;
+//   (2) target_name placeholder (composto/nome_composto/…) = omitir; (3) papel
+//   espelhado na raiz do payload; (4) RE_PEDIDO_DE_ATO aceita "emissao";
+//   (5) claim falso NAO fecha o turno — permite auto-continuar a emissao.
 // v28.39 (20/08/2026) - OBJETIVOS ODAX DE ENGAJAMENTO/RECONHECIMENTO (IMPULSAO SOCIAL):
 //   criar_campanha aceita ENGAJAMENTO/POST_ENGAGEMENT/RECONHECIMENTO (e deriva ODAX da
 //   objetivo_tag se params.objetivo omitido). Canal SOCIAL + Page/IG permitidos nesta
@@ -555,7 +562,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.38";
+const VERSAO = "chat-v28.40";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -1762,11 +1769,13 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       };
     }
     const nomeAlvoComposto = montado.nome;
+    // v28.40: "composto" / placeholders = omitir (nao recusar). Nome vem das partes.
+    const nomeAlvoUtil = targetNameCriacaoUtil(nomeAlvo);
     // Se o agente ainda passou target_name livre divergente, recusa — o nome e das partes.
-    if (nomeAlvo && norm(nomeAlvo) !== norm(nomeAlvoComposto) && !String(nomeAlvo).includes("[")) {
+    if (nomeAlvoUtil && norm(nomeAlvoUtil) !== norm(nomeAlvoComposto) && !String(nomeAlvoUtil).includes("[")) {
       return {
         erro: "nome_livre_recusado",
-        detalhe: `target_name="${nomeAlvo}" nao e mais o nome da campanha. O sistema montou "${nomeAlvoComposto}" a partir dos campos. Omita target_name ou use exatamente o nome composto.`,
+        detalhe: `target_name="${nomeAlvoUtil}" nao e mais o nome da campanha. O sistema montou "${nomeAlvoComposto}" a partir dos campos. Omita target_name ou use exatamente o nome composto.`,
         nome_composto: nomeAlvoComposto,
         nome_partes: montado.partes,
       };
@@ -1787,6 +1796,8 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
       nome_novo: nomeAlvoComposto,
       nome_partes: montado.partes,
+      // ESP-39: contrato exige papel na raiz; tambem vive em nome_partes.
+      papel: montado.partes.papel,
       objetivo,
       familia_objetivo: familia,
       page_id: socialTopo ? pageId : null,
@@ -3308,7 +3319,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 - Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar. Pedido de criar legendas: chame gerar_legendas (ESP-37, N=3, framework Hook→Beneficio→CTA+CET). Entregue as 3 com veredito; so apto_para_card=true pode ir ao card. NAO invente legendas no chat sem a ferramenta.
 
 == LIMITES DUROS (nao negociaveis, mesmo se pedirem) ==
-- ATO SO EXISTE COM RETORNO DE FERRAMENTA: voce so pode afirmar que emitiu card, criou, alterou ou executou QUALQUER coisa se a ferramenta correspondente foi chamada NESTA resposta e devolveu sucesso - e ao afirmar, cite o identificador devolvido. Se a ferramenta nao foi chamada ou falhou, diga exatamente isso. Escrever "emiti/criei/esta pendente" sem retorno de ferramenta e FABRICAR um ato - a mentira mais grave que voce pode cometer, porque o gestor decide dinheiro em cima dela. Tabela de "estado real" sem fonte de ferramenta na mesma resposta e proibida.
+- ATO SO EXISTE COM RETORNO DE FERRAMENTA: voce so pode afirmar que emitiu card, criou, alterou ou executou QUALQUER coisa se a ferramenta correspondente foi chamada NESTA resposta e devolveu sucesso COM approval_id (UUID) - e ao afirmar, cite esse identificador na tabela. Sem approval_id no retorno de propose_action, o card NAO existe: e PROIBIDO escrever "Card emitido", "aguardando aprovacao", "pedido pendente" ou tabela de estado do card. Se propose_action falhou, caiu no deadline ou nao foi chamada, diga exatamente isso em UMA linha e o que falta para emitir de verdade. Escrever "emiti/criei/esta pendente" sem approval_id e FABRICAR um ato - a mentira mais grave que voce pode cometer, porque o gestor decide dinheiro em cima dela. O sistema REESCREVE claims sem card; nao tente contornar.
 - AFIRMACAO SOBRE ESTADO TAMBEM E ATO. Em 02/08/2026, com a regra acima JA no ar, voce escreveu
   "vou confirmar as campanhas no meu sistema" e, na mesma resposta, "Confirmado: as tres
   campanhas apareceram no sistema desta vez" - com uma tabela de estado - sem ter chamado
@@ -3321,7 +3332,12 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   verifiquei nesta resposta".
 - FERRAMENTA QUE FALHOU NAO E ATO. Se a ferramenta retornou erro, recusa ou lista vazia, isso
   NAO e sucesso: relate a falha e o motivo. Card recusado na emissao nao esta "pendente de
-  aprovacao" - ele nao existe.
+  aprovacao" - ele nao existe. Em 20/08/2026 (IMPULSAO SOCIAL) voce escreveu "Card emitido"
+  depois de propose_action falhar (target_name=composto) e a reemissao cair no deadline —
+  o gestor nao viu card nenhum. Nunca repita.
+- criar_campanha: OMITA target_name (ou use exatamente o nome composto [MARCA][…]). Nao passe
+  "composto", "nome_composto" nem outro placeholder — o sistema monta o nome pelas partes.
+  params.papel (TESTE|ESCALA) e obrigatorio na raiz E em nome_partes.
 - TESTE A/B/C, VARIANTE, UTM OU RASTREIO: chame panorama_utm_anuncios antes de dizer se o teste
   e legivel ou se existe vencedora. Campanha vazia e uma causa possivel, mas NAO substitui a
   leitura dos rotulos. Sem desempenho por rotulo, nao invente vencedor.
@@ -3612,7 +3628,12 @@ const FAMILIAS_ASSUNTO: RegExp[] = [
 const ROTA_FAMILIAS_MIN = 5;
 const ROTA_CHARS_MIN = 1500;
 const RE_CONTINUACAO = /^sua resposta anterior foi cortada|^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/;
-const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
+const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
+/** Placeholders que o modelo usa no lugar de omitir target_name em criar_campanha. */
+const RE_TARGET_PLACEHOLDER = /^(composto|nome[_\s-]?composto|novo[_\s-]?nome|campanha(\s+nova)?|nova|n\/a|na|—|-|\.|\*)$/i;
+/** Claim de card emitido — so e verdade se actionCards tiver approval_id real. */
+const RE_CLAIM_CARD_EMITIDO =
+  /##\s*card\s+emitido|\bcard\s+emitido\b|\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)\b|\bpedido\s+(de\s+aprova[cç][aã]o\s+)?(foi\s+)?(emitido|registrado)\b|\baguardando\s+(sua\s+)?aprova/i;
 
 type TurnCheckpoint = {
   v: 1;
@@ -3665,6 +3686,64 @@ function resumirToolsParaCheckpoint(toolsUsed: any[], toolResults: { tool: strin
 
 function toolsIncluemPropose(tools: { tool?: string }[]): boolean {
   return tools.some((t) => String(t.tool ?? "") === "propose_action");
+}
+
+/**
+ * v28.40: HARD STOP — se a prosa afirma "card emitido" sem approval_id real em
+ * actionCards, reescreve. Doutrina sozinha nao bastou (incidente IMPULSAO 20/08).
+ */
+function sanitizarClaimEmitSemCard(
+  reply: string,
+  cards: CardInfo[],
+  toolResults: { tool?: string; retorno?: any; erro?: string }[],
+): { reply: string; reescreveu: boolean } {
+  const raw = String(reply ?? "").trim();
+  if (!raw || cards.length > 0) return { reply: raw, reescreveu: false };
+  if (!RE_CLAIM_CARD_EMITIDO.test(raw)) return { reply: raw, reescreveu: false };
+
+  const proposes = toolResults.filter((t) => String(t.tool ?? "") === "propose_action");
+  const errosPropose = proposes
+    .map((t) => {
+      if (t.erro) return String(t.erro);
+      const r = t.retorno;
+      if (r && typeof r === "object" && (r as any).erro) return String((r as any).erro);
+      return null;
+    })
+    .filter(Boolean) as string[];
+  const deadlineSkip = proposes.some((t) =>
+    /deadline|nao foi lido|consulta_nao_realizada/i.test(String(t.erro ?? "")));
+
+  let motivo = "propose_action nao devolveu approval_id nesta rodada";
+  if (deadlineSkip) {
+    motivo = "o orcamento de tempo esgotou antes de concluir propose_action — o card NAO existe";
+  } else if (errosPropose.length) {
+    motivo = `propose_action recusou: ${errosPropose[0]}`;
+  }
+
+  const aviso =
+    `**Nenhum pedido de aprovação foi emitido nesta rodada.** ${motivo}. ` +
+    `Afirmar "card emitido" sem o identificador devolvido pela ferramenta é fabricar um ato — ` +
+    `não há card na fila. Peça de novo a emissão (ou aguarde a continuação automática) e eu ` +
+    `volto a chamar propose_action até obter o approval_id real.`;
+
+  // Remove a secao "## Card emitido…" (ate o proximo ## ou fim) e o claim solto.
+  let limpo = raw
+    .replace(/##\s*card\s+emitido[^\n]*\n[\s\S]*?(?=\n##\s|\n---\s*\n|$)/gi, "")
+    .replace(/\bcard\s+emitido[^\n.]*/gi, "")
+    .replace(/\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)[^\n.]*/gi, "")
+    .trim();
+  if (limpo.length < 80 || RE_CLAIM_CARD_EMITIDO.test(limpo)) {
+    limpo = "";
+  }
+  const novo = limpo ? `${aviso}\n\n${limpo}` : aviso;
+  return { reply: novo, reescreveu: true };
+}
+
+/** target_name livre/placeholder em criar_* — trata como omitido (nome vem das partes). */
+function targetNameCriacaoUtil(raw: string): string {
+  const t = String(raw ?? "").trim();
+  if (!t || RE_TARGET_PLACEHOLDER.test(t)) return "";
+  return t;
 }
 
 /** Resposta que ja fecha o turno: clarificacao, contradicao, recusa pendente de decisao. */
@@ -4314,15 +4393,27 @@ Deno.serve(async (req) => {
     }
   }
 
+  // v28.40: HARD — claim de "card emitido" sem actionCards e mentira; reescreve.
+  const claimSan = sanitizarClaimEmitSemCard(String(reply ?? ""), actionCards, toolResults);
+  if (claimSan.reescreveu) {
+    reply = claimSan.reply;
+    finishReason = String(finishReason || "stop") + "+claim_emit_sem_card";
+  }
+
   // v28.38: CONTINUACAO AUTOMATICA — so quando o turno esta realmente incompleto.
   // Nao continuar apos resposta completa (clarificacao / decisao humana / analise fechada).
   const pedidoAto = RE_PEDIDO_DE_ATO.test(deacc(objetivoOriginal.toLowerCase())) ||
-    (turnCheckpoint?.pedido_ato === true);
+    (turnCheckpoint?.pedido_ato === true) ||
+    // v28.40: se propose_action de criacao rodou (ou tentou) sem card, trata como ato.
+    (actionCards.length === 0 && toolsIncluemPropose(toolsUsed));
   const cardsNesteSegmento = actionCards.length;
   const cardsJaNoPedido = (turnCheckpoint?.cards?.length ?? 0) + cardsNesteSegmento;
   const toolsNesteSegmento = toolsUsed.length;
   const replyTrim = String(reply ?? "").trim();
-  const turnoJaFechado = replyFechaTurno(replyTrim);
+  // Claim falso ja sanitizado: nao conta como "turno fechado" se ainda falta o card.
+  const turnoJaFechado = replyFechaTurno(replyTrim) && !(
+    claimSan.reescreveu || (pedidoAto && cardsJaNoPedido === 0 && toolsIncluemPropose(toolsUsed))
+  );
   const tentouEmitir =
     toolsIncluemPropose(toolsUsed) ||
     toolsIncluemPropose(turnCheckpoint?.tools_resumo ?? []);
