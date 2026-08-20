@@ -974,20 +974,18 @@ export function OperacaoChat() {
   // Job de análise profunda desta conversa. Vem do state (quem enviou) ou do banco (quem só
   // abriu a conversa / voltou depois) — mesmo princípio do indicador síncrono: o estado é
   // derivado, não presumido.
-  // GT-16: 'error' entra na busca. Sem ele, job marcado pelo `expira-chat-jobs` sumia do card
-  // ao reabrir a conversa e caía no aviso genérico de 2 min abaixo, que atribui a falha ao
-  // "limite de tempo do servidor" — motivo inventado, quando o banco tem o motivo real.
-  // Stub de falha (última msg): ainda mostra card error+Reenviar. Resposta substantiva:
-  // card some mesmo se chat_jobs.status=error (falso negativo na tela).
+  // GT-16 / 20/08: job ABSOLUTO mais recente (qualquer status). Filtrar só
+  // queued|running|error fazia um `error` antigo (sintese_vazia 429) reaparecer depois de
+  // um `done` mais novo. Stub de falha: ainda mostra card+Reenviar; resposta substantiva
+  // some o card mesmo se status=error.
   const jobDb = useQuery({
     queryKey: ["chat-job-ativo", activeId],
     enabled: !!activeId,
     queryFn: async () => {
       const { data, error } = await supabase
         .from("chat_jobs")
-        .select("id, message, status")
+        .select("id, message, status, created_at, erro")
         .eq("conversation_id", activeId!)
-        .in("status", ["queued", "running", "error"])
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
@@ -995,13 +993,18 @@ export function OperacaoChat() {
       return data;
     },
   });
+  const jobRow = jobDb.data;
+  const jobStatusAtivo =
+    !!jobRow &&
+    (jobRow.status === "queued" ||
+      jobRow.status === "running" ||
+      (jobRow.status === "error" && (aguardandoResposta || soStubDeFalha)));
   const jobAtivo = respostaRealJaChegou
     ? null
     : job && job.convId === activeId
       ? job
-      : jobDb.data &&
-          (jobDb.data.status !== "error" || aguardandoResposta || soStubDeFalha)
-        ? { convId: activeId!, jobId: jobDb.data.id, texto: jobDb.data.message ?? "" }
+      : jobStatusAtivo
+        ? { convId: activeId!, jobId: jobRow!.id, texto: jobRow!.message ?? "" }
         : null;
 
   // Com o Realtime, a pergunta gravada pela edge chega à thread durante o envio.

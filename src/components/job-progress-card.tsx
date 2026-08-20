@@ -234,15 +234,20 @@ export function JobProgressCard({
 
   // Falha é o que o BANCO diz. O motivo vem de `erro` — inclusive o texto do
   // `expira-chat-jobs`, que explica a expiração melhor do que "tempo esgotado" explicaria.
+  // 20/08: sintese_vazia / openrouter_http_429 é rate-limit transitório — não jogar o slug
+  // técnico na cara do gestor (e o pai já ignora error se houver job done mais novo).
   if (status === "error") {
+    const raw = String(erro ?? "");
+    const rateLimit = /openrouter_http_429|sintese_vazia|rate.?limit|429/i.test(raw);
+    const msg = rateLimit
+      ? "O modelo ficou sobrecarregado nesta rodada (limite temporário). Reenvie a pergunta — a conversa e o histórico foram preservados."
+      : (erro ?? "O processamento parou antes de concluir.");
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
         <div className="flex items-center gap-2 text-sm font-medium">
           <AlertTriangle className="h-4 w-4 text-destructive" />A resposta não foi concluída
         </div>
-        <p className="mt-1 text-xs text-muted-foreground">
-          {erro ?? "O processamento parou antes de concluir."}
-        </p>
+        <p className="mt-1 text-xs text-muted-foreground">{msg}</p>
         <Button size="sm" variant="outline" className="mt-2" onClick={onResend}>
           <RefreshCw className="mr-1 h-3.5 w-3.5" />
           Reenviar
