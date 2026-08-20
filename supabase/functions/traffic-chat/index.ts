@@ -1,4 +1,10 @@
-// supabase/functions/traffic-chat/index.ts (v28.34)
+// supabase/functions/traffic-chat/index.ts (v28.35)
+// v28.35 (20/08/2026) - ANALISE PROFUNDA PADRAO + PROIBE RESPOSTA DE INTENCAO:
+//   Q&A de analise vai ao traffic-agent-job por default (frontend e edge). Sync fica
+//   so para ato (propose_action), anexo e costura de continuacao. Doutrina: nunca
+//   enviar mensagem que so narra o que "vai" consultar — tools rodam, depois UMA
+//   resposta completa. Preambulos de intencao ("vou cruzar/ler/consultar") nao entram
+//   no reply.
 // v28.34 (20/08/2026) - DICAS DA META AO VIVO (Opportunity Score):
 //   O atalho meta-dicas lia so o banco; meta_recommendations estava vazio em TODAS as
 //   empresas porque a coleta v15 so sondava o campo classico `recommendations` (nunca
@@ -519,7 +525,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.33";
+const VERSAO = "chat-v28.35";
 const HIST = 24;
 // v28.11: orcamento da reinjecao de retorno de ferramenta.
 // TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
@@ -3296,6 +3302,15 @@ ESTA FORA DO SEU ESCOPO e voce NAO comenta, analisa nem recomenda: relacao com b
 4. SEGMENTE antes de concluir tendencia: medias historicas escondem mudancas. Se houver serie por mes (ex.: atribuicao.por_mes), leia o mes mais recente, nao a media.
 5. RESPONDA com numero + fonte + ressalva. Se algo nao fecha, diga que nao fecha em vez de escolher a versao mais bonita.
 
+== PROIBIDO: RESPOSTA SO DE INTENCAO / DIALOGO OPERACIONAL (20/08/2026) ==
+NUNCA envie ao gestor uma mensagem cujo unico conteudo seja narrar o que voce VAI fazer
+("Vou cruzar…", "vou ler o conjunto…", "vou consultar…", "deixe-me verificar…",
+"vou checar as dicas…"). Isso NAO e resposta: e ruido de intencao. O turno so termina
+quando houver UMA resposta completa e elaborada — veredito, evidencia e recomendacao
+(ex.: dica da Meta de musica: diga se e viavel ou nao e o que fazer, sem filler).
+Chame as tools em silencio; o texto visivel e so o julgamento final. Se o tempo apertar,
+entregue o que ja apurou com lacunas declaradas — nunca um "vou…" sozinho.
+
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
 R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os dois limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
@@ -3498,8 +3513,7 @@ const FAMILIAS_ASSUNTO: RegExp[] = [
   /whatsapp|waba|template|conversas/,
   /drive|video|reel|thumb|visual/,
 ];
-const ROTA_FAMILIAS_MIN = 5;
-const ROTA_CHARS_MIN = 1500;
+const ROTA_CHARS_MIN = 1500; // legado: tamanho sozinho ainda roteia; o default agora e quase tudo
 const RE_CONTINUACAO = /^sua resposta anterior foi cortada/;
 const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
 // v28.32: pergunta tipica que estourava 150s porque o modelo abria Pipeboard em vez de
@@ -3512,19 +3526,18 @@ function isPedidoDicasMeta(pedido: string): boolean {
   return RE_DICAS_META.test(p);
 }
 
+// v28.35: PADRAO = job assincrono (analise profunda). Sync so quando o job nao cobre:
+// continuacao de texto cortado, anexo, ou pedido de ato (propose_action).
 function decidirRotaAssincrona(pedido: string, nAnexos: number): { rotear: boolean; motivo: string; familias: number } {
   const p = deacc(pedido.toLowerCase());
   const familias = FAMILIAS_ASSUNTO.reduce((a, re) => a + (re.test(p) ? 1 : 0), 0);
-  const porFamilia = familias >= ROTA_FAMILIAS_MIN;
-  const porTamanho = pedido.length >= ROTA_CHARS_MIN;
-  if (!porFamilia && !porTamanho) return { rotear: false, motivo: "cabe no turno sincrono", familias };
-  // As tres guardas abaixo NAO sao cautela generica: cada uma cobre uma capacidade que a rota
-  // assincrona nao tem, e mandar o pedido para la seria perde-la em silencio.
   if (RE_CONTINUACAO.test(p)) return { rotear: false, motivo: "continuacao: o job replaneja do zero e nao retoma texto cortado", familias };
   if (nAnexos > 0) return { rotear: false, motivo: "pedido com anexo: o job nao le anexo", familias };
   if (RE_PEDIDO_DE_ATO.test(p)) return { rotear: false, motivo: "pedido de ato: propose_action nao existe no job e o card seria perdido", familias };
   return { rotear: true, familias,
-    motivo: porFamilia ? `pedido cobre ${familias} familias de assunto (>= ${ROTA_FAMILIAS_MIN})` : `pedido com ${pedido.length} chars (>= ${ROTA_CHARS_MIN})` };
+    motivo: pedido.length >= ROTA_CHARS_MIN
+      ? `pedido com ${pedido.length} chars — analise profunda padrao`
+      : `analise profunda padrao (${familias} familia(s) de assunto)` };
 }
 
 Deno.serve(async (req) => {
@@ -3563,26 +3576,15 @@ Deno.serve(async (req) => {
   const company = await resolveCompany(body?.company ? String(body.company) : undefined);
   if (!company) return json({ error: "empresa nao encontrada" }, 400);
 
-  // v28.11: pedido longo de ANALISE nao disputa os 150s da plataforma - vai para o job, que
+  // v28.11: pedido de ANALISE nao disputa os 150s da plataforma - vai para o job, que
   // nao tem esse teto. A decisao acontece AQUI, antes de qualquer chamada ao modelo e antes
   // de gravar a pergunta (quem grava e o job, senao a pergunta entraria duas vezes).
   // Se o encaminhamento falhar, NAO se perde o turno: cai no caminho sincrono e a falha vai
   // declarada na telemetria - rota nova nao pode derrubar o chat.
+  // v28.35: PADRAO e o job (analise profunda). Mid-fio tambem vai: o job responde a pergunta
+  // atual; follow-ups de dicas/musica precisam de resposta completa, nao do sync truncado.
   const rota = decidirRotaAssincrona(message, rawAtts.length);
   let rotaFalhou = "";
-  // Quarta guarda, e a unica que custa uma consulta: o job recebe SO a pergunta - nao le o
-  // historico da conversa. Pergunta feita no meio de um fio ("e agora compare com o que voce
-  // disse") viraria uma resposta sem o fio. Na medicao de 20 dias os 3 pedidos que este
-  // criterio rotearia eram TODOS a primeira pergunta do fio, entao a guarda nao custa nenhum
-  // caso verdadeiro.
-  if (rota.rotear && body?.conversation_id) {
-    const { count } = await supa.from("chat_messages").select("id", { count: "exact", head: true })
-      .eq("conversation_id", String(body.conversation_id)).eq("role", "assistant");
-    if (count) {
-      rota.rotear = false;
-      rota.motivo = "pergunta no meio de um fio: o job responde so a pergunta, sem o historico da conversa";
-    }
-  }
   if (rota.rotear) {
     try {
       const resp = await fetch(`${SUPABASE_URL}/functions/v1/traffic-agent-job`, {
@@ -4072,13 +4074,13 @@ Deno.serve(async (req) => {
       deadlineTools = true;
     }
   }
-  // v18: emenda o texto que vinha junto com tool_calls e era descartado.
-  // Heuristica deliberada: preambulo curto costuma ser ruido operacional ("vou consultar os
-  // dados"), que o proprio prompt ja proibe; texto de 120+ chars e analise real. Se 'reply'
-  // ficou vazio, emenda TUDO como resgate - melhor texto parcial que mensagem de erro.
+  // v18/v28.35: emenda preambulos substantivos; DESCARTA narracao de intencao.
+  // "vou consultar/cruzar/ler…" nunca vira reply — e o sintoma do dump mid-thought.
+  const RE_INTENCAO = /\b(vou|deixe-?me|deixa eu|irei|vou apenas)\b.{0,80}\b(cruzar|ler|consultar|verificar|checar|buscar|abrir|olhar|coletar|apurar|rodar|chamar)\b/i;
   let preambulosUsados = 0;
   if (preambulos.length) {
-    const aproveitar = reply ? preambulos.filter((p) => p.length >= 120) : preambulos;
+    const substantivos = preambulos.filter((p) => p.length >= 120 && !RE_INTENCAO.test(p));
+    const aproveitar = reply ? substantivos : (substantivos.length ? substantivos : preambulos.filter((p) => !RE_INTENCAO.test(p)));
     if (aproveitar.length) {
       preambulosUsados = aproveitar.length;
       const pre = aproveitar.join("\n\n").trim();

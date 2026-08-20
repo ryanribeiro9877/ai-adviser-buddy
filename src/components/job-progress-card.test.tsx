@@ -152,9 +152,9 @@ describe("fases", () => {
     expect(screen.getByText("Escrevendo resposta")).toBeInTheDocument();
   });
 
-  it("usa rótulo NEUTRO — o card cobre o toggle do gestor e o automático", async () => {
-    // Dizer "análise profunda" no caminho automático atribuiria ao gestor uma
-    // escolha que não foi dele; a linha de chat_jobs é idêntica nos dois.
+  it("usa rótulo NEUTRO — Q&A de análise usa o job por padrão", async () => {
+    // O card cobre o caminho padrão (job) e o encaminhamento pela traffic-chat;
+    // a linha de chat_jobs é idêntica.
     montar();
     expect(await screen.findByText("Preparando a resposta completa")).toBeInTheDocument();
   });

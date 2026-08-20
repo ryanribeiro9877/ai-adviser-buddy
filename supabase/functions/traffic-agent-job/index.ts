@@ -1,4 +1,6 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.2)
+// supabase/functions/traffic-agent-job/index.ts (v3.3)
+// v3.3 (20/08/2026) - Sintese: proibe narracao de intencao; resposta completa em um turno
+//   (veredito + evidencia + recomendacao), inclusive em follow-up de dicas Meta/musica.
 // v3.2 (12/08/2026) - ESP-41: tool ler_entregas_digest (RPC read-only) no subagente
 //   alertas_recomendacoes. Config de cadencia/destino do digest + entregas recentes.
 // v3.1 (12/08/2026) - ESP-30: tool saude_dos_tokens (RPC read-only) no subagente
@@ -862,7 +864,7 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   alertas_recomendacoes: {
     tools: ["get_alerts", "get_recommendations", "get_meta_dicas", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest"],
     maxPorTool: { get_alerts: 1, get_recommendations: 1, get_meta_dicas: 1, saude_das_integracoes: 1, custo_llm_periodo: 2, score_de_prontidao: 1, saude_dos_tokens: 1, ler_entregas_digest: 1 }, maxToolsTotal: 8,
-    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes, saude das integracoes por evidencia, custo LLM derivado dos tokens, score de prontidao (ESP-38), saude dos tokens Meta (ESP-30: expiracao/escopo) e entregas do digest/alerta critico (ESP-41), tudo read-only. Repetir as divergencias, premissas e lacunas declaradas pelos retornos.",
+    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes INTERNAS e dicas da Meta (get_meta_dicas com veredito interno). Em pergunta sobre dica/boost/musica/Opportunity Score: levante as dicas e devolva julgamento acionavel (viavel ou nao + o que fazer) — nunca so listar. Tambem saude das integracoes, custo LLM, score de prontidao (ESP-38), saude dos tokens Meta (ESP-30) e entregas do digest (ESP-41), tudo read-only. Repetir divergencias, premissas e lacunas dos retornos.",
   },
   analise_visual_drive: {
     tools: [], maxPorTool: {}, maxToolsTotal: 0,  // pipeline codificado - nao usa loop de tools
@@ -1187,6 +1189,7 @@ async function sintetizar(companyName: string, pergunta: string, relatorios: { n
 PERFIL EMPRESARIAL: ${perfil}.
 ESCOPO RIGIDO: somente trafego pago (midia, criativo, publico, orcamento, custo). Bancos, esteira interna, politica de credito, atendimento humano e conversao final do CRM estao FORA - se a pergunta tocar nisso, declare fora de escopo e siga.
 REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao disponivel'; NUNCA estime nem complete com plausibilidade. (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) alguns relatorios chegam marcados como INCOMPLETOS (cortados por limite de tamanho): o que nao esta neles pode MUITO BEM existir no sistema. Para esses, escreva 'o levantamento do especialista veio incompleto nesta rodada' - e PROIBIDO dizer 'nao disponivel', 'retornou vazio' ou tratar a ausencia como inexistencia. (R4) nao misture janelas. (R4b) HOJE e a data declarada na primeira linha deste prompt - NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar a janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes: se uma acao for recomendavel, descreva-a e diga que o gestor pode pedi-la no chat para virar pedido de aprovacao. (R9) incoerencia entre numeros: aponte. Sem jargao interno (nomes de ferramenta, codigos de regra, limites de implementacao).
+PROIBIDO NARRAR INTENCAO: nunca escreva "vou cruzar/ler/consultar/verificar". Entregue UMA resposta completa e elaborada neste turno — veredito + evidencia + recomendacao. Em dicas/recomendacoes da Meta (ex.: impulsionar com musica): diga se e viavel ou nao e o que fazer, sem filler operacional.
 FORMATO (regras vigentes do sistema):
 ${estilo}
 MEMORIA INSTITUCIONAL (fatos verificados):
