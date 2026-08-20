@@ -153,7 +153,7 @@ Framework OBRIGATORIO (ESP-37, opcao A), nesta ordem em CADA legenda:
 1) HOOK — primeira linha que para o scroll (use tatica de hook distinta em cada variante).
 2) BENEFICIO/PROVA — o que o produto entrega, sem promessa ilegal.
 3) CTA — acao clara (ex.: simular, falar com especialista).
-4) CET — o CET (ou referencia ao CET da oferta) MORA NA LEGENDA DA PUBLICACAO (FIN-04 v3). Inclua CET de forma natural; nao invente taxa falsa — se nao houver numero, use formulacao segura do tipo "consulte o CET da oferta na simulacao".
+4) CET — o CET (ou referencia ao CET da oferta) MORA NA LEGENDA DA PUBLICACAO (FIN-04 v4). Preferencia da casa quando NAO ha taxa oficial: "consulte o CET na sua simulacao". Isso E suficiente. NUNCA invente percentual. NUNCA peca ao gestor um numero de CET depois que ele autorizou a formulacao de consulta.
 
 Regras duras:
 - Portugues do Brasil; tom direto, conversacional, sem exagero de urgencia falsa.

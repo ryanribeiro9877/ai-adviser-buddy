@@ -132,7 +132,7 @@ Deno.serve(async (req) => {
       (r) => `${r.code} [${r.severidade}] (${r.categoria}): ${r.regra} Ex.: ${r.exemplos_violacao}`,
     )
     .join("\n");
-  const instru = `Você é o Guardião de Compliance de anúncios de crédito consignado (Legal é Viver). Identifique VIOLAÇÕES do material contra as regras abaixo. Seja rigoroso mas justo: só aponte violação com base concreta no material; não invente. Responda SOMENTE com JSON válido, sem markdown:\n{"violacoes":[{"code":"...","trecho_ou_elemento":"...","explicacao":"máx 20 palavras"}],"sugestao_reescrita":"legenda corrigida ou null"}\nSe não houver violações: {"violacoes":[],"sugestao_reescrita":null}.\nREGRAS:\n${regrasTxt}`;
+  const instru = `Você é o Guardião de Compliance de anúncios de crédito consignado (Legal é Viver). Identifique VIOLAÇÕES do material contra as regras abaixo. Seja rigoroso mas justo: só aponte violação com base concreta no material; não invente. Responda SOMENTE com JSON válido, sem markdown:\n{"violacoes":[{"code":"...","trecho_ou_elemento":"...","explicacao":"máx 20 palavras"}],"sugestao_reescrita":"legenda corrigida ou null"}\nSe não houver violações: {"violacoes":[],"sugestao_reescrita":null}.\nREGRAS DE INTERPRETAÇÃO OBRIGATÓRIAS (valem sobre ambiguidade nos exemplos):\n- FIN-04: a menção "consulte o CET na sua simulação" (ou "consulte o CET da oferta") SATISFAZ a exigência de CET. NÃO exija percentual numérico de CET. NÃO trate X%/Y%/Z% de exemplos como pendência do anunciante.\n- LGL-04: se a identificação do anunciante estiver na LP/URL de destino, isso é ATENÇÃO no máximo — não invente bloqueio exigindo CNPJ na legenda quando o gestor declarou que fica na LP.\nREGRAS:\n${regrasTxt}`;
 
   const content: any[] = [
     {

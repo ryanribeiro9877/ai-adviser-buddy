@@ -871,7 +871,7 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   criativos_drive: {
     tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "ler_brand_identity", "get_criativos_conteudo", "get_conhecimento"],
     maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 2, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 3, ler_brand_identity: 1, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
-    missao: "CRIATIVOS NOVOS NO DRIVE: leitura TOTAL. Videos 22/23/25/26/27 LIBERADOS (FIN-04 v3) — nao diga bloqueados. Carrossel Meta HABILITADO via child_attachments (2-10 image_hash). Cite taxonomia_drive antes de filtrar. Capas inventariar; Cards = leia a legenda. Nunca get_criativos_conteudo para peca nova. upload_midia se fora da Meta. nota_visual_da_peca antes de recomendar.",
+    missao: "CRIATIVOS NOVOS NO DRIVE: leitura total. Slate do gestor prevalece sobre inventario liberado (nao troque 3v+1carr+1card por 5 videos). CET: 'consulte o CET na sua simulacao' basta (FIN-04 v4). Carrossel via child_attachments. Cite taxonomia_drive antes de filtrar. Nunca get_criativos_conteudo para peca nova.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],

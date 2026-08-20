@@ -2881,7 +2881,7 @@ Deno.serve(async (req) => {
         if (doisLados && (par as any).veredito === "reprova") {
           const motivo = "par_texto_e_peca_reprova";
           const detalhe =
-            "O PAR legenda+peca reprovou no compliance de texto: a peca MOSTRA valor/taxa/prazo na tela e a legenda da publicacao nao traz o CET. O card NAO foi executado - uma peca liberada sob condicao viraria anuncio com a condicao nao cumprida. Para liberar, a legenda da publicacao precisa trazer o CET.";
+            "O PAR legenda+peca reprovou no compliance de texto: a peca MOSTRA valor/taxa/prazo na tela e a legenda da publicacao nao traz o CET nem referencia de consulta. O card NAO foi executado. Aceito: 'consulte o CET na sua simulacao' (ou CET numerico oficial). Percentual de CET NAO e obrigatorio.";
           await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
             motivo,
             detalhe,
