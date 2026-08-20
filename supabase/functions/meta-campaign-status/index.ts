@@ -1,10 +1,16 @@
-// supabase/functions/meta-campaign-status/index.ts (v15)
+// supabase/functions/meta-campaign-status/index.ts (v16)
+// v16 (20/08/2026) - OPPORTUNITY SCORE / Recommendation Center. O badge "1 recomendacao"
+//   do Ads Manager NAO vinha do campo classico `recommendations` em campaign/adset/ad
+//   (meta_recommendations ficou 0 em todas as empresas). Fonte correta: GET
+//   /act_{id}/recommendations (mid_flight). Mantem a sonda classica; adiciona coleta OS
+//   na corrida diaria e modo pontual { modo: "meta_dicas", company_id? } para refresh
+//   ao vivo no atalho do traffic-chat. Meta documenta assimetria API < UI.
 // v15 (15/08/2026) - DICAS DA META (recommendations). Apos o espelho ESP-13, sonda o campo
 //   `recommendations` isoladamente em campanhas ACTIVE, conjuntos dos anuncios ACTIVE e
 //   anuncios ACTIVE. Cada dica vira linha em meta_recommendations (first_seen_on/last_seen_on
 //   + referencia de campanha/conjunto/criativo) e passa pelo julgamento deterministico
 //   (upsert_meta_recomendacoes). Campo ausente nao fabrica []; um #100 em recommendations
-//   nao derruba o resto da corrida (mesma doutrina GT-12). Opportunity Score fica fase 2.
+//   nao derruba o resto da corrida (mesma doutrina GT-12).
 // v14 (11/08/2026) - COLETA PONTUAL DE UM CONJUNTO SOB DEMANDA (auto-resolucao de leitura).
 //   A corrida diaria colhe is_dynamic_creative de TODOS os conjuntos, mas conjunto recem-criado
 //   pelo fluxo nasce com is_dynamic_creative NULO e so ganha leitura no dia seguinte - e o portao
@@ -128,6 +134,8 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
+// Opportunity Score /act_*/recommendations estabilizou em versoes recentes da Marketing API.
+const GRAPH_OS = "https://graph.facebook.com/v22.0";
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 function redact(s: string) {
   if (!TOKEN) return s;
@@ -383,6 +391,392 @@ async function coletarEstadoDeUmConjunto(externalId: string, corpo: any): Promis
   });
 }
 
+function tituloDicaOs(tipo: string, lift: string | null, body: string | null): string {
+  const t = tipo.replace(/_/g, " ").trim();
+  if (lift) return `${t} (lift score ${lift})`;
+  if (body) return body.slice(0, 120);
+  return t || "Dica Meta (Opportunity Score)";
+}
+
+function importanciaDeLift(lift: string | null): string {
+  const n = Number(lift);
+  if (!Number.isFinite(n)) return "MEDIUM";
+  if (n >= 20) return "HIGH";
+  if (n >= 8) return "MEDIUM";
+  return "LOW";
+}
+
+function achatarRecsOs(payload: any): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  const push = (r: any) => {
+    if (!r || typeof r !== "object") return;
+    if (r.type != null || r.recommendation_signature != null || r.recommendation_name != null) {
+      out.push(r as Record<string, unknown>);
+      return;
+    }
+    if (Array.isArray(r.recommendations)) {
+      for (const x of r.recommendations) push(x);
+    }
+  };
+  if (Array.isArray(payload?.data)) {
+    for (const row of payload.data) push(row);
+  } else if (Array.isArray(payload?.recommendations)) {
+    for (const row of payload.recommendations) push(row);
+  } else {
+    push(payload);
+  }
+  return out;
+}
+
+async function fetchOpportunityRecommendations(accountId: string): Promise<{
+  ok: boolean;
+  recs: Record<string, unknown>[];
+  status: number;
+  erro?: string;
+  opportunity_score?: unknown;
+  raw_shape?: string;
+}> {
+  const tryUrls: string[] = [];
+  const fields = [
+    "recommendation_signature",
+    "recommendation_stage",
+    "recommendation_time",
+    "type",
+    "object_ids",
+    "recommendation_content",
+    "opportunity_score_lift",
+    "url",
+  ].join(",");
+  // Sem fields primeiro (alguns tokens devolvem lista so no shape default); depois com fields.
+  for (const base of [GRAPH_OS, "https://graph.facebook.com/v25.0", GRAPH]) {
+    tryUrls.push(
+      `${base}/act_${encodeURIComponent(accountId)}/recommendations?limit=100&access_token=${encodeURIComponent(TOKEN)}`,
+    );
+    tryUrls.push(
+      `${base}/act_${encodeURIComponent(accountId)}/recommendations` +
+        `?fields=${encodeURIComponent(fields)}&limit=100&access_token=${encodeURIComponent(TOKEN)}`,
+    );
+  }
+
+  let lastStatus = 0;
+  let lastErro: string | undefined;
+  let bestRecs: Record<string, unknown>[] = [];
+  let rawShape = "vazio";
+
+  for (const url of tryUrls) {
+    const r = await fetch(url);
+    const t = await r.text();
+    lastStatus = r.status;
+    let p: any = null;
+    try {
+      p = JSON.parse(t);
+    } catch {
+      p = null;
+    }
+    if (!r.ok) {
+      lastErro = redact(t).slice(0, 320);
+      // 403/400 nesta conta: nao adianta tentar outras URLs com o mesmo token.
+      if (r.status === 403 || r.status === 401) break;
+      continue;
+    }
+    const recs = achatarRecsOs(p);
+    rawShape = Array.isArray(p?.data)
+      ? `data[${p.data.length}]`
+      : (Array.isArray(p?.recommendations) ? `recommendations[${p.recommendations.length}]` : typeof p);
+    if (recs.length >= bestRecs.length) bestRecs = recs;
+    if (recs.length > 0) break;
+  }
+
+  let score: unknown = null;
+  try {
+    const su =
+      `${GRAPH_OS}/act_${encodeURIComponent(accountId)}` +
+      `?fields=opportunity_score&access_token=${encodeURIComponent(TOKEN)}`;
+    const sr = await fetch(su);
+    const st = await sr.text();
+    if (sr.ok) {
+      const sj = JSON.parse(st);
+      score = sj?.opportunity_score ?? null;
+    }
+  } catch {
+    /* score e opcional */
+  }
+
+  const ok = lastStatus >= 200 && lastStatus < 300 && !lastErro;
+  // ok=true mesmo com 0 recs se a conta respondeu 200 em alguma tentativa
+  const anyOk = bestRecs.length > 0 || (lastStatus === 200 && !lastErro) || score != null;
+  return {
+    ok: anyOk && (lastStatus !== 403 && lastStatus !== 401),
+    recs: bestRecs,
+    status: lastStatus || (score != null ? 200 : 0),
+    erro: anyOk ? undefined : lastErro,
+    opportunity_score: score,
+    raw_shape: rawShape,
+  };
+}
+
+type ObjRef = {
+  object_type: "campaign" | "adset" | "ad" | "account";
+  object_external_id: string;
+  object_name: string | null;
+  campaign_external_id: string | null;
+  campaign_name: string | null;
+  adset_external_id: string | null;
+  ad_external_id: string | null;
+  company_id: string;
+};
+
+async function montarIndiceObjetosConta(accountId: string): Promise<{
+  porId: Map<string, ObjRef>;
+  companyIds: Set<string>;
+}> {
+  const porId = new Map<string, ObjRef>();
+  const companyIds = new Set<string>();
+  const { data: camps } = await supa
+    .from("campaigns")
+    .select("external_id, name, company_id, external_account_id")
+    .eq("external_account_id", accountId)
+    .eq("provider", "meta_ads");
+  for (const c of camps ?? []) {
+    if (!c?.external_id || !c?.company_id) continue;
+    companyIds.add(String(c.company_id));
+    porId.set(String(c.external_id), {
+      object_type: "campaign",
+      object_external_id: String(c.external_id),
+      object_name: c.name != null ? String(c.name) : null,
+      campaign_external_id: String(c.external_id),
+      campaign_name: c.name != null ? String(c.name) : null,
+      adset_external_id: null,
+      ad_external_id: null,
+      company_id: String(c.company_id),
+    });
+  }
+  const { data: sets } = await supa
+    .from("ad_sets")
+    .select("external_id, name, company_id, campaign_id")
+    .eq("account_id", accountId);
+  const campPk = [...new Set((sets ?? []).map((s: any) => s.campaign_id).filter(Boolean))];
+  const { data: campsByPk } = await supa
+    .from("campaigns")
+    .select("id, external_id, name")
+    .in("id", campPk.length ? campPk : ["00000000-0000-0000-0000-000000000000"]);
+  const campByUuid = new Map(
+    (campsByPk ?? []).map((c: any) => [String(c.id), { id: String(c.external_id), name: String(c.name ?? "") }]),
+  );
+  for (const s of sets ?? []) {
+    if (!s?.external_id || !s?.company_id) continue;
+    companyIds.add(String(s.company_id));
+    const camp = s.campaign_id ? campByUuid.get(String(s.campaign_id)) : null;
+    porId.set(String(s.external_id), {
+      object_type: "adset",
+      object_external_id: String(s.external_id),
+      object_name: s.name != null ? String(s.name) : null,
+      campaign_external_id: camp?.id ?? null,
+      campaign_name: camp?.name ?? null,
+      adset_external_id: String(s.external_id),
+      ad_external_id: null,
+      company_id: String(s.company_id),
+    });
+  }
+  const { data: ads } = await supa
+    .from("ads")
+    .select("external_id, name, company_id, adset_external_id, campaign_id, account_id")
+    .eq("account_id", accountId);
+  for (const a of ads ?? []) {
+    if (!a?.external_id || !a?.company_id) continue;
+    companyIds.add(String(a.company_id));
+    const camp = a.campaign_id ? campByUuid.get(String(a.campaign_id)) : null;
+    porId.set(String(a.external_id), {
+      object_type: "ad",
+      object_external_id: String(a.external_id),
+      object_name: a.name != null ? String(a.name) : null,
+      campaign_external_id: camp?.id ?? null,
+      campaign_name: camp?.name ?? null,
+      adset_external_id: a.adset_external_id != null ? String(a.adset_external_id) : null,
+      ad_external_id: String(a.external_id),
+      company_id: String(a.company_id),
+    });
+  }
+  return { porId, companyIds };
+}
+
+function linhasDeOpportunityScore(
+  accountId: string,
+  recs: Record<string, unknown>[],
+  indice: Map<string, ObjRef>,
+  companyFallback: string | null,
+): Record<string, unknown>[] {
+  const linhas: Record<string, unknown>[] = [];
+  for (const raw of recs) {
+    const tipo = String(raw.type ?? raw.recommendation_name ?? "opportunity").trim();
+    const stage = raw.recommendation_stage != null ? String(raw.recommendation_stage) : null;
+    const sig = raw.recommendation_signature != null ? String(raw.recommendation_signature) : null;
+    const content = (raw.recommendation_content && typeof raw.recommendation_content === "object")
+      ? raw.recommendation_content as Record<string, unknown>
+      : {};
+    const body = content.body != null
+      ? String(content.body)
+      : (raw.body != null ? String(raw.body) : null);
+    const lift = content.opportunity_score_lift != null
+      ? String(content.opportunity_score_lift)
+      : (raw.opportunity_score_lift != null ? String(raw.opportunity_score_lift) : null);
+    const liftEst = content.lift_estimate != null ? String(content.lift_estimate) : null;
+    const message = [body, liftEst ? `Estimativa Meta: ${liftEst}` : null].filter(Boolean).join(" | ") || null;
+    const code = sig || tipo;
+    const title = tituloDicaOs(tipo, lift, body);
+    const importance = importanciaDeLift(lift);
+    const objectIds = Array.isArray(raw.object_ids)
+      ? raw.object_ids.map((x) => String(x)).filter(Boolean)
+      : [];
+    const payload = {
+      fonte: "opportunity_score",
+      account_id: accountId,
+      ...raw,
+    };
+
+    const refs: ObjRef[] = [];
+    for (const oid of objectIds) {
+      const hit = indice.get(oid);
+      if (hit) refs.push(hit);
+    }
+    if (!refs.length) {
+      if (!companyFallback) continue;
+      refs.push({
+        object_type: "account",
+        object_external_id: accountId,
+        object_name: `act_${accountId}`,
+        campaign_external_id: null,
+        campaign_name: null,
+        adset_external_id: null,
+        ad_external_id: null,
+        company_id: companyFallback,
+      });
+    }
+    for (const ref of refs) {
+      linhas.push({
+        company_id: ref.company_id,
+        object_type: ref.object_type,
+        object_external_id: ref.object_external_id,
+        object_name: ref.object_name,
+        campaign_external_id: ref.campaign_external_id,
+        campaign_name: ref.campaign_name,
+        adset_external_id: ref.adset_external_id,
+        ad_external_id: ref.ad_external_id,
+        recommendation_code: code,
+        title,
+        message,
+        importance,
+        confidence: stage,
+        blame_field: tipo,
+        payload_raw: payload,
+      });
+    }
+  }
+  return linhas;
+}
+
+async function coletarMetaDicasAoVivo(corpo: any): Promise<Response> {
+  const companyFilter = corpo?.company_id ? String(corpo.company_id).trim() : "";
+  let q = supa.from("integrations").select("external_id, company_id, estado_operacional").eq("provider", "meta_ads");
+  if (companyFilter) q = q.eq("company_id", companyFilter);
+  const { data: integs } = await q;
+  // Preferir contas com anuncios ACTIVE da empresa (evita 16x #200 em contas sem grant).
+  let contasPreferidas = new Set<string>();
+  if (companyFilter) {
+    const { data: adsAtivos } = await supa
+      .from("ads")
+      .select("account_id")
+      .eq("company_id", companyFilter)
+      .eq("status", "ACTIVE");
+    for (const a of adsAtivos ?? []) {
+      if (a?.account_id) contasPreferidas.add(String(a.account_id).replace(/^act_/, ""));
+    }
+  }
+  const todasContas = [
+    ...new Set((integs ?? []).map((i: any) => String(i.external_id ?? "").replace(/^act_/, "")).filter(Boolean)),
+  ];
+  const contas = contasPreferidas.size
+    ? todasContas.filter((c) => contasPreferidas.has(c))
+    : todasContas;
+  const companyPorConta = new Map<string, string>();
+  for (const i of integs ?? []) {
+    if (i?.external_id && i?.company_id) {
+      companyPorConta.set(String(i.external_id).replace(/^act_/, ""), String(i.company_id));
+    }
+  }
+
+  const linhas: Record<string, unknown>[] = [];
+  const diagnostico: unknown[] = [];
+  for (const acct of contas) {
+    const fetched = await fetchOpportunityRecommendations(acct);
+    const indice = await montarIndiceObjetosConta(acct);
+    const companyFb = companyPorConta.get(acct) ?? [...indice.companyIds][0] ?? null;
+    const montadas = fetched.ok
+      ? linhasDeOpportunityScore(acct, fetched.recs, indice.porId, companyFb)
+      : [];
+    // Snapshot do score da conta mesmo sem itens — o agente precisa dizer "score X, API sem lista".
+    if (fetched.opportunity_score != null && companyFb && montadas.length === 0) {
+      montadas.push({
+        company_id: companyFb,
+        object_type: "account",
+        object_external_id: acct,
+        object_name: `act_${acct}`,
+        campaign_external_id: null,
+        campaign_name: null,
+        adset_external_id: null,
+        ad_external_id: null,
+        recommendation_code: "opportunity_score_snapshot",
+        title: `Opportunity Score da conta: ${fetched.opportunity_score}`,
+        message:
+          `A Graph devolveu opportunity_score=${fetched.opportunity_score} para act_${acct}, ` +
+          `mas a lista GET /act_*/recommendations veio vazia (recs_api=0). ` +
+          `Badge do Ads Manager pode existir mesmo assim — assimetria documentada pela Meta.`,
+        importance: "LOW",
+        confidence: "mid_flight_recommendation",
+        blame_field: "opportunity_score",
+        payload_raw: {
+          fonte: "opportunity_score",
+          account_id: acct,
+          opportunity_score: fetched.opportunity_score,
+          recs_api: 0,
+          raw_shape: fetched.raw_shape ?? null,
+        },
+      });
+    }
+    linhas.push(...montadas);
+    diagnostico.push({
+      account_id: acct,
+      ok: fetched.ok,
+      status: fetched.status,
+      erro: fetched.erro ?? null,
+      opportunity_score: fetched.opportunity_score ?? null,
+      recs_api: fetched.recs.length,
+      linhas_montadas: montadas.length,
+      raw_shape: fetched.raw_shape ?? null,
+    });
+  }
+
+  let upsert: unknown = { nota: "nenhuma dica OS montada" };
+  if (linhas.length) {
+    const { data, error } = await supa.rpc("upsert_meta_recomendacoes", { p: linhas });
+    upsert = error ? { erro: error.message, candidatas: linhas.length } : data;
+  }
+
+  return json({
+    ok: true,
+    modo: "meta_dicas",
+    company_id: companyFilter || null,
+    contas: contas.length,
+    candidatas: linhas.length,
+    upsert,
+    diagnostico,
+    versao: "meta-campaign-status-v16",
+    nota:
+      "Refresh ao vivo do Opportunity Score (GET /act_*/recommendations). " +
+      "Badge do Ads Manager pode exceder a lista da API (assimetria documentada pela Meta).",
+  });
+}
+
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
   if (!TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
@@ -399,6 +793,8 @@ Deno.serve(async (req) => {
     ? String(corpo.conjunto ?? corpo.adset_external_id ?? "").trim()
     : "";
   if (conjuntoAlvo) return await coletarEstadoDeUmConjunto(conjuntoAlvo, corpo);
+  const modo = corpo && typeof corpo === "object" ? String(corpo.modo ?? "").trim() : "";
+  if (modo === "meta_dicas") return await coletarMetaDicasAoVivo(corpo);
 
   const { data: integs } = await supa
     .from("integrations")
@@ -1143,21 +1539,75 @@ Deno.serve(async (req) => {
   }
 
   let metaRecosResultado: unknown = { nota: "nenhuma dica coletada nesta corrida" };
-  if (linhasDicas.length) {
-    const { data, error } = await supa.rpc("upsert_meta_recomendacoes", { p: linhasDicas });
+  // v16: Opportunity Score por conta acessivel (badge Ads Manager / Recommendation Center).
+  const linhasOs: Record<string, unknown>[] = [];
+  const diagnosticoOs: unknown[] = [];
+  for (const acct of acessiveis) {
+    const fetched = await fetchOpportunityRecommendations(acct);
+    const indice = await montarIndiceObjetosConta(acct);
+    const companyFb =
+      [...indice.companyIds][0] ??
+      companyPorConta.get(acct) ??
+      null;
+    const montadas = fetched.ok
+      ? linhasDeOpportunityScore(acct, fetched.recs, indice.porId, companyFb)
+      : [];
+    if (fetched.opportunity_score != null && companyFb && montadas.length === 0) {
+      montadas.push({
+        company_id: companyFb,
+        object_type: "account",
+        object_external_id: acct,
+        object_name: `act_${acct}`,
+        campaign_external_id: null,
+        campaign_name: null,
+        adset_external_id: null,
+        ad_external_id: null,
+        recommendation_code: "opportunity_score_snapshot",
+        title: `Opportunity Score da conta: ${fetched.opportunity_score}`,
+        message:
+          `A Graph devolveu opportunity_score=${fetched.opportunity_score} para act_${acct}, ` +
+          `mas a lista GET /act_*/recommendations veio vazia. Badge do Ads Manager pode existir mesmo assim.`,
+        importance: "LOW",
+        confidence: "mid_flight_recommendation",
+        blame_field: "opportunity_score",
+        payload_raw: {
+          fonte: "opportunity_score",
+          account_id: acct,
+          opportunity_score: fetched.opportunity_score,
+          recs_api: 0,
+          raw_shape: fetched.raw_shape ?? null,
+        },
+      });
+    }
+    linhasOs.push(...montadas);
+    diagnosticoOs.push({
+      account_id: acct,
+      ok: fetched.ok,
+      status: fetched.status,
+      erro: fetched.erro ?? null,
+      opportunity_score: fetched.opportunity_score ?? null,
+      recs_api: fetched.recs.length,
+      linhas_montadas: montadas.length,
+      raw_shape: fetched.raw_shape ?? null,
+    });
+  }
+  const todasLinhasDicas = [...linhasDicas, ...linhasOs];
+  if (todasLinhasDicas.length) {
+    const { data, error } = await supa.rpc("upsert_meta_recomendacoes", { p: todasLinhasDicas });
     metaRecosResultado = error
-      ? { erro: error.message, candidatas: linhasDicas.length }
+      ? { erro: error.message, candidatas: todasLinhasDicas.length }
       : data;
   } else {
     metaRecosResultado = {
       ok: true,
       inseridas: 0,
       atualizadas: 0,
-      nota: "Graph nao devolveu recommendations nos objetos ACTIVE (ou campo ausente na sonda)",
+      nota: "Graph nao devolveu recommendations classicas nem Opportunity Score nos objetos/contas ACTIVE (ou campo ausente na sonda)",
       sonda: {
         campanhas: campRecs.diagnostico,
         conjuntos: adsetRecs.diagnostico,
         anuncios: adRecs.diagnostico,
+        opportunity_score: diagnosticoOs,
       },
     };
   }
@@ -1246,19 +1696,23 @@ Deno.serve(async (req) => {
     },
     meta_recommendations: {
       resultado: metaRecosResultado,
-      candidatas_montadas: linhasDicas.length,
+      candidatas_montadas: todasLinhasDicas.length,
+      candidatas_classicas: linhasDicas.length,
+      candidatas_opportunity_score: linhasOs.length,
       objetos_sondados: {
         campanhas_active: campanhasAtivasIds.length,
         conjuntos_de_ads_active: adsetsAtivosIds.length,
         anuncios_active: adsAtivosIds.length,
+        contas_opportunity_score: acessiveis.length,
       },
       sonda: {
         campanhas: campRecs.diagnostico,
         conjuntos: adsetRecs.diagnostico,
         anuncios: adRecs.diagnostico,
+        opportunity_score: diagnosticoOs,
       },
-      nota: "v15: dicas Graph recommendations em objetos ACTIVE. first_seen_on/last_seen_on + veredito interno via upsert_meta_recomendacoes. Espelha em ai_recommendations (family=meta_dica) e alerta HIGH+discorda.",
+      nota: "v16: Opportunity Score GET /act_*/recommendations (badge Ads Manager) + campo classico recommendations em objetos ACTIVE. first_seen_on/last_seen_on + veredito via upsert_meta_recomendacoes.",
     },
-    versao: "meta-campaign-status-v15",
+    versao: "meta-campaign-status-v16",
   });
 });

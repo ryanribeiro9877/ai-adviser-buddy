@@ -1,4 +1,10 @@
-// supabase/functions/traffic-chat/index.ts (v28.33)
+// supabase/functions/traffic-chat/index.ts (v28.34)
+// v28.34 (20/08/2026) - DICAS DA META AO VIVO (Opportunity Score):
+//   O atalho meta-dicas lia so o banco; meta_recommendations estava vazio em TODAS as
+//   empresas porque a coleta v15 so sondava o campo classico `recommendations` (nunca
+//   populou). O badge do Ads Manager vem de GET /act_*/recommendations. Agora o atalho
+//   dispara meta-campaign-status {modo:meta_dicas} ANTES de get_meta_dicas, e a doutrina
+//   separa fila interna (get_recommendations) do badge da Meta.
 // v28.33 (20/08/2026) - ORCAMENTO 2 MIN + PROSA (nao JSON) NAS DICAS DA META:
 //   Pos-v28.32 o atalho meta-dicas terminava, mas a sintese OpenRouter abortava no
 //   OPENROUTER_CALL_CAP 45s e o fallback colava JSON bruto ("tempo de sintese estourou").
@@ -793,7 +799,11 @@ function formatarResumoMetaDicasPt(dicasRaw: any, recosRaw: any): string {
       .join("; ");
     blocos.push(`## Dicas da Meta (últimos ${janela} dias)${empresa}`);
     if (total === 0 || lista.length === 0) {
-      blocos.push("Não há dica da Meta coletada nessa janela. Nada inventado.");
+      blocos.push(
+        "Não há dica da Meta na Graph nesta janela (Opportunity Score / Recommendation Center + campo clássico). " +
+          "Isso não inventa o badge do Ads Manager: a Meta documenta que a API pode listar menos itens que a coluna da UI. " +
+          "A fila interna abaixo NÃO é recomendação do Ads Manager.",
+      );
     } else {
       blocos.push(
         `Encontrei **${total}** dica(s) no banco` +
@@ -2649,6 +2659,22 @@ async function t_atualizar_estado_conjunto(adsetExternalId: string, accountId: s
   try { return JSON.parse(t); } catch { return { ok: false, erro: `coleta pontual do conjunto falhou (${r.status}): ${t.slice(0, 200)}` }; }
 }
 
+/** Refresh ao vivo das dicas Opportunity Score antes de ler o banco (atalho meta-dicas). */
+async function t_sincronizar_meta_dicas(companyId: string, mcpKey: string) {
+  if (!mcpKey) return { ok: false, erro: "mcp_key_ausente_para_sync" };
+  const r = await fetch(`${SUPABASE_URL}/functions/v1/meta-campaign-status`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+    body: JSON.stringify({ modo: "meta_dicas", company_id: companyId }),
+  });
+  const t = await r.text();
+  try {
+    return JSON.parse(t);
+  } catch {
+    return { ok: false, erro: `sync meta_dicas falhou (${r.status}): ${t.slice(0, 200)}` };
+  }
+}
+
 // Video na Meta e assincrono: id existe antes de status.video_status=ready.
 async function t_status_video(videoId: string, mcpKey: string) {
   const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
@@ -2705,8 +2731,8 @@ async function t_aprovacoes(companyId: string, apenasAbertos: boolean) {
 const TOOLS = [
   { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real da Meta), gasto e resultados dos ultimos 7 dias, com dias_com_dado para checar cobertura.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema (CPL, entrega, BM/politica, cobranca, WABA).", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "get_recommendations", description: "Recomendacoes pendentes da IA (regua = custo de midia, nao contrato pago).", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "get_meta_dicas", description: "Dicas da Meta (Graph recommendations) coletadas com first_seen_on/last_seen_on e referencia de campanha/conjunto/anuncio, JA COM VEREDITO INTERNO (concorda|discorda|nao_aplicavel|sem_regua). E PROIBIDO repetir a dica da Meta como se fosse nossa: sempre cite o veredito e o motivo. Opportunity Score (API nova) ainda nao entra nesta leitura.", parameters: { type: "object", properties: { dias: { type: "integer", description: "Janela em dias (default 14)." }, veredito: { type: "string", description: "Filtro opcional: concorda|discorda|nao_aplicavel|sem_regua" } } } } },
+  { type: "function", function: { name: "get_recommendations", description: "FILA INTERNA pendente (ai_recommendations: custo de midia / regua nossa). NAO e o badge '1 recomendacao' do Ads Manager nem Opportunity Score. Para dicas da Meta use get_meta_dicas.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "get_meta_dicas", description: "Dicas da Meta (Opportunity Score GET /act_*/recommendations + campo classico recommendations), com first_seen_on/last_seen_on e veredito interno (concorda|discorda|nao_aplicavel|sem_regua). E PROIBIDO repetir a dica da Meta como se fosse nossa. A API pode ter MENOS itens que o badge do Ads Manager.", parameters: { type: "object", properties: { dias: { type: "integer", description: "Janela em dias (default 14)." }, veredito: { type: "string", description: "Filtro opcional: concorda|discorda|nao_aplicavel|sem_regua" } } } } },
   { type: "function", function: { name: "teto_vigente", description: "FONTE PRIORITARIA para julgar teto vigente. Exige o company_id da conversa e uma metrica. Devolve qual regua governa, valor, denominador, autor/data/citacao da meta de negocio, consistencia historica, aspiracao e divergencias/avisos. A tabela targets isolada NAO decide teto vigente.", parameters: { type: "object", properties: { metric: { type: "string", description: "Metrica exata, por exemplo custo_por_formulario, custo_por_conversa ou custo_por_lead_lp." } }, required: ["metric"] } } },
   { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia o PAR legenda + peca pela concatenacao do texto disponivel. Exige company_id da conversa, legenda e drive_file_id. Devolve veredito, leituras separadas, cobertura e lacunas; e deteccao por padroes, NAO aprovacao. Audio sem transcricao permanece explicitamente nao lido.", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
   { type: "function", function: { name: "saude_das_integracoes", description: "Mede a saude das integracoes Meta desta empresa por evidencia de ads, snapshots, breakdown e tres relogios. Exige company_id da conversa. Declara divergencias contra status/estado_operacional sem alterar nenhum deles; nao promete diagnosticar provedores fora desse retorno.", parameters: { type: "object", properties: { dias_tolerancia: { type: "integer", description: "Opcional; padrao da RPC = 3 dias." } } } } },
@@ -3178,7 +3204,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 == DOUTRINA DE DECISAO ==
 - DIGA DE QUEM FALA: empresa e categoria regulatoria antes do nivel (conta/campanha/conjunto/anuncio). Doutrina de credito NAO se aplica a empresa que nao e de credito. NUNCA compare empresas de categorias distintas.
 - LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
-- DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations se quiser a fila interna). Cite SEMPRE o veredito interno (concorda|discorda|nao_aplicavel|sem_regua) — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta: as dicas ja estao no banco. Responda na mesma rodada com o retorno; se vier vazio, diga que nao ha dica coletada na janela — nao invente.
+- DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations SO se quiser a fila INTERNA de custo). Cite SEMPRE o veredito interno — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta. get_recommendations NAO e o badge do Ads Manager. Se get_meta_dicas vier vazio apos sync e o gestor apontar badge na UI, diga a assimetria documentada pela Meta (API pode listar menos que Ads Manager) — nao invente o texto da dica.
 - Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.
 - Uma decisao por leitura. Escolha a janela ANTES de olhar o resultado; se duas janelas discordam, mostre as duas e diga qual decide.
 - Sazonalidade: use somente calendario e produto comprovados para ${companyName}; produto nao identificado = nao invoque.
@@ -3854,12 +3880,29 @@ Deno.serve(async (req) => {
     try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
   }
 
-  // v28.32/v28.33: atalho para pergunta de dicas da Meta — le o banco e sintetiza UMA vez,
-  // sem deixar o modelo abrir catalogo Pipeboard. Em falha de sintese: prosa deterministica
-  // (nunca JSON bruto no chat).
+  // v28.32/v28.34: atalho para pergunta de dicas da Meta — sync Opportunity Score ao vivo,
+  // le o banco e sintetiza UMA vez, sem Pipeboard. Em falha de sintese: prosa deterministica.
   let atalhoMetaDicas = false;
   if (isPedidoDicasMeta(msgText) && !rawAtts.length) {
     atalhoMetaDicas = true;
+    let syncMeta: unknown = null;
+    try {
+      syncMeta = await t_sincronizar_meta_dicas(ctx.companyId, ctx.mcpKey);
+    } catch (e) {
+      syncMeta = { ok: false, erro: String((e as any)?.message ?? e).slice(0, 160) };
+    }
+    {
+      const bruto = JSON.stringify(syncMeta ?? null);
+      const cortado = bruto.length > TOOLRES_TETO_PERSIST;
+      toolsUsed.push({ tool: "sincronizar_meta_dicas", args: { company_id: ctx.companyId } });
+      toolResults.push({
+        tool: "sincronizar_meta_dicas",
+        args: { company_id: ctx.companyId },
+        chars: bruto.length,
+        cortado,
+        retorno: cortado ? bruto.slice(0, TOOLRES_TETO_PERSIST) : (syncMeta ?? null),
+      });
+    }
     const [dicas, recos] = await Promise.all([
       runTool("get_meta_dicas", { dias: 14 }, ctx),
       runTool("get_recommendations", {}, ctx),
@@ -3887,10 +3930,12 @@ Deno.serve(async (req) => {
         role: "user",
         content:
           `Pergunta do gestor: ${msgText}\n\n` +
-          "Os retornos abaixo JA foram lidos do banco (dicas da Meta + fila interna). " +
+          "Os retornos abaixo JA foram sincronizados na Graph (Opportunity Score) e lidos do banco " +
+          "(dicas da Meta + fila INTERNA de custo). " +
           "Responda AGORA em prosa clara, por secoes, sem chamar ferramentas e SEM colar JSON. " +
-          "Cite o veredito interno de cada dica; se a lista estiver vazia, diga que nao ha " +
-          "dica coletada na janela — nao invente.\n\n" +
+          "Cite o veredito interno de cada dica da Meta. A fila interna NAO e badge do Ads Manager. " +
+          "Se a lista de dicas da Meta estiver vazia, diga que a Graph nao devolveu dica nesta janela " +
+          "e lembre a assimetria API vs UI se o gestor apontar badge — nao invente.\n\n" +
           `Dicas da Meta (compacto):\n${JSON.stringify(dicasLlm).slice(0, TOOLRES_TETO_PERSIST)}\n\n` +
           `Fila interna (compacto):\n${JSON.stringify(recosLlm).slice(0, Math.min(6000, TOOLRES_TETO_PERSIST))}`,
       },
