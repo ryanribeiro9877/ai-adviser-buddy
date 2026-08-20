@@ -23,7 +23,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TOKEN = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "x-ai/grok-4.6").trim();
+const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "deepseek/deepseek-v4-pro").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
 const VERSAO = "create-v1";
 

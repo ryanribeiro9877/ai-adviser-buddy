@@ -31,7 +31,7 @@ Deno.serve(async (req) => {
     },
     openrouter_model: {
       configured: model.length > 0,
-      value: model || "(ausente — edge usa default do código: x-ai/grok-4.6)",
+      value: model || "(ausente — edge usa default do código: deepseek/deepseek-v4-pro)",
     },
     whatsapp_access_token: {
       configured: wa.length > 0,

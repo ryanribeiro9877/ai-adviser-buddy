@@ -491,9 +491,9 @@ import {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "x-ai/grok-4.6").trim();
+const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "deepseek/deepseek-v4-pro").trim();
 // v28: OPENROUTER_MODEL = chat principal; OPENROUTER_MODEL_SUB = subagentes do traffic-agent-job.
-// 20/08/2026: padrao da casa = SpaceXAI Grok 4.6 (slug OpenRouter x-ai/grok-4.6).
+// 20/08/2026: padrao da casa = DeepSeek V4 Pro 0423 (slug OpenRouter deepseek/deepseek-v4-pro).
 // no modelo atual (extracao estrita nao precisa de Opus e custa 5x). Nada a mudar AQUI alem
 // do secret; a separacao e feita na edge do job.
 // v28.1: credencial do Drive (mesma service account do job) + pasta raiz dos criativos.
