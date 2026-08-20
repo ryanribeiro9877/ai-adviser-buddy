@@ -449,9 +449,9 @@ import {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "anthropic/claude-sonnet-5").trim();
-// v28: quando a troca p/ Opus for decidida, o caminho e: setar OPENROUTER_MODEL para o Opus
-// (este chat) e criar OPENROUTER_MODEL_SUB p/ os subagentes do traffic-agent-job continuarem
+const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "x-ai/grok-4.6").trim();
+// v28: OPENROUTER_MODEL = chat principal; OPENROUTER_MODEL_SUB = subagentes do traffic-agent-job.
+// 20/08/2026: padrao da casa = SpaceXAI Grok 4.6 (slug OpenRouter x-ai/grok-4.6).
 // no modelo atual (extracao estrita nao precisa de Opus e custa 5x). Nada a mudar AQUI alem
 // do secret; a separacao e feita na edge do job.
 // v28.1: credencial do Drive (mesma service account do job) + pasta raiz dos criativos.

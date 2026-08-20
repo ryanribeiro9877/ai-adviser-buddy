@@ -13,7 +13,7 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "anthropic/claude-sonnet-4.6").trim();
+const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "x-ai/grok-4.6").trim();
 const VERSAO = "gerar-legendas-v1";
 const N = 3;
 

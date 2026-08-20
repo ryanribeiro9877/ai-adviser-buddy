@@ -163,7 +163,7 @@ import {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "anthropic/claude-sonnet-5").trim();
+const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "x-ai/grok-4.6").trim();
 // v2: modelo dos SUBAGENTES e do planejador (extracao estrita nao precisa do modelo caro).
 const MODEL_SUB = ((Deno.env.get("OPENROUTER_MODEL_SUB") ?? "").trim()) || MODEL;
 // v2: credencial do Drive (service account) + pasta raiz dos criativos.
