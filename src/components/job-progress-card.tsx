@@ -255,8 +255,10 @@ export function JobProgressCard({
 
   return (
     <div className="rounded-md border border-border bg-muted/40 p-3">
-      {/* Rótulo neutro: Q&A de análise usa o job por padrão (sem toggle). O mesmo card
-          cobre encaminhamento pela traffic-chat. */}
+      {/* Rótulo neutro: este mesmo card cobre o toggle ligado pelo gestor E o encaminhamento
+          automático decidido pela `traffic-chat` (v72). Dizer "análise profunda" no segundo caso
+          atribuiria ao gestor uma escolha que não foi dele. A linha de `chat_jobs` é idêntica nos
+          dois caminhos, então a tela não tem como distinguir — e não se inventa campo para isso. */}
       <div className="flex items-center gap-2 text-sm font-medium">
         <Microscope className="h-4 w-4 text-primary" />
         Preparando a resposta completa

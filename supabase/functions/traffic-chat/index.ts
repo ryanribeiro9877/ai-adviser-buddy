@@ -1,10 +1,14 @@
-// supabase/functions/traffic-chat/index.ts (v28.35)
+// supabase/functions/traffic-chat/index.ts (v28.36)
+// v28.36 (20/08/2026) - REVERTE analise profunda como default:
+//   Q&A volta ao sync traffic-chat; job so com toggle do gestor OU auto-rota antiga
+//   (>=5 familias / >=1500 chars), com guarda de meio-de-fio. Mantem filtro de
+//   preambulo anti-intencao (v28.35) e atalho Opportunity Score / orcamento 2 min.
 // v28.35 (20/08/2026) - ANALISE PROFUNDA PADRAO + PROIBE RESPOSTA DE INTENCAO:
 //   Q&A de analise vai ao traffic-agent-job por default (frontend e edge). Sync fica
 //   so para ato (propose_action), anexo e costura de continuacao. Doutrina: nunca
 //   enviar mensagem que so narra o que "vai" consultar — tools rodam, depois UMA
 //   resposta completa. Preambulos de intencao ("vou cruzar/ler/consultar") nao entram
-//   no reply.
+//   no reply. (roteamento default revertido em v28.36; filtro de preambulo permanece)
 // v28.34 (20/08/2026) - DICAS DA META AO VIVO (Opportunity Score):
 //   O atalho meta-dicas lia so o banco; meta_recommendations estava vazio em TODAS as
 //   empresas porque a coleta v15 so sondava o campo classico `recommendations` (nunca
@@ -525,7 +529,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.35";
+const VERSAO = "chat-v28.36";
 const HIST = 24;
 // v28.11: orcamento da reinjecao de retorno de ferramenta.
 // TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
@@ -3513,7 +3517,8 @@ const FAMILIAS_ASSUNTO: RegExp[] = [
   /whatsapp|waba|template|conversas/,
   /drive|video|reel|thumb|visual/,
 ];
-const ROTA_CHARS_MIN = 1500; // legado: tamanho sozinho ainda roteia; o default agora e quase tudo
+const ROTA_FAMILIAS_MIN = 5;
+const ROTA_CHARS_MIN = 1500;
 const RE_CONTINUACAO = /^sua resposta anterior foi cortada/;
 const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
 // v28.32: pergunta tipica que estourava 150s porque o modelo abria Pipeboard em vez de
@@ -3526,18 +3531,21 @@ function isPedidoDicasMeta(pedido: string): boolean {
   return RE_DICAS_META.test(p);
 }
 
-// v28.35: PADRAO = job assincrono (analise profunda). Sync so quando o job nao cobre:
-// continuacao de texto cortado, anexo, ou pedido de ato (propose_action).
+// v28.11 / v28.36: job assincrono so quando o pedido e largo o bastante (familias ou chars).
+// Sync e o default. Guardas cobrem capacidades que a rota assincrona nao tem.
 function decidirRotaAssincrona(pedido: string, nAnexos: number): { rotear: boolean; motivo: string; familias: number } {
   const p = deacc(pedido.toLowerCase());
   const familias = FAMILIAS_ASSUNTO.reduce((a, re) => a + (re.test(p) ? 1 : 0), 0);
+  const porFamilia = familias >= ROTA_FAMILIAS_MIN;
+  const porTamanho = pedido.length >= ROTA_CHARS_MIN;
+  if (!porFamilia && !porTamanho) return { rotear: false, motivo: "cabe no turno sincrono", familias };
+  // As tres guardas abaixo NAO sao cautela generica: cada uma cobre uma capacidade que a rota
+  // assincrona nao tem, e mandar o pedido para la seria perde-la em silencio.
   if (RE_CONTINUACAO.test(p)) return { rotear: false, motivo: "continuacao: o job replaneja do zero e nao retoma texto cortado", familias };
   if (nAnexos > 0) return { rotear: false, motivo: "pedido com anexo: o job nao le anexo", familias };
   if (RE_PEDIDO_DE_ATO.test(p)) return { rotear: false, motivo: "pedido de ato: propose_action nao existe no job e o card seria perdido", familias };
   return { rotear: true, familias,
-    motivo: pedido.length >= ROTA_CHARS_MIN
-      ? `pedido com ${pedido.length} chars — analise profunda padrao`
-      : `analise profunda padrao (${familias} familia(s) de assunto)` };
+    motivo: porFamilia ? `pedido cobre ${familias} familias de assunto (>= ${ROTA_FAMILIAS_MIN})` : `pedido com ${pedido.length} chars (>= ${ROTA_CHARS_MIN})` };
 }
 
 Deno.serve(async (req) => {
@@ -3576,15 +3584,26 @@ Deno.serve(async (req) => {
   const company = await resolveCompany(body?.company ? String(body.company) : undefined);
   if (!company) return json({ error: "empresa nao encontrada" }, 400);
 
-  // v28.11: pedido de ANALISE nao disputa os 150s da plataforma - vai para o job, que
+  // v28.11: pedido longo de ANALISE nao disputa os 150s da plataforma - vai para o job, que
   // nao tem esse teto. A decisao acontece AQUI, antes de qualquer chamada ao modelo e antes
   // de gravar a pergunta (quem grava e o job, senao a pergunta entraria duas vezes).
   // Se o encaminhamento falhar, NAO se perde o turno: cai no caminho sincrono e a falha vai
   // declarada na telemetria - rota nova nao pode derrubar o chat.
-  // v28.35: PADRAO e o job (analise profunda). Mid-fio tambem vai: o job responde a pergunta
-  // atual; follow-ups de dicas/musica precisam de resposta completa, nao do sync truncado.
   const rota = decidirRotaAssincrona(message, rawAtts.length);
   let rotaFalhou = "";
+  // Quarta guarda, e a unica que custa uma consulta: o job recebe SO a pergunta - nao le o
+  // historico da conversa. Pergunta feita no meio de um fio ("e agora compare com o que voce
+  // disse") viraria uma resposta sem o fio. Na medicao de 20 dias os 3 pedidos que este
+  // criterio rotearia eram TODOS a primeira pergunta do fio, entao a guarda nao custa nenhum
+  // caso verdadeiro.
+  if (rota.rotear && body?.conversation_id) {
+    const { count } = await supa.from("chat_messages").select("id", { count: "exact", head: true })
+      .eq("conversation_id", String(body.conversation_id)).eq("role", "assistant");
+    if (count) {
+      rota.rotear = false;
+      rota.motivo = "pergunta no meio de um fio: o job responde so a pergunta, sem o historico da conversa";
+    }
+  }
   if (rota.rotear) {
     try {
       const resp = await fetch(`${SUPABASE_URL}/functions/v1/traffic-agent-job`, {

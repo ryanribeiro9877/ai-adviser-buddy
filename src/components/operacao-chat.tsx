@@ -41,6 +41,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
   SelectContent,
@@ -96,22 +97,17 @@ const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 const TIMEOUT_TURNO_MS = 2 * 60 * 1000;
 const JANELA_STATUS_MS = 30 * 60 * 1000; // recorte para varrer a lista de conversas
 
-// Análise profunda (PADRÃO desde 20/08/2026): a edge traffic-agent-job roda subagentes em
-// background e responde 202 em ~1s; a resposta final só chega por Realtime em chat_messages.
+// Análise profunda: a edge traffic-agent-job roda subagentes em background e
+// responde 202 em ~1s; a resposta final só chega por Realtime em chat_messages.
 //
-// Q&A de análise vai SEMPRE ao job (sem toggle). O caminho síncrono (`traffic-chat`) fica
-// só para o que o job NÃO cobre: pedido de ATO (propose_action), anexo, e costura de
-// continuação de texto cortado. A edge `traffic-chat` ainda pode encaminhar sozinha se
-// alguém bater nela sem o flag — mesma regra de default.
+// O roteamento AUTOMÁTICO saiu daqui (v28.11). Ele era `text.length > 1500` e tinha dois
+// defeitos medidos: (a) não pegava o caso real — o pedido que truncou em 07/08 tinha 594
+// caracteres e gastou 9 ferramentas; (b) mandava pedido de AÇÃO para uma rota que não tem
+// `propose_action`, ou seja, trocava um card por card nenhum. Quem decide agora é a edge
+// `traffic-chat`, que enxerga famílias de assunto do pedido, anexos e verbos de ato, e
+// devolve `async + job_id` quando encaminha. Este toggle continua sendo o pedido EXPLÍCITO
+// do gestor e vai direto ao job.
 type ChatJobReply = { ok: boolean; async?: boolean; job_id: string; conversation_id: string };
-
-// Espelha RE_PEDIDO_DE_ATO da traffic-chat: job não tem propose_action.
-const RE_PEDIDO_DE_ATO =
-  /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
-const deacc = (s: string) => s.normalize("NFD").replace(/\p{M}/gu, "");
-function isPedidoDeAto(texto: string): boolean {
-  return RE_PEDIDO_DE_ATO.test(deacc(texto.toLowerCase()));
-}
 
 type PendingFile = {
   id: string;
@@ -234,8 +230,12 @@ export function OperacaoChat() {
     null,
   );
   const [interrupted, setInterrupted] = useState(false);
-  // Job assíncrono (análise profunda padrão) por conversa.
+  // Toggle da análise profunda e job em andamento — ambos por conversa, não globais.
+  const [deepByConv, setDeepByConv] = useState<Record<string, boolean>>({});
   const [job, setJob] = useState<{ convId: string; jobId: string; texto: string } | null>(null);
+  const chaveConv = activeId ?? "__nova__";
+  const deepOn = !!deepByConv[chaveConv];
+  const setDeepOn = (v: boolean) => setDeepByConv((m) => ({ ...m, [chaveConv]: v }));
 
   const threadRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -548,8 +548,9 @@ export function OperacaoChat() {
     if (reenvio && !text) return;
     const convIdAtSend = activeId;
     const snapshot = reenvio ? [] : attachments;
-    // Padrão: análise profunda (job). Sync só quando o job não cobre o pedido.
-    const profunda = !isPedidoDeAto(text) && snapshot.length === 0;
+    // Roteamento explícito: o toggle vai direto ao modo assíncrono. O automático é decidido
+    // pela edge e chega como `async` na resposta — `autoProfunda` só é ligado lá.
+    const profunda = deepOn;
     if (!reenvio) setInput("");
     setInterrupted(false);
     setJob(null);
@@ -572,7 +573,7 @@ export function OperacaoChat() {
         return; // mantém os anexos para nova tentativa
       }
 
-      // --- Modo assíncrono (padrão): 202 em ~1s, sem reply. A resposta final chega por
+      // --- Modo assíncrono: 202 em ~1s, sem reply. A resposta final chega por
       // Realtime em chat_messages; aqui só adotamos a conversa e abrimos o card.
       if (profunda) {
         const { data: jobData, error: jobErr } = await supabase.functions.invoke<ChatJobReply>(
@@ -587,7 +588,7 @@ export function OperacaoChat() {
           },
         );
         if (jobErr || !jobData?.job_id) {
-          let msg = "Não foi possível iniciar a análise. Tente novamente.";
+          let msg = "Não foi possível iniciar a análise profunda. Tente novamente.";
           try {
             const body = await (jobErr as { context?: Response })?.context?.json?.();
             if (body && typeof body.error === "string") msg = body.error;
@@ -1009,8 +1010,11 @@ export function OperacaoChat() {
                     {pending!.text && (
                       <div className="whitespace-pre-wrap break-words">{pending!.text}</div>
                     )}
-                    {/* Encaminhamento automático (edge) ou padrão profundo: sem reply imediato. */}
-                    {(pending!.profunda || pending!.autoProfunda) && (
+                    {/* Só quando o roteamento foi automático: explica por que não
+                        veio resposta imediata. Com o toggle ligado o usuário já sabe.
+                        Texto neutro de propósito: aqui o gestor NÃO pediu análise
+                        profunda, quem encaminhou foi a edge. */}
+                    {pending!.autoProfunda && (
                       <div className="flex items-center gap-1 pt-0.5 text-[11px] opacity-80">
                         <Microscope className="h-3 w-3" />
                         preparando resposta completa
@@ -1205,6 +1209,25 @@ export function OperacaoChat() {
                   <Mic className="h-4 w-4" />
                 )}
               </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant={deepOn ? "default" : "ghost"}
+                    className="h-[42px] w-[42px] shrink-0"
+                    onClick={() => setDeepOn(!deepOn)}
+                    disabled={sending || transcribing || listening || !companyId}
+                    aria-pressed={deepOn}
+                    aria-label="Análise profunda"
+                  >
+                    <Microscope className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[260px] text-left">
+                  Análise profunda: vários especialistas em paralelo; demora mais, responde completo
+                  de uma vez.
+                </TooltipContent>
+              </Tooltip>
               <Textarea
                 ref={inputRef}
                 value={input}
