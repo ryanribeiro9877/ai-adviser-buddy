@@ -172,6 +172,40 @@ async function fetchMessages(conversationId: string): Promise<Message[]> {
   return (data ?? []) as Message[];
 }
 
+// Gateway ~150s pode devolver 504 enquanto a edge ainda grava a resposta (medido 20/08:
+// HTTP 504 às 13:27:06 e assistant no banco às 13:27:27). Em vez de falhar na hora,
+// espera breve a mensagem assistant posterior à pergunta.
+async function waitAssistantAfterUser(
+  conversationId: string,
+  userText: string,
+  sentAtMs: number,
+  maxWaitMs = 45_000,
+): Promise<boolean> {
+  const deadline = Date.now() + maxWaitMs;
+  const needle = userText.trim();
+  while (Date.now() < deadline) {
+    try {
+      const msgs = await fetchMessages(conversationId);
+      let sawUser = false;
+      for (const m of msgs) {
+        if (
+          m.role === "user" &&
+          (m.content ?? "").trim() === needle &&
+          new Date(m.created_at).getTime() >= sentAtMs - 5_000
+        ) {
+          sawUser = true;
+          continue;
+        }
+        if (sawUser && m.role === "assistant" && (m.content ?? "").trim()) return true;
+      }
+    } catch {
+      /* rede transitória — tenta de novo */
+    }
+    await new Promise((r) => setTimeout(r, 2_500));
+  }
+  return false;
+}
+
 export function OperacaoChat() {
   const { selectedCompany, isAdmin } = useApp();
   const companyId = selectedCompany?.id ?? null;
@@ -582,6 +616,7 @@ export function OperacaoChat() {
         return; // NÃO há reply nem costura neste caminho
       }
 
+      const sentAtMs = Date.now();
       const { data, error } = await supabase.functions.invoke<ChatReply>("traffic-chat", {
         body: {
           message: text,
@@ -591,6 +626,20 @@ export function OperacaoChat() {
         },
       });
       if (error) {
+        // 504 do gateway: a edge pode ter gravado (ou ainda estar gravando). Se já temos
+        // conversation_id, espera a resposta no banco antes de declarar falha.
+        let recovered = false;
+        if (convIdAtSend) {
+          recovered = await waitAssistantAfterUser(convIdAtSend, text, sentAtMs);
+        }
+        if (recovered && convIdAtSend) {
+          clearAttachments();
+          qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
+          qc.invalidateQueries({ queryKey: ["approvals"] });
+          await qc.invalidateQueries({ queryKey: ["chat-messages", convIdAtSend] });
+          setPending(null);
+          return;
+        }
         let msg = "Não foi possível obter resposta agora. Tente novamente.";
         try {
           const body = await (error as { context?: Response }).context?.json?.();
@@ -1034,8 +1083,9 @@ export function OperacaoChat() {
                   <div className="text-sm font-medium">A resposta não chegou</div>
                   <p className="mt-1 text-xs text-muted-foreground">
                     A pergunta foi enviada há mais de 3 minutos e o turno não foi concluído
-                    (normalmente é o limite de tempo do servidor). Nada foi perdido: reenviar refaz
-                    a pergunta nesta mesma conversa.
+                    (em geral o servidor cortou a requisição perto de 2,5 min). Nada foi perdido:
+                    reenviar refaz a pergunta nesta mesma conversa — para dicas da Meta, uma
+                    pergunta só sobre isso costuma responder mais rápido.
                   </p>
                   <Button
                     size="sm"

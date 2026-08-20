@@ -1,4 +1,13 @@
-// supabase/functions/traffic-chat/index.ts (v28.31)
+// supabase/functions/traffic-chat/index.ts (v28.32)
+// v28.32 (20/08/2026) - FIM DOS 504 RECORRENTES (incidente Legal 20/08 ~13:27 e ~13:34 UTC):
+//   Evidencia: POST 504 no gateway a ~150s; um turno de "emita o card" gravou ms_total=170668
+//   (depois do 504); a pergunta de dicas da Meta nao gravou reply nenhum. Causa: o deadline
+//   so era checado ENTRE iteracoes, e o fetch ao OpenRouter nao tinha AbortSignal — uma
+//   unica geracao com ~112k tokens_in + propose/sintese estourava o IDLE_TIMEOUT da
+//   plataforma. Conserto: (1) HARD_LIMIT 125s + TOOLS_DEADLINE 50s; (2) AbortSignal por
+//   chamada OpenRouter no tempo restante; (3) deadline ANTES de cada tool do lote;
+//   (4) atalho sincrono para pergunta de dicas/recomendacoes da Meta (get_meta_dicas +
+//   get_recommendations, sem Pipeboard); (5) prioridade/doutrina anti-Pipeboard nesse caso.
 // v28.31 (20/08/2026) - Emite lote sem re-perguntar: MAX_TOOLS_TURNO 24; propose_action
 //   ate 10; criar_anuncio nao e cortado pelo teto global; get_acervo aceita
 //   drive_file_ids (recorte) + compactacao; doutrina "emite os N" fecha o ato;
@@ -497,7 +506,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.31";
+const VERSAO = "chat-v28.32";
 const HIST = 24;
 // v28.11: orcamento da reinjecao de retorno de ferramenta.
 // TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
@@ -517,14 +526,17 @@ const TOOLRES_TEXTO = 400;
 // enxergar INTEIRA (o corte em 6000 escondeu os blocos 9-12 do questionario de 28/07).
 const HIST_CAP = 6000;
 const HIST_CAP_USER_RECENTE = 12000;
-// v19 - orcamento de tempo. Teto da plataforma = 150s (IDLE_TIMEOUT, nao configuravel).
-// Calibrado com os logs de 27/07: sucessos entre 38s e 102s; o de 149,5s passou por 492ms.
-// TOOLS_DEADLINE: para de coletar aqui, deixando espaco para a sintese final.
-// HARD_LIMIT: teto proprio abaixo de 150s, com folga para gravar no banco.
-const TOOLS_DEADLINE_MS = 75_000;
-const HARD_LIMIT_MS = 143_000;
-const RESERVA_GRAVACAO_MS = 6_000;
-// Sonnet gera ~85 tok/s; usamos 60 para ser conservador.
+// v19/v28.32 - orcamento de tempo. Teto da plataforma = ~150s (IDLE_TIMEOUT, nao configuravel).
+// Calibrado com os logs de 27/07 e revalidado em 20/08 (504 em 149–151s; ms_total interno
+// chegou a 170s depois do gateway ja ter cortado). TOOLS_DEADLINE: para de coletar tools.
+// HARD_LIMIT: teto proprio bem abaixo de 150s, com folga para sintese + gravar no banco.
+// OPENROUTER_CALL_CAP: nenhuma chamada ao modelo pode segurar o HTTP ate o gateway matar.
+const TOOLS_DEADLINE_MS = 50_000;
+const HARD_LIMIT_MS = 125_000;
+const RESERVA_GRAVACAO_MS = 8_000;
+const OPENROUTER_CALL_CAP_MS = 45_000;
+// Sonnet gera ~85 tok/s; usamos 60 para ser conservador. Grok 4.6 e mais lento sob contexto
+// grande — o AbortSignal e a defesa real, nao so o teto de tokens.
 const TOKENS_POR_SEGUNDO = 60;
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
@@ -2654,6 +2666,11 @@ function prioridadeTool(nome: string, pedido: string): number {
   // justamente esse tipo de pergunta que o agente respondia de cabeca por nao ter a fila.
   const pedeFila = /card|aprova|pendente|aprovado|criou|criad|emiti|executou|executad|fila|sino|notificac|subiu|apareceu/.test(p);
   if (pedeFila && nome === "get_aprovacoes") return 0;
+  // v28.32: dicas/recomendacoes da Meta — so get_meta_dicas (+ fila interna). Nao gastar o
+  // lote em Pipeboard/catalogo; foi o padrao que estourava 150s em pergunta simples.
+  const pedeMetaDica = /dica.*meta|recomendac.*(meta|facebook|anuncio|impulsionar|boost)|meta emitiu|meta.*recomend|impulsionar.*(anuncio|eles|campanha)|opportunity score|recomendacao da meta/.test(p);
+  if (pedeMetaDica && (nome === "get_meta_dicas" || nome === "get_recommendations")) return 0;
+  if (pedeMetaDica && (nome === "listar_ferramentas_pipeboard" || nome === "ler_pipeboard")) return 99;
   // v28.31: pedido de emitir cards — propose_action primeiro; nao gastar o teto em re-auditoria.
   const pedeEmitir = /\bemite|\bemita|\bemiss[aã]o|\bcards?\b.*\baprov|\baprova.*\bcard|criar_anuncio|propose_action/.test(p);
   if (pedeEmitir && nome === "propose_action") return 0;
@@ -2990,6 +3007,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 == DOUTRINA DE DECISAO ==
 - DIGA DE QUEM FALA: empresa e categoria regulatoria antes do nivel (conta/campanha/conjunto/anuncio). Doutrina de credito NAO se aplica a empresa que nao e de credito. NUNCA compare empresas de categorias distintas.
 - LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
+- DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations se quiser a fila interna). Cite SEMPRE o veredito interno (concorda|discorda|nao_aplicavel|sem_regua) — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta: as dicas ja estao no banco. Responda na mesma rodada com o retorno; se vier vazio, diga que nao ha dica coletada na janela — nao invente.
 - Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.
 - Uma decisao por leitura. Escolha a janela ANTES de olhar o resultado; se duas janelas discordam, mostre as duas e diga qual decide.
 - Sazonalidade: use somente calendario e produto comprovados para ${companyName}; produto nao identificado = nao invoque.
@@ -3287,6 +3305,15 @@ const ROTA_FAMILIAS_MIN = 5;
 const ROTA_CHARS_MIN = 1500;
 const RE_CONTINUACAO = /^sua resposta anterior foi cortada/;
 const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
+// v28.32: pergunta tipica que estourava 150s porque o modelo abria Pipeboard em vez de
+// get_meta_dicas. Sem verbo de ato — se pedir emitir card, cai no caminho normal.
+const RE_DICAS_META = /dica.*meta|recomendac.*(meta|facebook|anuncio|impulsionar|boost)|meta emitiu|meta.*recomend|impulsionar.*(anuncio|eles|campanha)|opportunity score|recomendacao da meta/;
+
+function isPedidoDicasMeta(pedido: string): boolean {
+  const p = deacc(pedido.toLowerCase());
+  if (RE_PEDIDO_DE_ATO.test(p)) return false;
+  return RE_DICAS_META.test(p);
+}
 
 function decidirRotaAssincrona(pedido: string, nAnexos: number): { rotear: boolean; motivo: string; familias: number } {
   const p = deacc(pedido.toLowerCase());
@@ -3605,15 +3632,39 @@ Deno.serve(async (req) => {
   }
 
   async function chamar(comTools: boolean, maxTokens = MAX_TOKENS, semRaciocinio = false): Promise<any> {
+    const restanteMs = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
+    if (restanteMs < 8_000) {
+      return { erro: "orcamento_tempo_esgotado", detalhe: `restam ${restanteMs}ms — sem tempo util para nova geracao` };
+    }
     const usarCache = !cacheDesativado;
     const payload: any = { model: MODEL, messages: usarCache ? messages : semCache(messages), max_tokens: maxTokens };
     if (comTools) { payload.tools = TOOLS; payload.tool_choice = "auto"; }
     // v21: na sintese o raciocinio e excluido para que TODO o orcamento va para o texto.
     if (!reasoningDesativado) payload.reasoning = semRaciocinio ? REASONING_SINTESE : REASONING_LOOP;
-    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` }, body: JSON.stringify(payload),
-    });
-    const text = await resp.text();
+    // v28.32: AbortSignal — sem isso uma unica geracao com contexto grande segura o HTTP
+    // alem dos ~150s do gateway (ms_total=170s medido em 20/08 com 504 no cliente).
+    const capMs = Math.min(OPENROUTER_CALL_CAP_MS, restanteMs);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), capMs);
+    let resp: Response;
+    let text: string;
+    try {
+      resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` },
+        body: JSON.stringify(payload),
+        signal: ac.signal,
+      });
+      text = await resp.text();
+    } catch (e) {
+      const nome = String((e as any)?.name ?? "");
+      if (nome === "AbortError" || /abort/i.test(String((e as any)?.message ?? e))) {
+        return { erro: "openrouter_timeout", detalhe: `chamada abortada apos ${capMs}ms (orcamento de parede)` };
+      }
+      return { erro: "openrouter_fetch_failed", detalhe: String((e as any)?.message ?? e).slice(0, 200) };
+    } finally {
+      clearTimeout(timer);
+    }
     if (!resp.ok) {
       // v21: degradacao em 2 passos. Tira o reasoning primeiro (parametro novo, nao provado)
       // e so depois o cache (provado funcionando em 4 turnos v20 - nao vale perder de graca).
@@ -3632,14 +3683,87 @@ Deno.serve(async (req) => {
     try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
   }
 
-  for (let iter = 0; iter < MAX_ITER; iter++) {
-    // v19: orcamento de tempo. Sem isso o loop podia consumir os 150s inteiros coletando
-    // dados e morrer antes de escrever - 504, perda total. Melhor resposta parcial
-    // declarada que nenhuma resposta.
-    if (iter > 0 && decorrido() > TOOLS_DEADLINE_MS) { deadlineTools = true; break; }
+  // v28.32: atalho para pergunta de dicas da Meta — le o banco e sintetiza UMA vez, sem
+  // deixar o modelo abrir catalogo Pipeboard (padrao que estourava o teto em 20/08).
+  let atalhoMetaDicas = false;
+  if (isPedidoDicasMeta(msgText) && !rawAtts.length) {
+    atalhoMetaDicas = true;
+    const [dicas, recos] = await Promise.all([
+      runTool("get_meta_dicas", { dias: 14 }, ctx),
+      runTool("get_recommendations", {}, ctx),
+    ]);
+    for (const [nome, result] of [["get_meta_dicas", dicas], ["get_recommendations", recos]] as const) {
+      const bruto = JSON.stringify(result ?? null);
+      const cortado = bruto.length > TOOLRES_TETO_PERSIST;
+      toolsUsed.push({ tool: nome, args: nome === "get_meta_dicas" ? { dias: 14 } : {} });
+      toolResults.push({
+        tool: nome,
+        args: nome === "get_meta_dicas" ? { dias: 14 } : {},
+        chars: bruto.length,
+        cortado,
+        retorno: cortado ? bruto.slice(0, TOOLRES_TETO_PERSIST) : (result ?? null),
+      });
+    }
+    // Sintese com contexto ENXUTO: historico longo desta conversa (carrossel/cards) era o
+    // que fazia Grok estourar 150s numa pergunta de dicas. System + pergunta + dados bastam.
+    const msgsAtalho = [
+      { role: "system", content: cacheSystem },
+      {
+        role: "user",
+        content:
+          `Pergunta do gestor: ${msgText}\n\n` +
+          "Os retornos abaixo JA foram lidos do banco (get_meta_dicas + get_recommendations). " +
+          "Responda AGORA sem chamar ferramentas. Cite o veredito interno de cada dica; " +
+          "se a lista estiver vazia, diga que nao ha dica coletada na janela — nao invente.\n\n" +
+          `get_meta_dicas:\n${JSON.stringify(dicas).slice(0, TOOLRES_TETO_PERSIST)}\n\n` +
+          `get_recommendations:\n${JSON.stringify(recos).slice(0, TOOLRES_TETO_PERSIST)}`,
+      },
+    ];
+    const msgsBackup = messages.splice(0, messages.length, ...msgsAtalho);
+    const rf = await chamar(false, Math.min(tokensDisponiveis(), 4000), true);
+    messages.splice(0, messages.length, ...msgsBackup);
+    if (!rf.erro) {
+      const p = rf.parsed;
+      tokensIn += Number(p?.usage?.prompt_tokens ?? 0);
+      tokensOut += Number(p?.usage?.completion_tokens ?? 0);
+      somarCache(p?.usage); somarReasoning(p?.usage);
+      finishReason = String(p?.choices?.[0]?.finish_reason ?? "") + "+atalho_meta_dicas";
+      reply = p?.choices?.[0]?.message?.content ?? "";
+      iteracoes = 1;
+    } else {
+      // Sem inventar dicas: entrega o JSON lido, declarado como dado bruto do banco.
+      finishReason = `atalho_meta_dicas_${rf.erro}+bruto`;
+      deadlineTools = true;
+      const dicasStr = JSON.stringify(dicas ?? null).slice(0, 6000);
+      const recosStr = JSON.stringify(recos ?? null).slice(0, 3000);
+      reply =
+        "Li as dicas da Meta e a fila interna no banco, mas o tempo de sintese estourou. " +
+        "Segue o retorno bruto (nao inventei nada). Peça um resumo focado se quiser a leitura em prosa.\n\n" +
+        `### get_meta_dicas\n\`\`\`json\n${dicasStr}\n\`\`\`\n\n` +
+        `### get_recommendations\n\`\`\`json\n${recosStr}\n\`\`\``;
+      iteracoes = 1;
+    }
+  }
+
+  if (!atalhoMetaDicas) for (let iter = 0; iter < MAX_ITER; iter++) {
+    // v19/v28.32: orcamento de tempo. Checa ANTES de cada geracao (incluindo a 1a apos
+    // tools): sem isso o loop consumia os 150s coletando e o gateway devolvia 504.
+    if (decorrido() > TOOLS_DEADLINE_MS && (iter > 0 || toolsUsed.length > 0)) {
+      deadlineTools = true;
+      break;
+    }
+    if (decorrido() > HARD_LIMIT_MS - RESERVA_GRAVACAO_MS - 12_000) {
+      deadlineTools = true;
+      break;
+    }
     iteracoes = iter + 1;
     // v27: orcamento dimensionado pelo tempo restante, nao fixo.
     const r = await chamar(true, tokensDisponiveis());
+    if (r.erro === "orcamento_tempo_esgotado" || r.erro === "openrouter_timeout") {
+      deadlineTools = true;
+      finishReason = String(r.erro);
+      break;
+    }
     if (r.erro) return json({ error: r.erro, detail: r.detalhe }, 502);
     const parsed = r.parsed;
     tokensIn += Number(parsed?.usage?.prompt_tokens ?? 0);
@@ -3659,6 +3783,18 @@ Deno.serve(async (req) => {
         prioridadeTool(String(a.function?.name ?? ""), msgText) -
         prioridadeTool(String(b.function?.name ?? ""), msgText));
       for (const tc of loteOrdenado) {
+        // v28.32: deadline POR ferramenta — o lote inteiro nao pode segurar o HTTP.
+        if (decorrido() > TOOLS_DEADLINE_MS) {
+          deadlineTools = true;
+          const nomeSkip = String(tc.function?.name ?? "");
+          let argsSkip: any = {}; try { argsSkip = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
+          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
+            erro: "consulta_nao_realizada_nesta_rodada",
+            aviso: "O orcamento de tempo de coleta acabou antes desta consulta. O dado NAO foi lido — nao o trate como zero nem como inexistente. Responda com o que ja tem." }) });
+          toolResults.push({ tool: nomeSkip, args: argsSkip, chars: 0, cortado: false, retorno: null,
+            erro: "deadline de coleta — o dado NAO foi lido" });
+          continue;
+        }
         // v20: teto de ferramentas. A API exige resposta para CADA tool_call_id, entao nao
         // e possivel simplesmente pular - devolvemos um resultado que DECLARA o teto, para
         // o modelo nao tratar o dado como zero nem como inexistente (R3).
@@ -3702,7 +3838,7 @@ Deno.serve(async (req) => {
     break;
   }
 
-  if (!reply) {
+  if (!reply && !atalhoMetaDicas) {
     messages.push({ role: "user", content: deadlineTools
       ? "PARE de usar ferramentas: o tempo de coleta acabou. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes. Diga em UMA linha, no fim, quais itens do pedido nao foram cobertos por falta de tempo de coleta, para o usuario poder pedir so esses depois. Nao responda que nao conseguiu."
       : "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes, dizendo explicitamente o que nao esta disponivel. Nao responda que nao conseguiu." });
@@ -3714,6 +3850,9 @@ Deno.serve(async (req) => {
       somarCache(p?.usage); somarReasoning(p?.usage);
       finishReason = String(p?.choices?.[0]?.finish_reason ?? finishReason) + "+sintese_final";
       reply = p?.choices?.[0]?.message?.content ?? "";
+    } else if (rf.erro === "openrouter_timeout" || rf.erro === "orcamento_tempo_esgotado") {
+      finishReason = String(finishReason || rf.erro) + "+sintese_abortada";
+      deadlineTools = true;
     }
   }
   // v18: emenda o texto que vinha junto com tool_calls e era descartado.
@@ -3733,9 +3872,11 @@ Deno.serve(async (req) => {
   // a costura sobre a mensagem de erro - 3 vezes, 57-91k tokens cada.
   let usouFallback = false;
   if (!reply) {
-    reply = "Nao consegui produzir a resposta desta vez. Tente de novo, ou divida o pedido em partes menores.";
+    reply = deadlineTools
+      ? "Nao deu tempo de concluir esta rodada dentro do limite do servidor. Peça de novo de forma mais focada (ex.: só as dicas da Meta neste conjunto, ou só emitir o card já montado) — assim a resposta chega inteira."
+      : "Nao consegui produzir a resposta desta vez. Tente de novo, ou divida o pedido em partes menores.";
     usouFallback = true;
-    finishReason = "erro_sem_conteudo";
+    finishReason = deadlineTools ? "orcamento_tempo_sem_conteudo" : "erro_sem_conteudo";
   }
 
   const diagnostico = { finish_reason: finishReason, iteracoes, ms_total: decorrido(),
@@ -3745,6 +3886,7 @@ Deno.serve(async (req) => {
     cache_rejeitado: cacheRejeitado, reasoning_rejeitado: reasoningRejeitado,
     reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
     hist_msgs_cortadas: histMsgsCortadas,
+    atalho_meta_dicas: atalhoMetaDicas,
     // v28.11: quanto do contexto anterior a rodada enxergou, e quanto ela deixa para a proxima.
     toolres_gravados: toolResults.length, toolres_turnos_reinjetados: toolresTurnos,
     toolres_ferramentas_reinjetadas: toolresFerramentas, toolres_chars_reinjetados: toolresChars,
@@ -3763,7 +3905,7 @@ Deno.serve(async (req) => {
     deadline_tools: deadlineTools, ms_total: decorrido(),
     teto_tools: tetoTools, cache_write: cacheWrite, cache_read: cacheRead, cache_rejeitado: cacheRejeitado,
     reasoning_rejeitado: reasoningRejeitado, reasoning_tokens: reasoningTokens, usou_fallback: usouFallback,
-    hist_msgs_cortadas: histMsgsCortadas,
+    hist_msgs_cortadas: histMsgsCortadas, atalho_meta_dicas: atalhoMetaDicas,
     toolres_gravados: toolResults.length, toolres_turnos_reinjetados: toolresTurnos,
     toolres_ferramentas_reinjetadas: toolresFerramentas, toolres_chars_reinjetados: toolresChars,
     roteado_para_job: false, motivo_do_roteamento: rota.motivo, familias_de_assunto: rota.familias,
