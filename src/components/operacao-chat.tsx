@@ -89,11 +89,12 @@ const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 // o que estado local nunca cobriria. A edge grava a resposta antes de responder
 // ao HTTP, então o trabalho não se perde ao navegar.
 // Governa APENAS o caminho síncrono (traffic-chat), onde a resposta vem no próprio HTTP e
-// passar de 3 min significa que a requisição não voltou. NÃO vale para análise profunda: lá o
-// veredito é do banco (`chat_jobs`), e job passar de 3 min é rotina — dos 15 jobs medidos em
-// 05/08, 6 passaram de 180 s e a média é 196 s. Por isso o aviso derivado deste literal é
-// renderizado sob `!jobAtivo`.
-const TIMEOUT_TURNO_MS = 3 * 60 * 1000;
+// passar de 2 min significa que a requisição não voltou no orçamento operacional alinhado
+// à edge (HARD_LIMIT ~118s; teto de plataforma Supabase ~150s IDLE, não configurável).
+// NÃO vale para análise profunda: lá o veredito é do banco (`chat_jobs`), e job passar de
+// 2–3 min é rotina — dos 15 jobs medidos em 05/08, 6 passaram de 180 s e a média é 196 s.
+// Por isso o aviso derivado deste literal é renderizado sob `!jobAtivo`.
+const TIMEOUT_TURNO_MS = 2 * 60 * 1000;
 const JANELA_STATUS_MS = 30 * 60 * 1000; // recorte para varrer a lista de conversas
 
 // Análise profunda: a edge traffic-agent-job roda subagentes em background e
@@ -375,7 +376,7 @@ export function OperacaoChat() {
   const pendentes = status.data ?? {};
 
   // Relógio: sem isto a idade da pergunta não seria reavaliada e o indicador
-  // nunca viraria "falha" ao cruzar os 3 minutos.
+  // nunca viraria "falha" ao cruzar os 2 minutos.
   const [agora, setAgora] = useState(() => Date.now());
   const ultimaDaAtiva = messages.data?.[(messages.data?.length ?? 0) - 1];
   const precisaRelogio = Object.keys(pendentes).length > 0 || ultimaDaAtiva?.role === "user";
@@ -538,7 +539,7 @@ export function OperacaoChat() {
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !!companyId;
 
   // `textoOverride` só é usado pelo reenvio de uma pergunta órfã (turno que
-  // estourou os 3 min): reenvia aquele texto sem mexer no que o usuário digitou.
+  // estourou os 2 min): reenvia aquele texto sem mexer no que o usuário digitou.
   const send = async (textoOverride?: string) => {
     const reenvio = typeof textoOverride === "string";
     const text = (reenvio ? textoOverride : input).trim();
@@ -849,7 +850,7 @@ export function OperacaoChat() {
   // abriu a conversa / voltou depois) — mesmo princípio do indicador síncrono: o estado é
   // derivado, não presumido.
   // GT-16: 'error' entra na busca. Sem ele, job marcado pelo `expira-chat-jobs` sumia do card
-  // ao reabrir a conversa e caía no aviso genérico de 3 min abaixo, que atribui a falha ao
+  // ao reabrir a conversa e caía no aviso genérico de 2 min abaixo, que atribui a falha ao
   // "limite de tempo do servidor" — motivo inventado, quando o banco tem o motivo real.
   const jobDb = useQuery({
     queryKey: ["chat-job-ativo", activeId],
@@ -1075,17 +1076,18 @@ export function OperacaoChat() {
               )}
 
               {/* GT-16: `!jobAtivo` é obrigatório aqui. Este aviso é do caminho SÍNCRONO;
-                  sem a guarda ele aparecia embaixo do card de progresso aos 3 min, dizendo que
-                  o turno não foi concluído enquanto o card girava logo acima — e job de 3 min é
+                  sem a guarda ele aparecia embaixo do card de progresso aos 2 min, dizendo que
+                  o turno não foi concluído enquanto o card girava logo acima — e job longo é
                   normal: dos 15 jobs medidos em 05/08, 6 passaram de 180 s. */}
               {falhouAtiva && !jobAtivo && !sending && (
                 <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
                   <div className="text-sm font-medium">A resposta não chegou</div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    A pergunta foi enviada há mais de 3 minutos e o turno não foi concluído
-                    (em geral o servidor cortou a requisição perto de 2,5 min). Nada foi perdido:
-                    reenviar refaz a pergunta nesta mesma conversa — para dicas da Meta, uma
-                    pergunta só sobre isso costuma responder mais rápido.
+                    A pergunta foi enviada há mais de 2 minutos e o turno não foi concluído
+                    (o servidor corta perto desse orçamento; o gateway da plataforma fica em
+                    torno de 2,5 min). Nada foi perdido: reenviar refaz a pergunta nesta mesma
+                    conversa — para dicas da Meta, uma pergunta só sobre isso costuma responder
+                    mais rápido.
                   </p>
                   <Button
                     size="sm"

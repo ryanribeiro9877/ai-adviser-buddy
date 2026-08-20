@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v28.32)
+// supabase/functions/traffic-chat/index.ts (v28.33)
+// v28.33 (20/08/2026) - ORCAMENTO 2 MIN + PROSA (nao JSON) NAS DICAS DA META:
+//   Pos-v28.32 o atalho meta-dicas terminava, mas a sintese OpenRouter abortava no
+//   OPENROUTER_CALL_CAP 45s e o fallback colava JSON bruto ("tempo de sintese estourou").
+//   Conserto: (1) orcamento operacional de ~2 min (HARD_LIMIT 118s, margem sob IDLE ~150s
+//   nao configuravel da plataforma); (2) TOOLS_DEADLINE 55s + OPENROUTER_CALL_CAP 70s para
+//   sobrar >=40-60s de prosa; (3) payload compacto no atalho; (4) fallback deterministico
+//   em portugues a partir dos campos estruturados — NUNCA dump de JSON no chat.
 // v28.32 (20/08/2026) - FIM DOS 504 RECORRENTES (incidente Legal 20/08 ~13:27 e ~13:34 UTC):
 //   Evidencia: POST 504 no gateway a ~150s; um turno de "emita o card" gravou ms_total=170668
 //   (depois do 504); a pergunta de dicas da Meta nao gravou reply nenhum. Causa: o deadline
@@ -506,7 +513,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.32";
+const VERSAO = "chat-v28.33";
 const HIST = 24;
 // v28.11: orcamento da reinjecao de retorno de ferramenta.
 // TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
@@ -526,15 +533,20 @@ const TOOLRES_TEXTO = 400;
 // enxergar INTEIRA (o corte em 6000 escondeu os blocos 9-12 do questionario de 28/07).
 const HIST_CAP = 6000;
 const HIST_CAP_USER_RECENTE = 12000;
-// v19/v28.32 - orcamento de tempo. Teto da plataforma = ~150s (IDLE_TIMEOUT, nao configuravel).
-// Calibrado com os logs de 27/07 e revalidado em 20/08 (504 em 149–151s; ms_total interno
-// chegou a 170s depois do gateway ja ter cortado). TOOLS_DEADLINE: para de coletar tools.
-// HARD_LIMIT: teto proprio bem abaixo de 150s, com folga para sintese + gravar no banco.
-// OPENROUTER_CALL_CAP: nenhuma chamada ao modelo pode segurar o HTTP ate o gateway matar.
-const TOOLS_DEADLINE_MS = 50_000;
-const HARD_LIMIT_MS = 125_000;
+// v19/v28.33 - orcamento de tempo (~2 min operacional). Teto da plataforma = ~150s
+// (IDLE_TIMEOUT do gateway Supabase, NAO configuravel no projeto). Pedido do gestor:
+// 120s de orcamento util. HARD_LIMIT 118s deixa folga para gravar a reply antes do corte
+// de plataforma. TOOLS_DEADLINE 55s reserva >=40-60s para prosa. OPENROUTER_CALL_CAP 70s
+// evita o abort prematuro da sintese que, em v28.32, caia no dump de JSON.
+const TOOLS_DEADLINE_MS = 55_000;
+const HARD_LIMIT_MS = 118_000;
 const RESERVA_GRAVACAO_MS = 8_000;
-const OPENROUTER_CALL_CAP_MS = 45_000;
+const OPENROUTER_CALL_CAP_MS = 70_000;
+// Atalho meta-dicas: tetos do payload enviado ao LLM (persistencia em tool_results continua
+// com TOOLRES_TETO_PERSIST; aqui so enxugamos o que a sintese precisa ler).
+const META_DICAS_LLM_ITENS = 24;
+const META_DICAS_LLM_MSG = 280;
+const META_RECOS_LLM_ITENS = 12;
 // Sonnet gera ~85 tok/s; usamos 60 para ser conservador. Grok 4.6 e mais lento sob contexto
 // grande — o AbortSignal e a defesa real, nao so o teto de tokens.
 const TOKENS_POR_SEGUNDO = 60;
@@ -698,6 +710,165 @@ async function t_recos(companyId: string) {
     .eq("company_id", companyId).eq("status", "new").order("created_at", { ascending: false }).limit(20);
   return { recomendacoes_pendentes: data ?? [], nota: "regua destas recomendacoes e custo de MIDIA, nao contrato pago. Antes de aprovar escala, cruze com get_funil_credito." };
 }
+
+/** Compacta get_meta_dicas para a sintese LLM — menos tokens, mesma leitura acionavel. */
+function compactMetaDicasParaLlm(raw: any): any {
+  if (raw == null) return null;
+  if (typeof raw !== "object") return raw;
+  if (raw.erro) return { erro: String(raw.erro) };
+  const lista = Array.isArray(raw.dicas) ? raw.dicas : [];
+  const slim = lista.slice(0, META_DICAS_LLM_ITENS).map((d: any) => ({
+    title: d?.title ?? null,
+    message: String(d?.message ?? "").slice(0, META_DICAS_LLM_MSG),
+    importance: d?.importance ?? null,
+    object_type: d?.object_type ?? null,
+    object_name: d?.object_name ?? null,
+    campaign_name: d?.campaign_name ?? null,
+    veredito: d?.veredito ?? null,
+    veredito_motivo: String(d?.veredito_motivo ?? "").slice(0, 220),
+    first_seen_on: d?.first_seen_on ?? null,
+    last_seen_on: d?.last_seen_on ?? null,
+    ainda_ativa_hoje: d?.ainda_ativa_hoje ?? null,
+  }));
+  return {
+    empresa: raw.empresa ?? null,
+    janela_dias: raw.janela_dias ?? null,
+    desde: raw.desde ?? null,
+    total: raw.total ?? lista.length,
+    por_veredito: raw.por_veredito ?? {},
+    dicas: slim,
+    dicas_omitidas: Math.max(0, lista.length - slim.length),
+    nota: "Payload compactado para sintese. Cite o veredito interno; nao invente dicas ausentes.",
+  };
+}
+
+/** Compacta a fila interna para a sintese LLM. */
+function compactRecosParaLlm(raw: any): any {
+  if (raw == null) return null;
+  if (typeof raw !== "object") return raw;
+  const lista = Array.isArray(raw.recomendacoes_pendentes) ? raw.recomendacoes_pendentes : [];
+  return {
+    recomendacoes_pendentes: lista.slice(0, META_RECOS_LLM_ITENS).map((r: any) => ({
+      title: r?.title ?? null,
+      impact: r?.impact ?? null,
+      category: r?.category ?? null,
+      description: String(r?.description ?? "").slice(0, 280),
+      status: r?.status ?? null,
+      created_at: r?.created_at ?? null,
+    })),
+    omitidas: Math.max(0, lista.length - Math.min(lista.length, META_RECOS_LLM_ITENS)),
+    nota: raw.nota ?? null,
+  };
+}
+
+function rotuloVereditoPt(v: unknown): string {
+  const key = String(v ?? "").toLowerCase();
+  const map: Record<string, string> = {
+    concorda: "Concordamos",
+    discorda: "Discordamos",
+    nao_aplicavel: "Não aplicável à régua",
+    sem_regua: "Sem régua ainda",
+  };
+  return map[key] || (key ? String(v) : "sem veredito");
+}
+
+/**
+ * Fallback deterministico em portugues quando a sintese OpenRouter falha/estoura.
+ * Usa SO campos ja lidos do banco — NUNCA inventa dica nem cola JSON bruto no chat.
+ */
+function formatarResumoMetaDicasPt(dicasRaw: any, recosRaw: any): string {
+  const blocos: string[] = [];
+  const d = dicasRaw && typeof dicasRaw === "object" ? dicasRaw : null;
+  if (d?.erro) {
+    blocos.push(`Não consegui ler as dicas da Meta no banco (${String(d.erro).slice(0, 160)}).`);
+  } else if (d) {
+    const janela = Number(d.janela_dias ?? 14) || 14;
+    const total = Number(d.total ?? 0) || 0;
+    const lista = Array.isArray(d.dicas) ? d.dicas : [];
+    const empresa = d.empresa ? ` — ${String(d.empresa)}` : "";
+    const counts = d.por_veredito && typeof d.por_veredito === "object" ? d.por_veredito : {};
+    const partesCount = Object.entries(counts)
+      .filter(([, n]) => Number(n) > 0)
+      .map(([k, n]) => `${rotuloVereditoPt(k).toLowerCase()}: ${n}`)
+      .join("; ");
+    blocos.push(`## Dicas da Meta (últimos ${janela} dias)${empresa}`);
+    if (total === 0 || lista.length === 0) {
+      blocos.push("Não há dica da Meta coletada nessa janela. Nada inventado.");
+    } else {
+      blocos.push(
+        `Encontrei **${total}** dica(s) no banco` +
+          (partesCount ? ` (${partesCount})` : "") +
+          ". Abaixo, o veredito interno de cada uma — a sugestão da Meta não é a nossa.",
+      );
+      const maxShow = 18;
+      for (const item of lista.slice(0, maxShow)) {
+        const titulo = String(item?.title ?? "Dica sem título").trim() || "Dica sem título";
+        const onde = [
+          item?.object_type ? String(item.object_type) : "",
+          item?.object_name ? String(item.object_name) : "",
+          item?.campaign_name ? `campanha ${String(item.campaign_name)}` : "",
+        ].filter(Boolean).join(" · ");
+        const imp = item?.importance ? ` · impacto Meta: ${String(item.importance)}` : "";
+        const ver = rotuloVereditoPt(item?.veredito);
+        const motivo = String(item?.veredito_motivo ?? "").trim();
+        const msg = String(item?.message ?? "").trim().slice(0, 220);
+        const ativa = item?.ainda_ativa_hoje === true ? " (ainda ativa hoje)" : "";
+        const linhasItem = [
+          `### ${titulo}${ativa}`,
+          onde ? `- Onde: ${onde}${imp}` : (imp ? `- ${imp.replace(/^ · /, "")}` : null),
+          `- Veredito interno: **${ver}**` + (motivo ? ` — ${motivo.slice(0, 220)}` : ""),
+          msg ? `- O que a Meta escreveu: ${msg}` : null,
+          `- Próximo passo: ${
+            String(item?.veredito ?? "").toLowerCase() === "concorda"
+              ? "avaliar se cabe agir nesta conta com card explícito."
+              : String(item?.veredito ?? "").toLowerCase() === "discorda"
+              ? "não seguir a sugestão da Meta; manter a régua interna."
+              : String(item?.veredito ?? "").toLowerCase() === "nao_aplicavel"
+              ? "ignorar para decisão de mídia — fora da régua."
+              : "aguardar classificação interna antes de agir."
+          }`,
+        ].filter(Boolean);
+        blocos.push(linhasItem.join("\n"));
+      }
+      if (lista.length > maxShow) {
+        blocos.push(`_…e mais ${lista.length - maxShow} dica(s) no banco nesta janela (peça um recorte se quiser o restante)._`);
+      }
+    }
+  } else {
+    blocos.push("## Dicas da Meta\nNão há retorno estruturado de dicas neste turno.");
+  }
+
+  const r = recosRaw && typeof recosRaw === "object" ? recosRaw : null;
+  const fila = Array.isArray(r?.recomendacoes_pendentes) ? r.recomendacoes_pendentes : [];
+  blocos.push("## Fila interna (régua de mídia)");
+  if (fila.length === 0) {
+    blocos.push("Nenhuma recomendação interna pendente no momento.");
+  } else {
+    blocos.push(`Há **${fila.length}** item(ns) pendente(s) na fila interna (custo de mídia, não contrato pago):`);
+    for (const item of fila.slice(0, 10)) {
+      const titulo = String(item?.title ?? "Recomendação").trim() || "Recomendação";
+      const impact = item?.impact != null ? String(item.impact) : null;
+      const cat = item?.category != null ? String(item.category) : null;
+      const desc = String(item?.description ?? "").trim().slice(0, 220);
+      const meta = [cat, impact ? `impacto ${impact}` : null].filter(Boolean).join(" · ");
+      blocos.push(
+        `- **${titulo}**` +
+          (meta ? ` (${meta})` : "") +
+          (desc ? `: ${desc}` : "") +
+          " — próximo passo: revisar e decidir se vira card.",
+      );
+    }
+    if (fila.length > 10) {
+      blocos.push(`_…e mais ${fila.length - 10} na fila._`);
+    }
+  }
+
+  blocos.push(
+    "_Leitura direta do que já está no banco (sem inventar). Se quiser aprofundar um objeto ou emitir card, peça o recorte._",
+  );
+  return blocos.join("\n\n");
+}
+
 async function t_rpc(nome: string, parametros: Record<string, unknown>) {
   const { data, error } = await supa.rpc(nome, parametros);
   return error ? { erro: `falha ao chamar ${nome}: ${error.message}` } : data;
@@ -3683,8 +3854,9 @@ Deno.serve(async (req) => {
     try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
   }
 
-  // v28.32: atalho para pergunta de dicas da Meta — le o banco e sintetiza UMA vez, sem
-  // deixar o modelo abrir catalogo Pipeboard (padrao que estourava o teto em 20/08).
+  // v28.32/v28.33: atalho para pergunta de dicas da Meta — le o banco e sintetiza UMA vez,
+  // sem deixar o modelo abrir catalogo Pipeboard. Em falha de sintese: prosa deterministica
+  // (nunca JSON bruto no chat).
   let atalhoMetaDicas = false;
   if (isPedidoDicasMeta(msgText) && !rawAtts.length) {
     atalhoMetaDicas = true;
@@ -3706,21 +3878,26 @@ Deno.serve(async (req) => {
     }
     // Sintese com contexto ENXUTO: historico longo desta conversa (carrossel/cards) era o
     // que fazia Grok estourar 150s numa pergunta de dicas. System + pergunta + dados bastam.
+    // v28.33: payload compacto (campos acionaveis) para caber no orcamento de 2 min.
+    const dicasLlm = compactMetaDicasParaLlm(dicas);
+    const recosLlm = compactRecosParaLlm(recos);
     const msgsAtalho = [
       { role: "system", content: cacheSystem },
       {
         role: "user",
         content:
           `Pergunta do gestor: ${msgText}\n\n` +
-          "Os retornos abaixo JA foram lidos do banco (get_meta_dicas + get_recommendations). " +
-          "Responda AGORA sem chamar ferramentas. Cite o veredito interno de cada dica; " +
-          "se a lista estiver vazia, diga que nao ha dica coletada na janela — nao invente.\n\n" +
-          `get_meta_dicas:\n${JSON.stringify(dicas).slice(0, TOOLRES_TETO_PERSIST)}\n\n` +
-          `get_recommendations:\n${JSON.stringify(recos).slice(0, TOOLRES_TETO_PERSIST)}`,
+          "Os retornos abaixo JA foram lidos do banco (dicas da Meta + fila interna). " +
+          "Responda AGORA em prosa clara, por secoes, sem chamar ferramentas e SEM colar JSON. " +
+          "Cite o veredito interno de cada dica; se a lista estiver vazia, diga que nao ha " +
+          "dica coletada na janela — nao invente.\n\n" +
+          `Dicas da Meta (compacto):\n${JSON.stringify(dicasLlm).slice(0, TOOLRES_TETO_PERSIST)}\n\n` +
+          `Fila interna (compacto):\n${JSON.stringify(recosLlm).slice(0, Math.min(6000, TOOLRES_TETO_PERSIST))}`,
       },
     ];
     const msgsBackup = messages.splice(0, messages.length, ...msgsAtalho);
-    const rf = await chamar(false, Math.min(tokensDisponiveis(), 4000), true);
+    // Ate 4500 tokens de prosa; o AbortSignal respeita o restante do HARD_LIMIT (~2 min).
+    const rf = await chamar(false, Math.min(tokensDisponiveis(), 4500), true);
     messages.splice(0, messages.length, ...msgsBackup);
     if (!rf.erro) {
       const p = rf.parsed;
@@ -3728,19 +3905,14 @@ Deno.serve(async (req) => {
       tokensOut += Number(p?.usage?.completion_tokens ?? 0);
       somarCache(p?.usage); somarReasoning(p?.usage);
       finishReason = String(p?.choices?.[0]?.finish_reason ?? "") + "+atalho_meta_dicas";
-      reply = p?.choices?.[0]?.message?.content ?? "";
+      reply = String(p?.choices?.[0]?.message?.content ?? "").trim();
       iteracoes = 1;
-    } else {
-      // Sem inventar dicas: entrega o JSON lido, declarado como dado bruto do banco.
-      finishReason = `atalho_meta_dicas_${rf.erro}+bruto`;
+    }
+    if (!reply) {
+      // Sem inventar dicas: prosa deterministica a partir dos campos estruturados.
+      finishReason = `atalho_meta_dicas_${rf?.erro || "sem_conteudo"}+resumo_deterministico`;
       deadlineTools = true;
-      const dicasStr = JSON.stringify(dicas ?? null).slice(0, 6000);
-      const recosStr = JSON.stringify(recos ?? null).slice(0, 3000);
-      reply =
-        "Li as dicas da Meta e a fila interna no banco, mas o tempo de sintese estourou. " +
-        "Segue o retorno bruto (nao inventei nada). Peça um resumo focado se quiser a leitura em prosa.\n\n" +
-        `### get_meta_dicas\n\`\`\`json\n${dicasStr}\n\`\`\`\n\n` +
-        `### get_recommendations\n\`\`\`json\n${recosStr}\n\`\`\``;
+      reply = formatarResumoMetaDicasPt(dicas, recos);
       iteracoes = 1;
     }
   }
