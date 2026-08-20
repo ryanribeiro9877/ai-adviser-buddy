@@ -1,4 +1,11 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.4)
+// supabase/functions/traffic-agent-job/index.ts (v3.5)
+// v3.5 (20/08/2026) - ROTEADOR DE CAPACIDADE (lite | standard | deep): o esforco do
+//   pipeline escala com a complexidade da pergunta, sem baixar o padrao de resposta
+//   completa (veredito + evidencia + recomendacao; proibido "vou ler"). Classificacao
+//   DETERMINISTICA no codigo (heuristicas de tamanho/palavras-chave/follow-up), nao
+//   no LLM. lite = 1 especialista, sem devolucao/checkpoint, caps curtos; standard =
+//   planner 1-2 especialistas, 1 devolucao, checkpoint se parede exigir; deep =
+//   multi-especialista, devolucao plena, segmentos. Ato/anexo continuam no sync.
 // v3.4 (20/08/2026) - FAST-TRACK DEEP: pergunta curta / follow-up / dica Meta-musica
 //   roda 1 segmento, ate 2 especialistas, SEM devolucao e SEM checkpoint. Evita a
 //   maratona "segmento 2: retomando" em Q&A focado (caso medido: 2 dicas de musica
@@ -184,10 +191,15 @@ const RESERVA_FINAL_MS = 12_000;
 const MAX_SEGMENTOS = 3;
 const DEVOLUCOES_MAX = 2;          // rodadas de devolucao por job (nao por subagente)
 const CHECKPOINT_MIN_MS = 75_000;  // se falta trabalho e o prazo esta abaixo disto, segmenta
-// v3.4: fast-track — pergunta focada nao entra em multi-segmento nem devolucao.
-const FAST_MAX_ESPECIALISTAS = 2;
-const FAST_OPENROUTER_TIMEOUT_MS = 75_000;
+// v3.5: caps por tier de capacidade (roteador deterministico).
+const LITE_MAX_ESPECIALISTAS = 1;
+const STANDARD_MAX_ESPECIALISTAS = 2;
+const LITE_OPENROUTER_TIMEOUT_MS = 60_000;
+const STANDARD_OPENROUTER_TIMEOUT_MS = 90_000;
 const OPENROUTER_TIMEOUT_MS = 120_000;
+const LITE_DEVOLUCOES_MAX = 0;
+const STANDARD_DEVOLUCOES_MAX = 1;
+// deep usa DEVOLUCOES_MAX (2)
 // v2.2: pipeline de visao
 const VISAO_LOTE = 6;               // imagens por chamada de visao
 const VISAO_MAX_POR_RODADA = 30;    // teto de arquivos analisados por segmento
@@ -224,37 +236,83 @@ const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const deacc = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
 
-// v3.4: perfil "fast deep" — Q&A focado sem maratona de segmentos.
-// Medido 20/08: follow-up de 2 dicas de musica → planner+2 subs+devolucao+checkpoint
-// e card preso em "Planejando" no segmento 2. Fast = 1 pass + ate 2 especialistas + sintese.
-type PerfilFast = {
-  ativo: boolean;
+// v3.5: roteador de capacidade — lite | standard | deep.
+// Deterministico: tamanho + palavras-chave + follow-up. O LLM NAO escolhe o tier.
+// Resposta completa em todos os tiers (sintese nao muda o padrao de qualidade).
+type CapacidadeTier = "lite" | "standard" | "deep";
+type Capacidade = {
+  tier: CapacidadeTier;
   motivo: string;
+  maxEspecialistas: number;
+  devolucoesMax: number;
+  permitirCheckpoint: boolean;
+  openRouterTimeoutMs: number;
   forcarPlano?: { nome: string; foco: string }[];
 };
-function perfilFastDeep(pergunta: string): PerfilFast {
+
+const RE_DEEP = /\b(analise tudo|analise completa|auditoria|todas as campanhas|todas campanhas|todas as contas|comparar|comparacao|cruzar|panorama|inventario|conta inteira|conta toda|relatorio completo|diagnostico completo|visao geral|tudo da conta|tudo sobre|multiplas campanhas|todas as pecas|cobertura total|pontos? a pontos?)\b/;
+const RE_META_DICA = /\b(dica|recomendac|opportunity|musica|boost|impulsionar|meta emitiu|recomendacao da meta)\b|recomendac.*(meta|facebook|anuncio|impulsionar|boost)/;
+const RE_FOLLOW_UP = /^(sobre|e |dessas|dessa|desses|desse|analise|me (informe|diga|recomenda)|o que (voce|acha)|e as |e os |e essas|e esses)|\b(essas duas|analise[- ]as|o que me recomenda|me informe o que|e viavel|faz sentido)\b/;
+const RE_STATUS_SIMPLES = /\b(status|como (esta|estao)|ta ativa|esta ativa|pausad[ao]|ligada|desligada)\b/;
+const RE_JULGAMENTO_CURTO = /^(sim|nao|ok|pode|confirma|vale a pena|e bom|e ruim)\b|\b(essas? (duas|2)|1[-–]2|uma ou duas)\b.*\b(recomend|dica|opca)/;
+
+function classificarCapacidade(pergunta: string): Capacidade {
   const raw = pergunta.trim();
   const p = deacc(raw.toLowerCase());
   const len = raw.length;
-  const metaDica = /\b(dica|recomendac|opportunity|musica|boost|impulsionar|meta emitiu|recomendacao da meta)\b/.test(p)
-    || /recomendac.*(meta|facebook|anuncio|impulsionar|boost)/.test(p);
-  const followUp = /^(sobre|e |dessas|dessa|desses|desse|analise|me (informe|diga|recomenda)|o que (voce|acha)|e as |e os |e essas|e esses)/.test(p)
-    || /\b(essas duas|analise[- ]as|o que me recomenda|me informe o que)\b/.test(p);
+  const linhas = raw.split(/\n/).filter((l) => l.trim().length > 0).length;
+  const perguntas = (raw.match(/\?/g) ?? []).length;
+  const deepHit = RE_DEEP.test(p)
+    || len >= 1400
+    || (len >= 900 && (perguntas >= 3 || linhas >= 8))
+    || (perguntas >= 4 && len >= 500);
+  if (deepHit) {
+    return {
+      tier: "deep",
+      motivo: RE_DEEP.test(p) ? "brief amplo / multi-familia" : "pedido longo multi-parte",
+      maxEspecialistas: 99,
+      devolucoesMax: DEVOLUCOES_MAX,
+      permitirCheckpoint: true,
+      openRouterTimeoutMs: OPENROUTER_TIMEOUT_MS,
+    };
+  }
+  const metaDica = RE_META_DICA.test(p);
+  const followUp = RE_FOLLOW_UP.test(p);
+  const statusSimples = RE_STATUS_SIMPLES.test(p) && len <= 400;
+  const julgamentoCurto = RE_JULGAMENTO_CURTO.test(p) && len <= 500;
   const curta = len <= 600;
   if (curta && metaDica) {
     return {
-      ativo: true,
+      tier: "lite",
       motivo: "follow-up/dica-meta curta",
+      maxEspecialistas: LITE_MAX_ESPECIALISTAS,
+      devolucoesMax: LITE_DEVOLUCOES_MAX,
+      permitirCheckpoint: false,
+      openRouterTimeoutMs: LITE_OPENROUTER_TIMEOUT_MS,
       forcarPlano: [{
         nome: "alertas_recomendacoes",
         foco: "Levantar as dicas/recomendacoes da Meta (get_meta_dicas) citadas na pergunta — em especial musica/boost/Opportunity Score — e devolver julgamento acionavel (viavel ou nao + o que fazer). Nao inventariar criativos nem abrir outras frentes.",
       }],
     };
   }
-  if (curta && (followUp || len <= 280)) {
-    return { ativo: true, motivo: followUp ? "follow-up focado" : "pergunta curta" };
+  if (curta && (followUp || statusSimples || julgamentoCurto || len <= 280)) {
+    return {
+      tier: "lite",
+      motivo: followUp ? "follow-up focado" : statusSimples ? "status pontual" : julgamentoCurto ? "julgamento curto" : "pergunta curta",
+      maxEspecialistas: LITE_MAX_ESPECIALISTAS,
+      devolucoesMax: LITE_DEVOLUCOES_MAX,
+      permitirCheckpoint: false,
+      openRouterTimeoutMs: LITE_OPENROUTER_TIMEOUT_MS,
+    };
   }
-  return { ativo: false, motivo: "" };
+  return {
+    tier: "standard",
+    motivo: "operacao / diagnostico pontual",
+    maxEspecialistas: STANDARD_MAX_ESPECIALISTAS,
+    devolucoesMax: STANDARD_DEVOLUCOES_MAX,
+    permitirCheckpoint: true,
+    openRouterTimeoutMs: STANDARD_OPENROUTER_TIMEOUT_MS,
+  };
 }
 
 async function resolveCompany(name?: string): Promise<{ id: string; name: string } | null> {
@@ -1120,15 +1178,21 @@ function extrairJSON(txt: string): any | null {
   if (ini < 0 || fim <= ini) return null;
   try { return JSON.parse(limpo.slice(ini, fim + 1)); } catch { return null; }
 }
-async function planejar(pergunta: string, tel: any, fast?: PerfilFast): Promise<{ plano: { nome: string; foco: string }[]; degradado: boolean }> {
+async function planejar(pergunta: string, tel: any, cap?: Capacidade): Promise<{ plano: { nome: string; foco: string }[]; degradado: boolean }> {
   const nomes = Object.keys(SUBAGENTES);
-  if (fast?.ativo && fast.forcarPlano?.length) {
-    const plano = fast.forcarPlano.filter((p) => nomes.includes(p.nome));
+  const maxEsp = cap?.maxEspecialistas ?? nomes.length;
+  if (cap?.forcarPlano?.length) {
+    const plano = cap.forcarPlano.filter((p) => nomes.includes(p.nome)).slice(0, maxEsp);
     if (plano.length) {
-      tel.planner = { tokens_in: 0, tokens_out: 0, forcado: true, motivo: fast.motivo };
+      tel.planner = { tokens_in: 0, tokens_out: 0, forcado: true, motivo: cap.motivo, tier: cap.tier };
       return { plano, degradado: false };
     }
   }
+  const hintCap = cap?.tier === "lite"
+    ? "\nMODO LITE: no maximo 1 especialista; um dominio so."
+    : cap?.tier === "standard"
+      ? "\nMODO STANDARD: no maximo 2 especialistas; preferir 1 quando um dominio cobre."
+      : "\nMODO DEEP: pode usar varios especialistas se a pergunta cruzar dominios; auditoria ampla inclui todos os pertinentes.";
   const sys = `Voce e o ROTEADOR de um gestor de trafego Meta Ads. Dada a pergunta do gestor, encaminhe a tarefa para o MENOR conjunto de especialistas que a cobre por inteiro - tarefa de um unico dominio vai para UM unico especialista.
 Especialistas disponiveis (use exatamente estes nomes):
 - desempenho_campanhas: numeros de midia (gasto, CTR, custos, ranking, series, metas)
@@ -1139,24 +1203,24 @@ Especialistas disponiveis (use exatamente estes nomes):
 - alertas_recomendacoes: alertas ativos, recomendacoes pendentes e DICAS DA META (Opportunity Score, boost, musica)
 - criativos_drive: pasta de criativos NOVOS no Google Drive (inventario, formatos, eixos, comparacao com vencedores)\n- analise_visual_drive: analise VISUAL arquivo a arquivo das pecas do Drive (produto, texto visivel, riscos, veredito aproveitavel) - so quando pedirem CLASSIFICAR/ANALISAR CONTEUDO das pecas
 - conhecimento: fundamento tecnico puro (so quando a pergunta exige conceito alem do operacional)
-REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive; dica/recomendacao/boost/musica/Opportunity Score da Meta -> SOMENTE alertas_recomendacoes (NAO acrescente criativos so porque a dica menciona musica). NAO inclua especialista cujo dominio a pergunta nao toca.${fast?.ativo ? "\nMODO RAPIDO: no maximo 2 especialistas; preferir 1 quando um dominio cobre." : ""}
+REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive; dica/recomendacao/boost/musica/Opportunity Score da Meta -> SOMENTE alertas_recomendacoes (NAO acrescente criativos so porque a dica menciona musica). NAO inclua especialista cujo dominio a pergunta nao toca.${hintCap}
 Responda APENAS com JSON valido, sem markdown, no formato:
 {"subagentes":[{"nome":"...","foco":"instrucao curta e especifica do que ELE deve levantar"}]}
 Para auditoria ampla da conta, inclua todos os pertinentes.`;
   const r = await chamarLLM(
     [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 12000) }],
-    { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB, timeoutMs: fast?.ativo ? FAST_OPENROUTER_TIMEOUT_MS : OPENROUTER_TIMEOUT_MS },
+    { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB, timeoutMs: cap?.openRouterTimeoutMs ?? OPENROUTER_TIMEOUT_MS },
   );
   if (r.erro) {
-    const fallback = nomes.slice(0, fast?.ativo ? FAST_MAX_ESPECIALISTAS : nomes.length)
+    const fallback = nomes.slice(0, Math.min(maxEsp, nomes.length))
       .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
     return { plano: fallback, degradado: true };
   }
-  const u = usoDe(r.parsed); tel.planner = { tokens_in: u.tin, tokens_out: u.tout };
+  const u = usoDe(r.parsed); tel.planner = { tokens_in: u.tin, tokens_out: u.tout, tier: cap?.tier };
   const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
   const lista = Array.isArray(bruto?.subagentes) ? bruto.subagentes : null;
   if (!lista?.length) {
-    const fallback = nomes.slice(0, fast?.ativo ? FAST_MAX_ESPECIALISTAS : nomes.length)
+    const fallback = nomes.slice(0, Math.min(maxEsp, nomes.length))
       .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
     return { plano: fallback, degradado: true };
   }
@@ -1164,15 +1228,15 @@ Para auditoria ampla da conta, inclua todos os pertinentes.`;
     .map((x: any) => ({ nome: String(x?.nome ?? "").trim(), foco: String(x?.foco ?? "").trim().slice(0, 400) }))
     .filter((x: any) => nomes.includes(x.nome));
   if (!plano.length) {
-    const fallback = nomes.slice(0, fast?.ativo ? FAST_MAX_ESPECIALISTAS : nomes.length)
+    const fallback = nomes.slice(0, Math.min(maxEsp, nomes.length))
       .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
     return { plano: fallback, degradado: true };
   }
   // dedupe mantendo o primeiro foco
   const vistos = new Set<string>();
   let final = plano.filter((p: any) => (vistos.has(p.nome) ? false : (vistos.add(p.nome), true)));
-  if (fast?.ativo && final.length > FAST_MAX_ESPECIALISTAS) {
-    final = final.slice(0, FAST_MAX_ESPECIALISTAS);
+  if (final.length > maxEsp) {
+    final = final.slice(0, maxEsp);
     tel.planner_capado = true;
   }
   return { plano: final, degradado: false };
@@ -1271,7 +1335,7 @@ async function sintetizar(companyName: string, pergunta: string, relatorios: { n
 PERFIL EMPRESARIAL: ${perfil}.
 ESCOPO RIGIDO: somente trafego pago (midia, criativo, publico, orcamento, custo). Bancos, esteira interna, politica de credito, atendimento humano e conversao final do CRM estao FORA - se a pergunta tocar nisso, declare fora de escopo e siga.
 REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao disponivel'; NUNCA estime nem complete com plausibilidade. (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) alguns relatorios chegam marcados como INCOMPLETOS (cortados por limite de tamanho): o que nao esta neles pode MUITO BEM existir no sistema. Para esses, escreva 'o levantamento do especialista veio incompleto nesta rodada' - e PROIBIDO dizer 'nao disponivel', 'retornou vazio' ou tratar a ausencia como inexistencia. (R4) nao misture janelas. (R4b) HOJE e a data declarada na primeira linha deste prompt - NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar a janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes: se uma acao for recomendavel, descreva-a e diga que o gestor pode pedi-la no chat para virar pedido de aprovacao. (R9) incoerencia entre numeros: aponte. Sem jargao interno (nomes de ferramenta, codigos de regra, limites de implementacao).
-PROIBIDO NARRAR INTENCAO: nunca escreva "vou cruzar/ler/consultar/verificar". Entregue UMA resposta completa e elaborada neste turno — veredito + evidencia + recomendacao. Em dicas/recomendacoes da Meta (ex.: impulsionar com musica): diga se e viavel ou nao e o que fazer, sem filler operacional.
+PROIBIDO NARRAR INTENCAO: nunca escreva "vou cruzar/ler/consultar/verificar". Entregue UMA resposta completa e elaborada neste turno — veredito + evidencia + recomendacao — mesmo quando o levantamento veio de um unico especialista (capacidade lite). Em dicas/recomendacoes da Meta (ex.: impulsionar com musica): diga se e viavel ou nao e o que fazer, sem filler operacional. Capacidade menor NAO autoriza resposta curta de dialogo nem "vou analisar".
 FORMATO (regras vigentes do sistema):
 ${estilo}
 MEMORIA INSTITUCIONAL (fatos verificados):
@@ -1640,10 +1704,12 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
-  const fast = perfilFastDeep(pergunta);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.4", subagentes: [] };
-  tel.versao = "job-v3.4";
-  if (fast.ativo) { tel.perfil_fast = true; tel.perfil_fast_motivo = fast.motivo; }
+  const cap = classificarCapacidade(pergunta);
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.5", subagentes: [] };
+  tel.versao = "job-v3.5";
+  tel.capacidade = { tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas, devolucoes_max: cap.devolucoesMax };
+  // Compat: telemetria antiga lia perfil_fast
+  if (cap.tier === "lite") { tel.perfil_fast = true; tel.perfil_fast_motivo = cap.motivo; }
   try {
     const { data: companyRow } = await supa.from("companies").select("name").eq("id", companyId).maybeSingle();
     const companyName = String(companyRow?.name ?? "").trim();
@@ -1651,6 +1717,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     await supa.from("chat_jobs").update({ status: "running", started_at: new Date().toISOString() }).eq("id", jobId);
 
     // v2: RETOMADA DE CHECKPOINT - pula direto para o ponto onde o segmento anterior parou.
+    // lite nunca grava checkpoint; retomada so ocorre em standard/deep.
     if (retomada) {
       await pushProgresso(jobId, "segmento", `segmento ${segmento}: retomando do checkpoint`);
       const { data: styleRows0 } = await supa.from("agent_style").select("secao,regra").eq("vigente", true).order("ordem");
@@ -1661,6 +1728,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       let relatorios: { nome: string; relatorio: string; completo: boolean }[] = retomada.relatorios ?? [];
       const plano: { nome: string; foco: string }[] = retomada.plano ?? [];
       let rodada: number = Number(retomada.rodada ?? 0);
+      const devolucoesCap = cap.devolucoesMax;
       // devolucoes pendentes deste checkpoint (ja com parecer da coordenacao anexavel)
       if (!retomada.direto_para_sintese && Array.isArray(retomada.devolver) && retomada.devolver.length) {
         await pushProgresso(jobId, "subagentes", `reexecutando: ${retomada.devolver.map((d: any) => d.nome).join(", ")}`);
@@ -1674,11 +1742,11 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
         }
         // uma re-validacao final se ainda ha rodadas e prazo
-        while (rodada < DEVOLUCOES_MAX) {
+        while (rodada < devolucoesCap) {
           const devolver2 = await validarRelatorios(pergunta, plano, relatorios, tel);
           if (!devolver2.length) break;
           rodada++;
-          if (prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+          if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
             await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
               pergunta, plano, relatorios, devolver: devolver2, rodada, tel_parcial: tel, segmento: segmento + 1 });
             return;
@@ -1724,35 +1792,31 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       : "(sem regras cadastradas)";
 
     // FASE 1 - planner
-    await pushProgresso(jobId, "planner", fast.ativo
-      ? `modo rapido (${fast.motivo}): escolhendo especialistas`
-      : "escolhendo especialistas");
-    const { plano, degradado } = await planejar(pergunta, tel, fast);
+    const rotuloTier = cap.tier === "lite" ? "leve" : cap.tier === "deep" ? "profunda" : "padrao";
+    await pushProgresso(jobId, "planner", `capacidade ${rotuloTier} (${cap.motivo}): escolhendo especialistas`);
+    const { plano, degradado } = await planejar(pergunta, tel, cap);
     tel.plano = plano.map((p) => p.nome);
     tel.planner_degradado = degradado;
-    await pushProgresso(jobId, "planner", `especialistas: ${plano.map((p) => p.nome).join(", ")}${degradado ? " (plano padrao - planejador nao devolveu JSON valido)" : ""}${fast.ativo ? " [fast]" : ""}`);
+    await pushProgresso(jobId, "planner", `especialistas: ${plano.map((p) => p.nome).join(", ")}${degradado ? " (plano padrao - planejador nao devolveu JSON valido)" : ""} [${cap.tier}]`);
 
     // FASE 2 - subagentes em paralelo
     await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
     let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey }, prazo, tel);
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
 
-    // FASE 2.5 (v2) - VALIDACAO DA COORDENACAO + DEVOLUCAO
-    // v3.4: fast-track PULA devolucao e checkpoint — pergunta focada nao precisa de
-    // segunda rodada da coordenacao (medido: +85s de validacao + segmento 2 preso).
+    // FASE 2.5 - VALIDACAO + DEVOLUCAO (escala com o tier)
     let rodada = 0;
     const falhosDefinitivos: string[] = [];
-    if (!fast.ativo) {
-      while (rodada < DEVOLUCOES_MAX) {
+    if (cap.devolucoesMax > 0) {
+      while (rodada < cap.devolucoesMax) {
         const devolver = await validarRelatorios(pergunta, plano, relatorios, tel);
         if (!devolver.length) break;
         rodada++;
         await pushProgresso(jobId, "devolucao", `rodada ${rodada}: ${devolver.map((d) => d.nome).join(", ")}`);
-        // prazo apertado com trabalho pendente -> grava checkpoint e reinvoca (novo segmento)
-        if (prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+        if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
           await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
             pergunta, plano, relatorios, devolver, rodada, tel_parcial: tel, segmento: segmento + 1 });
-          return; // este worker termina limpo; o proximo retoma do ponto exato
+          return;
         }
         await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver.map((d) => d.nome).join(", ")}`);
         const refeitos = await executarLote(
@@ -1764,27 +1828,26 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           const i = relatorios.findIndex((r) => r.nome === novo.nome);
           if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
         }
-        if (rodada >= DEVOLUCOES_MAX) {
+        if (rodada >= cap.devolucoesMax) {
           for (const d of devolver) if (!falhosDefinitivos.includes(d.nome)) falhosDefinitivos.push(d.nome);
         }
       }
     } else {
-      tel.devolucao_pulada = "fast_deep";
-      await pushProgresso(jobId, "subagentes", "modo rapido: seguindo direto para a resposta (sem devolucao)");
+      tel.devolucao_pulada = `capacidade_${cap.tier}`;
+      await pushProgresso(jobId, "subagentes", `capacidade ${rotuloTier}: seguindo direto para a resposta (sem devolucao)`);
     }
     if (falhosDefinitivos.length) {
       tel.devolucao_esgotada = falhosDefinitivos;
       for (const nome of falhosDefinitivos) {
         const i = relatorios.findIndex((r) => r.nome === nome);
-        if (i >= 0) relatorios[i] = { ...relatorios[i], relatorio: `[RELATORIO COM DEVOLUCAO ESGOTADA - a coordenacao recusou ${DEVOLUCOES_MAX}x; use com reserva e declare a limitacao]\n` + relatorios[i].relatorio };
+        if (i >= 0) relatorios[i] = { ...relatorios[i], relatorio: `[RELATORIO COM DEVOLUCAO ESGOTADA - a coordenacao recusou ${cap.devolucoesMax}x; use com reserva e declare a limitacao]\n` + relatorios[i].relatorio };
       }
     }
     tel.rodadas_devolucao = rodada;
     tel.segmento = segmento;
 
-    // Sintese em segmento proprio se o prazo nao comporta escrever a resposta inteira
-    // Fast-track: nunca segmenta — fecha com o que tem neste worker.
-    if (!fast.ativo && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+    // Checkpoint/segmentos so em tiers que permitem (lite nunca)
+    if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
       await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
         pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel, segmento: segmento + 1, direto_para_sintese: true });
       return;

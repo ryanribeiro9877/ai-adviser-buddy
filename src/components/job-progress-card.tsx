@@ -92,10 +92,25 @@ function nomesEspecialistas(detalhe: string): string[] {
     .split(/[,;]/)
     .map((s) => s.trim())
     .filter(Boolean)
-    // remove sufixo "[fast]" se o planner marcou modo rapido
-    .map((s) => s.replace(/\s*\[fast\]\s*$/i, "").trim())
+    // remove sufixo de capacidade/tier se o planner marcou ([lite]/[standard]/[deep]/[fast])
+    .map((s) => s.replace(/\s*\[(lite|standard|deep|fast)\]\s*$/i, "").trim())
     .filter(Boolean)
     .map((s) => ESPECIALISTAS[s] ?? s);
+}
+
+/** Extrai o tier de capacidade do detalhe do progresso (ex.: "... [lite]"). */
+function tierDoProgresso(lista: Passo[]): string | null {
+  for (let i = lista.length - 1; i >= 0; i--) {
+    const d = lista[i]?.detalhe ?? "";
+    const m = /\[(lite|standard|deep)\]/i.exec(d) || /capacidade\s+(leve|padrao|profunda)/i.exec(d);
+    if (m) {
+      const raw = m[1].toLowerCase();
+      if (raw === "leve" || raw === "lite") return "leve";
+      if (raw === "profunda" || raw === "deep") return "profunda";
+      return "padrão";
+    }
+  }
+  return null;
 }
 
 /** Índice da fase VISÍVEL: fases internas (devolucao/segmento) não podem resetar para Planejando. */
@@ -202,6 +217,7 @@ export function JobProgressCard({
   const ultimo = lista[lista.length - 1];
   const indiceAtual = indiceDaFase(lista);
   const especialistas = lista.flatMap((p) => nomesEspecialistas(p.detalhe ?? ""));
+  const tier = tierDoProgresso(lista);
 
   // Concluído: o card sai de cena por conta própria. O pai também o remove ao receber a
   // resposta, mas depender só disso deixaria o card girando "em andamento" sobre um job já
@@ -237,6 +253,11 @@ export function JobProgressCard({
       <div className="flex items-center gap-2 text-sm font-medium">
         <Microscope className="h-4 w-4 text-primary" />
         Preparando a resposta completa
+        {tier && (
+          <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
+            análise {tier}
+          </span>
+        )}
       </div>
 
       <ol className="mt-2 space-y-1.5">
