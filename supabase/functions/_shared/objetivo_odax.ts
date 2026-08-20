@@ -194,6 +194,20 @@ export function defaultsConjuntoSocialTopo(
   };
 }
 
+/**
+ * Targeting minimo BR Advantage+ para conjunto social SEM molde.
+ * Sem interesses/LAL inventados — so geo+idade+advantage_audience; plataformas
+ * entram depois via aplicarPosicionamentoPorPlataformas.
+ */
+export function targetingPadraoSocialTopo(): Record<string, unknown> {
+  return {
+    age_min: 18,
+    age_max: 65,
+    geo_locations: { countries: ["BR"] },
+    targeting_automation: { advantage_audience: 1 },
+  };
+}
+
 export function mensagemObjetivoNaoSuportado(bruto: string): {
   erro: string;
   detalhe: string;

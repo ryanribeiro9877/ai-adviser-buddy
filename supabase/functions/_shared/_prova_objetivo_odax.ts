@@ -4,6 +4,7 @@ import {
   familiaDeObjetivo,
   ehFamiliaSocialTopo,
   defaultsConjuntoSocialTopo,
+  targetingPadraoSocialTopo,
   mensagemObjetivoNaoSuportado,
   normalizarObjetivoOdax,
 } from "./objetivo_odax.ts";
@@ -48,5 +49,9 @@ assert(!("erro" in reach) && reach.optimization_goal === "REACH", "reach");
 
 const semPage = defaultsConjuntoSocialTopo("engajamento", "");
 assert("erro" in semPage && semPage.erro === "page_id_obrigatorio_para_engajamento", "page obrig");
+
+const tgt = targetingPadraoSocialTopo();
+assert((tgt.geo_locations as any)?.countries?.[0] === "BR", "geo BR");
+assert((tgt.targeting_automation as any)?.advantage_audience === 1, "advantage");
 
 console.log("ok: _prova_objetivo_odax");

@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.28)
+// supabase/functions/meta-actions/index.ts (v5.29)
+// v5.29 (20/08/2026) - criar_conjunto SEM MOLDE para familia engajamento/reconhecimento:
+//   sem_molde / molde_external_id=sem_molde → targeting BR Advantage+ minimo + POST_ENGAGEMENT
+//   (ou REACH) + promoted_object={page_id}. Molde LEADS continua ok: so empresta targeting.
 // v5.28 (20/08/2026) - ENGAJAMENTO/RECONHECIMENTO: criar_campanha aceita ODAX social
 //   (OUTCOME_ENGAGEMENT/AWARENESS + sinonimos). criar_conjunto, quando familia engajamento
 //   ou reconhecimento (payload ou objective da campanha destino), sobrescreve molde
@@ -313,6 +316,7 @@ import {
   familiaDeObjetivo,
   ehFamiliaSocialTopo,
   defaultsConjuntoSocialTopo,
+  targetingPadraoSocialTopo,
   mensagemObjetivoNaoSuportado,
 } from "../_shared/objetivo_odax.ts";
 import {
@@ -1340,13 +1344,24 @@ export async function montarCriacao(
   }
 
   if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
-    const molde = String(p?.molde_external_id ?? "");
+    const moldeRaw = String(p?.molde_external_id ?? "").trim();
+    const semMoldeConj =
+      acao === "criar_conjunto_a_partir_de" &&
+      (p?.sem_molde === true ||
+        /^_?sem_molde$/i.test(moldeRaw));
+    const molde = semMoldeConj ? "" : moldeRaw;
     const campanha = String(p?.campanha_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
     const reais = Number(p?.orcamento_diario_reais ?? 0);
-    if (!molde || !campanha || !nome)
+    if (!campanha || !nome)
+      return {
+        erro: "payload incompleto (campanha_destino_external_id, nome_novo)",
+      };
+    if (!semMoldeConj && !molde)
       return {
         erro: "payload incompleto (molde_external_id, campanha_destino_external_id, nome_novo)",
+        detalhe:
+          "Informe o conjunto molde (qualquer um da conta — so empresta targeting) OU sem_molde=true / molde_external_id=sem_molde quando familia engajamento/reconhecimento.",
       };
     if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
 
@@ -1476,21 +1491,52 @@ export async function montarCriacao(
       };
     }
 
-    const campos = [
-      "optimization_goal",
-      "billing_event",
-      "bid_strategy",
-      "targeting",
-      "promoted_object",
-      "destination_type",
-      "attribution_spec",
-      "bid_amount",
-      "dsa_beneficiary",
-      "dsa_payor",
-    ].join(",");
-    const m = await g(`/${molde}?fields=${campos}`);
-    if (m.status !== 200) return { erro: "falha ao ler o conjunto molde na Meta", detalhe: m.body };
-    const mb: any = m.body ?? {};
+    // Resolve familia social cedo (payload → tag → objective da campanha).
+    let familiaPayload = String(p?.familia_objetivo ?? "").trim().toLowerCase();
+    const tagPartes = String((p?.nome_partes as any)?.objetivo_tag ?? p?.objetivo_tag ?? "").trim();
+    if (!familiaPayload || familiaPayload === "conversao") {
+      if (ehFamiliaSocialTopo(tagPartes) || ehFamiliaSocialTopo(p?.objetivo)) {
+        familiaPayload = familiaDeObjetivo(p?.objetivo ?? tagPartes);
+      }
+    }
+    if (!familiaPayload || familiaPayload === "conversao") {
+      const campObj = await g(`/${campanha}?fields=objective`);
+      if (campObj.status === 200) {
+        const objCamp = String((campObj.body as any)?.objective ?? "");
+        if (ehFamiliaSocialTopo(objCamp)) {
+          familiaPayload = familiaDeObjetivo(objCamp);
+        }
+      }
+    }
+    const socialTopo =
+      familiaPayload === "engajamento" || familiaPayload === "reconhecimento";
+
+    if (semMoldeConj && !socialTopo) {
+      return {
+        erro: "sem_molde_so_para_familia_social",
+        detalhe:
+          "sem_molde em criar_conjunto so vale para engajamento/reconhecimento (campanha OUTCOME_ENGAGEMENT/AWARENESS). Para LEADS/conversao continue com um conjunto molde real.",
+      };
+    }
+
+    let mb: any = {};
+    if (!semMoldeConj) {
+      const campos = [
+        "optimization_goal",
+        "billing_event",
+        "bid_strategy",
+        "targeting",
+        "promoted_object",
+        "destination_type",
+        "attribution_spec",
+        "bid_amount",
+        "dsa_beneficiary",
+        "dsa_payor",
+      ].join(",");
+      const m = await g(`/${molde}?fields=${campos}`);
+      if (m.status !== 200) return { erro: "falha ao ler o conjunto molde na Meta", detalhe: m.body };
+      mb = m.body ?? {};
+    }
 
     const body: Record<string, string> = {
       name: nomeFinal,
@@ -1498,17 +1544,23 @@ export async function montarCriacao(
       daily_budget: String(Math.round(reais * 100)), // centavos
       status: "ACTIVE", // v5.26: aprovar criar_conjunto / escalar_duplicar = cria ACTIVE
     };
-    // Replica apenas o que o molde realmente tem - nada e inventado.
-    if (mb.optimization_goal) body.optimization_goal = String(mb.optimization_goal);
-    if (mb.billing_event) body.billing_event = String(mb.billing_event);
-    if (mb.bid_strategy) body.bid_strategy = String(mb.bid_strategy);
-    if (mb.destination_type) body.destination_type = String(mb.destination_type);
-    if (mb.bid_amount) body.bid_amount = String(mb.bid_amount);
-    if (mb.targeting) body.targeting = JSON.stringify(mb.targeting);
-    if (mb.promoted_object) body.promoted_object = JSON.stringify(mb.promoted_object);
-    if (mb.attribution_spec) body.attribution_spec = JSON.stringify(mb.attribution_spec);
-    if (mb.dsa_beneficiary) body.dsa_beneficiary = String(mb.dsa_beneficiary);
-    if (mb.dsa_payor) body.dsa_payor = String(mb.dsa_payor);
+
+    if (semMoldeConj) {
+      body.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
+      body.targeting = JSON.stringify(targetingPadraoSocialTopo());
+    } else {
+      // Replica apenas o que o molde realmente tem - nada e inventado.
+      if (mb.optimization_goal) body.optimization_goal = String(mb.optimization_goal);
+      if (mb.billing_event) body.billing_event = String(mb.billing_event);
+      if (mb.bid_strategy) body.bid_strategy = String(mb.bid_strategy);
+      if (mb.destination_type) body.destination_type = String(mb.destination_type);
+      if (mb.bid_amount) body.bid_amount = String(mb.bid_amount);
+      if (mb.targeting) body.targeting = JSON.stringify(mb.targeting);
+      if (mb.promoted_object) body.promoted_object = JSON.stringify(mb.promoted_object);
+      if (mb.attribution_spec) body.attribution_spec = JSON.stringify(mb.attribution_spec);
+      if (mb.dsa_beneficiary) body.dsa_beneficiary = String(mb.dsa_beneficiary);
+      if (mb.dsa_payor) body.dsa_payor = String(mb.dsa_payor);
+    }
 
     // ESP-25: escala herda targeting do molde (so remove Threads se presente). Sem redes livres.
     let posicionamento: Record<string, unknown>;
@@ -1531,18 +1583,19 @@ export async function montarCriacao(
       };
     } else {
     // ===== v5.15: PLATAFORMAS PEDIDAS + VIDEO SEM COLUNA + THREADS OFF (Ryan 11/08) =====
-    // O agente pergunta as redes. Threads nunca entra (empresa sem cadastro). Facebook+video
-    // aplica os 8 placements observados sem right_hand_column. Sem plataformas declaradas:
-    // recusa nomeada (nao assume em silencio).
     const formatoPrevisto = String(p?.formato_midia_previsto ?? "").trim().toLowerCase();
     const plataformasPedidas = p?.plataformas_publicacao ?? p?.publisher_platforms ?? null;
+    const baseTargeting = (() => {
+      if (semMoldeConj) return targetingPadraoSocialTopo();
+      if (mb.targeting && typeof mb.targeting === "object") {
+        return mb.targeting as Record<string, unknown>;
+      }
+      return {};
+    })();
 
     if (plataformasPedidas != null) {
-      const base = (mb.targeting && typeof mb.targeting === "object")
-        ? (mb.targeting as Record<string, unknown>)
-        : {};
       const derivado = aplicarPosicionamentoPorPlataformas(
-        base,
+        baseTargeting,
         formatoPrevisto || "desconhecido",
         plataformasPedidas,
       );
@@ -1556,6 +1609,7 @@ export async function montarCriacao(
       posicionamento = {
         formato_midia_previsto: formatoPrevisto || null,
         padrao_aplicado: true,
+        sem_molde: semMoldeConj,
         plataformas_publicacao: derivado.plataformas,
         excluidos: derivado.excluidos,
         perfil: derivado.perfil,
@@ -1564,16 +1618,12 @@ export async function montarCriacao(
         publisher_platforms: derivado.targeting.publisher_platforms ?? null,
       };
     } else if (formatoPrevisto === "video") {
-      // Compat: pedidos antigos so com formato=video e sem plataformas => facebook-only + Threads off
-      // (mesmo padrao dos 3 conjuntos). Novos pedidos devem declarar plataformas_publicacao.
-      const base = (mb.targeting && typeof mb.targeting === "object")
-        ? (mb.targeting as Record<string, unknown>)
-        : {};
-      const { targeting, excluidos } = aplicarPadraoPosicionamentoVideo(base);
+      const { targeting, excluidos } = aplicarPadraoPosicionamentoVideo(baseTargeting);
       body.targeting = JSON.stringify(targeting);
       posicionamento = {
         formato_midia_previsto: "video",
         padrao_aplicado: true,
+        sem_molde: semMoldeConj,
         origem_padrao: "3_conjuntos_video_active_observados_11_08",
         publisher_platforms: [...PUBLISHER_PLATFORMS_VIDEO_PADRAO],
         facebook_positions: [...FACEBOOK_POSITIONS_VIDEO_PADRAO],
@@ -1582,91 +1632,79 @@ export async function montarCriacao(
           "Conjunto de video: posicionamentos manuais aplicados conforme padrao observado nos 3 conjuntos ativos; Coluna da direita excluida; Threads desabilitado (empresa sem cadastro). Prefira declarar plataformas_publicacao explicitamente.",
       };
     } else if (formatoPrevisto === "imagem") {
-      // Mesmo sem lista: corta Threads do molde se estiver la.
-      if (mb.targeting && typeof mb.targeting === "object") {
-        const t = { ...(mb.targeting as Record<string, unknown>) };
-        delete t.threads_positions;
-        if (Array.isArray(t.publisher_platforms)) {
-          t.publisher_platforms = (t.publisher_platforms as unknown[])
-            .map(String)
-            .filter((p) => p !== "threads");
-        }
-        body.targeting = JSON.stringify(t);
+      const t = { ...baseTargeting };
+      delete t.threads_positions;
+      if (Array.isArray(t.publisher_platforms)) {
+        t.publisher_platforms = (t.publisher_platforms as unknown[])
+          .map(String)
+          .filter((pl) => pl !== "threads");
       }
+      body.targeting = JSON.stringify(t);
       posicionamento = {
         formato_midia_previsto: "imagem",
         padrao_aplicado: false,
-        nota: "Imagem: Coluna da direita elegivel. Threads removido se presente no molde. Declare plataformas_publicacao para fixar as redes.",
+        sem_molde: semMoldeConj,
+        nota: "Imagem: Coluna da direita elegivel. Threads removido se presente. Declare plataformas_publicacao para fixar as redes.",
       };
     } else {
       return {
         erro: "plataformas_de_publicacao_obrigatorias",
         detalhe:
-          "Antes de criar o conjunto, pergunte ao gestor em quais redes publicar (facebook, instagram, audience_network, messenger). Threads esta desabilitado. Tambem declare formato_midia_previsto quando Facebook fizer parte da escolha.",
+          "Antes de criar o conjunto, declare plataformas_publicacao (facebook, instagram, …). Threads esta desabilitado. Tambem declare formato_midia_previsto quando Facebook fizer parte da escolha.",
       };
     }
     } // fim else criar_conjunto (plataformas)
 
-    // v5.28: familia engajamento/reconhecimento — molde so empresta targeting.
+    // v5.28/v5.29: familia engajamento/reconhecimento — molde (se houver) so empresta targeting.
     // Campanha OUTCOME_ENGAGEMENT/AWARENESS NAO aceita OFFSITE_CONVERSIONS+pixel do molde LEADS.
-    {
-      let familiaPayload = String(p?.familia_objetivo ?? "").trim().toLowerCase();
-      const tagPartes = String((p?.nome_partes as any)?.objetivo_tag ?? p?.objetivo_tag ?? "").trim();
-      if (!familiaPayload || familiaPayload === "conversao") {
-        if (ehFamiliaSocialTopo(tagPartes) || ehFamiliaSocialTopo(p?.objetivo)) {
-          familiaPayload = familiaDeObjetivo(p?.objetivo ?? tagPartes);
-        }
+    if (socialTopo) {
+      let pageId = String(p?.page_id ?? "").trim();
+      if (!pageId && companyId) {
+        const { data: cfgPage } = await supa
+          .from("meta_execution_config")
+          .select("page_id")
+          .eq("company_id", companyId)
+          .maybeSingle();
+        pageId = String((cfgPage as any)?.page_id ?? "").trim();
       }
-      if (!familiaPayload || familiaPayload === "conversao") {
-        const campObj = await g(`/${campanha}?fields=objective`);
-        if (campObj.status === 200) {
-          const objCamp = String((campObj.body as any)?.objective ?? "");
-          if (ehFamiliaSocialTopo(objCamp)) {
-            familiaPayload = familiaDeObjetivo(objCamp);
-          }
-        }
+      const defs = defaultsConjuntoSocialTopo(
+        familiaPayload as "engajamento" | "reconhecimento",
+        pageId,
+        p?.optimization_goal,
+      );
+      if ("erro" in defs) {
+        return { erro: defs.erro, detalhe: defs.detalhe };
       }
-      if (familiaPayload === "engajamento" || familiaPayload === "reconhecimento") {
-        let pageId = String(p?.page_id ?? "").trim();
-        if (!pageId && companyId) {
-          const { data: cfgPage } = await supa
-            .from("meta_execution_config")
-            .select("page_id")
-            .eq("company_id", companyId)
-            .maybeSingle();
-          pageId = String((cfgPage as any)?.page_id ?? "").trim();
-        }
-        const defs = defaultsConjuntoSocialTopo(
-          familiaPayload,
-          pageId,
-          p?.optimization_goal,
-        );
-        if ("erro" in defs) {
-          return { erro: defs.erro, detalhe: defs.detalhe };
-        }
-        body.optimization_goal = defs.optimization_goal;
-        body.billing_event = defs.billing_event;
-        body.promoted_object = JSON.stringify(defs.promoted_object);
-        delete body.attribution_spec;
-        if (defs.destination_type) {
-          body.destination_type = defs.destination_type;
-        } else {
-          delete body.destination_type;
-        }
-        posicionamento = {
-          ...(posicionamento && typeof posicionamento === "object" ? posicionamento : {}),
-          familia_objetivo: familiaPayload,
-          override_social_topo: true,
-          optimization_goal: defs.optimization_goal,
-          billing_event: defs.billing_event,
-          page_id: pageId,
-          declaracao_social:
-            `Conjunto ${familiaPayload}: optimization_goal=${defs.optimization_goal}, promoted_object.page_id=${pageId} (sem pixel/conversao do molde).`,
-        };
+      body.optimization_goal = defs.optimization_goal;
+      body.billing_event = defs.billing_event;
+      body.promoted_object = JSON.stringify(defs.promoted_object);
+      delete body.attribution_spec;
+      if (defs.destination_type) {
+        body.destination_type = defs.destination_type;
+      } else {
+        delete body.destination_type;
       }
+      posicionamento = {
+        ...(posicionamento && typeof posicionamento === "object" ? posicionamento : {}),
+        familia_objetivo: familiaPayload,
+        override_social_topo: true,
+        sem_molde: semMoldeConj,
+        optimization_goal: defs.optimization_goal,
+        billing_event: defs.billing_event,
+        page_id: pageId,
+        declaracao_social: semMoldeConj
+          ? `Conjunto ${familiaPayload} SEM MOLDE: targeting BR Advantage+ minimo; optimization_goal=${defs.optimization_goal}; promoted_object.page_id=${pageId}.`
+          : `Conjunto ${familiaPayload}: molde so emprestou targeting; optimization_goal=${defs.optimization_goal}, promoted_object.page_id=${pageId} (pixel/LEAD do molde descartados).`,
+      };
     }
 
-    return { path: `/${conta}/adsets`, body, molde_lido: mb, posicionamento, nome_partes: nomePartesGravar };
+    return {
+      path: `/${conta}/adsets`,
+      body,
+      molde_lido: semMoldeConj ? { sem_molde: true } : mb,
+      posicionamento,
+      nome_partes: nomePartesGravar,
+    };
   }
 
   if (acao === "criar_anuncio_a_partir_de") {
