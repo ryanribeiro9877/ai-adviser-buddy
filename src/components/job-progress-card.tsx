@@ -92,7 +92,28 @@ function nomesEspecialistas(detalhe: string): string[] {
     .split(/[,;]/)
     .map((s) => s.trim())
     .filter(Boolean)
+    // remove sufixo "[fast]" se o planner marcou modo rapido
+    .map((s) => s.replace(/\s*\[fast\]\s*$/i, "").trim())
+    .filter(Boolean)
     .map((s) => ESPECIALISTAS[s] ?? s);
+}
+
+/** Índice da fase VISÍVEL: fases internas (devolucao/segmento) não podem resetar para Planejando. */
+function indiceDaFase(lista: Passo[]): number {
+  let idx = 0;
+  for (const p of lista) {
+    const f = p.fase ?? "";
+    const d = p.detalhe ?? "";
+    if (f === "planner") idx = Math.max(idx, 0);
+    else if (f === "subagentes" || f === "devolucao") idx = Math.max(idx, 1);
+    else if (f === "sintese") idx = Math.max(idx, 2);
+    else if (f === "segmento") {
+      // Continuação: se o detalhe fala em síntese, mostra Escrevendo; senão Especialistas.
+      if (/sintese|escrevendo|direto_para_sintese/i.test(d)) idx = Math.max(idx, 2);
+      else idx = Math.max(idx, 1);
+    }
+  }
+  return idx;
 }
 
 export function JobProgressCard({
@@ -179,11 +200,7 @@ export function JobProgressCard({
   const agora = useAgora(aguardando);
 
   const ultimo = lista[lista.length - 1];
-  const faseAtual = ultimo?.fase ?? "planner";
-  const indiceAtual = Math.max(
-    0,
-    FASES.findIndex((f) => f.id === faseAtual),
-  );
+  const indiceAtual = indiceDaFase(lista);
   const especialistas = lista.flatMap((p) => nomesEspecialistas(p.detalhe ?? ""));
 
   // Concluído: o card sai de cena por conta própria. O pai também o remove ao receber a

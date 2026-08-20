@@ -175,6 +175,26 @@ describe("fases", () => {
     await waitFor(() => expect(screen.getByText("Planejando")).toBeInTheDocument());
   });
 
+  it("devolucao e segmento NAO voltam o spinner para Planejando", async () => {
+    // Bug medido 20/08: ultimo passo "segmento: retomando do checkpoint" fazia
+    // findIndex=-1 → Math.max(0,-1)=0 → card preso em Planejando com tags Criativos/Alertas.
+    montar();
+    chegaDoBanco({
+      progresso: [
+        { fase: "planner", detalhe: "especialistas: criativos, alertas_recomendacoes" },
+        { fase: "subagentes", detalhe: "relatorios prontos" },
+        { fase: "devolucao", detalhe: "rodada 1: criativos" },
+        { fase: "segmento", detalhe: "segmento 2: retomando do checkpoint" },
+      ],
+    });
+    await waitFor(() => {
+      const esp = screen.getByText("Especialistas trabalhando");
+      expect(esp.className).toContain("text-foreground");
+    });
+    const planejando = screen.getByText("Planejando");
+    expect(planejando.className).toContain("text-muted-foreground");
+  });
+
   it("progresso que não é lista é tratado como vazio", async () => {
     montar();
     chegaDoBanco({ progresso: { nao: "e lista" } });

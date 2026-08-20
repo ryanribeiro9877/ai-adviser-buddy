@@ -1,4 +1,9 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.3)
+// supabase/functions/traffic-agent-job/index.ts (v3.4)
+// v3.4 (20/08/2026) - FAST-TRACK DEEP: pergunta curta / follow-up / dica Meta-musica
+//   roda 1 segmento, ate 2 especialistas, SEM devolucao e SEM checkpoint. Evita a
+//   maratona "segmento 2: retomando" em Q&A focado (caso medido: 2 dicas de musica
+//   ficou 9+ min em Planejando apos devolucao+checkpoint). OpenRouter ganha timeout
+//   para nao deixar o worker silencioso. Analise ampla continua com multi-segmento.
 // v3.3 (20/08/2026) - Sintese: proibe narracao de intencao; resposta completa em um turno
 //   (veredito + evidencia + recomendacao), inclusive em follow-up de dicas Meta/musica.
 // v3.2 (12/08/2026) - ESP-41: tool ler_entregas_digest (RPC read-only) no subagente
@@ -179,6 +184,10 @@ const RESERVA_FINAL_MS = 12_000;
 const MAX_SEGMENTOS = 3;
 const DEVOLUCOES_MAX = 2;          // rodadas de devolucao por job (nao por subagente)
 const CHECKPOINT_MIN_MS = 75_000;  // se falta trabalho e o prazo esta abaixo disto, segmenta
+// v3.4: fast-track — pergunta focada nao entra em multi-segmento nem devolucao.
+const FAST_MAX_ESPECIALISTAS = 2;
+const FAST_OPENROUTER_TIMEOUT_MS = 75_000;
+const OPENROUTER_TIMEOUT_MS = 120_000;
 // v2.2: pipeline de visao
 const VISAO_LOTE = 6;               // imagens por chamada de visao
 const VISAO_MAX_POR_RODADA = 30;    // teto de arquivos analisados por segmento
@@ -214,6 +223,39 @@ const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/
 const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const deacc = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
+
+// v3.4: perfil "fast deep" — Q&A focado sem maratona de segmentos.
+// Medido 20/08: follow-up de 2 dicas de musica → planner+2 subs+devolucao+checkpoint
+// e card preso em "Planejando" no segmento 2. Fast = 1 pass + ate 2 especialistas + sintese.
+type PerfilFast = {
+  ativo: boolean;
+  motivo: string;
+  forcarPlano?: { nome: string; foco: string }[];
+};
+function perfilFastDeep(pergunta: string): PerfilFast {
+  const raw = pergunta.trim();
+  const p = deacc(raw.toLowerCase());
+  const len = raw.length;
+  const metaDica = /\b(dica|recomendac|opportunity|musica|boost|impulsionar|meta emitiu|recomendacao da meta)\b/.test(p)
+    || /recomendac.*(meta|facebook|anuncio|impulsionar|boost)/.test(p);
+  const followUp = /^(sobre|e |dessas|dessa|desses|desse|analise|me (informe|diga|recomenda)|o que (voce|acha)|e as |e os |e essas|e esses)/.test(p)
+    || /\b(essas duas|analise[- ]as|o que me recomenda|me informe o que)\b/.test(p);
+  const curta = len <= 600;
+  if (curta && metaDica) {
+    return {
+      ativo: true,
+      motivo: "follow-up/dica-meta curta",
+      forcarPlano: [{
+        nome: "alertas_recomendacoes",
+        foco: "Levantar as dicas/recomendacoes da Meta (get_meta_dicas) citadas na pergunta — em especial musica/boost/Opportunity Score — e devolver julgamento acionavel (viavel ou nao + o que fazer). Nao inventariar criativos nem abrir outras frentes.",
+      }],
+    };
+  }
+  if (curta && (followUp || len <= 280)) {
+    return { ativo: true, motivo: followUp ? "follow-up focado" : "pergunta curta" };
+  }
+  return { ativo: false, motivo: "" };
+}
 
 async function resolveCompany(name?: string): Promise<{ id: string; name: string } | null> {
   const { data } = await supa.from("companies").select("id,name");
@@ -1026,21 +1068,38 @@ async function t_drive_criativos(companyId: string) {
 // ============================================================================
 // LLM
 // ============================================================================
-async function chamarLLM(messages: any[], opts: { tools?: any[]; maxTokens: number; reasoning?: any; model?: string }): Promise<any> {
+async function chamarLLM(messages: any[], opts: { tools?: any[]; maxTokens: number; reasoning?: any; model?: string; timeoutMs?: number }): Promise<any> {
   const payload: any = { model: opts.model ?? MODEL, messages, max_tokens: opts.maxTokens };
   if (opts.tools?.length) { payload.tools = opts.tools; payload.tool_choice = "auto"; }
   if (opts.reasoning) payload.reasoning = opts.reasoning;
-  let resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` }, body: JSON.stringify(payload),
-  });
-  let text = await resp.text();
+  const timeoutMs = opts.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
+  const headers = { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` };
+  async function postOnce(body: any): Promise<{ resp: Response; text: string; aborted: boolean }> {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST", headers, body: JSON.stringify(body), signal: ac.signal,
+      });
+      const text = await resp.text();
+      return { resp, text, aborted: false };
+    } catch (e) {
+      const msg = String((e as any)?.message ?? e);
+      if (ac.signal.aborted || /abort/i.test(msg)) {
+        return { resp: new Response(null, { status: 408 }), text: `openrouter_timeout_${timeoutMs}ms`, aborted: true };
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  let { resp, text, aborted } = await postOnce(payload);
+  if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   if (!resp.ok && (resp.status === 400 || resp.status === 422) && payload.reasoning) {
     // Degradacao: remove reasoning e retenta (mesmo padrao do traffic-chat v21).
     delete payload.reasoning;
-    resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` }, body: JSON.stringify(payload),
-    });
-    text = await resp.text();
+    ({ resp, text, aborted } = await postOnce(payload));
+    if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   }
   if (!resp.ok) return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };
   try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
@@ -1061,8 +1120,15 @@ function extrairJSON(txt: string): any | null {
   if (ini < 0 || fim <= ini) return null;
   try { return JSON.parse(limpo.slice(ini, fim + 1)); } catch { return null; }
 }
-async function planejar(pergunta: string, tel: any): Promise<{ plano: { nome: string; foco: string }[]; degradado: boolean }> {
+async function planejar(pergunta: string, tel: any, fast?: PerfilFast): Promise<{ plano: { nome: string; foco: string }[]; degradado: boolean }> {
   const nomes = Object.keys(SUBAGENTES);
+  if (fast?.ativo && fast.forcarPlano?.length) {
+    const plano = fast.forcarPlano.filter((p) => nomes.includes(p.nome));
+    if (plano.length) {
+      tel.planner = { tokens_in: 0, tokens_out: 0, forcado: true, motivo: fast.motivo };
+      return { plano, degradado: false };
+    }
+  }
   const sys = `Voce e o ROTEADOR de um gestor de trafego Meta Ads. Dada a pergunta do gestor, encaminhe a tarefa para o MENOR conjunto de especialistas que a cobre por inteiro - tarefa de um unico dominio vai para UM unico especialista.
 Especialistas disponiveis (use exatamente estes nomes):
 - desempenho_campanhas: numeros de midia (gasto, CTR, custos, ranking, series, metas)
@@ -1070,29 +1136,45 @@ Especialistas disponiveis (use exatamente estes nomes):
 - compliance: auditoria das legendas contra as regras de credito (FIN/CRI/LGL)
 - estrutura_conta: CBO/ABO, orcamento por conjunto, lance, targeting
 - whatsapp_waba: numeros WhatsApp (tier, qualidade) e templates (envios, leituras, cliques)
-- alertas_recomendacoes: alertas ativos e recomendacoes pendentes
+- alertas_recomendacoes: alertas ativos, recomendacoes pendentes e DICAS DA META (Opportunity Score, boost, musica)
 - criativos_drive: pasta de criativos NOVOS no Google Drive (inventario, formatos, eixos, comparacao com vencedores)\n- analise_visual_drive: analise VISUAL arquivo a arquivo das pecas do Drive (produto, texto visivel, riscos, veredito aproveitavel) - so quando pedirem CLASSIFICAR/ANALISAR CONTEUDO das pecas
 - conhecimento: fundamento tecnico puro (so quando a pergunta exige conceito alem do operacional)
-REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive. NAO inclua especialista cujo dominio a pergunta nao toca.
+REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive; dica/recomendacao/boost/musica/Opportunity Score da Meta -> SOMENTE alertas_recomendacoes (NAO acrescente criativos so porque a dica menciona musica). NAO inclua especialista cujo dominio a pergunta nao toca.${fast?.ativo ? "\nMODO RAPIDO: no maximo 2 especialistas; preferir 1 quando um dominio cobre." : ""}
 Responda APENAS com JSON valido, sem markdown, no formato:
 {"subagentes":[{"nome":"...","foco":"instrucao curta e especifica do que ELE deve levantar"}]}
 Para auditoria ampla da conta, inclua todos os pertinentes.`;
   const r = await chamarLLM(
     [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 12000) }],
-    { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB },
+    { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB, timeoutMs: fast?.ativo ? FAST_OPENROUTER_TIMEOUT_MS : OPENROUTER_TIMEOUT_MS },
   );
-  if (r.erro) return { plano: nomes.map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" })), degradado: true };
+  if (r.erro) {
+    const fallback = nomes.slice(0, fast?.ativo ? FAST_MAX_ESPECIALISTAS : nomes.length)
+      .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
+    return { plano: fallback, degradado: true };
+  }
   const u = usoDe(r.parsed); tel.planner = { tokens_in: u.tin, tokens_out: u.tout };
   const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
   const lista = Array.isArray(bruto?.subagentes) ? bruto.subagentes : null;
-  if (!lista?.length) return { plano: nomes.map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" })), degradado: true };
+  if (!lista?.length) {
+    const fallback = nomes.slice(0, fast?.ativo ? FAST_MAX_ESPECIALISTAS : nomes.length)
+      .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
+    return { plano: fallback, degradado: true };
+  }
   const plano = lista
     .map((x: any) => ({ nome: String(x?.nome ?? "").trim(), foco: String(x?.foco ?? "").trim().slice(0, 400) }))
     .filter((x: any) => nomes.includes(x.nome));
-  if (!plano.length) return { plano: nomes.map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" })), degradado: true };
+  if (!plano.length) {
+    const fallback = nomes.slice(0, fast?.ativo ? FAST_MAX_ESPECIALISTAS : nomes.length)
+      .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
+    return { plano: fallback, degradado: true };
+  }
   // dedupe mantendo o primeiro foco
   const vistos = new Set<string>();
-  const final = plano.filter((p: any) => (vistos.has(p.nome) ? false : (vistos.add(p.nome), true)));
+  let final = plano.filter((p: any) => (vistos.has(p.nome) ? false : (vistos.add(p.nome), true)));
+  if (fast?.ativo && final.length > FAST_MAX_ESPECIALISTAS) {
+    final = final.slice(0, FAST_MAX_ESPECIALISTAS);
+    tel.planner_capado = true;
+  }
   return { plano: final, degradado: false };
 }
 
@@ -1558,8 +1640,10 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v2.9", subagentes: [] };
-  tel.versao = "job-v2.4";
+  const fast = perfilFastDeep(pergunta);
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.4", subagentes: [] };
+  tel.versao = "job-v3.4";
+  if (fast.ativo) { tel.perfil_fast = true; tel.perfil_fast_motivo = fast.motivo; }
   try {
     const { data: companyRow } = await supa.from("companies").select("name").eq("id", companyId).maybeSingle();
     const companyName = String(companyRow?.name ?? "").trim();
@@ -1579,6 +1663,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       let rodada: number = Number(retomada.rodada ?? 0);
       // devolucoes pendentes deste checkpoint (ja com parecer da coordenacao anexavel)
       if (!retomada.direto_para_sintese && Array.isArray(retomada.devolver) && retomada.devolver.length) {
+        await pushProgresso(jobId, "subagentes", `reexecutando: ${retomada.devolver.map((d: any) => d.nome).join(", ")}`);
         const refeitos = await executarLote(
           retomada.devolver.map((d: any) => ({ nome: String(d.nome),
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${String(d.motivo)}\nCorrija exatamente isso.` })),
@@ -1598,6 +1683,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
               pergunta, plano, relatorios, devolver: devolver2, rodada, tel_parcial: tel, segmento: segmento + 1 });
             return;
           }
+          await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver2.map((d) => d.nome).join(", ")}`);
           const refeitos2 = await executarLote(
             devolver2.map((d) => ({ nome: d.nome, foco: `DEVOLUCAO DA COORDENACAO (rodada ${rodada}): ${d.motivo}. Corrija exatamente isso.` })),
             pergunta, { companyId, companyName, mcpKey }, prazo, tel,
@@ -1638,44 +1724,53 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       : "(sem regras cadastradas)";
 
     // FASE 1 - planner
-    await pushProgresso(jobId, "planner", "escolhendo especialistas");
-    const { plano, degradado } = await planejar(pergunta, tel);
+    await pushProgresso(jobId, "planner", fast.ativo
+      ? `modo rapido (${fast.motivo}): escolhendo especialistas`
+      : "escolhendo especialistas");
+    const { plano, degradado } = await planejar(pergunta, tel, fast);
     tel.plano = plano.map((p) => p.nome);
     tel.planner_degradado = degradado;
-    await pushProgresso(jobId, "planner", `especialistas: ${plano.map((p) => p.nome).join(", ")}${degradado ? " (plano padrao - planejador nao devolveu JSON valido)" : ""}`);
+    await pushProgresso(jobId, "planner", `especialistas: ${plano.map((p) => p.nome).join(", ")}${degradado ? " (plano padrao - planejador nao devolveu JSON valido)" : ""}${fast.ativo ? " [fast]" : ""}`);
 
     // FASE 2 - subagentes em paralelo
     await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
     let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey }, prazo, tel);
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
 
-    // FASE 2.5 (v2) - VALIDACAO DA COORDENACAO + DEVOLUCAO (com segmentacao se o prazo apertar)
+    // FASE 2.5 (v2) - VALIDACAO DA COORDENACAO + DEVOLUCAO
+    // v3.4: fast-track PULA devolucao e checkpoint — pergunta focada nao precisa de
+    // segunda rodada da coordenacao (medido: +85s de validacao + segmento 2 preso).
     let rodada = 0;
     const falhosDefinitivos: string[] = [];
-    while (rodada < DEVOLUCOES_MAX) {
-      const devolver = await validarRelatorios(pergunta, plano, relatorios, tel);
-      if (!devolver.length) break;
-      rodada++;
-      await pushProgresso(jobId, "devolucao", `rodada ${rodada}: ${devolver.map((d) => d.nome).join(", ")}`);
-      // prazo apertado com trabalho pendente -> grava checkpoint e reinvoca (novo segmento)
-      if (prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
-        await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
-          pergunta, plano, relatorios, devolver, rodada, tel_parcial: tel, segmento: segmento + 1 });
-        return; // este worker termina limpo; o proximo retoma do ponto exato
+    if (!fast.ativo) {
+      while (rodada < DEVOLUCOES_MAX) {
+        const devolver = await validarRelatorios(pergunta, plano, relatorios, tel);
+        if (!devolver.length) break;
+        rodada++;
+        await pushProgresso(jobId, "devolucao", `rodada ${rodada}: ${devolver.map((d) => d.nome).join(", ")}`);
+        // prazo apertado com trabalho pendente -> grava checkpoint e reinvoca (novo segmento)
+        if (prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+          await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
+            pergunta, plano, relatorios, devolver, rodada, tel_parcial: tel, segmento: segmento + 1 });
+          return; // este worker termina limpo; o proximo retoma do ponto exato
+        }
+        await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver.map((d) => d.nome).join(", ")}`);
+        const refeitos = await executarLote(
+          devolver.map((d) => ({ nome: d.nome,
+            foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${d.motivo}\nCorrija exatamente isso; o que ja estava certo nao precisa ser repetido do zero.` })),
+          pergunta, { companyId, companyName, mcpKey }, prazo, tel,
+        );
+        for (const novo of refeitos) {
+          const i = relatorios.findIndex((r) => r.nome === novo.nome);
+          if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
+        }
+        if (rodada >= DEVOLUCOES_MAX) {
+          for (const d of devolver) if (!falhosDefinitivos.includes(d.nome)) falhosDefinitivos.push(d.nome);
+        }
       }
-      const refeitos = await executarLote(
-        devolver.map((d) => ({ nome: d.nome,
-          foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${d.motivo}\nCorrija exatamente isso; o que ja estava certo nao precisa ser repetido do zero.` })),
-        pergunta, { companyId, companyName, mcpKey }, prazo, tel,
-      );
-      for (const novo of refeitos) {
-        const i = relatorios.findIndex((r) => r.nome === novo.nome);
-        if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
-      }
-      if (rodada >= DEVOLUCOES_MAX) {
-        // ainda reprovados na proxima validacao entrariam aqui - marca sem re-validar para nao gastar o prazo
-        for (const d of devolver) if (!falhosDefinitivos.includes(d.nome)) falhosDefinitivos.push(d.nome);
-      }
+    } else {
+      tel.devolucao_pulada = "fast_deep";
+      await pushProgresso(jobId, "subagentes", "modo rapido: seguindo direto para a resposta (sem devolucao)");
     }
     if (falhosDefinitivos.length) {
       tel.devolucao_esgotada = falhosDefinitivos;
@@ -1688,7 +1783,8 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     tel.segmento = segmento;
 
     // Sintese em segmento proprio se o prazo nao comporta escrever a resposta inteira
-    if (prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+    // Fast-track: nunca segmenta — fecha com o que tem neste worker.
+    if (!fast.ativo && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
       await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
         pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel, segmento: segmento + 1, direto_para_sintese: true });
       return;
