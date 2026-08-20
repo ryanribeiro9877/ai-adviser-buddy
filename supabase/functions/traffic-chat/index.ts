@@ -1,4 +1,8 @@
-// supabase/functions/traffic-chat/index.ts (v28.30)
+// supabase/functions/traffic-chat/index.ts (v28.31)
+// v28.31 (20/08/2026) - Emite lote sem re-perguntar: MAX_TOOLS_TURNO 24; propose_action
+//   ate 10; criar_anuncio nao e cortado pelo teto global; get_acervo aceita
+//   drive_file_ids (recorte) + compactacao; doutrina "emite os N" fecha o ato;
+//   child_attachments entra no payload do card (carrossel real).
 // v28.30 (17/08/2026) - Auditoria financeira fechada: get_campaign_detail expoe
 //   special_ad_categories; nova tool auditar_compliance_financeira; prompt proibe
 //   "nao tenho tool" para categoria especial / regras Meta se compliance e Pipeboard
@@ -460,20 +464,29 @@ const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? 
 const MAX_ITER = 10;
 // v20: teto de ferramentas por turno. 14 tools medidas em 2 turnos consecutivos, com 5
 // chamadas ao compliance-check a 3-6s cada. Corta tempo e tokens ao mesmo tempo.
-const MAX_TOOLS_TURNO = 12;
+// v28.31 (20/08/2026): 12 era pouco para "emite N cards" (acervo + notes + N×propose).
+// 24 cobre lote de 5 criar_anuncio + leituras curtas sem forcar o gestor a repetir "emite".
+const MAX_TOOLS_TURNO = 24;
 // v23: o gargalo de tempo era REPETICAO, nao variedade. check_compliance custa 3-6s por
 // chamada e foi chamada 5x num unico turno. Limite por ferramenta resolve na origem.
 // v28.7: get_estrutura_conjuntos com teto 3. Sao 46 conjuntos relevantes em paginas de 20 - com o
 // default 2 o agente ficaria ESTRUTURALMENTE impedido de ver o universo completo, recriando o
 // problema do universo parcial numa forma nova, agora causada pelo proprio limite.
+// v28.31: propose_action default=2 matava lote de 5 cards; carve-out dedicado abaixo.
 const MAX_POR_FERRAMENTA: Record<string, number> = {
   check_compliance: 3,
   gerar_legendas: 1,
   get_estrutura_conjuntos: 3,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
+  propose_action: 10,
+  get_acervo_para_anuncio: 3,
+  nota_visual_da_peca: 6,
 };
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
+// propose_action de criacao nao consome o teto global do turno (so o teto por ferramenta).
+// Assim releituras opcionais nao "roubam" as vagas dos cards quando o slate ja esta no chat.
+const ACOES_CRIACAO_NO_TETO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 const MAX_TOKENS = 12000;
 // v21: orcamento de raciocinio. max_tokens cobre raciocinio + texto; sem teto, o modelo
 // gastava os 6000 pensando e devolvia content vazio. 2000 preserva o protocolo de 5 passos
@@ -484,7 +497,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.11";
+const VERSAO = "chat-v28.31";
 const HIST = 24;
 // v28.11: orcamento da reinjecao de retorno de ferramenta.
 // TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
@@ -968,6 +981,38 @@ function cortarLista(obj: Record<string, unknown>, campo: string, teto = TETO_TO
     out.aviso_corte = `A lista '${campo}' foi truncada para caber no limite de payload: ${mantidos.length} de ${lista.length} itens enviados. Os ${omitidos} restantes EXISTEM no banco mas NAO foram enviados nesta chamada - nao os trate como inexistentes nem como zero. Se precisar deles, peca um recorte mais estreito.`;
   }
   return out;
+}
+
+/** v28.31: acervo compacto — taxonomia + campos uteis por item; corta texto longo. */
+function compactarAcervoParaAgente(data: unknown, filtroAtivo: boolean): unknown {
+  if (!data || typeof data !== "object") return data;
+  const obj = { ...(data as Record<string, unknown>) };
+  const itens = Array.isArray(obj.itens) ? (obj.itens as Record<string, unknown>[]) : null;
+  if (!itens) return obj;
+  const compactos = itens.map((it) => {
+    const o: Record<string, unknown> = {
+      nome: it.nome,
+      drive_file_id: it.drive_file_id,
+      tipo: it.tipo,
+      familia_drive: it.familia_drive,
+      apta: it.apta,
+      na_biblioteca_da_meta: it.na_biblioteca_da_meta,
+      meta_video_id: it.meta_video_id ?? null,
+      meta_image_hash: it.meta_image_hash ?? null,
+      grupo_carrossel: it.grupo_carrossel ?? null,
+      caminho: it.caminho ?? null,
+      produto: it.produto ?? null,
+      motivo_inapta: it.motivo_inapta ?? null,
+    };
+    if (it.bloqueada_por_compliance) o.bloqueada_por_compliance = it.bloqueada_por_compliance;
+    return o;
+  });
+  const tetoItens = filtroAtivo ? 40 : 25;
+  const cortado = cortarLista({ ...obj, itens: compactos }, "itens", filtroAtivo ? 9000 : 8000) as Record<string, unknown>;
+  if ((compactos.length > tetoItens) && !filtroAtivo) {
+    cortado.dica = "Para emitir slate conhecido, chame de novo com drive_file_ids=[...] — payload bem menor.";
+  }
+  return cortado;
 }
 // v28.11 (05/08/2026) - BUSCA POR NOME. A sobrecarga de 5 argumentos existe no banco e nao estava
 // sendo usada: o agente folheava os 67 anuncios, batia no corte de payload e concluia que o
@@ -1891,14 +1936,18 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       utmCampaign = String(montadoAd.partes.rotulo || montadoAd.partes.periodo || nomeNovo).trim();
     }
     const driveFileId = String(params?.drive_file_id ?? "").trim();   // v28.10 (GT-13): peca nova
+    // v28.31: carrossel real via child_attachments (2-10 slides com image_hash).
+    const childAttachmentsRaw = Array.isArray(params?.child_attachments) ? params.child_attachments : null;
+    const temCarrossel = !!(childAttachmentsRaw && childAttachmentsRaw.length >= 2);
+    const metaImageHashEarly = String(params?.meta_image_hash ?? "").trim();
     // ESP-35: peca nova pode omitir molde (target_name vazio / "sem_molde" / params.sem_molde).
-    const semMolde = !!driveFileId && (
+    const semMolde = !!(driveFileId || temCarrossel || metaImageHashEarly) && (
       params?.sem_molde === true ||
       !nomeAlvo ||
       norm(nomeAlvo) === "sem_molde" ||
       norm(nomeAlvo) === "_sem_molde"
     );
-    if (!semMolde && !nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar (ou 'sem_molde' + drive_file_id para peca nova sem herdar molde)" };
+    if (!semMolde && !nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar (ou 'sem_molde' + drive_file_id / child_attachments / meta_image_hash para peca nova sem herdar molde)" };
     if (!conjuntoDestino) {
       return {
         erro:
@@ -1948,12 +1997,12 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // nem em tabela. As tres procedencias legitimas (humano, herdada_do_molde, agente) sao da RPC.
     let legendaFonte = String(params?.legenda_fonte ?? "").trim();
     let legenda = String(params?.legenda ?? "").trim();
-    if (driveFileId && legenda && !legendaFonte) legendaFonte = "agente";
+    if ((driveFileId || temCarrossel) && legenda && !legendaFonte) legendaFonte = "agente";
     let legendaRefs: string[] | null = Array.isArray(params?.legenda_referencias)
       ? (params.legenda_referencias as unknown[]).map((r) => String(r ?? "").trim()).filter(Boolean)
       : null;
     let legendaRefsOrigem: string | null = Array.isArray(params?.legenda_referencias) ? "params" : null;
-    if (!driveFileId) {
+    if (!driveFileId && !temCarrossel) {
       legenda = String(molde?.body ?? "").trim();
       legendaFonte = "herdada_do_molde";
     } else if (!legenda && legendaFonte === "herdada_do_molde") {
@@ -1965,7 +2014,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     }
 
     // v28.27: se a legenda e do agente, autofill referencias — NUNCA pedir isso ao humano.
-    if (driveFileId && (legendaFonte === "agente" || (!legendaFonte && legenda))) {
+    if ((driveFileId || temCarrossel) && (legendaFonte === "agente" || (!legendaFonte && legenda))) {
       if (legendaFonte !== "agente") legendaFonte = "agente";
       const resolvido = await resolverLegendaReferenciasAgente({
         companyId,
@@ -2045,6 +2094,27 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       if (legendaRefs && legendaRefs.length) pedido.legenda_referencias = legendaRefs;
       pedido.tipo_de_pedido = "peca_nova";
     }
+    const metaImageHashParam = String(params?.meta_image_hash ?? "").trim();
+    if (metaImageHashParam && !temCarrossel) {
+      pedido.meta_image_hash = metaImageHashParam;
+      pedido.legenda = legenda;
+      pedido.legenda_fonte = legendaFonte;
+      if (legendaRefs && legendaRefs.length) pedido.legenda_referencias = legendaRefs;
+      pedido.tipo_de_pedido = "peca_nova";
+    }
+    if (temCarrossel) {
+      pedido.child_attachments = childAttachmentsRaw;
+      pedido.legenda = legenda;
+      pedido.legenda_fonte = legendaFonte;
+      if (legendaRefs && legendaRefs.length) pedido.legenda_referencias = legendaRefs;
+      pedido.tipo_de_pedido = "peca_nova";
+      // Hash do 1o slide ajuda a RPC a achar a peca na biblioteca quando drive_file_id falta.
+      const h0 = String((childAttachmentsRaw![0] as any)?.image_hash ?? (childAttachmentsRaw![0] as any)?.meta_image_hash ?? "").trim();
+      if (h0 && !pedido.meta_image_hash) {
+        // Nao setar meta_image_hash junto de child_attachments na executora — so no pedido
+        // intermediario a RPC antiga pode exigir "peca"; apos fix ja_na_meta isso sobra.
+      }
+    }
     if (semMolde) {
       pedido.page_id = pageIdPedido;
       pedido.call_to_action_type = ctaPedido;
@@ -2083,24 +2153,83 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       if (ver2) v = ver2;
     }
     if (v.completo !== true) {
-      // A mensagem e dela, nao minha: recusa inventada aqui seria a doutrina em dois lugares.
-      const faltandoTxt = JSON.stringify(v.faltando ?? []);
-      const soRastreio = /legenda_referencias|anuncios existentes voce se baseou/i.test(faltandoTxt + String(v.mensagem_para_o_gestor ?? ""));
-      return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
-        auto_resolucao_estado_conjunto: autoResConjunto,
-        faltando: v.faltando ?? null, mensagem_para_o_gestor: v.mensagem_para_o_gestor,
-        destino_do_anuncio: v.destino_do_anuncio ?? null,
-        legenda_referencias_autofill: legendaRefs,
-        legenda_referencias_origem: legendaRefsOrigem,
-        instrucao: soRastreio
-          ? "Falha de rastreio da legenda: NAO pergunte ao gestor. Reemitir com molde real ou anuncio_substituido preenchido a partir do espelho; o codigo tambem tenta autofill."
-          : "Complete VOCE o que o contrato permite (molde real, drive_file_id, partes ESP-40, legenda_referencias via autofill). So devolva ao gestor decisao DELE (orcamento nao informado, escolha entre pecas equivalentes que voce ja listou). NUNCA peca ao gestor para te ensinar o contrato nem para montar o card.",
-      };
+      // v28.31: carrossel com hashes ja na biblioteca — RPC antiga so olhava meta_video_id
+      // e recusava imagem/carrossel. Se todos os slides tem hash em media_uploads, seguimos.
+      let hashesCarr: string[] = [];
+      if (temCarrossel) {
+        hashesCarr = (childAttachmentsRaw as any[])
+          .map((c) => String(c?.image_hash ?? c?.meta_image_hash ?? "").trim())
+          .filter(Boolean);
+      }
+      let carrosselLibOk = false;
+      if (hashesCarr.length >= 2) {
+        const { data: upsCarr } = await supa.from("media_uploads")
+          .select("meta_image_hash")
+          .eq("company_id", companyId)
+          .eq("status", "enviado")
+          .in("meta_image_hash", hashesCarr);
+        const found = new Set((upsCarr ?? []).map((u: any) => String(u.meta_image_hash)));
+        carrosselLibOk = hashesCarr.every((h) => found.has(h));
+      }
+      // Imagem avulsa: RPC antiga so olhava meta_video_id no drive_file_id.
+      let imagemLibOk = false;
+      const hImg = String(params?.meta_image_hash ?? "").trim();
+      if (!temCarrossel && (driveFileId || hImg)) {
+        let q = supa.from("media_uploads").select("meta_image_hash,drive_file_id")
+          .eq("company_id", companyId).eq("status", "enviado");
+        if (driveFileId) q = q.eq("drive_file_id", driveFileId);
+        else q = q.eq("meta_image_hash", hImg);
+        const { data: upImg } = await q.not("meta_image_hash", "is", null).limit(1).maybeSingle();
+        imagemLibOk = !!(upImg?.meta_image_hash);
+      }
+      const soBiblioteca = /biblioteca|enviada para a biblioteca|peca criativa/i.test(
+        JSON.stringify(v.faltando ?? []) + String(v.mensagem_para_o_gestor ?? ""),
+      );
+      const bypassLib = soBiblioteca && legenda && legendaFonte &&
+        ((temCarrossel && carrosselLibOk) || (!temCarrossel && imagemLibOk));
+      if (!bypassLib) {
+        // A mensagem e dela, nao minha: recusa inventada aqui seria a doutrina em dois lugares.
+        const faltandoTxt = JSON.stringify(v.faltando ?? []);
+        const soRastreio = /legenda_referencias|anuncios existentes voce se baseou/i.test(faltandoTxt + String(v.mensagem_para_o_gestor ?? ""));
+        return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
+          auto_resolucao_estado_conjunto: autoResConjunto,
+          faltando: v.faltando ?? null, mensagem_para_o_gestor: v.mensagem_para_o_gestor,
+          destino_do_anuncio: v.destino_do_anuncio ?? null,
+          legenda_referencias_autofill: legendaRefs,
+          legenda_referencias_origem: legendaRefsOrigem,
+          instrucao: soRastreio
+            ? "Falha de rastreio da legenda: NAO pergunte ao gestor. Reemitir com molde real ou anuncio_substituido preenchido a partir do espelho; o codigo tambem tenta autofill."
+            : "Complete VOCE o que o contrato permite (molde real, drive_file_id, partes ESP-40, legenda_referencias via autofill). So devolva ao gestor decisao DELE (orcamento nao informado, escolha entre pecas equivalentes que voce ja listou). NUNCA peca ao gestor para te ensinar o contrato nem para montar o card.",
+        };
+      }
+      // Bypass controlado: trata como completo para gravar o card (imagem/carrossel).
+      v = { ...v, completo: true, peca_ja_na_biblioteca: true, tipo_de_pedido: "peca_nova",
+        mensagem_para_o_gestor: (v.mensagem_para_o_gestor ?? "") +
+          (temCarrossel
+            ? " CARROSSEL: slides confirmados na biblioteca Meta via media_uploads (image_hash)."
+            : " IMAGEM: meta_image_hash confirmado na biblioteca Meta via media_uploads.") };
     }
     // A RPC declara peca_ja_na_biblioteca=false e AVISA, mas nao recusa - a decisao e do fluxo.
     // Aqui ela e recusa: aprovar um card e o ato que inicia gasto, e este card falharia na
     // execucao DEPOIS de aprovado. Descobrir na execucao e o pior lugar para descobrir.
-    if (v.peca_ja_na_biblioteca === false) {
+    // v28.31: carrossel — se todos os image_hash estao em media_uploads, nao bloqueie por
+    // peca_ja_na_biblioteca=false do drive_file_id (RPC antiga so olhava meta_video_id).
+    let carrosselHashesOk = false;
+    if (temCarrossel) {
+      const hashes = (childAttachmentsRaw as any[])
+        .map((c) => String(c?.image_hash ?? c?.meta_image_hash ?? "").trim())
+        .filter(Boolean);
+      if (hashes.length >= 2) {
+        const { data: upsCarr } = await supa.from("media_uploads")
+          .select("meta_image_hash")
+          .eq("company_id", companyId)
+          .eq("status", "enviado")
+          .in("meta_image_hash", hashes);
+        const found = new Set((upsCarr ?? []).map((u: any) => String(u.meta_image_hash)));
+        carrosselHashesOk = hashes.every((h) => found.has(h));
+      }
+    }
+    if (v.peca_ja_na_biblioteca === false && !carrosselHashesOk) {
       return { pedido_incompleto: true, tipo_de_pedido: v.tipo_de_pedido ?? null,
         mensagem_para_o_gestor: v.mensagem_para_o_gestor,
         proximo_passo: "chame upload_midia com este drive_file_id para subir a peca a biblioteca da conta; depois proponha o card de novo",
@@ -2109,10 +2238,10 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     }
 
     // A biblioteca ja foi julgada pela RPC; aqui e so BUSCAR o valor que ela confirmou existir.
-    // Imagem e video: um anuncio avulso usa UM dos dois.
+    // Imagem e video: um anuncio avulso usa UM dos dois. Carrossel usa child_attachments.
     let metaVideoId: string | null = null;
     let metaImageHash: string | null = null;
-    if (driveFileId) {
+    if (driveFileId && !temCarrossel) {
       const { data: up } = await supa.from("media_uploads")
         .select("meta_video_id, meta_image_hash, tipo")
         .eq("drive_file_id", driveFileId)
@@ -2127,6 +2256,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
           detalhe: `A verificacao disse que a peca ${driveFileId} esta na biblioteca da conta, mas media_uploads nao devolve meta_video_id nem meta_image_hash. NAO emiti card.`,
           proximo_passo: "chame upload_midia com este drive_file_id" };
       }
+    }
+    // Permite meta_image_hash explicito no params (capa/imagem) quando drive ja mapeou.
+    if (!temCarrossel && !metaImageHash && !metaVideoId) {
+      const hParam = String(params?.meta_image_hash ?? "").trim();
+      if (hParam) metaImageHash = hParam;
     }
 
     // Video na Meta e assincrono: o id existe antes do processamento terminar.
@@ -2189,7 +2323,9 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const destAnuncio = (semMolde ? pedido.destino_do_anuncio : null) ?? v.destino_do_anuncio ?? null;
     const destinoUrlCard = destAnuncio?.url_final ?? destAnuncio?.url_do_molde ?? destinoUrlPedido ?? null;
 
-    const cabeca = semMolde
+    const cabeca = temCarrossel
+      ? `Criar anuncio "${nomeNovo}" CARROSSEL (${(childAttachmentsRaw as any[]).length} slides) no conjunto "${dest.name}", SEM molde (ESP-35) - compliance de texto aprovado, nasce ACTIVE`
+      : semMolde
       ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", SEM molde (ESP-35: page/CTA/destino da config) - compliance de texto aprovado, nasce ACTIVE`
       : driveFileId
       ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", usando "${molde.name}" como molde de configuracao - compliance de texto aprovado, nasce ACTIVE`
@@ -2209,8 +2345,9 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       conta_destino: contaDaEmpresa, status_inicial: "ACTIVE",  // v28.28: aprovar criar_anuncio = cria ACTIVE
       // v28.10 (GT-13): a executora le meta_video_id para trocar a midia no spec do molde.
       // Ausente = replicacao pura, e ela replica o criativo inteiro como sempre fez.
-      tipo_de_pedido: v.tipo_de_pedido ?? (driveFileId ? "peca_nova" : null),
-      drive_file_id: driveFileId || null, meta_video_id: metaVideoId, meta_image_hash: metaImageHash,
+      tipo_de_pedido: v.tipo_de_pedido ?? (driveFileId || temCarrossel ? "peca_nova" : null),
+      drive_file_id: driveFileId || null, meta_video_id: metaVideoId, meta_image_hash: temCarrossel ? null : metaImageHash,
+      child_attachments: temCarrossel ? childAttachmentsRaw : null,
       legenda, legenda_fonte: legendaFonte || null, legenda_referencias: legendaRefs,
       legenda_referencias_origem: legendaRefsOrigem,
       utm_campaign_origem: String(params?.utm_campaign ?? "").trim() ? "gestor" : "derivado_do_rotulo",
@@ -2414,7 +2551,7 @@ const TOOLS = [
   { type: "function", function: { name: "auditar_compliance_financeira", description: "Auditoria de categoria especial + regras financeiras de UMA campanha e seus anuncios. Devolve special_ad_categories do espelho, se e financeira, lista de anuncios (status/CTA/destino/criado_pelo_sistema), alertas de segmentacao (idade/genero/LAL) e as regras ativas FIN/LGL/CRI. Use quando o gestor perguntar se anuncios respeitam finanças/categoria especial/regras da Meta. NAO diga que o campo nao existe: esta tool e get_campaign_detail leem. Complemente com get_conhecimento(tema=compliance) e check_compliance nas legendas. Confirmacao ao vivo: ler_pipeboard get_campaign_details.", parameters: { type: "object", properties: { name_like: { type: "string", description: "Nome (ou trecho) da campanha" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA TOTAL do acervo do Drive. SEMPRE taxonomia_drive + inventario_global. Carrossel Meta HABILITADO via child_attachments. Videos liberados FIN-04 sao inventario apto (NAO confundir com o slate do pedido do gestor). Em lote/mix: chame SEM produto primeiro e cite o slate que o gestor pediu.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional. Em lote/mix deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true." } } } } },
+  { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA TOTAL do acervo do Drive. SEMPRE taxonomia_drive + inventario_global. Carrossel Meta HABILITADO via child_attachments. Videos liberados FIN-04 sao inventario apto (NAO confundir com o slate do pedido do gestor). Em lote/mix: chame SEM produto primeiro e cite o slate que o gestor pediu. Quando o slate JA tem drive_file_ids conhecidos (ex. 'emite os 5'), passe drive_file_ids para recorte compacto — evite dump completo.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional. Em lote/mix deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true." }, drive_file_ids: { type: "array", items: { type: "string" }, description: "Opcional. Recorte: so estes arquivos (slate conhecido). Preferir ao inventariar de novo antes de emitir." } } } } },
   { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. ESP-40/39: o novo nome e COMPOSTO a partir de marca/canal/objetivo_tag/papel(TESTE|ESCALA)/periodo (+ produto/rotulo opcionais) no padrao [MARCA][CANAL][OBJ][PROD?][PAPEL][ROT?][PER] — novo_nome livre foi aposentado. Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (obrigatorio ESP-39)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "canal", "papel", "periodo"] } } },
@@ -2517,6 +2654,9 @@ function prioridadeTool(nome: string, pedido: string): number {
   // justamente esse tipo de pergunta que o agente respondia de cabeca por nao ter a fila.
   const pedeFila = /card|aprova|pendente|aprovado|criou|criad|emiti|executou|executad|fila|sino|notificac|subiu|apareceu/.test(p);
   if (pedeFila && nome === "get_aprovacoes") return 0;
+  // v28.31: pedido de emitir cards — propose_action primeiro; nao gastar o teto em re-auditoria.
+  const pedeEmitir = /\bemite|\bemita|\bemiss[aã]o|\bcards?\b.*\baprov|\baprova.*\bcard|criar_anuncio|propose_action/.test(p);
+  if (pedeEmitir && nome === "propose_action") return 0;
   if (pedeUtm && nome === "panorama_utm_anuncios") return 0;
   if (pedeCustoLlm && nome === "custo_llm_periodo") return 0;
   if (pedeSaudeIntegracao && nome === "saude_das_integracoes") return 0;
@@ -2738,12 +2878,34 @@ async function runTool(name: string, args: any, ctx: any) {
       }
       case "get_acervo_para_anuncio": {
         const produto = String(args?.produto ?? "").trim();
-        const { data, error } = await supa.rpc("get_acervo_para_anuncio", {
+        const idsFiltro = Array.isArray(args?.drive_file_ids)
+          ? (args.drive_file_ids as unknown[]).map((x) => String(x ?? "").trim()).filter(Boolean)
+          : [];
+        const rpcArgs: Record<string, unknown> = {
           p_company_id: ctx.companyId,
           p_produto: produto || null,
           p_incluir_inaptas: args?.incluir_inaptas === false ? false : true,
-        });
-        return error ? { erro: error.message } : data;
+        };
+        // p_drive_file_ids so existe apos migracao v28.31; se a RPC antiga rejeitar o arg, cai sem filtro.
+        if (idsFiltro.length) rpcArgs.p_drive_file_ids = idsFiltro;
+        let data: any = null;
+        let error: any = null;
+        ({ data, error } = await supa.rpc("get_acervo_para_anuncio", rpcArgs));
+        if (error && idsFiltro.length && /p_drive_file_ids|function.*does not exist|Could not find/i.test(String(error.message ?? ""))) {
+          ({ data, error } = await supa.rpc("get_acervo_para_anuncio", {
+            p_company_id: ctx.companyId,
+            p_produto: produto || null,
+            p_incluir_inaptas: args?.incluir_inaptas === false ? false : true,
+          }));
+          if (!error && data && typeof data === "object" && Array.isArray((data as any).itens)) {
+            const want = new Set(idsFiltro);
+            const itens = ((data as any).itens as any[]).filter((it) => want.has(String(it?.drive_file_id ?? "")));
+            data = { ...data, itens, filtro_drive_file_ids: idsFiltro, filtro_aplicado_no_edge: true,
+              total_no_acervo_apos_filtro: itens.length };
+          }
+        }
+        if (error) return { erro: error.message };
+        return compactarAcervoParaAgente(data, idsFiltro.length > 0);
       }
       case "upload_midia": {
         const dfid = String(args?.drive_file_id ?? "").trim();
@@ -2874,6 +3036,13 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   antes de auditar ou emitir. PROIBIDO trocar por outro conjunto (ex. "5 videos 22-27" so porque
   estao liberados no acervo). Inventario apto ≠ pedido. Se perder o slate no historico, peca
   confirmacao — nao invente.
+- EMITE OS N (anti-loop, 20/08/2026): se o gestor disser "emite os N" / "emite os cards" e o
+  slate (drive_file_id / meta ids / legendas) JA estiver nesta conversa (mensagem atual ou
+  historico reinjetado), EMITA agora com propose_action — sem releitura obrigatoria de
+  nota_visual / checar_par / get_acervo completo, sem reabrir compliance se a legenda CET ja
+  foi confirmada, e SEM pedir ao gestor para repetir "emite os N". Use get_acervo_para_anuncio
+  com drive_file_ids do slate quando so precisar confirmar biblioteca. Se o teto cortar no
+  meio, emita o que couber e diga o que falta — nunca "manda emite de novo".
 - CET (FIN-04 v4): "consulte o CET na sua simulacao" e formulacao APROVADA pelo gestor e pela
   regra. Se o gestor pediu essa formulacao, USE e NAO volte a exigir numero. Nao ha taxa de CET
   fixa da LEV no sistema. Aceitar e depois recusar a mesma formulacao e falta grave.
@@ -3497,11 +3666,20 @@ Deno.serve(async (req) => {
         let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
         const jaUsou = toolsUsed.filter((t) => t.tool === nomeTc).length;
         const limiteDesta = MAX_POR_FERRAMENTA[nomeTc] ?? MAX_POR_FERRAMENTA_DEFAULT;
-        if (toolsUsed.length >= MAX_TOOLS_TURNO || jaUsou >= limiteDesta) {
+        // v28.31: criar_anuncio (e demais criacoes) nao competem com releituras pelo teto global.
+        const eCriacao =
+          nomeTc === "propose_action" &&
+          ACOES_CRIACAO_NO_TETO.includes(String(args?.action_type ?? ""));
+        const tetoGlobal = !eCriacao && toolsUsed.filter((t) => {
+          if (t.tool !== "propose_action") return true;
+          const at = String((t.args as any)?.action_type ?? "");
+          return !ACOES_CRIACAO_NO_TETO.includes(at);
+        }).length >= MAX_TOOLS_TURNO;
+        if (tetoGlobal || jaUsou >= limiteDesta) {
           tetoTools = true;
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
             erro: "consulta_nao_realizada_nesta_rodada",
-            aviso: "Esta consulta nao foi executada nesta rodada. O dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao gestor, em UMA linha e em linguagem natural, que este item ficou para a proxima. NAO cite nome de ferramenta, numero de limite nem detalhe de implementacao." }) });
+            aviso: "Esta consulta nao foi executada nesta rodada. O dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao gestor, em UMA linha e em linguagem natural, que este item ficou para a proxima. NAO cite nome de ferramenta, numero de limite nem detalhe de implementacao. Se o pedido era EMITIR cards e o slate/legendas ja estavam no chat, NAO peca para repetir 'emite' — emita o que couber agora e declare o que falta sem pedir eco." }) });
           // v28.11: a consulta NAO feita tambem se registra. Sem isto a continuacao veria a
           // ausencia do dado e nao saberia distinguir "nao foi lido" de "nao existe" (R3).
           toolResults.push({ tool: nomeTc, args, chars: 0, cortado: false, retorno: null,
