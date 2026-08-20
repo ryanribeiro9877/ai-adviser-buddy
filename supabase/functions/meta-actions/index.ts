@@ -1,4 +1,5 @@
-// supabase/functions/meta-actions/index.ts (v5.26)
+// supabase/functions/meta-actions/index.ts (v5.27)
+// v5.27 (20/08/2026) - teto horario por EMPRESA (Map), alinhado a contar_acoes_na_hora.
 // v5.26 (15/08/2026) - campanha/conjunto tambem nascem ACTIVE; ativar_campanha / ativar_conjunto.
 // v5.25 (15/08/2026) - criar_anuncio nasce ACTIVE na aprovacao; ativar_criativo (update_ad ACTIVE).
 // v5.24 (15/08/2026) - Identidade Instagram oficial Legal = @legaleviver_ (IBA).
@@ -2731,12 +2732,9 @@ Deno.serve(async (req) => {
       mcp_chave_legada: auth.legado,
     });
 
-  const { count: naHora } = await supa
-    .from("audit_log")
-    .select("id", { count: "exact", head: true })
-    .eq("action", "meta_action_executed")
-    .gte("created_at", new Date(Date.now() - 3600e3).toISOString());
-  let executadasNaHora = naHora ?? 0;
+  // Teto por EMPRESA (alinha com contar_acoes_na_hora / pode_executar_acao). Contagem
+  // global misturava empresas e podia barrar slate de uma por causa de outra.
+  const executadasNaHoraPorEmpresa = new Map<string, number>();
 
   const resultados: any[] = [];
   for (const r of fila) {
@@ -2764,6 +2762,16 @@ Deno.serve(async (req) => {
       });
       continue;
     }
+    if (!executadasNaHoraPorEmpresa.has(r.company_id)) {
+      const { count: naHoraEmpresa } = await supa
+        .from("audit_log")
+        .select("id", { count: "exact", head: true })
+        .eq("company_id", r.company_id)
+        .eq("action", "meta_action_executed")
+        .gte("created_at", new Date(Date.now() - 3600e3).toISOString());
+      executadasNaHoraPorEmpresa.set(r.company_id, naHoraEmpresa ?? 0);
+    }
+    let executadasNaHora = executadasNaHoraPorEmpresa.get(r.company_id) ?? 0;
     const contasOk: string[] = (conf.contas_permitidas_criacao ?? []).map((x: string) => actId(x));
     const tetoSanidade = Number(conf.teto_sanidade_orcamento_diario ?? 5000);
     const flagsOk = conf.master_enabled === true && conf.action_flags?.[acao] === true;
@@ -3171,6 +3179,7 @@ Deno.serve(async (req) => {
 
       if (sucesso) {
         executadasNaHora++;
+        executadasNaHoraPorEmpresa.set(r.company_id, executadasNaHora);
         // v4.2: espelha ANTES de fechar o card, para que o proximo turno do agente ja veja.
         const esp = await espelhar(
           acao,
@@ -3620,6 +3629,7 @@ Deno.serve(async (req) => {
     );
     if (sucesso) {
       executadasNaHora++;
+      executadasNaHoraPorEmpresa.set(r.company_id, executadasNaHora);
       const acaoRec = acaoDeAuditoriaDaReconciliacao(reconciliacao);
       if (acaoRec && reconciliacao) {
         await audit(r.company_id, sistema, acaoRec, r.id, {
