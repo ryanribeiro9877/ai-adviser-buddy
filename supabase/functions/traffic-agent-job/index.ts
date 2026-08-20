@@ -1,4 +1,9 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.5)
+// supabase/functions/traffic-agent-job/index.ts (v3.6)
+// v3.6 (20/08/2026) - HARDENING LITE/META + SINTESE: RE_META_DICA passa a casar
+//   "musicas"/"recomendacao" (antes so "musica"/"recomendac" com word-boundary quebrava
+//   o forcarPlano); fallback do planner invalido e por tier (lite Meta -> alertas,
+//   nunca desempenho/criativos); sintese com timeout duro por chamada + parede de fase
+//   e job vira error (Reenviar) se nao houver texto — nunca "escrevendo" infinito.
 // v3.5 (20/08/2026) - ROTEADOR DE CAPACIDADE (lite | standard | deep): o esforco do
 //   pipeline escala com a complexidade da pergunta, sem baixar o padrao de resposta
 //   completa (veredito + evidencia + recomendacao; proibido "vou ler"). Classificacao
@@ -251,10 +256,16 @@ type Capacidade = {
 };
 
 const RE_DEEP = /\b(analise tudo|analise completa|auditoria|todas as campanhas|todas campanhas|todas as contas|comparar|comparacao|cruzar|panorama|inventario|conta inteira|conta toda|relatorio completo|diagnostico completo|visao geral|tudo da conta|tudo sobre|multiplas campanhas|todas as pecas|cobertura total|pontos? a pontos?)\b/;
-const RE_META_DICA = /\b(dica|recomendac|opportunity|musica|boost|impulsionar|meta emitiu|recomendacao da meta)\b|recomendac.*(meta|facebook|anuncio|impulsionar|boost)/;
+// Prefixos com \w*: "recomendac\b" NAO casava "recomendacao"; "musica\b" NAO casava "musicas".
+const RE_META_DICA = /\b(dicas?|recomendac\w*|opportunity(?:\s*score)?|musicas?|boost|impulsionar|meta\s+emitiu|recomendacao\s+da\s+meta)\b/;
 const RE_FOLLOW_UP = /^(sobre|e |dessas|dessa|desses|desse|analise|me (informe|diga|recomenda)|o que (voce|acha)|e as |e os |e essas|e esses)|\b(essas duas|analise[- ]as|o que me recomenda|me informe o que|e viavel|faz sentido)\b/;
 const RE_STATUS_SIMPLES = /\b(status|como (esta|estao)|ta ativa|esta ativa|pausad[ao]|ligada|desligada)\b/;
 const RE_JULGAMENTO_CURTO = /^(sim|nao|ok|pode|confirma|vale a pena|e bom|e ruim)\b|\b(essas? (duas|2)|1[-–]2|uma ou duas)\b.*\b(recomend|dica|opca)/;
+const FOCO_META_DICAS =
+  "Levantar as dicas/recomendacoes da Meta (get_meta_dicas) citadas na pergunta — em especial musica/boost/Opportunity Score — e devolver julgamento acionavel (viavel ou nao + o que fazer). Nao inventariar criativos nem abrir outras frentes.";
+// Parede da fase de sintese: alem do timeout por chamada OpenRouter, a fase inteira
+// nao pode ficar "escrevendo" alem disto (worker morto deixa job running para sempre).
+const SINT_FASE_HARD_MS = 150_000;
 
 function classificarCapacidade(pergunta: string): Capacidade {
   const raw = pergunta.trim();
@@ -289,10 +300,7 @@ function classificarCapacidade(pergunta: string): Capacidade {
       devolucoesMax: LITE_DEVOLUCOES_MAX,
       permitirCheckpoint: false,
       openRouterTimeoutMs: LITE_OPENROUTER_TIMEOUT_MS,
-      forcarPlano: [{
-        nome: "alertas_recomendacoes",
-        foco: "Levantar as dicas/recomendacoes da Meta (get_meta_dicas) citadas na pergunta — em especial musica/boost/Opportunity Score — e devolver julgamento acionavel (viavel ou nao + o que fazer). Nao inventariar criativos nem abrir outras frentes.",
-      }],
+      forcarPlano: [{ nome: "alertas_recomendacoes", foco: FOCO_META_DICAS }],
     };
   }
   if (curta && (followUp || statusSimples || julgamentoCurto || len <= 280)) {
@@ -1178,6 +1186,37 @@ function extrairJSON(txt: string): any | null {
   if (ini < 0 || fim <= ini) return null;
   try { return JSON.parse(limpo.slice(ini, fim + 1)); } catch { return null; }
 }
+
+/** Fallback quando o planner falha: por tier, nunca Object.keys() cego (lite Meta → alertas). */
+function planoFallbackSeguro(
+  nomes: string[],
+  cap: Capacidade | undefined,
+  pergunta: string,
+): { nome: string; foco: string }[] {
+  const maxEsp = Math.max(1, Math.min(cap?.maxEspecialistas ?? nomes.length, nomes.length));
+  const p = deacc(pergunta.toLowerCase());
+  const metaHit = RE_META_DICA.test(p);
+  if (metaHit && nomes.includes("alertas_recomendacoes")) {
+    return [{ nome: "alertas_recomendacoes", foco: FOCO_META_DICAS }];
+  }
+  if (cap?.tier === "lite") {
+    const preferidos = ["desempenho_campanhas", "alertas_recomendacoes", "conhecimento"];
+    const escolhido = preferidos.find((n) => nomes.includes(n)) ?? nomes[0];
+    return [{ nome: escolhido, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }];
+  }
+  if (cap?.tier === "standard") {
+    const preferidos = ["desempenho_campanhas", "alertas_recomendacoes", "estrutura_conta"];
+    return preferidos
+      .filter((n) => nomes.includes(n))
+      .slice(0, maxEsp)
+      .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
+  }
+  return nomes.slice(0, maxEsp).map((n) => ({
+    nome: n,
+    foco: "cobrir a parte da pergunta pertinente a sua especialidade",
+  }));
+}
+
 async function planejar(pergunta: string, tel: any, cap?: Capacidade): Promise<{ plano: { nome: string; foco: string }[]; degradado: boolean }> {
   const nomes = Object.keys(SUBAGENTES);
   const maxEsp = cap?.maxEspecialistas ?? nomes.length;
@@ -1212,25 +1251,19 @@ Para auditoria ampla da conta, inclua todos os pertinentes.`;
     { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB, timeoutMs: cap?.openRouterTimeoutMs ?? OPENROUTER_TIMEOUT_MS },
   );
   if (r.erro) {
-    const fallback = nomes.slice(0, Math.min(maxEsp, nomes.length))
-      .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
-    return { plano: fallback, degradado: true };
+    return { plano: planoFallbackSeguro(nomes, cap, pergunta), degradado: true };
   }
   const u = usoDe(r.parsed); tel.planner = { tokens_in: u.tin, tokens_out: u.tout, tier: cap?.tier };
   const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
   const lista = Array.isArray(bruto?.subagentes) ? bruto.subagentes : null;
   if (!lista?.length) {
-    const fallback = nomes.slice(0, Math.min(maxEsp, nomes.length))
-      .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
-    return { plano: fallback, degradado: true };
+    return { plano: planoFallbackSeguro(nomes, cap, pergunta), degradado: true };
   }
   const plano = lista
     .map((x: any) => ({ nome: String(x?.nome ?? "").trim(), foco: String(x?.foco ?? "").trim().slice(0, 400) }))
     .filter((x: any) => nomes.includes(x.nome));
   if (!plano.length) {
-    const fallback = nomes.slice(0, Math.min(maxEsp, nomes.length))
-      .map((n) => ({ nome: n, foco: "cobrir a parte da pergunta pertinente a sua especialidade" }));
-    return { plano: fallback, degradado: true };
+    return { plano: planoFallbackSeguro(nomes, cap, pergunta), degradado: true };
   }
   // dedupe mantendo o primeiro foco
   const vistos = new Set<string>();
@@ -1326,7 +1359,16 @@ Ao terminar a coleta, escreva um RELATORIO conciso e denso em markdown com numer
 // ============================================================================
 // FASE 3 - SINTESE com continuacao INTERNA (contexto preservado, zero re-coleta)
 // ============================================================================
-async function sintetizar(companyName: string, pergunta: string, relatorios: { nome: string; relatorio: string; completo: boolean }[], estilo: string, memoria: string, prazo: () => number, tel: any) {
+async function sintetizar(
+  companyName: string,
+  pergunta: string,
+  relatorios: { nome: string; relatorio: string; completo: boolean }[],
+  estilo: string,
+  memoria: string,
+  prazo: () => number,
+  tel: any,
+  opts?: { timeoutMs?: number },
+) {
   const isLegal = norm(companyName).includes("legal");
   const perfil = isLegal
     ? "empresa de credito consignado; regras financeiras so valem quando o produto estiver comprovado"
@@ -1346,13 +1388,23 @@ Responda a pergunta INTEIRA, bloco a bloco na ordem pedida, com numero + fonte (
     { role: "system", content: sys },
     { role: "user", content: `PERGUNTA DO GESTOR (responda por completo):\n${pergunta}\n\n=== RELATORIOS DOS ESPECIALISTAS (sua unica fonte de numeros da conta) ===\n${blocos}` },
   ];
+  const perCallTimeout = opts?.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
+  const hardDeadline = Date.now() + Math.min(SINT_FASE_HARD_MS, Math.max(prazo(), 8_000));
   let texto = "", partes = 0, tin = 0, tout = 0, finish = "";
   while (partes < SINT_MAX_PARTES) {
-    const restanteMs = prazo();
-    if (restanteMs <= 0) { finish = (finish || "stop") + "+prazo_do_job"; break; }
+    const restanteMs = Math.min(prazo(), hardDeadline - Date.now());
+    if (restanteMs <= 0) {
+      finish = (finish || "stop") + (texto ? "+sintese_timeout_parcial" : "+sintese_timeout");
+      break;
+    }
     const maxTok = Math.max(1500, Math.min(SINT_MAX_TOKENS, Math.floor((restanteMs / 1000) * TOKENS_POR_SEGUNDO)));
-    const r = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF });
-    if (r.erro) { if (!texto) texto = `Nao consegui produzir a sintese (${r.erro}).`; finish = "erro_llm"; break; }
+    const callTimeout = Math.min(perCallTimeout, Math.max(5_000, restanteMs));
+    const r = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, timeoutMs: callTimeout });
+    if (r.erro) {
+      if (!texto) texto = "";
+      finish = `erro_llm:${r.erro}`;
+      break;
+    }
     const u = usoDe(r.parsed); tin += u.tin; tout += u.tout;
     const msg = r.parsed?.choices?.[0]?.message;
     const pedaco = String(msg?.content ?? "");
@@ -1365,7 +1417,9 @@ Responda a pergunta INTEIRA, bloco a bloco na ordem pedida, com numero + fonte (
     messages.push({ role: "user", content: "Continue EXATAMENTE do ponto onde parou, na proxima palavra. Nao repita nada, nao reescreva titulos, nao cumprimente." });
   }
   tel.sintese = { partes, tokens_in: tin, tokens_out: tout, finish_reason: finish };
-  if (finish === "length") texto += "\n\n*(resposta encerrada no limite de tamanho do processamento; peca a parte que faltou que eu completo)*";
+  if (finish === "length" || finish.includes("sintese_timeout_parcial")) {
+    texto += "\n\n*(resposta encerrada no limite de tamanho do processamento; peca a parte que faltou que eu completo)*";
+  }
   return texto;
 }
 
@@ -1705,8 +1759,8 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
   const cap = classificarCapacidade(pergunta);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.5", subagentes: [] };
-  tel.versao = "job-v3.5";
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.6", subagentes: [] };
+  tel.versao = "job-v3.6";
   tel.capacidade = { tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas, devolucoes_max: cap.devolucoesMax };
   // Compat: telemetria antiga lia perfil_fast
   if (cap.tier === "lite") { tel.perfil_fast = true; tel.perfil_fast_motivo = cap.motivo; }
@@ -1765,7 +1819,12 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       tel.rodadas_devolucao = rodada;
       tel.segmento = segmento;
       await pushProgresso(jobId, "sintese", "escrevendo a resposta final");
-      const texto0 = await sintetizar(companyName, pergunta, relatorios, estilo0, memoria0, prazo, tel);
+      const texto0 = await sintetizar(companyName, pergunta, relatorios, estilo0, memoria0, prazo, tel, {
+        timeoutMs: cap.openRouterTimeoutMs,
+      });
+      if (!String(texto0 ?? "").trim()) {
+        throw new Error(`sintese_vazia (${tel.sintese?.finish_reason ?? "sem_finish"})`);
+      }
       tel.ms_total = Date.now() - t0;
       const finishSint0 = tel.sintese?.finish_reason ?? "stop";
       await supa.from("chat_messages").insert({
@@ -1855,7 +1914,12 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
     // FASE 3 - sintese
     await pushProgresso(jobId, "sintese", "escrevendo a resposta final");
-    const texto = await sintetizar(companyName, pergunta, relatorios, estilo, memoria, prazo, tel);
+    const texto = await sintetizar(companyName, pergunta, relatorios, estilo, memoria, prazo, tel, {
+      timeoutMs: cap.openRouterTimeoutMs,
+    });
+    if (!String(texto ?? "").trim()) {
+      throw new Error(`sintese_vazia (${tel.sintese?.finish_reason ?? "sem_finish"})`);
+    }
 
     tel.ms_total = Date.now() - t0;
     const finishSint = tel.sintese?.finish_reason ?? "stop";

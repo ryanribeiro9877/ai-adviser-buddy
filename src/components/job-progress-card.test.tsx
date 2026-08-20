@@ -212,6 +212,19 @@ describe("especialistas", () => {
     expect(screen.getByText("WhatsApp")).toBeInTheDocument();
   });
 
+  it("ignora sufixo de plano padrao no chip (nao vaza texto tecnico)", async () => {
+    montar();
+    chegaDoBanco({
+      progresso: [{
+        fase: "planner",
+        detalhe: "especialistas: desempenho_campanhas, criativos (plano padrao - planejador nao devolveu JSON valido) [lite]",
+      }],
+    });
+    expect(await screen.findByText("Desempenho")).toBeInTheDocument();
+    expect(screen.getByText("Criativos")).toBeInTheDocument();
+    expect(screen.queryByText(/plano padrao/i)).not.toBeInTheDocument();
+  });
+
   it("o detalhe de especialistas NÃO é repetido como texto solto", async () => {
     // Ele já virou chip; repetir a string técnica embaixo seria ruído.
     montar();

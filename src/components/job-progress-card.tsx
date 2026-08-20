@@ -49,6 +49,9 @@ const RELEITURA_MS = 20 * 1000;
 // 900 s. Conta silêncio (tempo sem a linha avançar), não tempo total: job que segue emitindo
 // fase está vivo por mais que demore.
 const SILENCIO_MS = 15 * 60 * 1000;
+// Em "Escrevendo resposta" o worker ja coletou tudo; se a sintese travar, 5 min de
+// silencio basta para oferecer Reenviar sem esperar o watchdog de 15 min.
+const SILENCIO_SINTESE_MS = 5 * 60 * 1000;
 
 const minutos = (ms: number) => Math.floor(ms / 60000);
 
@@ -88,14 +91,17 @@ function carimboDoAvanco(row: Linha): number {
 function nomesEspecialistas(detalhe: string): string[] {
   const m = /especialistas:\s*(.+)$/i.exec(detalhe);
   if (!m) return [];
-  return m[1]
+  const body = m[1]
+    // remove sufixo de degradacao do planner e tier ([lite]/[fast]/…)
+    .replace(/\s*\(plano padrao[^)]*\)/gi, "")
+    .replace(/\s*\[(lite|standard|deep|fast)\]\s*$/i, "")
+    .trim();
+  return body
     .split(/[,;]/)
     .map((s) => s.trim())
     .filter(Boolean)
-    // remove sufixo de capacidade/tier se o planner marcou ([lite]/[standard]/[deep]/[fast])
-    .map((s) => s.replace(/\s*\[(lite|standard|deep|fast)\]\s*$/i, "").trim())
-    .filter(Boolean)
-    .map((s) => ESPECIALISTAS[s] ?? s);
+    .map((s) => ESPECIALISTAS[s] ?? s)
+    .filter((s) => !/plano padrao/i.test(s));
 }
 
 /** Extrai o tier de capacidade do detalhe do progresso (ex.: "... [lite]"). */
@@ -244,7 +250,8 @@ export function JobProgressCard({
   }
 
   const silencio = agora - ultimoAvanco;
-  const emSilencio = silencio >= SILENCIO_MS;
+  const silencioLimite = ultimo?.fase === "sintese" ? SILENCIO_SINTESE_MS : SILENCIO_MS;
+  const emSilencio = silencio >= silencioLimite;
 
   return (
     <div className="rounded-md border border-border bg-muted/40 p-3">
