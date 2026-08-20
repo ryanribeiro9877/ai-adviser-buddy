@@ -1,4 +1,12 @@
-// supabase/functions/traffic-chat/index.ts (v28.37)
+// supabase/functions/traffic-chat/index.ts (v28.38)
+// v28.38 (20/08/2026) - CONTINUACAO AUTOMATICA SO EM TURNO INCOMPLETO:
+//   v28.37 disparava continuar quando pedido_ato + deadline + zero cards, mesmo com
+//   resposta completa (contradicão / pergunta de decisao). Agora so retoma se:
+//   (1) orcamento esgotou com reply vazia/parcial mid tool-loop, OU
+//   (2) fluxo de ato com propose_action/emissão em andamento e card ainda nao saiu.
+//   Resposta substantiva que fecha o turno (clarificacao, recusa pendente de decisao)
+//   NAO grava checkpoint nem continua. Copy de "emitir pedido(s)" so quando de fato
+//   havia emissao pendente — nao quando o modelo so esclarece.
 // v28.37 (20/08/2026) - CONTINUACAO AUTOMATICA DO TURNO SINCRONO:
 //   Quando o orcamento (~118s) esgota no meio do loop (ato/criar, tools, sintese),
 //   grava turn_checkpoint em chat_conversations e devolve { continuar:true } em vez
@@ -535,13 +543,18 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.37";
+const VERSAO = "chat-v28.38";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
+  "Continuando automaticamente a partir do ponto em que o orçamento desta janela esgotou.";
+const REPLY_CONTINUANDO_ATO =
   "Montando os pedidos de aprovação — continuando automaticamente a partir do ponto em que o orçamento desta janela esgotou.";
 const RE_CONTINUAR_AUTO =
-  /^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando/i;
+  /^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/i;
+// Narracao mid-loop ("vou consultar…") — nao conta como resposta que fecha o turno.
+const RE_INTENCAO =
+  /\b(vou|deixe-?me|deixa eu|irei|vou apenas)\b.{0,80}\b(cruzar|ler|consultar|verificar|checar|buscar|abrir|olhar|coletar|apurar|rodar|chamar|emitir|criar|propor)\b/i;
 const HIST = 24;
 // v28.11: orcamento da reinjecao de retorno de ferramenta.
 // TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
@@ -3531,7 +3544,7 @@ const FAMILIAS_ASSUNTO: RegExp[] = [
 ];
 const ROTA_FAMILIAS_MIN = 5;
 const ROTA_CHARS_MIN = 1500;
-const RE_CONTINUACAO = /^sua resposta anterior foi cortada|^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando/;
+const RE_CONTINUACAO = /^sua resposta anterior foi cortada|^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/;
 const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
 
 type TurnCheckpoint = {
@@ -3582,6 +3595,26 @@ function resumirToolsParaCheckpoint(toolsUsed: any[], toolResults: { tool: strin
     action_type: t.args && typeof t.args === "object" ? String(t.args.action_type ?? "") || undefined : undefined,
   })).slice(-40);
 }
+
+function toolsIncluemPropose(tools: { tool?: string }[]): boolean {
+  return tools.some((t) => String(t.tool ?? "") === "propose_action");
+}
+
+/** Resposta que ja fecha o turno: clarificacao, contradicao, recusa pendente de decisao. */
+function replyFechaTurno(texto: string): boolean {
+  const raw = String(texto ?? "").trim();
+  if (raw.length < 100) return false;
+  const t = deacc(raw.toLowerCase());
+  if (RE_INTENCAO.test(raw)) return false;
+  if (RE_CONTINUAR_AUTO.test(t) || /continuando automaticamente/.test(t)) return false;
+  const perguntaOuDecisao =
+    /\?/.test(raw) ||
+    /\b(preciso (da sua|que voce|confirmar|saber|da decisao)|qual (o |a )?(objetivo|opcao|caminho|meta|foco)|me (confirma|diga|escolha|oriente)|antes de (criar|emitir|propor|subir|montar)|contradic|incompatib|nao (posso|vou) (criar|emitir|propor)|aguardo (sua|a) (resposta|decisao|confirmacao)|escolha (uma|o|a)|decida)\b/.test(t);
+  if (perguntaOuDecisao) return true;
+  // Prosa longa sem narrar intencao: o gestor ja tem a resposta do turno.
+  return raw.length >= 280;
+}
+
 // v28.32: pergunta tipica que estourava 150s porque o modelo abria Pipeboard em vez de
 // get_meta_dicas. Sem verbo de ato — se pedir emitir card, cai no caminho normal.
 const RE_DICAS_META = /dica.*meta|recomendac.*(meta|facebook|anuncio|impulsionar|boost)|meta emitiu|meta.*recomend|impulsionar.*(anuncio|eles|campanha)|opportunity score|recomendacao da meta/;
@@ -4202,7 +4235,7 @@ Deno.serve(async (req) => {
   }
   // v18/v28.35: emenda preambulos substantivos; DESCARTA narracao de intencao.
   // "vou consultar/cruzar/ler…" nunca vira reply — e o sintoma do dump mid-thought.
-  const RE_INTENCAO = /\b(vou|deixe-?me|deixa eu|irei|vou apenas)\b.{0,80}\b(cruzar|ler|consultar|verificar|checar|buscar|abrir|olhar|coletar|apurar|rodar|chamar)\b/i;
+  // RE_INTENCAO e constante de modulo (v28.38).
   let preambulosUsados = 0;
   if (preambulos.length) {
     const substantivos = preambulos.filter((p) => p.length >= 120 && !RE_INTENCAO.test(p));
@@ -4214,23 +4247,38 @@ Deno.serve(async (req) => {
     }
   }
 
-  // v28.37: CONTINUACAO AUTOMATICA — nunca devolver o aviso "Peça de novo…" como UX final
-  // em fluxo de ato / turno incompleto por orcamento. Grava checkpoint e sinaliza ao front.
+  // v28.38: CONTINUACAO AUTOMATICA — so quando o turno esta realmente incompleto.
+  // Nao continuar apos resposta completa (clarificacao / decisao humana / analise fechada).
   const pedidoAto = RE_PEDIDO_DE_ATO.test(deacc(objetivoOriginal.toLowerCase())) ||
     (turnCheckpoint?.pedido_ato === true);
   const cardsNesteSegmento = actionCards.length;
   const cardsJaNoPedido = (turnCheckpoint?.cards?.length ?? 0) + cardsNesteSegmento;
   const toolsNesteSegmento = toolsUsed.length;
-  const turnoIncompletoPorTempo = deadlineTools && (
-    !String(reply ?? "").trim() ||
-    (pedidoAto && cardsNesteSegmento === 0 && toolsNesteSegmento > 0) ||
-    (pedidoAto && cardsJaNoPedido === 0)
+  const replyTrim = String(reply ?? "").trim();
+  const turnoJaFechado = replyFechaTurno(replyTrim);
+  const tentouEmitir =
+    toolsIncluemPropose(toolsUsed) ||
+    toolsIncluemPropose(turnCheckpoint?.tools_resumo ?? []);
+  const midLoopFraco =
+    !replyTrim ||
+    RE_INTENCAO.test(replyTrim) ||
+    replyTrim.length < 100;
+  // Ato incompleto: card ainda nao saiu E havia trabalho de emissao em curso
+  // (propose tentado, ou mid-loop sem prosa util). Clarificacao com zero cards NAO entra.
+  const atoEmAndamentoSemCard =
+    pedidoAto &&
+    cardsJaNoPedido === 0 &&
+    !turnoJaFechado &&
+    (tentouEmitir || (toolsNesteSegmento > 0 && midLoopFraco));
+  const turnoIncompletoPorTempo = deadlineTools && !turnoJaFechado && (
+    !replyTrim ||
+    atoEmAndamentoSemCard
   );
   const podeContinuarSegmento = segmentoAtual < MAX_TURN_SEGMENTS;
   let continuarTurno = false;
   let usouFallback = false;
 
-  if (!String(reply ?? "").trim() || turnoIncompletoPorTempo) {
+  if (!replyTrim || turnoIncompletoPorTempo) {
     if (turnoIncompletoPorTempo && podeContinuarSegmento) {
       // Junta cards deste segmento com os do checkpoint anterior.
       const cardsMerged = [
@@ -4247,7 +4295,7 @@ Deno.serve(async (req) => {
       ].slice(-60);
       const replyParcial = [
         turnCheckpoint?.reply_parcial,
-        String(reply ?? "").trim(),
+        replyTrim,
       ].filter(Boolean).join("\n\n").trim();
 
       const novoCp: TurnCheckpoint = {
@@ -4264,21 +4312,24 @@ Deno.serve(async (req) => {
         .update({ turn_checkpoint: novoCp, updated_at: new Date().toISOString() })
         .eq("id", convId);
 
-      if (!String(reply ?? "").trim()) {
+      if (!replyTrim) {
         if (cardsNesteSegmento > 0) {
           reply = `Emiti ${cardsNesteSegmento} pedido(s) de aprovação. Continuando o restante automaticamente…`;
-        } else if (toolsNesteSegmento > 0) {
-          reply = REPLY_CONTINUANDO;
+        } else if (pedidoAto && (tentouEmitir || toolsNesteSegmento > 0)) {
+          reply = REPLY_CONTINUANDO_ATO;
         } else {
           reply = REPLY_CONTINUANDO;
         }
-      } else if (pedidoAto && cardsNesteSegmento === 0) {
-        // Havia prosa mas o card ainda nao saiu — nao deixe o gestor achar que acabou.
-        reply = String(reply).trim() + "\n\n_Continuando automaticamente para emitir o(s) pedido(s) de aprovação…_";
+      } else if (pedidoAto && cardsNesteSegmento === 0 && tentouEmitir) {
+        // propose_action em curso sem card — progress de emissao e honesto.
+        reply = replyTrim + "\n\n_Continuando automaticamente para emitir o(s) pedido(s) de aprovação…_";
+      } else if (replyTrim) {
+        // Mid-loop com prosa fraca: continue generico, sem fingir emissao de card.
+        reply = replyTrim + "\n\n_Continuando automaticamente…_";
       }
       continuarTurno = true;
       finishReason = `continuar_turno+seg${segmentoAtual}`;
-    } else if (!String(reply ?? "").trim()) {
+    } else if (!replyTrim) {
       // Ultimo segmento ou sem trabalho retomavel: ainda assim NAO use o texto antigo
       // de "Peça de novo…" em pedido de ato — diga o que falta com o que ja tem.
       if (pedidoAto) {

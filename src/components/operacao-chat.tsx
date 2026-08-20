@@ -89,7 +89,45 @@ const CONTINUE_PROMPT =
 const MAX_CONTINUATIONS = 5;
 const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 const needsAutoContinue = (data?: ChatReply | null) =>
-  !!data && (data.continuar === true || (!!data.finish_reason && data.finish_reason.startsWith("continuar_turno")));
+  !!data && data.continuar === true && !!data.finish_reason && data.finish_reason.startsWith("continuar_turno");
+
+function deaccFront(s: string) {
+  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+/** Mensagens de progresso / checkpoint — nao contam como resposta ao gestor. */
+function isProgressOnlyReply(text: string): boolean {
+  const raw = (text ?? "").trim();
+  if (!raw) return true;
+  const t = deaccFront(raw.toLowerCase());
+  if (raw.length < 80 && /continuando|montando os pedidos/.test(t)) return true;
+  return (
+    /^montando os pedidos de aprovacao/.test(t) ||
+    /^continuando automaticamente/.test(t) ||
+    /continuando automaticamente para emitir/.test(t) ||
+    /^\[continuacao automatica do sistema/.test(t)
+  );
+}
+
+/** Resposta que ja fecha o turno (clarificacao / decisao) — front nao deve auto-continuar. */
+function looksLikeCompleteTurn(text: string): boolean {
+  const raw = (text ?? "").trim();
+  if (raw.length < 100 || isProgressOnlyReply(raw)) return false;
+  const t = deaccFront(raw.toLowerCase());
+  if (/\?/.test(raw)) return true;
+  return /\b(preciso (da sua|que voce|confirmar|saber)|qual (o |a )?(objetivo|opcao|caminho|meta)|me (confirma|diga|escolha)|antes de (criar|emitir|propor)|contradic|aguardo (sua|a) (resposta|decisao)|escolha (uma|o|a)|decida)\b/.test(t);
+}
+
+/** Conta assistants substantivos apos o ultimo user (protege contra 2a bolha). */
+function countSubstantiveAssistantsSinceLastUser(msgs: Message[]): number {
+  let count = 0;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role === "user") break;
+    if (m.role === "assistant" && !isProgressOnlyReply(m.content ?? "")) count++;
+  }
+  return count;
+}
 
 // Estado de processamento é DERIVADO do banco, não guardado em memória: um turno
 // está em andamento quando a última mensagem da conversa é 'user' e nenhuma
@@ -647,9 +685,16 @@ export function OperacaoChat() {
           qc.invalidateQueries({ queryKey: ["approvals"] });
           await qc.invalidateQueries({ queryKey: ["chat-messages", convIdAtSend] });
           // Pode ter gravado checkpoint + "continuando…": retoma sem o gestor clicar Reenviar.
+          // v28.38: so se continuar=true de verdade; para se ja houver 2 assistants substantivos.
           setLive({ convId: convIdAtSend, text: "continuando a resposta…", continuing: 1 });
           let contFinish = true;
           for (let n = 1; n <= MAX_CONTINUATIONS && contFinish; n++) {
+            try {
+              const msgsNow = await fetchMessages(convIdAtSend);
+              if (countSubstantiveAssistantsSinceLastUser(msgsNow) >= 2) break;
+            } catch {
+              /* rede — segue com a flag da edge */
+            }
             setLive({ convId: convIdAtSend, text: "continuando a resposta…", continuing: n });
             const { data: more, error: contErr } = await supabase.functions.invoke<ChatReply>(
               "traffic-chat",
@@ -659,7 +704,7 @@ export function OperacaoChat() {
               contFinish = false;
               break;
             }
-            contFinish = needsAutoContinue(more);
+            contFinish = needsAutoContinue(more) && !looksLikeCompleteTurn(more.reply ?? "");
             await qc.invalidateQueries({ queryKey: ["chat-messages", convIdAtSend] });
             qc.invalidateQueries({ queryKey: ["approvals"] });
           }
@@ -707,12 +752,21 @@ export function OperacaoChat() {
 
       // Resposta longa (finish_reason=length) OU turno com checkpoint (continuar=true):
       // cada HTTP fica sob ~150s; o cliente emenda / retoma sem o gestor clicar Reenviar.
+      // v28.38: ignora continuar se a 1a reply ja fechou o turno (clarificacao/decisao).
       let acc = data!.reply ?? "";
       let finish = data!.finish_reason;
-      let autoCont = needsAutoContinue(data);
+      let autoCont = needsAutoContinue(data) && !looksLikeCompleteTurn(acc);
       if (isTruncated(finish) || autoCont) setLive({ convId, text: acc || "continuando a resposta…", continuing: 0 });
 
       for (let n = 1; n <= MAX_CONTINUATIONS && (isTruncated(finish) || autoCont); n++) {
+        if (autoCont) {
+          try {
+            const msgsNow = await fetchMessages(convId);
+            if (countSubstantiveAssistantsSinceLastUser(msgsNow) >= 2) break;
+          } catch {
+            /* rede — segue com a flag da edge */
+          }
+        }
         setLive({ convId, text: acc || "continuando a resposta…", continuing: n });
         const bodyCont = autoCont
           ? { continuar: true, conversation_id: convId, company: companyName }
@@ -736,7 +790,7 @@ export function OperacaoChat() {
           acc = `${acc}\n${piece}`;
         }
         finish = more.finish_reason;
-        autoCont = needsAutoContinue(more);
+        autoCont = needsAutoContinue(more) && !looksLikeCompleteTurn(more.reply ?? "");
         setLive({ convId, text: acc || "continuando a resposta…", continuing: n });
         // Cards podem ter saído no segmento — atualiza a fila sem esperar o fim.
         if (autoCont || (more.tools_used?.length ?? 0) > 0) {
