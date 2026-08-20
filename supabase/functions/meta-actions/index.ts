@@ -1,4 +1,8 @@
-// supabase/functions/meta-actions/index.ts (v5.27)
+// supabase/functions/meta-actions/index.ts (v5.28)
+// v5.28 (20/08/2026) - ENGAJAMENTO/RECONHECIMENTO: criar_campanha aceita ODAX social
+//   (OUTCOME_ENGAGEMENT/AWARENESS + sinonimos). criar_conjunto, quando familia engajamento
+//   ou reconhecimento (payload ou objective da campanha destino), sobrescreve molde
+//   OFFSITE_CONVERSIONS+pixel por POST_ENGAGEMENT|REACH + promoted_object={page_id}.
 // v5.27 (20/08/2026) - teto horario por EMPRESA (Map), alinhado a contar_acoes_na_hora.
 // v5.26 (15/08/2026) - campanha/conjunto tambem nascem ACTIVE; ativar_campanha / ativar_conjunto.
 // v5.25 (15/08/2026) - criar_anuncio nasce ACTIVE na aprovacao; ativar_criativo (update_ad ACTIVE).
@@ -304,6 +308,13 @@ import {
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import { conferirNomeComPartes, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
+import {
+  resolverObjetivoOdax,
+  familiaDeObjetivo,
+  ehFamiliaSocialTopo,
+  defaultsConjuntoSocialTopo,
+  mensagemObjetivoNaoSuportado,
+} from "../_shared/objetivo_odax.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
   argsAdDeGraph,
@@ -1303,11 +1314,19 @@ export async function montarCriacao(
     // ABO de verdade: use_adset_level_budgets=true e a chave. Sem ele, o Pipeboard injeta
     // daily_budget=1000 (provado por teste descartavel controlado em 07/08/2026). Nenhum orcamento
     // de campanha e enviado. O flag e do CONECTOR; escreverCriacao o remove antes de um POST Graph.
+    const resolvidoObj = resolverObjetivoOdax({
+      objetivo: p?.objetivo,
+      objetivo_tag: (p?.nome_partes as any)?.objetivo_tag ?? p?.objetivo_tag,
+    });
+    if (!resolvidoObj.ok) {
+      return mensagemObjetivoNaoSuportado(resolvidoObj.bruto);
+    }
+    const objetivo = resolvidoObj.objetivo;
     return {
       path: `/${conta}/campaigns`,
       body: {
         name: conf.nome,
-        objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
+        objective: objetivo,
         status: "ACTIVE", // v5.26: aprovar criar_campanha = cria ACTIVE
         special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]), // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
         buying_type: "AUCTION",
@@ -1316,6 +1335,7 @@ export async function montarCriacao(
       } as Record<string, string>,
       regime_orcamento: "abo",
       nome_partes: conf.partes,
+      familia_objetivo: familiaDeObjetivo(objetivo),
     };
   }
 
@@ -1586,6 +1606,65 @@ export async function montarCriacao(
       };
     }
     } // fim else criar_conjunto (plataformas)
+
+    // v5.28: familia engajamento/reconhecimento — molde so empresta targeting.
+    // Campanha OUTCOME_ENGAGEMENT/AWARENESS NAO aceita OFFSITE_CONVERSIONS+pixel do molde LEADS.
+    {
+      let familiaPayload = String(p?.familia_objetivo ?? "").trim().toLowerCase();
+      const tagPartes = String((p?.nome_partes as any)?.objetivo_tag ?? p?.objetivo_tag ?? "").trim();
+      if (!familiaPayload || familiaPayload === "conversao") {
+        if (ehFamiliaSocialTopo(tagPartes) || ehFamiliaSocialTopo(p?.objetivo)) {
+          familiaPayload = familiaDeObjetivo(p?.objetivo ?? tagPartes);
+        }
+      }
+      if (!familiaPayload || familiaPayload === "conversao") {
+        const campObj = await g(`/${campanha}?fields=objective`);
+        if (campObj.status === 200) {
+          const objCamp = String((campObj.body as any)?.objective ?? "");
+          if (ehFamiliaSocialTopo(objCamp)) {
+            familiaPayload = familiaDeObjetivo(objCamp);
+          }
+        }
+      }
+      if (familiaPayload === "engajamento" || familiaPayload === "reconhecimento") {
+        let pageId = String(p?.page_id ?? "").trim();
+        if (!pageId && companyId) {
+          const { data: cfgPage } = await supa
+            .from("meta_execution_config")
+            .select("page_id")
+            .eq("company_id", companyId)
+            .maybeSingle();
+          pageId = String((cfgPage as any)?.page_id ?? "").trim();
+        }
+        const defs = defaultsConjuntoSocialTopo(
+          familiaPayload,
+          pageId,
+          p?.optimization_goal,
+        );
+        if ("erro" in defs) {
+          return { erro: defs.erro, detalhe: defs.detalhe };
+        }
+        body.optimization_goal = defs.optimization_goal;
+        body.billing_event = defs.billing_event;
+        body.promoted_object = JSON.stringify(defs.promoted_object);
+        delete body.attribution_spec;
+        if (defs.destination_type) {
+          body.destination_type = defs.destination_type;
+        } else {
+          delete body.destination_type;
+        }
+        posicionamento = {
+          ...(posicionamento && typeof posicionamento === "object" ? posicionamento : {}),
+          familia_objetivo: familiaPayload,
+          override_social_topo: true,
+          optimization_goal: defs.optimization_goal,
+          billing_event: defs.billing_event,
+          page_id: pageId,
+          declaracao_social:
+            `Conjunto ${familiaPayload}: optimization_goal=${defs.optimization_goal}, promoted_object.page_id=${pageId} (sem pixel/conversao do molde).`,
+        };
+      }
+    }
 
     return { path: `/${conta}/adsets`, body, molde_lido: mb, posicionamento, nome_partes: nomePartesGravar };
   }
@@ -2328,7 +2407,7 @@ async function espelhar(
           company_id: companyId,
           provider: "meta_ads",
           name: String(objeto?.name ?? p?.nome_novo ?? ""),
-          objective: String(p?.objetivo ?? "OUTCOME_LEADS"),
+          objective: String(objeto?.objective ?? p?.objetivo ?? "OUTCOME_LEADS"),
           status: statusMeta.toLowerCase(), // campaigns = minusculo
           // v5.4: o literal `0` que estava aqui era um PALPITE apresentado como fato ("ABO:
           // orcamento vive no conjunto"). Em 07/08/2026 ele gravou 0 para uma campanha que a Meta

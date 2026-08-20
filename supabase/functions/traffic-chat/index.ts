@@ -1,4 +1,9 @@
-// supabase/functions/traffic-chat/index.ts (v28.38)
+// supabase/functions/traffic-chat/index.ts (v28.39)
+// v28.39 (20/08/2026) - OBJETIVOS ODAX DE ENGAJAMENTO/RECONHECIMENTO (IMPULSAO SOCIAL):
+//   criar_campanha aceita ENGAJAMENTO/POST_ENGAGEMENT/RECONHECIMENTO (e deriva ODAX da
+//   objetivo_tag se params.objetivo omitido). Canal SOCIAL + Page/IG permitidos nesta
+//   familia; CLT+LP continua o default da casa. criar_conjunto propaga familia_objetivo
+//   + page_id para o executor sobrescrever OFFSITE_CONVERSIONS do molde.
 // v28.38 (20/08/2026) - CONTINUACAO AUTOMATICA SO EM TURNO INCOMPLETO:
 //   v28.37 disparava continuar quando pedido_ato + deadline + zero cards, mesmo com
 //   resposta completa (contradicão / pergunta de decisao). Agora so retoma se:
@@ -486,6 +491,13 @@ import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { situacaoDoCard } from "../_shared/aprovacoes.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import { resolverNomePartesDoParams, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
+import {
+  resolverObjetivoOdax,
+  familiaDeObjetivo,
+  ehFamiliaSocialTopo,
+  mensagemObjetivoNaoSuportado,
+  ODAX_OBJETIVOS,
+} from "../_shared/objetivo_odax.ts";
 import { pipeboardToken } from "../_shared/pipeboard.ts";
 import {
   callReadTool,
@@ -1716,24 +1728,23 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
 
   // -------- criar_campanha: nome COMPOSTO (ESP-40); target_name deixa de ser nome livre --------
   if (action === "criar_campanha") {
-    // v26: ODAX. A API so aceita estes seis; sinonimos comuns sao mapeados e o resto e
-    // recusado, porque objetivo invalido so falharia no momento da execucao real.
-    const ODAX = ["OUTCOME_LEADS", "OUTCOME_SALES", "OUTCOME_TRAFFIC", "OUTCOME_ENGAGEMENT", "OUTCOME_AWARENESS", "OUTCOME_APP_PROMOTION"];
-    const SINONIMOS: Record<string, string> = {
-      LEADS: "OUTCOME_LEADS", LEAD_GENERATION: "OUTCOME_LEADS", LEADGEN: "OUTCOME_LEADS",
-      CONVERSIONS: "OUTCOME_SALES", SALES: "OUTCOME_SALES", VENDAS: "OUTCOME_SALES",
-      TRAFFIC: "OUTCOME_TRAFFIC", TRAFEGO: "OUTCOME_TRAFFIC", LINK_CLICKS: "OUTCOME_TRAFFIC",
-      MESSAGES: "OUTCOME_ENGAGEMENT", MENSAGEM: "OUTCOME_ENGAGEMENT", ENGAGEMENT: "OUTCOME_ENGAGEMENT",
-      AWARENESS: "OUTCOME_AWARENESS", RECONHECIMENTO: "OUTCOME_AWARENESS",
-    };
-    const bruto = String(params?.objetivo ?? "OUTCOME_LEADS").trim().toUpperCase().replace(/[\s-]+/g, "_");
-    const objetivo = ODAX.includes(bruto) ? bruto : (SINONIMOS[bruto] ?? "");
-    if (!objetivo) return { erro: `objetivo '${bruto}' nao e valido na Meta. Use um destes: ${ODAX.join(", ")}. Para geracao de lead em landing page o correto e OUTCOME_LEADS.` };
+    // v28.39: ODAX completo + sinonimos PT/legado (ENGAJAMENTO, POST_ENGAGEMENT, …).
+    // Se params.objetivo faltar, deriva de objetivo_tag (ex.: ENGAJAMENTO → OUTCOME_ENGAGEMENT).
+    const resolvido = resolverObjetivoOdax({
+      objetivo: params?.objetivo,
+      objetivo_tag: params?.objetivo_tag,
+    });
+    if (!resolvido.ok) {
+      return mensagemObjetivoNaoSuportado(resolvido.bruto);
+    }
+    const objetivo = resolvido.objetivo;
+    const familia = familiaDeObjetivo(objetivo);
+    const socialTopo = ehFamiliaSocialTopo(objetivo);
 
     // Marca vem da empresa ou do pedido; nunca cai em LEV para outra empresa.
     const { data: cfgNome } = await supa
       .from("meta_execution_config")
-      .select("marca_tag")
+      .select("marca_tag, page_id")
       .eq("company_id", companyId)
       .maybeSingle();
     const montado = resolverNomePartesDoParams(params, {
@@ -1747,7 +1758,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
         detalhe: montado.detalhe,
         faltando: montado.faltando,
         instrucao:
-          "Informe params.marca quando a empresa nao tiver marca_tag, params.canal, params.objetivo_tag (ou objetivo ODAX), params.papel (TESTE|ESCALA) e params.periodo. Opcional: produto, rotulo.",
+          "Informe params.marca quando a empresa nao tiver marca_tag, params.canal, params.objetivo_tag (ou objetivo ODAX), params.papel (TESTE|ESCALA) e params.periodo. Opcional: produto, rotulo. Brand boost: canal=SOCIAL, objetivo_tag=ENGAJAMENTO (sem produto CLT).",
       };
     }
     const nomeAlvoComposto = montado.nome;
@@ -1765,11 +1776,21 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if ((existentes ?? []).some((c) => norm(c.name) === norm(nomeAlvoComposto))) {
       return { erro: `ja existe uma campanha chamada '${nomeAlvoComposto}'. Ajuste rotulo/periodo/produto.` };
     }
-    const summary = `Criar campanha "${nomeAlvoComposto}" (objetivo ${objetivo}, papel ${montado.partes.papel}) - nasce ACTIVE, categoria especial de credito obrigatoria — nome composto ESP-40/39`;
+    const pageId =
+      String(params?.page_id ?? "").trim() ||
+      String((cfgNome as any)?.page_id ?? "").trim() ||
+      null;
+    const notaSocial = socialTopo
+      ? ` — familia ${familia}: destino Page/Instagram (nao LP). ODAX ${objetivo} (via ${resolvido.origem}).`
+      : "";
+    const summary = `Criar campanha "${nomeAlvoComposto}" (objetivo ${objetivo}, papel ${montado.partes.papel}) - nasce ACTIVE, categoria especial de credito obrigatoria — nome composto ESP-40/39${notaSocial}`;
     return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
       nome_novo: nomeAlvoComposto,
       nome_partes: montado.partes,
       objetivo,
+      familia_objetivo: familia,
+      page_id: socialTopo ? pageId : null,
+      destino_social: socialTopo,
       conta_destino: contaDaEmpresa,
       special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"],
       status_inicial: "ACTIVE",
@@ -1778,6 +1799,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
+      odax_aceitos: [...ODAX_OBJETIVOS],
     }, cards);
   }
 
@@ -1792,7 +1814,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // ESP-40: nome do conjunto novo vem das partes (nao nome_novo livre).
     const { data: cfgNomeConj } = await supa
       .from("meta_execution_config")
-      .select("marca_tag")
+      .select("marca_tag, page_id")
       .eq("company_id", companyId)
       .maybeSingle();
     const montadoConj = resolverNomePartesDoParams(params, {
@@ -1815,6 +1837,31 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
         detalhe: `params.nome_novo="${nomeLivre}" divergiu do composto "${nomeNovo}". Use os campos de nomenclatura.`,
         nome_composto: nomeNovo,
         nome_partes: montadoConj.partes,
+      };
+    }
+    // v28.39: familia social (ENGAJAMENTO/RECONHECIMENTO) — Page, nao LP/pixel.
+    const resolvidoObjConj = resolverObjetivoOdax({
+      objetivo: params?.objetivo,
+      objetivo_tag: params?.objetivo_tag ?? montadoConj.partes.objetivo_tag,
+      defaultLeadsSeVazio: true,
+    });
+    const objetivoConj = resolvidoObjConj.ok ? resolvidoObjConj.objetivo : "OUTCOME_LEADS";
+    const familiaRaw = String(params?.familia_objetivo ?? "").trim().toLowerCase();
+    const familiaConj =
+      familiaRaw === "engajamento" || familiaRaw === "reconhecimento" || familiaRaw === "conversao"
+      || familiaRaw === "trafego" || familiaRaw === "app"
+        ? familiaRaw
+        : familiaDeObjetivo(objetivoConj ?? montadoConj.partes.objetivo_tag);
+    const socialTopoConj = familiaConj === "engajamento" || familiaConj === "reconhecimento";
+    const pageIdConj =
+      String(params?.page_id ?? "").trim() ||
+      String((cfgNomeConj as any)?.page_id ?? "").trim() ||
+      null;
+    if (socialTopoConj && !pageIdConj) {
+      return {
+        erro: "page_id_obrigatorio_para_engajamento",
+        detalhe:
+          "Conjunto de engajamento/reconhecimento exige page_id da Page. Configure meta_execution_config ou passe params.page_id.",
       };
     }
     // v28.27: default facebook+instagram. Threads continua bloqueado. Nao entrevista o gestor
@@ -1905,8 +1952,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const notaPosicionamento = plataformas.includes("facebook") && formatoEfetivo === "video"
       ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`
       : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoEfetivo === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`;
+    const notaSocialConj = socialTopoConj
+      ? ` — familia ${familiaConj}: optimization/page (nao pixel LEAD). Molde so empresta targeting; executor sobrescreve promoted_object=page_id.`
+      : "";
     const summary = `Criar conjunto "${nomeNovo}" replicando "${molde.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce ACTIVE` +
-      (avisoOrcamento ? ` — ${avisoOrcamento}` : "") + notaPosicionamento;
+      (avisoOrcamento ? ` — ${avisoOrcamento}` : "") + notaPosicionamento + notaSocialConj;
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo,
       nome_partes: montadoConj.partes,
@@ -1917,6 +1967,13 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       plataformas_publicacao: plataformas,
       plataformas_default_aplicado: plataformasDefaultAplicado,
       threads_desabilitado: true,
+      familia_objetivo: familiaConj,
+      objetivo: objetivoConj,
+      page_id: socialTopoConj ? pageIdConj : null,
+      optimization_goal: socialTopoConj
+        ? (String(params?.optimization_goal ?? "").trim() || (familiaConj === "reconhecimento" ? "REACH" : "POST_ENGAGEMENT"))
+        : null,
+      destino_social: socialTopoConj,
       posicionamento_padrao_video: formatoEfetivo === "video" && plataformas.includes("facebook") ? {
         publisher_platforms: plataformas,
         facebook_positions: ["feed", "instream_video", "marketplace", "story", "search", "facebook_reels", "facebook_reels_overlay", "profile_feed"],
@@ -3367,6 +3424,16 @@ pode ser inventada — ou, em peca nova, sem_molde=true + drive_file_id do acerv
 conjunto e anuncio novos nascem ACTIVE na aprovacao do card. Se um objeto existente estiver
 PAUSED e o gestor pedir religar, use ativar_campanha / ativar_conjunto / ativar_criativo.
 Para desligar, use pausar_campanha / pausar_conjunto / pausar_criativo.
+OBJETIVO ODAX (criar_campanha): OUTCOME_LEADS (default da casa, LP/CLT), OUTCOME_SALES,
+OUTCOME_TRAFFIC, OUTCOME_ENGAGEMENT, OUTCOME_AWARENESS, OUTCOME_APP_PROMOTION. Sinonimos:
+ENGAJAMENTO/ENGAGEMENT/POST_ENGAGEMENT → OUTCOME_ENGAGEMENT; RECONHECIMENTO/AWARENESS/REACH →
+OUTCOME_AWARENESS. Se omitir params.objetivo, o codigo deriva da objetivo_tag. Brand boost /
+impulsao de Page ou Instagram (@legaleviver_): canal=SOCIAL, objetivo_tag=ENGAJAMENTO (ou
+RECONHECIMENTO), SEM produto CLT, destino = Page (nao LP). Excecao autorizada pelo gestor em
+20/08/2026 (IMPULSAO) — nao remove o padrao CLT+LP das demais campanhas. Conjunto social:
+ainda usa molde para targeting, mas o executor troca optimization_goal (POST_ENGAGEMENT ou
+REACH) e promoted_object={page_id} — nao herda pixel LEAD. Anuncio de perfil/boost ainda e
+lacuna explicita (proximo degrau).
 ORCAMENTO: se o gestor nao disse quanto quer gastar por dia, PERGUNTE (unico valor que nao se
 inventa). Se ele ja disse (ex.: 60 no conjunto), use isso e nao reabra.
 UTM: o sistema monta a string. Se o gestor deu identificador (ex.: TEST-RR-AGO262), use em
