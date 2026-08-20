@@ -871,7 +871,7 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   criativos_drive: {
     tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "ler_brand_identity", "get_criativos_conteudo", "get_conhecimento"],
     maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 2, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 3, ler_brand_identity: 1, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
-    missao: "CRIATIVOS NOVOS NO DRIVE: leitura TOTAL. Em lote/mix chame get_acervo_para_anuncio SEM produto e cite taxonomia_drive (19 videos=10 Educacao financeira+9 Caminho Triste/feliz; Capas; 9 Carrosseis; 4 Cards instrucionais 'leia a legenda') antes de filtrar; nunca diga escassez so com filtro CLT. Slides Carrossel = imagem estatica; Capas inventariar; Cards nao sao imagem generica. Bloqueadas via veredito+card (nao liberar FIN-04 sozinho). Nunca get_criativos_conteudo para peca nova. upload_midia se fora da Meta. nota_visual_da_peca antes de recomendar.",
+    missao: "CRIATIVOS NOVOS NO DRIVE: leitura TOTAL. Videos 22/23/25/26/27 LIBERADOS (FIN-04 v3) — nao diga bloqueados. Carrossel Meta HABILITADO via child_attachments (2-10 image_hash). Cite taxonomia_drive antes de filtrar. Capas inventariar; Cards = leia a legenda. Nunca get_criativos_conteudo para peca nova. upload_midia se fora da Meta. nota_visual_da_peca antes de recomendar.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],

@@ -474,7 +474,12 @@ async function escreverCreative(
   body: Record<string, string>,
   pbToken: string,
 ): Promise<ResultadoEscrita> {
-  if (driver !== "pipeboard") {
+  // Carrossel: Pipeboard create_ad_creative nao monta child_attachments completo.
+  // Forca Graph quando o object_story_spec traz 2+ slides.
+  const forcarGraph = specTemCarrossel(body.object_story_spec);
+  const driverEfetivo: DriverEscrita = forcarGraph ? "graph" : driver;
+
+  if (driverEfetivo !== "pipeboard") {
     const cc = await g(path, "POST", body);
     const id = (cc.body as any)?.id ?? null;
     return {
@@ -1136,6 +1141,83 @@ export function campoPresente(v: unknown): boolean {
   return true;
 }
 
+/** Carrossel Meta: 2–10 child_attachments com image_hash (+ link opcional no card). */
+export function normalizarChildAttachments(
+  raw: unknown,
+  linkPadrao: string,
+  ctaTipo: string,
+): { ok: true; cards: Record<string, unknown>[] } | { ok: false; erro: string; detalhe: string } {
+  if (!campoPresente(raw)) {
+    return { ok: true, cards: [] };
+  }
+  if (!Array.isArray(raw)) {
+    return {
+      ok: false,
+      erro: "carrossel_invalido",
+      detalhe: "child_attachments deve ser um array de 2 a 10 slides.",
+    };
+  }
+  if (raw.length < 2 || raw.length > 10) {
+    return {
+      ok: false,
+      erro: "carrossel_tamanho_invalido",
+      detalhe: `Carrossel exige 2 a 10 slides; recebi ${raw.length}.`,
+    };
+  }
+  const cards: Record<string, unknown>[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i] as Record<string, unknown> | null;
+    if (!c || typeof c !== "object") {
+      return {
+        ok: false,
+        erro: "carrossel_slide_invalido",
+        detalhe: `Slide ${i + 1} nao e objeto.`,
+      };
+    }
+    const hash = String(c.image_hash ?? c.meta_image_hash ?? "").trim();
+    if (!hash) {
+      return {
+        ok: false,
+        erro: "carrossel_slide_sem_image_hash",
+        detalhe: `Slide ${i + 1} sem image_hash. Faca upload_midia de cada peca antes.`,
+      };
+    }
+    const linkCard = String(c.link ?? linkPadrao ?? "").trim();
+    if (!linkCard) {
+      return {
+        ok: false,
+        erro: "carrossel_slide_sem_link",
+        detalhe: `Slide ${i + 1} sem link e sem link pai no pedido.`,
+      };
+    }
+    const card: Record<string, unknown> = {
+      image_hash: hash,
+      link: linkCard,
+      call_to_action: {
+        type: String(c.call_to_action_type ?? ctaTipo ?? "LEARN_MORE").trim() || "LEARN_MORE",
+        value: { link: linkCard },
+      },
+    };
+    const name = String(c.name ?? c.headline ?? "").trim();
+    const description = String(c.description ?? "").trim();
+    if (name) card.name = name;
+    if (description) card.description = description;
+    cards.push(card);
+  }
+  return { ok: true, cards };
+}
+
+function specTemCarrossel(objectStorySpecJson: string | undefined): boolean {
+  if (!objectStorySpecJson) return false;
+  try {
+    const spec = JSON.parse(objectStorySpecJson);
+    const kids = spec?.link_data?.child_attachments;
+    return Array.isArray(kids) && kids.length >= 2;
+  } catch {
+    return false;
+  }
+}
+
 async function resolverIdentidadeInstagram(
   companyId: string | null,
   creativeMolde: string,
@@ -1515,9 +1597,11 @@ export async function montarCriacao(
     const videoNovo = String(p?.meta_video_id ?? "").trim(); // v4.4: peca nova video
     const imagemNova = String(p?.meta_image_hash ?? "").trim(); // v5.9: peca nova imagem
     const legendaNova = String(p?.legenda ?? "").trim();
-    // ESP-35: peca nova (video|imagem) pode nascer SEM creative_id quando page/CTA/URL
+    // v5.24: carrossel via child_attachments (2-10 image_hash)
+    const temPedidoCarrossel = campoPresente(p?.child_attachments);
+    // ESP-35: peca nova (video|imagem|carrossel) pode nascer SEM creative_id quando page/CTA/URL
     // vierem no payload ou na config da empresa. Replicacao pura continua exigindo molde.
-    const pecaNovaSemMolde = !creativeMolde && !!(videoNovo || imagemNova);
+    const pecaNovaSemMolde = !creativeMolde && !!(videoNovo || imagemNova || temPedidoCarrossel);
     if (!adset || !nome)
       return { erro: "payload incompleto (conjunto_destino_external_id, nome_novo)" };
     if (!creativeMolde && !pecaNovaSemMolde)
@@ -1536,14 +1620,20 @@ export async function montarCriacao(
     if (!confAd.ok) return { erro: confAd.erro, detalhe: confAd.detalhe };
     nome = confAd.nome;
 
-    // ============ v5.1 / v5.9: FORMATOS ============
-    // Carrossel CONTINUA recusado por nome. Foto deixa de ser recusa fixa: v5.9 monta link_data.
-    // Video e imagem no mesmo pedido e ambiguidade de formato - recusa, nao escolhe.
-    if (campoPresente(p?.child_attachments)) {
+    // ============ v5.24: FORMATOS ============
+    // Carrossel HABILITADO (child_attachments). Video/imagem/carrossel sao mutuamente exclusivos.
+    if (videoNovo && (imagemNova || temPedidoCarrossel)) {
       return {
-        erro: "carrossel_nao_suportado",
+        erro: "formatos_de_midia_conflitantes",
         detalhe:
-          "O pedido traz child_attachments (carrossel) e esta executora NAO monta carrossel: ela replica o criativo do molde ou troca a midia de um video_data/link_data. Antes desta versao o campo era ignorado em silencio e a Meta publicava o CRIATIVO DO MOLDE - a peca antiga no ar, com o gestor achando que aprovou o carrossel novo. Monte o carrossel no Gerenciador, ou peca o suporte a carrossel como trabalho declarado.",
+          "O pedido mistura video com imagem/carrossel. Um anuncio avulso e de UM formato: video, imagem unica ou carrossel. Remova os campos conflitantes.",
+      };
+    }
+    if (imagemNova && temPedidoCarrossel) {
+      return {
+        erro: "formatos_de_midia_conflitantes",
+        detalhe:
+          "O pedido traz meta_image_hash E child_attachments. Use so child_attachments para carrossel (varios slides) OU so meta_image_hash para imagem unica.",
       };
     }
     if (videoNovo && imagemNova) {
@@ -1646,6 +1736,57 @@ export async function montarCriacao(
       }
 
       const identidadeInstagram = await resolverIdentidadeInstagram(companyId, "");
+
+      // ============ v5.24: CARROSSEL sem molde ============
+      if (temPedidoCarrossel) {
+        const norm = normalizarChildAttachments(p?.child_attachments, linkFinal, ctaTipo);
+        if (!norm.ok) return { erro: norm.erro, detalhe: norm.detalhe };
+        let novoLdCarr: any = {
+          message: legendaNova,
+          link: linkFinal,
+          child_attachments: norm.cards,
+          multi_share_optimized: true,
+          call_to_action: { type: ctaTipo, value: { link: linkFinal } },
+        };
+        let novoSpecCarr: any = { page_id: pageId, link_data: novoLdCarr };
+        novoSpecCarr = aplicarIdentidadeInstagramNoSpec(novoSpecCarr, identidadeInstagram);
+        const avisosCarr: string[] = [
+          `Anuncio CARROSSEL sem molde (v5.24): ${norm.cards.length} slides em link_data.child_attachments. Escrita via Graph (Pipeboard nao monta carrossel completo).`,
+        ];
+        avisosCarr.push(avisoIdentidadeInstagram(identidadeInstagram));
+        return {
+          path: `/${conta}/ads`,
+          body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>,
+          criativo: {
+            modo: "novo_adcreative_peca_nova_carrossel_sem_molde",
+            path: `/${conta}/adcreatives`,
+            body: {
+              name: `${nome} - creative`,
+              object_story_spec: JSON.stringify(novoSpecCarr),
+              ...(urlTags ? { url_tags: urlTags } : {}),
+            } as Record<string, string>,
+          },
+          peca_nova: {
+            child_attachments: norm.cards,
+            slides: norm.cards.length,
+            link_publicado: linkFinal,
+            destino_url_lp: destinoPedido,
+            legenda_substituida: true,
+            creative_molde: null,
+            fonte_da_config: "config_empresa_sem_molde",
+            identidade_ig_herdada: false,
+            identidade_instagram_preenchida: identidadeInstagram.encontrada,
+            identidade_instagram: identidadeInstagram,
+            identidade_instagram_campo_spec: identidadeInstagram.instagram_actor_id
+              ? campoIdentidadeInstagramPorFormato(identidadeInstagram.instagram_actor_id)
+              : null,
+            formato: "carrossel",
+            page_id: pageId,
+            call_to_action_type: ctaTipo,
+          },
+          avisos_de_veiculacao: avisosCarr,
+        };
+      }
 
       if (videoNovo) {
         const th = await escolherThumbnail(videoNovo, String(p?.thumbnail_url ?? ""));
@@ -1752,7 +1893,7 @@ export async function montarCriacao(
     const cb: any = c.body ?? {};
     const temStorySpec = c.status === 200 && cb.object_story_spec;
     const identidadeInstagram =
-      videoNovo || imagemNova
+      videoNovo || imagemNova || temPedidoCarrossel
         ? await resolverIdentidadeInstagram(companyId, creativeMolde)
         : SEM_IDENTIDADE_INSTAGRAM;
 
@@ -1902,6 +2043,89 @@ export async function montarCriacao(
       };
     }
 
+    // ============ v5.24: PECA NOVA CARROSSEL (com molde; sem molde ja tratado acima) ============
+    if (temPedidoCarrossel) {
+      if (!temStorySpec) {
+        return {
+          erro: "molde_sem_object_story_spec",
+          detalhe:
+            "Carrossel com molde exige object_story_spec no molde (page_id). Ou use peca nova sem molde (page_id/CTA/destino no payload).",
+        };
+      }
+      const pageId = cb.object_story_spec?.page_id ?? null;
+      if (!pageId) {
+        return {
+          erro: "molde_sem_page_id",
+          detalhe: "Molde sem page_id — Meta recusa adcreative sem pagina.",
+        };
+      }
+      const ldMolde: any = cb.object_story_spec?.link_data ?? null;
+      const linkMoldeCarr = ldMolde?.link ?? ldMolde?.call_to_action?.value?.link ?? null;
+      const destinoPedidoCarr = destinoDoPedidoCompat(p);
+      const linkFinalCarr = String(
+        (destinoPedidoCarr.aplicavel && destinoPedidoCarr.url_final
+          ? destinoPedidoCarr.url_final
+          : null) ??
+          p?.destino_url ??
+          linkMoldeCarr ??
+          "",
+      ).trim();
+      if (!linkFinalCarr) {
+        return {
+          erro: "destino_url_ausente_carrossel",
+          detalhe: "Carrossel exige link de destino (pedido ou molde com link_data).",
+        };
+      }
+      if (!legendaNova) {
+        return {
+          erro: "legenda_obrigatoria_peca_nova",
+          detalhe: "Carrossel exige legenda no payload.",
+        };
+      }
+      const ctaTipoCarr =
+        String(p?.call_to_action_type ?? ldMolde?.call_to_action?.type ?? "LEARN_MORE").trim() ||
+        "LEARN_MORE";
+      const norm = normalizarChildAttachments(p?.child_attachments, linkFinalCarr, ctaTipoCarr);
+      if (!norm.ok) return { erro: norm.erro, detalhe: norm.detalhe };
+      let novoLd: any = {
+        message: legendaNova,
+        link: linkFinalCarr,
+        child_attachments: norm.cards,
+        multi_share_optimized: true,
+        call_to_action: { type: ctaTipoCarr, value: { link: linkFinalCarr } },
+      };
+      let novoSpec: any = { page_id: pageId, link_data: novoLd };
+      novoSpec = aplicarIdentidadeInstagramNoSpec(novoSpec, identidadeInstagram);
+      return {
+        path: `/${conta}/ads`,
+        body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>,
+        criativo: {
+          modo: "novo_adcreative_peca_nova_carrossel",
+          path: `/${conta}/adcreatives`,
+          body: {
+            name: `${nome} - creative`,
+            object_story_spec: JSON.stringify(novoSpec),
+            ...(urlTags ? { url_tags: urlTags } : {}),
+          } as Record<string, string>,
+        },
+        peca_nova: {
+          child_attachments: norm.cards,
+          slides: norm.cards.length,
+          link_publicado: linkFinalCarr,
+          legenda_substituida: true,
+          creative_molde: creativeMolde,
+          formato: "carrossel",
+          page_id: pageId,
+          call_to_action_type: ctaTipoCarr,
+          identidade_instagram_preenchida: identidadeInstagram.encontrada,
+        },
+        avisos_de_veiculacao: [
+          `Carrossel com molde (v5.24): ${norm.cards.length} slides; escrita via Graph.`,
+          avisoIdentidadeInstagram(identidadeInstagram),
+        ],
+      };
+    }
+
     // ============ v5.9: PECA NOVA DE IMAGEM (hash ja na biblioteca da conta) ============
     // Espelha a disciplina do video: COPIA link_data do molde e TROCA image_hash.
     // Pipeboard create_ad_creative aceita image_hash plano (argsCreativeDeGraph desembrulha
@@ -1931,9 +2155,9 @@ export async function montarCriacao(
       }
       if (Array.isArray(ld.child_attachments) && ld.child_attachments.length > 0) {
         return {
-          erro: "carrossel_nao_suportado",
+          erro: "molde_e_carrossel",
           detalhe:
-            "O link_data do molde traz child_attachments (carrossel). Esta executora monta anuncio de imagem AVULSA (um image_hash), nao carrossel. Escolha um molde de imagem unica ou monte o carrossel no Gerenciador.",
+            "O molde e um carrossel. Para publicar carrossel novo, envie child_attachments (2-10 image_hash). Para imagem unica, use molde de imagem avulsa.",
         };
       }
       const linkMolde = ld?.link ?? ld?.call_to_action?.value?.link ?? null;

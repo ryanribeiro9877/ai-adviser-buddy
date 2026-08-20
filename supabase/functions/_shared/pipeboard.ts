@@ -435,6 +435,21 @@ export function argsCreativeDeGraph(
 
     const ld: any = spec.link_data ?? null;
     if (ld && typeof ld === "object") {
+      const kids = Array.isArray(ld.child_attachments) ? ld.child_attachments : [];
+      if (kids.length >= 2) {
+        // Carrossel: Pipeboard exige midia plana; image_hashes cobre os slides.
+        // A escrita completa do carrossel e forçada via Graph em escreverCreative.
+        out.image_hashes = kids
+          .map((c: any) => String(c?.image_hash ?? "").trim())
+          .filter(Boolean);
+        if (ld.message) out.message = String(ld.message);
+        if (ld.link) out.link_url = String(ld.link);
+        const cta: any = ld.call_to_action ?? kids[0]?.call_to_action ?? null;
+        if (cta?.type) out.call_to_action_type = String(cta.type);
+        const linkCta = cta?.value?.link;
+        if (linkCta && !out.link_url) out.link_url = String(linkCta);
+        return out;
+      }
       if (ld.image_hash) out.image_hash = String(ld.image_hash);
       if (ld.message) out.message = String(ld.message);
       if (ld.name) out.headline = String(ld.name);
