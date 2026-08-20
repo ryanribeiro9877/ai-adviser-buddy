@@ -55,13 +55,14 @@ const TAG_PARA_ODAX: Record<string, ObjetivoOdax> = {
   APP: "OUTCOME_APP_PROMOTION",
 };
 
+// ODAX: goals de engajamento dependem de destination_type (conversion location).
+// PROFILE_VISIT / PROFILE_AND_PAGE_ENGAGEMENT existem no Ads Manager mas a Marketing
+ // API rejeita (Pipeboard/Meta 20/08/2026) — nao listamos aqui.
 const OPT_ENGAJAMENTO = new Set([
   "POST_ENGAGEMENT",
   "PAGE_LIKES",
   "EVENT_RESPONSES",
   "THRUPLAY",
-  "PROFILE_VISIT",
-  "PROFILE_AND_PAGE_ENGAGEMENT",
 ]);
 
 const OPT_RECONHECIMENTO = new Set([
@@ -69,6 +70,21 @@ const OPT_RECONHECIMENTO = new Set([
   "IMPRESSIONS",
   "AD_RECALL_LIFT",
 ]);
+
+/** destination_type exigido pela Meta para cada optimization_goal de ENGAGEMENT. */
+function destinationTypeEngajamento(opt: string): string {
+  switch (opt) {
+    case "PAGE_LIKES":
+      return "ON_PAGE";
+    case "EVENT_RESPONSES":
+      return "ON_EVENT";
+    case "THRUPLAY":
+      return "ON_VIDEO";
+    default:
+      // POST_ENGAGEMENT (e default da casa): On Post.
+      return "ON_POST";
+  }
+}
 
 function normalizarChave(raw: unknown): string {
   return String(raw ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_");
@@ -147,6 +163,15 @@ export type AdsetEngajamentoDefaults = {
 /**
  * Defaults de conjunto para campanha de engajamento/reconhecimento.
  * Destino e a Page (e IG vinculado), nao LP/pixel.
+ *
+ * ENGAGEMENT: Meta exige destination_type alinhado ao goal (ON_POST + POST_ENGAGEMENT
+ * e o padrao da casa). Sem destination_type, create_adset devolve
+ * "Performance Goal Incompatible with Campaign Objective" mesmo com POST_ENGAGEMENT
+ * (medido 20/08/2026, card 1b905e3a).
+ *
+ * REACH/IMPRESSIONS como optimization_goal ficam em reconhecimento (AWARENESS).
+ * Em ENGAGEMENT+ON_POST a Meta tambem lista REACH/IMPRESSIONS, mas a doutrina da casa
+ * usa POST_ENGAGEMENT — nao OR-merge REACH no caminho de engajamento.
  */
 export function defaultsConjuntoSocialTopo(
   familia: "engajamento" | "reconhecimento",
@@ -179,17 +204,30 @@ export function defaultsConjuntoSocialTopo(
     };
   }
 
+  // REACH/IMPRESSIONS pedidas em engajamento: recusa (nao viram ON_POST silenciosamente).
+  if (pedida === "REACH" || pedida === "IMPRESSIONS" || pedida === "AD_RECALL_LIFT") {
+    return {
+      erro: "optimization_goal_nao_suportado_para_engajamento",
+      detalhe:
+        `REACH/IMPRESSIONS/AD_RECALL_LIFT sao goals de OUTCOME_AWARENESS (reconhecimento), nao de OUTCOME_ENGAGEMENT. ` +
+        `Para engajamento use: ${[...OPT_ENGAJAMENTO].join(", ")} (padrao POST_ENGAGEMENT + destination_type=ON_POST). Recebi "${pedida}".`,
+    };
+  }
+
   const opt = pedida && OPT_ENGAJAMENTO.has(pedida) ? pedida : "POST_ENGAGEMENT";
   if (pedida && !OPT_ENGAJAMENTO.has(pedida)) {
     return {
       erro: "optimization_goal_nao_suportado_para_engajamento",
-      detalhe: `Para OUTCOME_ENGAGEMENT use: ${[...OPT_ENGAJAMENTO].join(", ")}. Recebi "${pedida}".`,
+      detalhe:
+        `Para OUTCOME_ENGAGEMENT use: ${[...OPT_ENGAJAMENTO].join(", ")} ` +
+        `(com destination_type ON_POST|ON_PAGE|ON_EVENT|ON_VIDEO). Recebi "${pedida}". ` +
+        `Profile/Page visits (PROFILE_AND_PAGE_ENGAGEMENT) nao e suportado via Marketing API — use POST_ENGAGEMENT + ON_POST.`,
     };
   }
   return {
     optimization_goal: opt,
     billing_event: "IMPRESSIONS",
-    destination_type: null,
+    destination_type: destinationTypeEngajamento(opt),
     promoted_object: { page_id: page },
   };
 }

@@ -1,11 +1,13 @@
-// supabase/functions/meta-actions/index.ts (v5.29)
+// supabase/functions/meta-actions/index.ts (v5.30)
+// v5.30 (20/08/2026) - ENGAGEMENT exige destination_type=ON_POST com POST_ENGAGEMENT
+//   (card 1b905e3a: Meta recusou goal sem ON_POST). REACH nao entra no caminho engajamento.
 // v5.29 (20/08/2026) - criar_conjunto SEM MOLDE para familia engajamento/reconhecimento:
 //   sem_molde / molde_external_id=sem_molde → targeting BR Advantage+ minimo + POST_ENGAGEMENT
-//   (ou REACH) + promoted_object={page_id}. Molde LEADS continua ok: so empresta targeting.
+//   + ON_POST (ou REACH em reconhecimento) + promoted_object={page_id}. Molde LEADS: so targeting.
 // v5.28 (20/08/2026) - ENGAJAMENTO/RECONHECIMENTO: criar_campanha aceita ODAX social
 //   (OUTCOME_ENGAGEMENT/AWARENESS + sinonimos). criar_conjunto, quando familia engajamento
 //   ou reconhecimento (payload ou objective da campanha destino), sobrescreve molde
-//   OFFSITE_CONVERSIONS+pixel por POST_ENGAGEMENT|REACH + promoted_object={page_id}.
+//   OFFSITE_CONVERSIONS+pixel por POST_ENGAGEMENT+ON_POST|REACH + promoted_object={page_id}.
 // v5.27 (20/08/2026) - teto horario por EMPRESA (Map), alinhado a contar_acoes_na_hora.
 // v5.26 (15/08/2026) - campanha/conjunto tambem nascem ACTIVE; ativar_campanha / ativar_conjunto.
 // v5.25 (15/08/2026) - criar_anuncio nasce ACTIVE na aprovacao; ativar_criativo (update_ad ACTIVE).
@@ -1691,10 +1693,11 @@ export async function montarCriacao(
         sem_molde: semMoldeConj,
         optimization_goal: defs.optimization_goal,
         billing_event: defs.billing_event,
+        destination_type: defs.destination_type,
         page_id: pageId,
         declaracao_social: semMoldeConj
-          ? `Conjunto ${familiaPayload} SEM MOLDE: targeting BR Advantage+ minimo; optimization_goal=${defs.optimization_goal}; promoted_object.page_id=${pageId}.`
-          : `Conjunto ${familiaPayload}: molde so emprestou targeting; optimization_goal=${defs.optimization_goal}, promoted_object.page_id=${pageId} (pixel/LEAD do molde descartados).`,
+          ? `Conjunto ${familiaPayload} SEM MOLDE: targeting BR Advantage+ minimo; optimization_goal=${defs.optimization_goal}; destination_type=${defs.destination_type ?? "null"}; promoted_object.page_id=${pageId}.`
+          : `Conjunto ${familiaPayload}: molde so emprestou targeting; optimization_goal=${defs.optimization_goal}, destination_type=${defs.destination_type ?? "null"}, promoted_object.page_id=${pageId} (pixel/LEAD do molde descartados).`,
       };
     }
 

@@ -227,6 +227,14 @@ const ASSINATURAS: {
     frase:
       "o orcamento pedido esta abaixo do minimo que a Meta aceita para este tipo de conjunto. Aumentar o valor ou mudar a estrategia de lance.",
   },
+  {
+    // Medido 20/08/2026 no card 1b905e3a: POST_ENGAGEMENT sem destination_type=ON_POST.
+    recusa: "meta_de_desempenho_incompativel_com_objetivo",
+    quando:
+      /performance goal incompatible|optimization_goal you selected is not valid|not compatible with the campaign'?s? objective|performance goal isn'?t available/i,
+    frase:
+      "a Meta recusou a meta de desempenho (optimization_goal) porque ela nao combina com o objetivo da campanha — ou falta o destino (destination_type) exigido. Em engajamento (OUTCOME_ENGAGEMENT) o padrao e POST_ENGAGEMENT com destino ON_POST e page_id da Page. Em reconhecimento (OUTCOME_AWARENESS) use REACH/IMPRESSIONS. Corrigir o pedido (ou reexecutar apos o ajuste do sistema) e tentar de novo.",
+  },
 ];
 
 /**

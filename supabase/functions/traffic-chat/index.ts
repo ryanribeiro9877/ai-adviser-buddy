@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.41)
+// supabase/functions/traffic-chat/index.ts (v28.42)
+// v28.42 (20/08/2026) - ENGAGEMENT: summary/doutrina sem OR REACH; ON_POST no payload.
+//   REACH so em reconhecimento. Meta exige destination_type=ON_POST com POST_ENGAGEMENT.
 // v28.41 (20/08/2026) - CONJUNTO DE ENGAJAMENTO: sem_molde OU molde LEADS so para targeting.
 //   PROIBIDO bloquear com "nao ha molde POST_ENGAGEMENT" / "so no Ads Manager" / "aguardar Ryan".
 //   Campanha OUTCOME_ENGAGEMENT ja criada: emitir criar_conjunto com objetivo_tag=ENGAJAMENTO.
@@ -2013,9 +2015,13 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`
       : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoEfetivo === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`;
     const notaSocialConj = socialEfetivo
-      ? (semMoldeConj
-        ? ` — familia ${familiaEfetiva} SEM MOLDE: POST_ENGAGEMENT|REACH + page_id (targeting BR Advantage+ minimo).`
-        : ` — familia ${familiaEfetiva}: molde so empresta targeting; executor sobrescreve OFFSITE/pixel por POST_ENGAGEMENT|REACH + page_id.`)
+      ? (familiaEfetiva === "reconhecimento"
+        ? (semMoldeConj
+          ? ` — familia reconhecimento SEM MOLDE: REACH + page_id (targeting BR Advantage+ minimo).`
+          : ` — familia reconhecimento: molde so empresta targeting; executor sobrescreve por REACH + page_id.`)
+        : (semMoldeConj
+          ? ` — familia engajamento SEM MOLDE: POST_ENGAGEMENT + destination_type=ON_POST + page_id (targeting BR Advantage+ minimo).`
+          : ` — familia engajamento: molde so empresta targeting; executor sobrescreve OFFSITE/pixel por POST_ENGAGEMENT + ON_POST + page_id.`))
       : "";
     const summary = semMoldeConj
       ? `Criar conjunto "${nomeNovo}" SEM MOLDE na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce ACTIVE` +
@@ -2039,6 +2045,9 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       page_id: socialEfetivo ? pageIdEfetivo : null,
       optimization_goal: socialEfetivo
         ? (String(params?.optimization_goal ?? "").trim() || (familiaEfetiva === "reconhecimento" ? "REACH" : "POST_ENGAGEMENT"))
+        : null,
+      destination_type: socialEfetivo
+        ? (familiaEfetiva === "reconhecimento" ? null : "ON_POST")
         : null,
       destino_social: socialEfetivo,
       posicionamento_padrao_video: formatoEfetivo === "video" && plataformas.includes("facebook") ? {
@@ -3493,24 +3502,26 @@ Voce pode PROPOR criacao, nunca executar. A ordem e uma escada e cada degrau exi
 aprovado: campanha -> conjunto -> anuncio. Conjunto e anuncio sao REPLICADOS de um molde que
 ja funciona (voce informa o nome EXATO do molde no espelho), porque configuracao de conjunto nao
 pode ser inventada — ou, em peca nova de ANUNCIO, sem_molde=true + drive_file_id do acervo.
-EXCECAO CONJUNTO SOCIAL (engajamento/reconhecimento, 20/08/2026 v28.41): (A) target_name=sem_molde
+EXCECAO CONJUNTO SOCIAL (engajamento/reconhecimento, 20/08/2026 v28.42): (A) target_name=sem_molde
 + objetivo_tag=ENGAJAMENTO|RECONHECIMENTO + page_id da config; OU (B) qualquer molde de conjunto
 da conta (mesmo OFFSITE_CONVERSIONS/pixel LEAD) — o executor DESCARTA conversion fields e grava
-POST_ENGAGEMENT|REACH + promoted_object={page_id}. PROIBIDO dizer "nao ha molde POST_ENGAGEMENT",
-"so no Ads Manager", "aguardar Ryan" ou "configuracao de conjunto nao pode ser inventada" para
-bloquear IMPULSAO: o caminho existe — EMITA o card. Campanha, conjunto e anuncio novos nascem
-ACTIVE na aprovacao do card. Se um objeto existente estiver PAUSED e o gestor pedir religar, use
-ativar_campanha / ativar_conjunto / ativar_criativo. Para desligar, use pausar_campanha /
-pausar_conjunto / pausar_criativo.
+engajamento: POST_ENGAGEMENT + destination_type=ON_POST + promoted_object={page_id};
+reconhecimento: REACH + page_id. NUNCA misture REACH como goal de campanha OUTCOME_ENGAGEMENT.
+PROIBIDO dizer "nao ha molde POST_ENGAGEMENT", "so no Ads Manager", "aguardar Ryan" ou
+"configuracao de conjunto nao pode ser inventada" para bloquear IMPULSAO: o caminho existe —
+EMITA o card. Campanha, conjunto e anuncio novos nascem ACTIVE na aprovacao do card. Se um
+objeto existente estiver PAUSED e o gestor pedir religar, use ativar_campanha / ativar_conjunto
+/ ativar_criativo. Para desligar, use pausar_campanha / pausar_conjunto / pausar_criativo.
 OBJETIVO ODAX (criar_campanha): OUTCOME_LEADS (default da casa, LP/CLT), OUTCOME_SALES,
 OUTCOME_TRAFFIC, OUTCOME_ENGAGEMENT, OUTCOME_AWARENESS, OUTCOME_APP_PROMOTION. Sinonimos:
 ENGAJAMENTO/ENGAGEMENT/POST_ENGAGEMENT → OUTCOME_ENGAGEMENT; RECONHECIMENTO/AWARENESS/REACH →
 OUTCOME_AWARENESS. Se omitir params.objetivo, o codigo deriva da objetivo_tag. Brand boost /
 impulsao de Page ou Instagram (@legaleviver_): canal=SOCIAL, objetivo_tag=ENGAJAMENTO (ou
 RECONHECIMENTO), SEM produto CLT, destino = Page (nao LP). Excecao autorizada pelo gestor em
-20/08/2026 (IMPULSAO) — nao remove o padrao CLT+LP das demais campanhas. Conjunto social:
-sem_molde OU molde so para targeting; optimization_goal POST_ENGAGEMENT (default) ou REACH;
-promoted_object={page_id}; billing_event=IMPRESSIONS. Instagram actor da config fica disponivel
+20/08/2026 (IMPULSAO) — nao remove o padrao CLT+LP das demais campanhas. Conjunto engajamento:
+sem_molde OU molde so para targeting; optimization_goal=POST_ENGAGEMENT (default),
+destination_type=ON_POST, promoted_object={page_id}, billing_event=IMPRESSIONS. Conjunto
+reconhecimento: optimization_goal=REACH (default). Instagram actor da config fica disponivel
 para o anuncio seguinte. Anuncio de perfil/boost ainda e lacuna explicita (proximo degrau) —
 campanha+conjunto bastam neste passo; NAO invente criativo de boost.
 ORCAMENTO: se o gestor nao disse quanto quer gastar por dia, PERGUNTE (unico valor que nao se
