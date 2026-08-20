@@ -1,4 +1,12 @@
-// supabase/functions/traffic-chat/index.ts (v28.44)
+// supabase/functions/traffic-chat/index.ts (v28.45)
+// v28.45 (20/08/2026) - EMISSAO ENGAJAMENTO (lote 5 cards IMPULSAO):
+//   (1) sem_molde em conjunto OUTCOME_ENGAGEMENT/AWARENESS auto-preenche destino
+//   Page/IG (nao exige LP/produto CLT) — fecha peca_nova_sem_molde_incompleta;
+//   (2) FIN-01 em impulsão educativa: se so falta "Consulte sua margem…", anexa
+//   a frase uma vez e revalida (nao recusa hard o card autorizado pelo gestor);
+//   (3) auto-continue NAO loopa quando propose_action ja falhou com erro duro
+//   (destino/compliance) sem card — reporta o erro em vez de "Continuando…";
+//   (4) EMITE OS N: prioridade propose; doutrina proibe re-get_acervo total.
 // v28.44 (20/08/2026) - LEGENDAS DURAVEIS ANTI-AMNESIA (IMPULSAO):
 //   (1) tabela conversation_legendas + tools get_legendas_da_conversa /
 //   registrar_legenda_da_conversa; gerar_legendas grava ao sucesso;
@@ -521,6 +529,7 @@ import {
   mensagemObjetivoNaoSuportado,
   ODAX_OBJETIVOS,
 } from "../_shared/objetivo_odax.ts";
+import { urlDestinoSocialTopo } from "../_shared/destino_url_lp.ts";
 import { pipeboardToken } from "../_shared/pipeboard.ts";
 import {
   callReadTool,
@@ -580,7 +589,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.44";
+const VERSAO = "chat-v28.45";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -2359,11 +2368,28 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
     }
 
-    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id").eq("company_id", companyId);
+    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,campaign_id").eq("company_id", companyId);
     const dest = (sets ?? []).find((x) => x.external_id === conjuntoDestino)
       ?? (sets ?? []).find((x) => norm(x.name) === norm(conjuntoDestino))
       ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(conjuntoDestino)))[0];
     if (!dest) return { erro: `conjunto de destino '${conjuntoDestino}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro.` };
+
+    // v28.45: familia do conjunto destino (campanha ODAX) — engajamento/reconhecimento
+    // nao usam LP de conversao; destino do criativo e Page/IG.
+    let objetivoCampanhaDest: string | null = null;
+    if ((dest as any).campaign_id) {
+      const { data: campDest } = await supa
+        .from("campaigns")
+        .select("objective,name")
+        .eq("id", (dest as any).campaign_id)
+        .maybeSingle();
+      objetivoCampanhaDest = String((campDest as any)?.objective ?? "").trim() || null;
+    }
+    const familiaPorTag = ehFamiliaSocialTopo(params?.objetivo_tag) || ehFamiliaSocialTopo(params?.objetivo);
+    const familiaPorCampanha = ehFamiliaSocialTopo(objetivoCampanhaDest);
+    const familiaPorNomeConjunto = /ENGAJAMENTO|RECONHECIMENTO|IMPULSAO|SOCIAL/i.test(String(dest.name ?? ""));
+    const anuncioSocialTopo = familiaPorTag || familiaPorCampanha ||
+      (familiaPorNomeConjunto && String(params?.canal ?? "").toUpperCase() === "SOCIAL");
 
     // v28.10 (GT-13) - DOIS PEDIDOS, UMA FONTE. Existem dois anuncios diferentes com o mesmo nome
     // de acao: REPLICAR um que ja roda (escalar o que funciona) e PUBLICAR PECA NOVA do acervo.
@@ -2414,13 +2440,15 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     }
 
     // ESP-35: config da empresa preenche page/CTA quando sem molde.
+    // v28.45: engajamento/reconhecimento → destino Page/IG (nunca forcar LP CLT).
     let pageIdPedido: string | null = String(params?.page_id ?? "").trim() || null;
-    let ctaPedido: string | null = String(params?.call_to_action_type ?? "").trim() || null;
+    let ctaPedido: string | null = String(params?.call_to_action_type ?? params?.cta ?? "").trim() || null;
     let destinoUrlPedido: string | null = String(params?.destino_url ?? "").trim() || null;
+    let destinoSocialResolvido = false;
     if (semMolde) {
       const { data: confEmp } = await supa
         .from("meta_execution_config")
-        .select("instagram_identity_page_id, page_id, cta_padrao")
+        .select("instagram_identity_page_id, page_id, cta_padrao, instagram_handle")
         .eq("company_id", companyId)
         .maybeSingle();
       if (!pageIdPedido) {
@@ -2429,8 +2457,18 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       if (!ctaPedido) {
         ctaPedido = String(confEmp?.cta_padrao ?? "LEARN_MORE").trim() || null;
       }
-      // Destino: so CLT tem LP canonica. Se o agente/gestor nao passou destino_url, tenta produto.
-      if (!destinoUrlPedido) {
+      if (anuncioSocialTopo) {
+        // Preferir URL ja passada (Page ou IG); senao Instagram handle da config; senao Page.
+        if (!destinoUrlPedido) {
+          destinoUrlPedido = urlDestinoSocialTopo(
+            pageIdPedido ?? "",
+            String((confEmp as any)?.instagram_handle ?? params?.instagram_handle ?? "").trim() || null,
+          );
+        }
+        destinoSocialResolvido = true;
+        // CTA tipico de boost social: LEARN_MORE / SEE_MORE — LEARN_MORE ja e o padrao.
+      } else if (!destinoUrlPedido) {
+        // Destino conversao: so CLT tem LP canonica.
         const produtoHint = String(params?.produto ?? "").trim().toLowerCase();
         if (produtoHint.includes("clt") || produtoHint.includes("consignado")) {
           const { data: destP } = await supa
@@ -2446,8 +2484,9 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       if (!pageIdPedido || !ctaPedido || !destinoUrlPedido) {
         return {
           erro: "peca_nova_sem_molde_incompleta",
-          detalhe:
-            `Sem molde faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "destino_url (ou produto CLT)"].filter(Boolean).join(", ")}. Configure meta_execution_config ou passe no params. So CLT tem LP canonica hoje.`,
+          detalhe: anuncioSocialTopo
+            ? `Sem molde (engajamento/reconhecimento) faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "destino Page/IG"].filter(Boolean).join(", ")}. Configure meta_execution_config.page_id.`
+            : `Sem molde faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "destino_url (ou produto CLT)"].filter(Boolean).join(", ")}. Configure meta_execution_config ou passe no params. So CLT tem LP canonica hoje.`,
         };
       }
     }
@@ -2495,15 +2534,28 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       pedido.page_id = pageIdPedido;
       pedido.call_to_action_type = ctaPedido;
       pedido.destino_url = destinoUrlPedido;
-      pedido.destino_do_anuncio = {
-        caso: "clt",
-        produto: "consignado_clt",
-        url_final: destinoUrlPedido,
-        url_canonica: destinoUrlPedido,
-        corrigir: false,
-        aplicavel: true,
-        mensagem: "ESP-35: peca nova sem molde; destino informado/resolvido na emissao (sem heranca de URL de molde).",
-      };
+      if (destinoSocialResolvido || anuncioSocialTopo) {
+        pedido.destino_do_anuncio = {
+          caso: "engajamento_social",
+          produto: null,
+          url_final: destinoUrlPedido,
+          url_canonica: destinoUrlPedido,
+          corrigir: false,
+          aplicavel: true,
+          mensagem:
+            "ESP-35/v28.45: anuncio de engajamento/reconhecimento — destino Page/Instagram (sem LP de conversao).",
+        };
+      } else {
+        pedido.destino_do_anuncio = {
+          caso: "clt",
+          produto: "consignado_clt",
+          url_final: destinoUrlPedido,
+          url_canonica: destinoUrlPedido,
+          corrigir: false,
+          aplicavel: true,
+          mensagem: "ESP-35: peca nova sem molde; destino informado/resolvido na emissao (sem heranca de URL de molde).",
+        };
+      }
     }
     const { data: ver, error: verErr } = await supa.rpc("pedido_de_anuncio_completo", { p_company_id: companyId, p_pedido: pedido });
     // Falha de verificacao NAO emite card - mesmo tratamento de pode_executar_acao e
@@ -2671,6 +2723,8 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // v25 TRAVA 3: compliance BLOQUEANTE, agora sobre a legenda DECIDIDA acima - do molde na
     // replicacao, do gestor ou herdada na peca nova. Quem escreveu nao muda a exposicao
     // regulatoria de um anuncio de credito, e por isso as duas passam pelas mesmas 16 regras.
+    // v28.45: impulsão educativa — se FIN-01 so pede "Consulte sua margem…", anexa e revalida
+    // uma vez (gestor autorizou engajamento social; nao trava o emit por frase faltante).
     if (!legenda) {
       return {
         erro: semMolde
@@ -2678,8 +2732,24 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
           : `o anuncio molde '${molde?.name}' nao tem legenda sincronizada; sem ela nao e possivel validar compliance, e criar anuncio financeiro sem essa validacao nao e permitido.`,
       };
     }
-    const comp: any = await t_check_compliance(companyId, legenda, [], mcpKey);
-    const vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
+    const FRASE_MARGEM_FIN01 = "Consulte sua margem disponivel";
+    let legendaCompliance = legenda;
+    let comp: any = await t_check_compliance(companyId, legendaCompliance, [], mcpKey);
+    let vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
+    if (!vereditoOk && anuncioSocialTopo) {
+      const blob = JSON.stringify(comp ?? {});
+      const fin01Margem = /FIN-01/i.test(blob) && /margem/i.test(blob);
+      const jaTemFrase = /consulte\s+sua\s+margem/i.test(legendaCompliance);
+      if (fin01Margem && !jaTemFrase) {
+        legendaCompliance = `${legendaCompliance.trim()}\n\n${FRASE_MARGEM_FIN01}.`;
+        legenda = legendaCompliance;
+        comp = await t_check_compliance(companyId, legendaCompliance, [], mcpKey);
+        vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
+      } else if (fin01Margem && jaTemFrase && /atencao|aprovado/i.test(String(comp?.veredito ?? ""))) {
+        // Ja tem a frase e so atencao residual — nao bloqueia emit de impulsão autorizada.
+        vereditoOk = !comp?.erro && String(comp?.veredito ?? "").toLowerCase() !== "reprovado";
+      }
+    }
     if (!vereditoOk) {
       return { erro: "compliance_bloqueou_a_criacao",
         detalhe: "A legenda nao passou na validacao de compliance, entao a criacao NAO foi proposta. Relate ao gestor o veredito e as violacoes encontradas e sugira ajustar o texto antes de replicar.",
@@ -2699,6 +2769,14 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const destAnuncio = (semMolde ? pedido.destino_do_anuncio : null) ?? v.destino_do_anuncio ?? null;
     const destinoUrlCard = destAnuncio?.url_final ?? destAnuncio?.url_do_molde ?? destinoUrlPedido ?? null;
 
+    // v28.45: nao deixe a RPC colar "DESTINO: LP CLT" em card de engajamento social.
+    let msgGestor = String(v.mensagem_para_o_gestor ?? "");
+    if (anuncioSocialTopo || destinoSocialResolvido) {
+      msgGestor = msgGestor.replace(/\s*DESTINO:\s*[^.]*\./gi, " ");
+      msgGestor = (msgGestor.trim() +
+        ` DESTINO: engajamento/reconhecimento — Page/Instagram (${destinoUrlCard ?? "config"}). Sem LP de conversao.`).trim();
+    }
+
     const cabeca = temCarrossel
       ? `Criar anuncio "${nomeNovo}" CARROSSEL (${(childAttachmentsRaw as any[]).length} slides) no conjunto "${dest.name}", SEM molde (ESP-35) - compliance de texto aprovado, nasce ACTIVE`
       : semMolde
@@ -2706,7 +2784,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       : driveFileId
       ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", usando "${molde.name}" como molde de configuracao - compliance de texto aprovado, nasce ACTIVE`
       : `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce ACTIVE`;
-    const summary = `${cabeca}\n\n${String(v.mensagem_para_o_gestor ?? "")}`.trim();
+    const summary = `${cabeca}\n\n${msgGestor}`.trim();
     return await gravarCard(companyId, convId, requestedBy, action, "ad", molde?.id ?? dest.id, summary, {
       nome_novo: nomeNovo,
       nome_partes: montadoAd.partes,
@@ -3585,13 +3663,18 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   antes de auditar ou emitir. PROIBIDO trocar por outro conjunto (ex. "5 videos 22-27" so porque
   estao liberados no acervo). Inventario apto ≠ pedido. Se perder o slate no historico, peca
   confirmacao — nao invente.
-- EMITE OS N (anti-loop, 20/08/2026): se o gestor disser "emite os N" / "emite os cards" e o
-  slate (drive_file_id / meta ids / legendas) JA estiver nesta conversa (mensagem atual ou
-  historico reinjetado), EMITA agora com propose_action — sem releitura obrigatoria de
-  nota_visual / checar_par / get_acervo completo, sem reabrir compliance se a legenda CET ja
-  foi confirmada, e SEM pedir ao gestor para repetir "emite os N". Use get_acervo_para_anuncio
-  com drive_file_ids do slate quando so precisar confirmar biblioteca. Se o teto cortar no
-  meio, emita o que couber e diga o que falta — nunca "manda emite de novo".
+- EMITE OS N (anti-loop, 20/08/2026 v28.45): se o gestor disser "emite os N" / "emite os cards" e o
+  slate (drive_file_id / meta ids / legendas) JA estiver nesta conversa (mensagem atual,
+  historico reinjetado OU conversation_legendas via get_legendas_da_conversa), EMITA agora com
+  propose_action×N — PRIMEIRO, sem releitura obrigatoria de nota_visual / checar_par /
+  get_acervo completo, sem reabrir compliance se a legenda ja foi confirmada, e SEM pedir ao
+  gestor para repetir "emite os N". PROIBIDO gastar o turno re-narrando o slate ou re-buscando
+  acervo quando os IDs ja estao no store. Use get_acervo_para_anuncio com drive_file_ids so
+  se precisar confirmar biblioteca. ANUNCIO em conjunto ENGAJAMENTO/RECONHECIMENTO: sem_molde
+  + page_id; o codigo preenche destino Page/IG automaticamente — NAO passe LP de conversao e
+  NAO diga que falta destino_url/produto CLT. Se o teto cortar no meio, emita o que couber e
+  diga o que falta — nunca "manda emite de novo" nem "Continuando automaticamente" sem chamar
+  propose_action de novo.
 - CET (FIN-04 v4): "consulte o CET na sua simulacao" e formulacao APROVADA pelo gestor e pela
   regra. Se o gestor pediu essa formulacao, USE e NAO volte a exigir numero. Nao ha taxa de CET
   fixa da LEV no sistema. Aceitar e depois recusar a mesma formulacao e falta grave.
@@ -3686,8 +3769,12 @@ RECONHECIMENTO), SEM produto CLT, destino = Page (nao LP). Excecao autorizada pe
 sem_molde OU molde so para targeting; optimization_goal=POST_ENGAGEMENT (default),
 destination_type=ON_POST, promoted_object={page_id}, billing_event=IMPRESSIONS. Conjunto
 reconhecimento: optimization_goal=REACH (default). Instagram actor da config fica disponivel
-para o anuncio seguinte. Anuncio de perfil/boost ainda e lacuna explicita (proximo degrau) —
-campanha+conjunto bastam neste passo; NAO invente criativo de boost.
+para o anuncio seguinte. ANUNCIO (criar_anuncio) no conjunto de engajamento: sem_molde=true +
+drive_file_id / child_attachments + page_id + objetivo_tag=ENGAJAMENTO + canal=SOCIAL; o codigo
+preenche destino_url = Page/IG (v28.45). NUNCA force LP /simulacao-clt nesse caminho. FIN-01 em
+copy educativa de impulsão: se a regra pedir "Consulte sua margem…", anexe a frase e emita —
+nao recuse o lote autorizado. Campanha+conjunto bastam como degraus previos; NAO invente
+criativo de boost fora do slate.
 ORCAMENTO: se o gestor nao disse quanto quer gastar por dia, PERGUNTE (unico valor que nao se
 inventa). Se ele ja disse (ex.: 60 no conjunto), use isso e nao reabra.
 UTM: o sistema monta a string. Se o gestor deu identificador (ex.: TEST-RR-AGO262), use em
@@ -4691,13 +4778,50 @@ Deno.serve(async (req) => {
     cardsJaNoPedido === 0 &&
     !turnoJaFechado &&
     (tentouEmitir || (toolsNesteSegmento > 0 && midLoopFraco));
+
+  // v28.45: propose_action ja rodou e FALHOU com erro duro (destino/compliance/contrato) —
+  // NAO auto-continuar so para re-narrar "nenhum card". Continua so se foi deadline/timeout
+  // (ainda cabe retomar propose) ou se ainda nao tentou emitir.
+  const proposesDuros = toolResults.filter((t) => {
+    if (String(t.tool ?? "") !== "propose_action") return false;
+    const err = String(t.erro ?? "");
+    if (/deadline|orcamento|consulta_nao_realizada|nao foi lido/i.test(err)) return false;
+    const r = t.retorno;
+    if (r && typeof r === "object" && (r as any).erro) {
+      const e = String((r as any).erro);
+      return /peca_nova_sem_molde|compliance_bloqueou|pedido_incompleto|verificacao_do_pedido|molde_|legenda_|destino_/i.test(e);
+    }
+    return false;
+  });
+  const soFalhaDuraSemCard =
+    pedidoAto &&
+    cardsJaNoPedido === 0 &&
+    proposesDuros.length > 0 &&
+    !toolResults.some((t) =>
+      String(t.tool ?? "") === "propose_action" &&
+      /deadline|orcamento|consulta_nao_realizada|nao foi lido/i.test(String(t.erro ?? "")));
+
   const turnoIncompletoPorTempo = deadlineTools && !turnoJaFechado && (
     !replyTrim ||
     atoEmAndamentoSemCard
-  );
+  ) && !soFalhaDuraSemCard;
   const podeContinuarSegmento = segmentoAtual < MAX_TURN_SEGMENTS;
   let continuarTurno = false;
   let usouFallback = false;
+
+  if (soFalhaDuraSemCard && !continuarTurno) {
+    const errs = proposesDuros.map((t) => {
+      const r = t.retorno as any;
+      return String(r?.erro ?? t.erro ?? "erro");
+    });
+    const uniq = [...new Set(errs)].slice(0, 3).join("; ");
+    if (!replyTrim || claimSan.reescreveu || midLoopFraco) {
+      reply =
+        `Nao emiti card(s) nesta rodada: propose_action recusou (${uniq}). ` +
+        `Corrija o motivo acima e peca de novo a emissao — nao vou ficar em loop automatico sem progresso.`;
+      finishReason = String(finishReason || "stop") + "+propose_erro_duro_sem_continuar";
+    }
+  }
 
   if (!replyTrim || turnoIncompletoPorTempo) {
     if (turnoIncompletoPorTempo && podeContinuarSegmento) {

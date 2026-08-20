@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.30)
+// supabase/functions/meta-actions/index.ts (v5.31)
+// v5.31 (20/08/2026) - ANUNCIO engajamento: destino_url pode ser Page/IG (nao so LP CLT).
+//   destino_do_anuncio.caso=engajamento_social e honrado via destinoDoPedidoCompat.
 // v5.30 (20/08/2026) - ENGAGEMENT exige destination_type=ON_POST com POST_ENGAGEMENT
 //   (card 1b905e3a: Meta recusou goal sem ON_POST). REACH nao entra no caminho engajamento.
 // v5.29 (20/08/2026) - criar_conjunto SEM MOLDE para familia engajamento/reconhecimento:
@@ -1846,7 +1848,7 @@ export async function montarCriacao(
         return {
           erro: "destino_url_ausente_sem_molde",
           detalhe:
-            "Peca nova sem molde nao tem URL para herdar. Informe destino_url no pedido ou emita com destino_do_anuncio resolvido (hoje so CLT tem LP canonica em destino_por_produto).",
+            "Peca nova sem molde nao tem URL para herdar. Informe destino_url no pedido (LP de conversao OU, em engajamento/reconhecimento, URL da Page/Instagram) ou emita com destino_do_anuncio resolvido.",
         };
       }
       if (!legendaNova) {

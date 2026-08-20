@@ -20,13 +20,23 @@ export type DestinoDoAnuncio = {
   produto?: string | null;
   sinal?: string | null;
   confianca?: string | null;
-  caso?: "clt" | "outro" | "outro_sem_lp_decidida" | "indeterminado" | string | null;
+  caso?: "clt" | "engajamento_social" | "outro" | "outro_sem_lp_decidida" | "indeterminado" | string | null;
   url_do_molde?: string | null;
   url_canonica?: string | null;
   url_final?: string | null;
   corrigir?: boolean | null;
   mensagem?: string | null;
 };
+
+/** Page/IG profile URL for OUTCOME_ENGAGEMENT / AWARENESS ads (no LP conversion). */
+export function urlDestinoSocialTopo(pageId: string, igHandle?: string | null): string {
+  const pid = String(pageId ?? "").trim();
+  // Prefer Page (mesmo padrao do card Capa1 IMPULSAO 20/08 que publicou com sucesso).
+  if (pid) return `https://www.facebook.com/profile.php?id=${pid}`;
+  const handle = String(igHandle ?? "").trim().replace(/^@/, "");
+  if (handle) return `https://www.instagram.com/${handle}/`;
+  return "";
+}
 
 /** Lê a decisão de destino resolvida na emissão (RPC), que a executora deve honrar. */
 export function destinoDoPedido(p: any): DestinoDoAnuncio | null {
@@ -71,7 +81,8 @@ export function destinoDoPedidoCompat(p: any): DestinoCompat {
     };
   }
   return {
-    aplicavel: d.caso === "clt",
+    // CLT = LP de conversao; engajamento_social = Page/IG (link do criativo, sem LP).
+    aplicavel: d.caso === "clt" || d.caso === "engajamento_social",
     corrigiu: deveCorrigirParaCanonico(d),
     url_final: d.url_final ?? null,
     url_original: d.url_do_molde ?? null,
