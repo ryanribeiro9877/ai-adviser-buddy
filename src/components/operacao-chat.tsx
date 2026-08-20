@@ -67,21 +67,29 @@ type ChatReply = {
   conversation_id: string;
   reply: string;
   tools_used?: string[];
-  // "stop" = completa; começa com "length" = cortada pelo limite de tamanho.
+  // "stop" = completa; começa com "length" = cortada pelo limite de tamanho;
+  // "continuar_turno" = orçamento esgotou com checkpoint — retomar automaticamente.
   finish_reason?: string;
   // A edge pode encaminhar o pedido para a rota assíncrona antes de responder. Nesse caso
   // não há `reply`: o que volta é o job, e a resposta chega pela conversa (Realtime).
   async?: boolean;
   job_id?: string;
   roteado_para_job?: boolean;
+  /** v28.37: turno sincrono pediu novo segmento (checkpoint gravado). */
+  continuar?: boolean;
+  segmento?: number;
+  aviso?: string;
 };
 
 // Costura de respostas longas no FRONT: cada requisição fica dentro dos 150s da
 // plataforma e o cliente emenda os pedaços. Texto exigido pelo briefing.
 const CONTINUE_PROMPT =
   "Sua resposta anterior foi cortada pelo limite de tamanho. Continue EXATAMENTE do ponto onde parou, na próxima palavra ou linha. Não repita nada do que já escreveu, não reintroduza o assunto, não reescreva títulos já entregues, não cumprimente. Apenas continue até concluir.";
-const MAX_CONTINUATIONS = 3;
+// Segmentos extras alem da costura por tamanho (checkpoint de orçamento / ato).
+const MAX_CONTINUATIONS = 5;
 const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
+const needsAutoContinue = (data?: ChatReply | null) =>
+  !!data && (data.continuar === true || (!!data.finish_reason && data.finish_reason.startsWith("continuar_turno")));
 
 // Estado de processamento é DERIVADO do banco, não guardado em memória: um turno
 // está em andamento quando a última mensagem da conversa é 'user' e nenhuma
@@ -638,6 +646,24 @@ export function OperacaoChat() {
           qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
           qc.invalidateQueries({ queryKey: ["approvals"] });
           await qc.invalidateQueries({ queryKey: ["chat-messages", convIdAtSend] });
+          // Pode ter gravado checkpoint + "continuando…": retoma sem o gestor clicar Reenviar.
+          setLive({ convId: convIdAtSend, text: "continuando a resposta…", continuing: 1 });
+          let contFinish = true;
+          for (let n = 1; n <= MAX_CONTINUATIONS && contFinish; n++) {
+            setLive({ convId: convIdAtSend, text: "continuando a resposta…", continuing: n });
+            const { data: more, error: contErr } = await supabase.functions.invoke<ChatReply>(
+              "traffic-chat",
+              { body: { continuar: true, conversation_id: convIdAtSend, company: companyName } },
+            );
+            if (contErr || !more || more.aviso === "sem_checkpoint") {
+              contFinish = false;
+              break;
+            }
+            contFinish = needsAutoContinue(more);
+            await qc.invalidateQueries({ queryKey: ["chat-messages", convIdAtSend] });
+            qc.invalidateQueries({ queryKey: ["approvals"] });
+          }
+          setLive(null);
           setPending(null);
           return;
         }
@@ -679,27 +705,44 @@ export function OperacaoChat() {
       const convId = data!.conversation_id;
       clearAttachments();
 
-      // Resposta longa: a edge corta em ~150s (limite da plataforma). Enquanto
-      // finish_reason começar com "length", pedimos a continuação na MESMA conversa
-      // e emendamos os pedaços aqui, mostrando uma resposta só que cresce na tela.
+      // Resposta longa (finish_reason=length) OU turno com checkpoint (continuar=true):
+      // cada HTTP fica sob ~150s; o cliente emenda / retoma sem o gestor clicar Reenviar.
       let acc = data!.reply ?? "";
       let finish = data!.finish_reason;
-      if (isTruncated(finish)) setLive({ convId, text: acc, continuing: 0 });
+      let autoCont = needsAutoContinue(data);
+      if (isTruncated(finish) || autoCont) setLive({ convId, text: acc || "continuando a resposta…", continuing: 0 });
 
-      for (let n = 1; n <= MAX_CONTINUATIONS && isTruncated(finish); n++) {
-        setLive({ convId, text: acc, continuing: n });
+      for (let n = 1; n <= MAX_CONTINUATIONS && (isTruncated(finish) || autoCont); n++) {
+        setLive({ convId, text: acc || "continuando a resposta…", continuing: n });
+        const bodyCont = autoCont
+          ? { continuar: true, conversation_id: convId, company: companyName }
+          : { message: CONTINUE_PROMPT, conversation_id: convId, company: companyName };
         const { data: more, error: contErr } = await supabase.functions.invoke<ChatReply>(
           "traffic-chat",
-          { body: { message: CONTINUE_PROMPT, conversation_id: convId, company: companyName } },
+          { body: bodyCont },
         );
         if (contErr || !more) {
           // Nunca descarta o que já veio: o texto recebido já está gravado no banco.
           setInterrupted(true);
           break;
         }
-        acc = `${acc}\n${more.reply ?? ""}`;
+        if (more.aviso === "sem_checkpoint") break;
+        const piece = (more.reply ?? "").trim();
+        if (piece && autoCont) {
+          // Segmentos de checkpoint: cada um já é mensagem assistant no banco;
+          // na bolha live só mostramos progresso + último trecho.
+          acc = acc ? `${acc}\n\n${piece}` : piece;
+        } else if (piece) {
+          acc = `${acc}\n${piece}`;
+        }
         finish = more.finish_reason;
-        setLive({ convId, text: acc, continuing: n });
+        autoCont = needsAutoContinue(more);
+        setLive({ convId, text: acc || "continuando a resposta…", continuing: n });
+        // Cards podem ter saído no segmento — atualiza a fila sem esperar o fim.
+        if (autoCont || (more.tools_used?.length ?? 0) > 0) {
+          qc.invalidateQueries({ queryKey: ["approvals"] });
+          await qc.invalidateQueries({ queryKey: ["chat-messages", convId] });
+        }
       }
 
       qc.invalidateQueries({ queryKey: ["chat-conversations", companyId] });
@@ -1037,7 +1080,7 @@ export function OperacaoChat() {
                     {live.continuing > 0 && (
                       <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
                         <Loader2 className="h-3 w-3 animate-spin" />
-                        continuando resposta… ({live.continuing}/{MAX_CONTINUATIONS})
+                        continuando a resposta… ({live.continuing}/{MAX_CONTINUATIONS})
                       </div>
                     )}
                   </div>
@@ -1078,8 +1121,9 @@ export function OperacaoChat() {
               {/* GT-16: `!jobAtivo` é obrigatório aqui. Este aviso é do caminho SÍNCRONO;
                   sem a guarda ele aparecia embaixo do card de progresso aos 2 min, dizendo que
                   o turno não foi concluído enquanto o card girava logo acima — e job longo é
-                  normal: dos 15 jobs medidos em 05/08, 6 passaram de 180 s. */}
-              {falhouAtiva && !jobAtivo && !sending && (
+                  normal: dos 15 jobs medidos em 05/08, 6 passaram de 180 s.
+                  Com auto-continuação (live/sending), NÃO mostrar o card de timeout. */}
+              {falhouAtiva && !jobAtivo && !sending && !live && (
                 <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
                   <div className="text-sm font-medium">A resposta não chegou</div>
                   <p className="mt-1 text-xs text-muted-foreground">

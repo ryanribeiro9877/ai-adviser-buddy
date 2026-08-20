@@ -1,4 +1,10 @@
-// supabase/functions/traffic-chat/index.ts (v28.36)
+// supabase/functions/traffic-chat/index.ts (v28.37)
+// v28.37 (20/08/2026) - CONTINUACAO AUTOMATICA DO TURNO SINCRONO:
+//   Quando o orcamento (~118s) esgota no meio do loop (ato/criar, tools, sintese),
+//   grava turn_checkpoint em chat_conversations e devolve { continuar:true } em vez
+//   do aviso "Nao deu tempo… Peça de novo…". O front (ou body.continuar) retoma do
+//   checkpoint no mesmo conversation_id ate emitir cards/reply. Segmentos sob o
+//   teto de gateway (~150s) — nunca falha como UX final em fluxo de ato.
 // v28.36 (20/08/2026) - REVERTE analise profunda como default:
 //   Q&A volta ao sync traffic-chat; job so com toggle do gestor OU auto-rota antiga
 //   (>=5 familias / >=1500 chars), com guarda de meio-de-fio. Mantem filtro de
@@ -529,7 +535,13 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.36";
+const VERSAO = "chat-v28.37";
+// Continuacao automatica do turno sincrono (espelho do checkpoint do job).
+const MAX_TURN_SEGMENTS = 4;
+const REPLY_CONTINUANDO =
+  "Montando os pedidos de aprovação — continuando automaticamente a partir do ponto em que o orçamento desta janela esgotou.";
+const RE_CONTINUAR_AUTO =
+  /^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando/i;
 const HIST = 24;
 // v28.11: orcamento da reinjecao de retorno de ferramenta.
 // TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
@@ -3519,8 +3531,57 @@ const FAMILIAS_ASSUNTO: RegExp[] = [
 ];
 const ROTA_FAMILIAS_MIN = 5;
 const ROTA_CHARS_MIN = 1500;
-const RE_CONTINUACAO = /^sua resposta anterior foi cortada/;
+const RE_CONTINUACAO = /^sua resposta anterior foi cortada|^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando/;
 const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
+
+type TurnCheckpoint = {
+  v: 1;
+  segmento: number;
+  objetivo: string;
+  pedido_ato: boolean;
+  tools_resumo: { tool: string; action_type?: string; erro?: string }[];
+  cards: { approval_id: string; summary: string; status: string }[];
+  reply_parcial: string;
+  created_at: string;
+};
+
+function montarPromptRetomada(cp: TurnCheckpoint): string {
+  const toolsLinha = cp.tools_resumo.length
+    ? cp.tools_resumo.map((t) =>
+      `- ${t.tool}${t.action_type ? `(${t.action_type})` : ""}${t.erro ? ` [nao lido: ${t.erro}]` : ""}`).join("\n")
+    : "- (nenhuma ferramenta concluida ainda neste pedido)";
+  const cardsLinha = cp.cards.length
+    ? cp.cards.map((c) => `- ${c.summary} (${c.status}, id ${c.approval_id})`).join("\n")
+    : "- (nenhum ActionCard emitido ainda)";
+  const parcial = (cp.reply_parcial || "").trim();
+  return (
+    `[CONTINUACAO AUTOMATICA DO SISTEMA — segmento ${cp.segmento}]\n` +
+    `Objetivo original do gestor (NAO peca para reformular nem "focar" o pedido):\n"""\n${cp.objetivo}\n"""\n\n` +
+    `Ja feito neste pedido:\nFerramentas:\n${toolsLinha}\n\nCards ja emitidos:\n${cardsLinha}\n\n` +
+    (parcial
+      ? `Texto ja entregue ao gestor (NAO repita; retome depois):\n"""\n${parcial.slice(-3500)}\n"""\n\n`
+      : "") +
+    "INSTRUCOES OBRIGATORIAS:\n" +
+    "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir ou focar.\n" +
+    "2. Retome do ponto em que parou. Se o objetivo era criar campanha/conjunto/anuncio (ou emitir card), " +
+    "chame propose_action AGORA com os dados reais ja coletados — NAO invente IDs nem parametros.\n" +
+    "3. Se os cards necessarios ja existem, confirme em 2-4 linhas o que ficou pendente de aprovacao humana.\n" +
+    "4. Use ferramentas so do que ainda falta; nao releia o que ja consta acima como concluido."
+  );
+}
+
+function resumirToolsParaCheckpoint(toolsUsed: any[], toolResults: { tool: string; erro?: string; args?: any }[]): TurnCheckpoint["tools_resumo"] {
+  const byIdx = toolResults.map((tr) => ({
+    tool: String(tr.tool ?? ""),
+    action_type: tr.args && typeof tr.args === "object" ? String((tr.args as any).action_type ?? "") || undefined : undefined,
+    erro: tr.erro ? String(tr.erro).slice(0, 120) : undefined,
+  }));
+  if (byIdx.length) return byIdx.slice(-40);
+  return toolsUsed.map((t) => ({
+    tool: String(t.tool ?? ""),
+    action_type: t.args && typeof t.args === "object" ? String(t.args.action_type ?? "") || undefined : undefined,
+  })).slice(-40);
+}
 // v28.32: pergunta tipica que estourava 150s porque o modelo abria Pipeboard em vez de
 // get_meta_dicas. Sem verbo de ato — se pedir emitir card, cai no caminho normal.
 const RE_DICAS_META = /dica.*meta|recomendac.*(meta|facebook|anuncio|impulsionar|boost)|meta emitiu|meta.*recomend|impulsionar.*(anuncio|eles|campanha)|opportunity score|recomendacao da meta/;
@@ -3577,19 +3638,57 @@ Deno.serve(async (req) => {
 
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
-  const message = String(body?.message ?? "").trim();
+  const pedirContinuar = body?.continuar === true;
+  let message = String(body?.message ?? "").trim();
   const rawAtts: any[] = Array.isArray(body?.attachments) ? body.attachments.slice(0, 4) : [];
-  if (!message && !rawAtts.length) return json({ error: "message obrigatorio" }, 400);
+  if (!pedirContinuar && !message && !rawAtts.length) return json({ error: "message obrigatorio" }, 400);
 
   const company = await resolveCompany(body?.company ? String(body.company) : undefined);
   if (!company) return json({ error: "empresa nao encontrada" }, 400);
+
+  // v28.37: retomada de turno sincrono a partir de turn_checkpoint (espelho do job).
+  let turnCheckpoint: TurnCheckpoint | null = null;
+  let segmentoAtual = 1;
+  let objetivoOriginal = message;
+  let ehRetomada = false;
+  if (pedirContinuar || RE_CONTINUAR_AUTO.test(deacc(message.toLowerCase()))) {
+    const cid = body?.conversation_id ? String(body.conversation_id) : "";
+    if (!cid) {
+      if (pedirContinuar) return json({ error: "continuar exige conversation_id" }, 400);
+    } else {
+      const { data: convCp } = await supa.from("chat_conversations")
+        .select("id, company_id, turn_checkpoint")
+        .eq("id", cid).maybeSingle();
+      if (pedirContinuar && (!convCp || convCp.company_id !== company.id)) {
+        return json({ error: "conversa nao encontrada" }, 404);
+      }
+      const cp = convCp?.turn_checkpoint as TurnCheckpoint | null;
+      if (cp && cp.v === 1 && cp.objetivo) {
+        turnCheckpoint = cp;
+        segmentoAtual = Math.max(1, Number(cp.segmento ?? 1));
+        objetivoOriginal = String(cp.objetivo);
+        message = montarPromptRetomada({ ...cp, segmento: segmentoAtual });
+        ehRetomada = true;
+        // Consome o checkpoint ANTES de processar (anti-reentrega duplicada, igual ao job).
+        await supa.from("chat_conversations").update({ turn_checkpoint: null }).eq("id", cid);
+      } else if (pedirContinuar) {
+        return json({
+          ok: true, versao: VERSAO, conversation_id: cid, continuar: false,
+          aviso: "sem_checkpoint", reply: "", finish_reason: "sem_checkpoint",
+        }, 200);
+      }
+    }
+  }
 
   // v28.11: pedido longo de ANALISE nao disputa os 150s da plataforma - vai para o job, que
   // nao tem esse teto. A decisao acontece AQUI, antes de qualquer chamada ao modelo e antes
   // de gravar a pergunta (quem grava e o job, senao a pergunta entraria duas vezes).
   // Se o encaminhamento falhar, NAO se perde o turno: cai no caminho sincrono e a falha vai
   // declarada na telemetria - rota nova nao pode derrubar o chat.
-  const rota = decidirRotaAssincrona(message, rawAtts.length);
+  // Continuacao automatica NUNCA vai ao job (propose_action + fio).
+  const rota = ehRetomada
+    ? { rotear: false, motivo: "retomada de checkpoint sincrono", familias: 0 }
+    : decidirRotaAssincrona(message, rawAtts.length);
   let rotaFalhou = "";
   // Quarta guarda, e a unica que custa uma consulta: o job recebe SO a pergunta - nao le o
   // historico da conversa. Pergunta feita no meio de um fio ("e agora compare com o que voce
@@ -3666,6 +3765,10 @@ Deno.serve(async (req) => {
     else if (String(conv.company_id) !== company.id) {
       return json({ error: "conversation_company_mismatch" }, 409);
     }
+  }
+  // Pedido novo (nao retomada): descarta checkpoint orfao para nao misturar objetivos.
+  if (convId && !ehRetomada) {
+    await supa.from("chat_conversations").update({ turn_checkpoint: null }).eq("id", convId);
   }
   if (!convId) {
     const { data: conv, error: ce } = await supa.from("chat_conversations")
@@ -3781,7 +3884,11 @@ Deno.serve(async (req) => {
       c.slice(0, cap) + `\n[AVISO DO SISTEMA: o final desta mensagem (${omitidos} caracteres) foi omitido do historico por limite de tamanho.]`);
   });
 
-  await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "user", content: msgText, user_id: userId, attachments: attMeta.length ? attMeta : null });
+  // Retomada: o prompt de checkpoint vai so ao LLM (abaixo), nao vira bolha de usuario.
+  // O gestor ve a costura das respostas assistant + cards — sem eco interno.
+  if (!ehRetomada) {
+    await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "user", content: msgText, user_id: userId, attachments: attMeta.length ? attMeta : null });
+  }
 
   // v20: prompt caching. cache_control marca o bloco como cacheavel; leituras subsequentes
   // do MESMO prefixo custam 0,1x. O system (escopo+protocolo+regras+memoria, ~3.600 tokens)
@@ -4106,15 +4213,93 @@ Deno.serve(async (req) => {
       reply = reply ? pre + "\n\n" + reply : pre;
     }
   }
-  // v21: o fallback NAO e uma resposta truncada. Marcar como 'length' fazia o front disparar
-  // a costura sobre a mensagem de erro - 3 vezes, 57-91k tokens cada.
+
+  // v28.37: CONTINUACAO AUTOMATICA — nunca devolver o aviso "Peça de novo…" como UX final
+  // em fluxo de ato / turno incompleto por orcamento. Grava checkpoint e sinaliza ao front.
+  const pedidoAto = RE_PEDIDO_DE_ATO.test(deacc(objetivoOriginal.toLowerCase())) ||
+    (turnCheckpoint?.pedido_ato === true);
+  const cardsNesteSegmento = actionCards.length;
+  const cardsJaNoPedido = (turnCheckpoint?.cards?.length ?? 0) + cardsNesteSegmento;
+  const toolsNesteSegmento = toolsUsed.length;
+  const turnoIncompletoPorTempo = deadlineTools && (
+    !String(reply ?? "").trim() ||
+    (pedidoAto && cardsNesteSegmento === 0 && toolsNesteSegmento > 0) ||
+    (pedidoAto && cardsJaNoPedido === 0)
+  );
+  const podeContinuarSegmento = segmentoAtual < MAX_TURN_SEGMENTS;
+  let continuarTurno = false;
   let usouFallback = false;
-  if (!reply) {
-    reply = deadlineTools
-      ? "Nao deu tempo de concluir esta rodada dentro do limite do servidor. Peça de novo de forma mais focada (ex.: só as dicas da Meta neste conjunto, ou só emitir o card já montado) — assim a resposta chega inteira."
-      : "Nao consegui produzir a resposta desta vez. Tente de novo, ou divida o pedido em partes menores.";
-    usouFallback = true;
-    finishReason = deadlineTools ? "orcamento_tempo_sem_conteudo" : "erro_sem_conteudo";
+
+  if (!String(reply ?? "").trim() || turnoIncompletoPorTempo) {
+    if (turnoIncompletoPorTempo && podeContinuarSegmento) {
+      // Junta cards deste segmento com os do checkpoint anterior.
+      const cardsMerged = [
+        ...(turnCheckpoint?.cards ?? []),
+        ...actionCards.map((c) => ({
+          approval_id: c.approval_id,
+          summary: c.summary,
+          status: c.status,
+        })),
+      ];
+      const toolsMerged = [
+        ...(turnCheckpoint?.tools_resumo ?? []),
+        ...resumirToolsParaCheckpoint(toolsUsed, toolResults),
+      ].slice(-60);
+      const replyParcial = [
+        turnCheckpoint?.reply_parcial,
+        String(reply ?? "").trim(),
+      ].filter(Boolean).join("\n\n").trim();
+
+      const novoCp: TurnCheckpoint = {
+        v: 1,
+        segmento: segmentoAtual + 1,
+        objetivo: objetivoOriginal,
+        pedido_ato: pedidoAto,
+        tools_resumo: toolsMerged,
+        cards: cardsMerged,
+        reply_parcial: replyParcial.slice(-8000),
+        created_at: new Date().toISOString(),
+      };
+      await supa.from("chat_conversations")
+        .update({ turn_checkpoint: novoCp, updated_at: new Date().toISOString() })
+        .eq("id", convId);
+
+      if (!String(reply ?? "").trim()) {
+        if (cardsNesteSegmento > 0) {
+          reply = `Emiti ${cardsNesteSegmento} pedido(s) de aprovação. Continuando o restante automaticamente…`;
+        } else if (toolsNesteSegmento > 0) {
+          reply = REPLY_CONTINUANDO;
+        } else {
+          reply = REPLY_CONTINUANDO;
+        }
+      } else if (pedidoAto && cardsNesteSegmento === 0) {
+        // Havia prosa mas o card ainda nao saiu — nao deixe o gestor achar que acabou.
+        reply = String(reply).trim() + "\n\n_Continuando automaticamente para emitir o(s) pedido(s) de aprovação…_";
+      }
+      continuarTurno = true;
+      finishReason = `continuar_turno+seg${segmentoAtual}`;
+    } else if (!String(reply ?? "").trim()) {
+      // Ultimo segmento ou sem trabalho retomavel: ainda assim NAO use o texto antigo
+      // de "Peça de novo…" em pedido de ato — diga o que falta com o que ja tem.
+      if (pedidoAto) {
+        const nCards = cardsJaNoPedido;
+        reply = nCards > 0
+          ? `Consegui emitir ${nCards} pedido(s) de aprovação neste fio. Se ainda faltar algum card do pedido original, peça só o que falta (ex.: o conjunto) — o que já saiu está na fila de aprovação.`
+          : "Cheguei ao limite desta janela antes de emitir o card. Os dados já coletados ficaram no histórico desta conversa — envie de novo o mesmo pedido (ou só a parte que faltou) e eu retomo sem recomeçar do zero.";
+        finishReason = deadlineTools ? "orcamento_ato_sem_card" : "erro_ato_sem_conteudo";
+      } else {
+        reply = deadlineTools
+          ? "Nao deu tempo de concluir esta rodada dentro do limite do servidor. Peça de novo de forma mais focada (ex.: só as dicas da Meta neste conjunto, ou só emitir o card já montado) — assim a resposta chega inteira."
+          : "Nao consegui produzir a resposta desta vez. Tente de novo, ou divida o pedido em partes menores.";
+        finishReason = deadlineTools ? "orcamento_tempo_sem_conteudo" : "erro_sem_conteudo";
+      }
+      usouFallback = true;
+    }
+  }
+
+  // Turno completo: garante checkpoint limpo.
+  if (!continuarTurno && convId) {
+    await supa.from("chat_conversations").update({ turn_checkpoint: null }).eq("id", convId);
   }
 
   const diagnostico = { finish_reason: finishReason, iteracoes, ms_total: decorrido(),
@@ -4129,7 +4314,9 @@ Deno.serve(async (req) => {
     toolres_gravados: toolResults.length, toolres_turnos_reinjetados: toolresTurnos,
     toolres_ferramentas_reinjetadas: toolresFerramentas, toolres_chars_reinjetados: toolresChars,
     rota_familias: rota.familias, rota_falhou: rotaFalhou || null,
-    tokens_in: tokensIn, tokens_out: tokensOut, versao: VERSAO };
+    tokens_in: tokensIn, tokens_out: tokensOut, versao: VERSAO,
+    continuar_turno: continuarTurno, segmento_turno: segmentoAtual,
+    retomada: ehRetomada, pedido_ato: pedidoAto };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
     tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
@@ -4148,5 +4335,9 @@ Deno.serve(async (req) => {
     toolres_ferramentas_reinjetadas: toolresFerramentas, toolres_chars_reinjetados: toolresChars,
     roteado_para_job: false, motivo_do_roteamento: rota.motivo, familias_de_assunto: rota.familias,
     rota_falhou: rotaFalhou || null,
-    tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas, action_cards: actionCards });
+    tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas,
+    action_cards: actionCards,
+    continuar: continuarTurno,
+    segmento: segmentoAtual,
+  });
 });

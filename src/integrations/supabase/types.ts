@@ -488,6 +488,7 @@ export type Database = {
           id: string;
           kind: string;
           title: string | null;
+          turn_checkpoint: Json | null;
           updated_at: string;
         };
         Insert: {
@@ -497,6 +498,7 @@ export type Database = {
           id?: string;
           kind?: string;
           title?: string | null;
+          turn_checkpoint?: Json | null;
           updated_at?: string;
         };
         Update: {
@@ -506,6 +508,7 @@ export type Database = {
           id?: string;
           kind?: string;
           title?: string | null;
+          turn_checkpoint?: Json | null;
           updated_at?: string;
         };
         Relationships: [
