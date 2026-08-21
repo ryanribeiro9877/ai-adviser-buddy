@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.49)
+// supabase/functions/traffic-chat/index.ts (v28.50)
+// v28.50 (21/08/2026) - FAMILIA MENSAGENS (CTWA): CONVERSATIONS + WHATSAPP sob
+//   OUTCOME_ENGAGEMENT. Distinto de engajamento social (POST_ENGAGEMENT+ON_POST).
+//   Card 7d6563df falhou: sistema rejeitava CONVERSATIONS na familia engajamento.
 // v28.49 (21/08/2026) - GEO PRESET JURIDICO COHAPM: default Salvador–BA obrigatório
 //   só no meio Jurídico; rejeita geo diferente; La Felicità isolada (não herda).
 //   buscar_geolocalizacao força Salvador+BA no contexto Jurídico.
@@ -535,6 +538,8 @@ import {
   resolverObjetivoOdax,
   familiaDeObjetivo,
   ehFamiliaSocialTopo,
+  ehFamiliaSemMoldePermitida,
+  ehPedidoMensagens,
   mensagemObjetivoNaoSuportado,
   ODAX_OBJETIVOS,
 } from "../_shared/objetivo_odax.ts";
@@ -1967,29 +1972,40 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       };
     }
     const nomeNovo = resolvidoConj.nome;
-    // v28.39: familia social (ENGAJAMENTO/RECONHECIMENTO) — Page, nao LP/pixel.
+    // v28.50: familia mensagens (CTWA) distinta de engajamento social (POST/ON_POST).
     const resolvidoObjConj = resolverObjetivoOdax({
       objetivo: params?.objetivo,
       objetivo_tag: params?.objetivo_tag ?? resolvidoConj.partes?.objetivo_tag,
       defaultLeadsSeVazio: true,
     });
     const objetivoConj = resolvidoObjConj.ok ? resolvidoObjConj.objetivo : "OUTCOME_LEADS";
+    const pedidoMensagens = ehPedidoMensagens({
+      optimization_goal: params?.optimization_goal,
+      destination_type: params?.destination_type,
+      familia_objetivo: params?.familia_objetivo,
+      objetivo_tag: params?.objetivo_tag ?? resolvidoConj.partes?.objetivo_tag,
+      nome: `${campanhaDestino} ${nomeNovo}`,
+    });
     const familiaRaw = String(params?.familia_objetivo ?? "").trim().toLowerCase();
-    const familiaConj =
+    let familiaConj =
       familiaRaw === "engajamento" || familiaRaw === "reconhecimento" || familiaRaw === "conversao"
-      || familiaRaw === "trafego" || familiaRaw === "app"
+      || familiaRaw === "trafego" || familiaRaw === "app" || familiaRaw === "mensagens"
         ? familiaRaw
         : familiaDeObjetivo(objetivoConj ?? resolvidoConj.partes?.objetivo_tag);
+    // CTWA/conversas prevalece sobre o mapeamento generico OUTCOME_ENGAGEMENT → engajamento social.
+    if (pedidoMensagens) familiaConj = "mensagens";
     const socialTopoConj = familiaConj === "engajamento" || familiaConj === "reconhecimento";
+    const mensagensConj = familiaConj === "mensagens";
     const pageIdConj =
       String(params?.page_id ?? "").trim() ||
       String((cfgNomeConj as any)?.page_id ?? "").trim() ||
       null;
-    if (socialTopoConj && !pageIdConj) {
+    if ((socialTopoConj || mensagensConj) && !pageIdConj) {
       return {
-        erro: "page_id_obrigatorio_para_engajamento",
-        detalhe:
-          "Conjunto de engajamento/reconhecimento exige page_id da Page. Configure meta_execution_config ou passe params.page_id.",
+        erro: mensagensConj ? "page_id_obrigatorio_para_mensagens" : "page_id_obrigatorio_para_engajamento",
+        detalhe: mensagensConj
+          ? "Conjunto de conversas WhatsApp exige page_id da Page (com WA vinculado). Configure meta_execution_config ou passe params.page_id."
+          : "Conjunto de engajamento/reconhecimento exige page_id da Page. Configure meta_execution_config ou passe params.page_id.",
       };
     }
     // v28.27: default facebook+instagram. Threads continua bloqueado. Nao entrevista o gestor
@@ -2027,11 +2043,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       params?.sem_molde === true ||
       norm(nomeAlvo) === "sem_molde" ||
       norm(nomeAlvo) === "_sem_molde";
-    if (semMoldeConj && !socialTopoConj) {
+    if (semMoldeConj && !ehFamiliaSemMoldePermitida(familiaConj)) {
       return {
         erro: "sem_molde_so_para_familia_social",
         detalhe:
-          "sem_molde em criar_conjunto so vale para engajamento/reconhecimento. Use objetivo_tag=ENGAJAMENTO (ou RECONHECIMENTO) e campanha OUTCOME_ENGAGEMENT/AWARENESS, OU informe um conjunto molde real (mesmo OFFSITE_CONVERSIONS — o executor sobrescreve).",
+          "sem_molde em criar_conjunto so vale para engajamento/reconhecimento/mensagens. Use objetivo_tag=ENGAJAMENTO|CONV (ou RECONHECIMENTO) e campanha compativel, OU informe um conjunto molde real.",
       };
     }
     if (!semMoldeConj && !nomeAlvo) {
@@ -2137,27 +2153,45 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       }
     }
 
-    // Se a campanha destino e social e o agente esqueceu a tag, forca familia pelo objective.
+    // Se a campanha destino e social/mensagens e o agente esqueceu a tag, forca familia pelo objective.
     let familiaEfetiva = familiaConj;
     let socialEfetivo = socialTopoConj;
+    let mensagensEfetivo = mensagensConj;
     let pageIdEfetivo = pageIdConj;
     let objetivoEfetivo = objetivoConj;
-    if (!socialEfetivo && ehFamiliaSocialTopo((dest as any).objective)) {
-      familiaEfetiva = familiaDeObjetivo((dest as any).objective);
-      socialEfetivo = true;
-      objetivoEfetivo = String((dest as any).objective);
+    if (!socialEfetivo && !mensagensEfetivo && ehFamiliaSocialTopo((dest as any).objective)) {
+      // OUTCOME_ENGAGEMENT: CTWA (mensagens) se pedido CONVERSATIONS/WHATSAPP; senao impulsão social.
+      if (
+        pedidoMensagens ||
+        ehPedidoMensagens({
+          optimization_goal: params?.optimization_goal,
+          destination_type: params?.destination_type,
+          familia_objetivo: params?.familia_objetivo,
+          objetivo_tag: params?.objetivo_tag,
+          nome: `${dest.name} ${nomeNovo}`,
+        })
+      ) {
+        familiaEfetiva = "mensagens";
+        mensagensEfetivo = true;
+        objetivoEfetivo = String((dest as any).objective);
+      } else {
+        familiaEfetiva = familiaDeObjetivo((dest as any).objective);
+        socialEfetivo = true;
+        objetivoEfetivo = String((dest as any).objective);
+      }
       if (!pageIdEfetivo) {
         return {
-          erro: "page_id_obrigatorio_para_engajamento",
-          detalhe:
-            "Campanha destino e de engajamento/reconhecimento; informe page_id ou configure meta_execution_config.page_id.",
+          erro: mensagensEfetivo ? "page_id_obrigatorio_para_mensagens" : "page_id_obrigatorio_para_engajamento",
+          detalhe: mensagensEfetivo
+            ? "Campanha destino OUTCOME_ENGAGEMENT; para conversas WhatsApp informe page_id (Page com WA)."
+            : "Campanha destino e de engajamento/reconhecimento; informe page_id ou configure meta_execution_config.page_id.",
         };
       }
     }
-    if (semMoldeConj && !socialEfetivo) {
+    if (semMoldeConj && !ehFamiliaSemMoldePermitida(familiaEfetiva)) {
       return {
         erro: "sem_molde_so_para_familia_social",
-        detalhe: "A campanha destino nao e OUTCOME_ENGAGEMENT/AWARENESS — sem_molde recusado.",
+        detalhe: "A campanha destino nao e OUTCOME_ENGAGEMENT/AWARENESS nem pedido de mensagens — sem_molde recusado.",
       };
     }
 
@@ -2169,7 +2203,11 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const notaPosicionamento = plataformas.includes("facebook") && formatoEfetivo === "video"
       ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`
       : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoEfetivo === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`;
-    const notaSocialConj = socialEfetivo
+    const notaSocialConj = mensagensEfetivo
+      ? (semMoldeConj
+        ? ` — familia mensagens SEM MOLDE: CONVERSATIONS + destination_type=WHATSAPP + page_id (Click-to-WhatsApp).`
+        : ` — familia mensagens: molde so empresta targeting; executor grava CONVERSATIONS + WHATSAPP + page_id.`)
+      : socialEfetivo
       ? (familiaEfetiva === "reconhecimento"
         ? (semMoldeConj
           ? ` — familia reconhecimento SEM MOLDE: REACH + page_id (targeting BR Advantage+ minimo).`
@@ -2201,14 +2239,22 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       threads_desabilitado: true,
       familia_objetivo: familiaEfetiva,
       objetivo: objetivoEfetivo,
-      page_id: socialEfetivo ? pageIdEfetivo : null,
-      optimization_goal: socialEfetivo
+      page_id: (socialEfetivo || mensagensEfetivo) ? pageIdEfetivo : null,
+      optimization_goal: mensagensEfetivo
+        ? (String(params?.optimization_goal ?? "").trim() || "CONVERSATIONS")
+        : socialEfetivo
         ? (String(params?.optimization_goal ?? "").trim() || (familiaEfetiva === "reconhecimento" ? "REACH" : "POST_ENGAGEMENT"))
-        : null,
-      destination_type: socialEfetivo
+        : (String(params?.optimization_goal ?? "").trim() || null),
+      destination_type: mensagensEfetivo
+        ? (String(params?.destination_type ?? "").trim() || "WHATSAPP")
+        : socialEfetivo
         ? (familiaEfetiva === "reconhecimento" ? null : "ON_POST")
-        : null,
+        : (String(params?.destination_type ?? "").trim() || null),
       destino_social: socialEfetivo,
+      destino_mensagens: mensagensEfetivo,
+      ...(params?.whatsapp_phone_number
+        ? { whatsapp_phone_number: String(params.whatsapp_phone_number).trim() }
+        : {}),
       ...(gateGeo.meio ? { meio: gateGeo.meio } : {}),
       ...(geoEfetivo
         ? {
@@ -3938,27 +3984,26 @@ EXCECAO CONJUNTO SOCIAL (engajamento/reconhecimento, 20/08/2026 v28.42): (A) tar
 da conta (mesmo OFFSITE_CONVERSIONS/pixel LEAD) — o executor DESCARTA conversion fields e grava
 engajamento: POST_ENGAGEMENT + destination_type=ON_POST + promoted_object={page_id};
 reconhecimento: REACH + page_id. NUNCA misture REACH como goal de campanha OUTCOME_ENGAGEMENT.
+EXCECAO CONJUNTO MENSAGENS / CTWA (21/08/2026 v28.50): conversas WhatsApp NAO sao impulsão de
+post. Campanha OUTCOME_ENGAGEMENT (ou tag CONV/MESSAGES/WHATSAPP) + conjunto com
+familia_objetivo=mensagens OU optimization_goal=CONVERSATIONS → destination_type=WHATSAPP +
+promoted_object={page_id} (+ whatsapp_phone_number opcional). Pode usar target_name=sem_molde.
+PROIBIDO emitir CONVERSATIONS com destination_type=ON_POST ou tratar CTWA como familia
+engajamento social (isso gerou a falha do card JURIDICO_CONJ.01 em 21/08/2026).
 PROIBIDO dizer "nao ha molde POST_ENGAGEMENT", "so no Ads Manager", "aguardar Ryan" ou
-"configuracao de conjunto nao pode ser inventada" para bloquear IMPULSAO: o caminho existe —
-EMITA o card. Campanha, conjunto e anuncio novos nascem ACTIVE na aprovacao do card. Se um
+"configuracao de conjunto nao pode ser inventada" para bloquear IMPULSAO ou CTWA: o caminho
+existe — EMITA o card. Campanha, conjunto e anuncio novos nascem ACTIVE na aprovacao do card. Se um
 objeto existente estiver PAUSED e o gestor pedir religar, use ativar_campanha / ativar_conjunto
 / ativar_criativo. Para desligar, use pausar_campanha / pausar_conjunto / pausar_criativo.
 OBJETIVO ODAX (criar_campanha): OUTCOME_LEADS (default da casa, LP/CLT), OUTCOME_SALES,
 OUTCOME_TRAFFIC, OUTCOME_ENGAGEMENT, OUTCOME_AWARENESS, OUTCOME_APP_PROMOTION. Sinonimos:
-ENGAJAMENTO/ENGAGEMENT/POST_ENGAGEMENT → OUTCOME_ENGAGEMENT; RECONHECIMENTO/AWARENESS/REACH →
-OUTCOME_AWARENESS. Se omitir params.objetivo, o codigo deriva da objetivo_tag. Brand boost /
-impulsao de Page ou Instagram (@legaleviver_): canal=SOCIAL, objetivo_tag=ENGAJAMENTO (ou
-RECONHECIMENTO), SEM produto CLT, destino = Page (nao LP). Excecao autorizada pelo gestor em
-20/08/2026 (IMPULSAO) — nao remove o padrao CLT+LP das demais campanhas. Conjunto engajamento:
-sem_molde OU molde so para targeting; optimization_goal=POST_ENGAGEMENT (default),
-destination_type=ON_POST, promoted_object={page_id}, billing_event=IMPRESSIONS. Conjunto
-reconhecimento: optimization_goal=REACH (default). Instagram actor da config fica disponivel
-para o anuncio seguinte. ANUNCIO (criar_anuncio) no conjunto de engajamento: sem_molde=true +
-drive_file_id / child_attachments + page_id + objetivo_tag=ENGAJAMENTO + canal=SOCIAL; o codigo
-preenche destino_url = Page/IG (v28.45). NUNCA force LP /simulacao-clt nesse caminho. FIN-01 em
-copy educativa de impulsão: se a regra pedir "Consulte sua margem…", anexe a frase e emita —
-nao recuse o lote autorizado. Campanha+conjunto bastam como degraus previos; NAO invente
-criativo de boost fora do slate.
+ENGAJAMENTO/ENGAGEMENT/POST_ENGAGEMENT → OUTCOME_ENGAGEMENT (impulsão social);
+CONV/MESSAGES/WHATSAPP/CONVERSATIONS → OUTCOME_ENGAGEMENT (Click-to-WhatsApp, familia mensagens);
+RECONHECIMENTO/AWARENESS/REACH → OUTCOME_AWARENESS. Se omitir params.objetivo, o codigo deriva
+da objetivo_tag. Brand boost / impulsao de Page ou Instagram: canal=SOCIAL, objetivo_tag=ENGAJAMENTO,
+SEM produto CLT, destino = Page (nao LP). CTWA/conversas: nome/tag com CONV, familia mensagens,
+CONVERSATIONS+WHATSAPP. Conjunto engajamento social: POST_ENGAGEMENT + ON_POST + page_id.
+Conjunto mensagens: CONVERSATIONS + WHATSAPP + page_id. Conjunto reconhecimento: REACH + page_id.
 ORCAMENTO: se o gestor nao disse quanto quer gastar por dia, PERGUNTE (unico valor que nao se
 inventa). Se ele ja disse (ex.: 60 no conjunto), use isso e nao reabra.
 UTM: o sistema monta a string. Se o gestor deu identificador (ex.: TEST-RR-AGO262), use em

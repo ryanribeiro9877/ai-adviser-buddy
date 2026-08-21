@@ -233,7 +233,7 @@ const ASSINATURAS: {
     quando:
       /performance goal incompatible|optimization_goal you selected is not valid|not compatible with the campaign'?s? objective|performance goal isn'?t available/i,
     frase:
-      "a Meta recusou a meta de desempenho (optimization_goal) porque ela nao combina com o objetivo da campanha — ou falta o destino (destination_type) exigido. Em engajamento (OUTCOME_ENGAGEMENT) o padrao e POST_ENGAGEMENT com destino ON_POST e page_id da Page. Em reconhecimento (OUTCOME_AWARENESS) use REACH/IMPRESSIONS. Corrigir o pedido (ou reexecutar apos o ajuste do sistema) e tentar de novo.",
+      "a Meta recusou a meta de desempenho (optimization_goal) porque ela nao combina com o objetivo da campanha — ou falta o destino (destination_type) exigido. Em engajamento SOCIAL use POST_ENGAGEMENT + ON_POST. Em conversas WhatsApp (CTWA) use CONVERSATIONS + WHATSAPP sob a mesma campanha OUTCOME_ENGAGEMENT (familia mensagens). Em reconhecimento use REACH. Corrigir o pedido e tentar de novo.",
   },
 ];
 

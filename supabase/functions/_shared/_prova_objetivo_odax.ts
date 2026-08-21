@@ -3,7 +3,10 @@ import {
   resolverObjetivoOdax,
   familiaDeObjetivo,
   ehFamiliaSocialTopo,
+  ehFamiliaSemMoldePermitida,
+  ehPedidoMensagens,
   defaultsConjuntoSocialTopo,
+  defaultsConjuntoMensagens,
   targetingPadraoSocialTopo,
   mensagemObjetivoNaoSuportado,
   normalizarObjetivoOdax,
@@ -51,12 +54,31 @@ assert(!("erro" in likes) && likes.destination_type === "ON_PAGE", "ON_PAGE");
 const reachEmEng = defaultsConjuntoSocialTopo("engajamento", "1095196357012756", "REACH");
 assert("erro" in reachEmEng && reachEmEng.erro === "optimization_goal_nao_suportado_para_engajamento", "REACH bloqueado em eng");
 
+const convEmEng = defaultsConjuntoSocialTopo("engajamento", "1095196357012756", "CONVERSATIONS");
+assert("erro" in convEmEng && convEmEng.erro === "optimization_goal_exige_familia_mensagens", "CONVERSATIONS fora do social");
+
 const reach = defaultsConjuntoSocialTopo("reconhecimento", "1095196357012756", "REACH");
 assert(!("erro" in reach) && reach.optimization_goal === "REACH", "reach");
 assert(!("erro" in reach) && reach.destination_type === null, "awareness sem dest");
 
 const semPage = defaultsConjuntoSocialTopo("engajamento", "");
 assert("erro" in semPage && semPage.erro === "page_id_obrigatorio_para_engajamento", "page obrig");
+
+const msg = defaultsConjuntoMensagens("1095196357012756");
+assert(!("erro" in msg), "mensagens ok");
+if (!("erro" in msg)) {
+  assert(msg.optimization_goal === "CONVERSATIONS", "opt conv");
+  assert(msg.destination_type === "WHATSAPP", "dest WA");
+  assert(msg.billing_event === "IMPRESSIONS", "billing msg");
+  assert(msg.promoted_object.page_id === "1095196357012756", "page msg");
+}
+
+assert(ehPedidoMensagens({ optimization_goal: "CONVERSATIONS" }) === true, "pedido conv");
+assert(ehPedidoMensagens({ nome: "COHAPM_JURIDICO_CONV_LEVA01" }) === true, "nome conv");
+assert(ehPedidoMensagens({ nome: "IMPULSAO SOCIAL ENGAJAMENTO" }) === false, "nome social");
+assert(ehFamiliaSemMoldePermitida("mensagens") === true, "sem molde mensagens");
+assert(normalizarObjetivoOdax("CONV") === "OUTCOME_ENGAGEMENT", "CONV odax");
+assert(normalizarObjetivoOdax("CONVERSATIONS") === "OUTCOME_ENGAGEMENT", "CONVERSATIONS odax");
 
 const tgt = targetingPadraoSocialTopo();
 assert((tgt.geo_locations as any)?.countries?.[0] === "BR", "geo BR");

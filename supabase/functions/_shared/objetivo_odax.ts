@@ -12,7 +12,13 @@ export const ODAX_OBJETIVOS = [
 
 export type ObjetivoOdax = (typeof ODAX_OBJETIVOS)[number];
 
-export type FamiliaObjetivo = "conversao" | "engajamento" | "reconhecimento" | "trafego" | "app";
+export type FamiliaObjetivo =
+  | "conversao"
+  | "engajamento"
+  | "reconhecimento"
+  | "trafego"
+  | "app"
+  | "mensagens";
 
 const SINONIMOS_ODAX: Record<string, ObjetivoOdax> = {
   LEADS: "OUTCOME_LEADS",
@@ -24,8 +30,13 @@ const SINONIMOS_ODAX: Record<string, ObjetivoOdax> = {
   TRAFFIC: "OUTCOME_TRAFFIC",
   TRAFEGO: "OUTCOME_TRAFFIC",
   LINK_CLICKS: "OUTCOME_TRAFFIC",
+  // Click-to-WhatsApp / conversas: Meta aceita OUTCOME_ENGAGEMENT + CONVERSATIONS + WHATSAPP.
   MESSAGES: "OUTCOME_ENGAGEMENT",
   MENSAGEM: "OUTCOME_ENGAGEMENT",
+  MENSAGENS: "OUTCOME_ENGAGEMENT",
+  CONVERSATIONS: "OUTCOME_ENGAGEMENT",
+  CONV: "OUTCOME_ENGAGEMENT",
+  WHATSAPP: "OUTCOME_ENGAGEMENT",
   ENGAGEMENT: "OUTCOME_ENGAGEMENT",
   ENGAJAMENTO: "OUTCOME_ENGAGEMENT",
   POST_ENGAGEMENT: "OUTCOME_ENGAGEMENT",
@@ -50,6 +61,10 @@ const TAG_PARA_ODAX: Record<string, ObjetivoOdax> = {
   TRAFEGO: "OUTCOME_TRAFFIC",
   ENGAGEMENT: "OUTCOME_ENGAGEMENT",
   ENGAJAMENTO: "OUTCOME_ENGAGEMENT",
+  CONV: "OUTCOME_ENGAGEMENT",
+  MESSAGES: "OUTCOME_ENGAGEMENT",
+  MENSAGENS: "OUTCOME_ENGAGEMENT",
+  WHATSAPP: "OUTCOME_ENGAGEMENT",
   AWARENESS: "OUTCOME_AWARENESS",
   RECONHECIMENTO: "OUTCOME_AWARENESS",
   APP: "OUTCOME_APP_PROMOTION",
@@ -147,9 +162,61 @@ export function familiaDeObjetivo(objetivo: unknown): FamiliaObjetivo {
   }
 }
 
+/**
+ * Click-to-WhatsApp / conversas: OUTCOME_ENGAGEMENT (ou LEADS/SALES/TRAFFIC) +
+ * optimization_goal=CONVERSATIONS + destination_type=WHATSAPP.
+ * Distinto de "engajamento" social (POST_ENGAGEMENT + ON_POST).
+ */
+export function ehPedidoMensagens(params: {
+  optimization_goal?: unknown;
+  destination_type?: unknown;
+  familia_objetivo?: unknown;
+  objetivo_tag?: unknown;
+  nome?: unknown;
+}): boolean {
+  const fam = normalizarChave(params.familia_objetivo);
+  if (
+    fam === "MENSAGENS" || fam === "MENSAGEM" || fam === "MESSAGES" ||
+    fam === "CONVERSAS" || fam === "CONVERSATIONS" || fam === "WHATSAPP"
+  ) {
+    return true;
+  }
+  const opt = normalizarChave(params.optimization_goal);
+  if (opt === "CONVERSATIONS") return true;
+  const dest = normalizarChave(params.destination_type);
+  if (
+    dest === "WHATSAPP" || dest === "MESSENGER" || dest === "INSTAGRAM_DIRECT" ||
+    dest.includes("MESSAGING")
+  ) {
+    return true;
+  }
+  const tag = normalizarChave(params.objetivo_tag);
+  if (
+    tag === "CONV" || tag === "MESSAGES" || tag === "MENSAGENS" ||
+    tag === "WHATSAPP" || tag === "CONVERSAS"
+  ) {
+    return true;
+  }
+  const nome = String(params.nome ?? "").toUpperCase();
+  // Nome com CONV/WA (ex.: COHAPM_JURIDICO_CONV_LEVA01) indica CTWA, nao impulsão de post.
+  if (
+    /_CONV_|\bCONV\b|CONVERSA|WHATSAPP|\bWA\b|CLICK.?TO.?WA|CTWA/.test(nome) &&
+    !/ENGAJAMENTO|POST_ENGAGEMENT|IMPULSAO|SOCIAL.?BOOST/.test(nome)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function ehFamiliaSocialTopo(objetivoOuTag: unknown): boolean {
   const f = familiaDeObjetivo(objetivoOuTag);
   return f === "engajamento" || f === "reconhecimento";
+}
+
+/** Familias que permitem criar_conjunto com target_name=sem_molde. */
+export function ehFamiliaSemMoldePermitida(familia: unknown): boolean {
+  const f = String(familia ?? "").trim().toLowerCase();
+  return f === "engajamento" || f === "reconhecimento" || f === "mensagens";
 }
 
 export type AdsetEngajamentoDefaults = {
@@ -157,7 +224,7 @@ export type AdsetEngajamentoDefaults = {
   billing_event: string;
   destination_type: string | null;
   /** promoted_object so com page_id — sem pixel/conversao. */
-  promoted_object: { page_id: string };
+  promoted_object: { page_id: string; whatsapp_phone_number?: string };
 };
 
 /**
@@ -214,13 +281,25 @@ export function defaultsConjuntoSocialTopo(
     };
   }
 
+  // CONVERSATIONS nao e impulsão de post — e Click-to-WhatsApp (familia mensagens).
+  if (pedida === "CONVERSATIONS" || pedida === "LINK_CLICKS") {
+    return {
+      erro: "optimization_goal_exige_familia_mensagens",
+      detalhe:
+        `optimization_goal=${pedida} sob familia engajamento (POST/Page/Event/Video) e invalido. ` +
+        `Para conversas no WhatsApp use familia_objetivo=mensagens com optimization_goal=CONVERSATIONS e destination_type=WHATSAPP ` +
+        `(campanha OUTCOME_ENGAGEMENT ja criada continua valida). Nao misture CONVERSATIONS com ON_POST.`,
+    };
+  }
+
   const opt = pedida && OPT_ENGAJAMENTO.has(pedida) ? pedida : "POST_ENGAGEMENT";
   if (pedida && !OPT_ENGAJAMENTO.has(pedida)) {
     return {
       erro: "optimization_goal_nao_suportado_para_engajamento",
       detalhe:
-        `Para OUTCOME_ENGAGEMENT use: ${[...OPT_ENGAJAMENTO].join(", ")} ` +
+        `Para engajamento SOCIAL (impulsão de post/Page) use: ${[...OPT_ENGAJAMENTO].join(", ")} ` +
         `(com destination_type ON_POST|ON_PAGE|ON_EVENT|ON_VIDEO). Recebi "${pedida}". ` +
+        `Para conversas WhatsApp use familia_objetivo=mensagens (CONVERSATIONS + WHATSAPP). ` +
         `Profile/Page visits (PROFILE_AND_PAGE_ENGAGEMENT) nao e suportado via Marketing API — use POST_ENGAGEMENT + ON_POST.`,
     };
   }
@@ -229,6 +308,67 @@ export function defaultsConjuntoSocialTopo(
     billing_event: "IMPRESSIONS",
     destination_type: destinationTypeEngajamento(opt),
     promoted_object: { page_id: page },
+  };
+}
+
+/**
+ * Defaults de conjunto Click-to-WhatsApp / conversas.
+ * Meta: OUTCOME_ENGAGEMENT|LEADS|SALES|TRAFFIC + CONVERSATIONS + destination_type=WHATSAPP
+ * + promoted_object.page_id (whatsapp_phone_number opcional).
+ * Medido 21/08/2026: o caminho "engajamento social" rejeitava CONVERSATIONS e forçava ON_POST.
+ */
+export function defaultsConjuntoMensagens(
+  pageId: string,
+  opts?: {
+    whatsapp_phone_number?: unknown;
+    destination_type?: unknown;
+    optimization_goal?: unknown;
+  },
+): AdsetEngajamentoDefaults | { erro: string; detalhe: string } {
+  const page = String(pageId ?? "").trim();
+  if (!page) {
+    return {
+      erro: "page_id_obrigatorio_para_mensagens",
+      detalhe:
+        "Conjunto de conversas WhatsApp exige page_id (Page com WhatsApp vinculado). Configure meta_execution_config.page_id ou passe params.page_id.",
+    };
+  }
+
+  const destPedida = normalizarChave(opts?.destination_type);
+  const dest =
+    !destPedida || destPedida === "WHATSAPP" || destPedida.includes("WHATSAPP")
+      ? "WHATSAPP"
+      : destPedida === "MESSENGER" || destPedida === "INSTAGRAM_DIRECT"
+      ? destPedida
+      : null;
+  if (!dest) {
+    return {
+      erro: "destination_type_invalido_para_mensagens",
+      detalhe:
+        `Para familia mensagens use destination_type=WHATSAPP (padrao), MESSENGER ou INSTAGRAM_DIRECT. Recebi "${destPedida}". ` +
+        `ON_POST/ON_PAGE sao de engajamento social, nao de conversa.`,
+    };
+  }
+
+  const optPedida = normalizarChave(opts?.optimization_goal);
+  const opt = !optPedida || optPedida === "CONVERSATIONS" ? "CONVERSATIONS" : optPedida;
+  if (opt !== "CONVERSATIONS" && opt !== "LINK_CLICKS") {
+    return {
+      erro: "optimization_goal_nao_suportado_para_mensagens",
+      detalhe:
+        `Para familia mensagens use CONVERSATIONS (padrao) ou LINK_CLICKS. Recebi "${optPedida}".`,
+    };
+  }
+
+  const wa = String(opts?.whatsapp_phone_number ?? "").trim();
+  const promoted: { page_id: string; whatsapp_phone_number?: string } = { page_id: page };
+  if (wa) promoted.whatsapp_phone_number = wa;
+
+  return {
+    optimization_goal: opt,
+    billing_event: "IMPRESSIONS",
+    destination_type: dest,
+    promoted_object: promoted,
   };
 }
 
@@ -254,8 +394,9 @@ export function mensagemObjetivoNaoSuportado(bruto: string): {
     erro: "objetivo_nao_suportado",
     detalhe:
       `objetivo '${bruto || "(vazio)"}' nao e valido na Meta/ODAX. Use: ${ODAX_OBJETIVOS.join(", ")}. ` +
-      `Sinonimos aceitos: ENGAJAMENTO/ENGAGEMENT/POST_ENGAGEMENT → OUTCOME_ENGAGEMENT; ` +
+      `Sinonimos aceitos: ENGAJAMENTO/ENGAGEMENT/POST_ENGAGEMENT → OUTCOME_ENGAGEMENT (impulsão social); ` +
+      `CONV/MESSAGES/WHATSAPP/CONVERSATIONS → OUTCOME_ENGAGEMENT (Click-to-WhatsApp, familia mensagens); ` +
       `RECONHECIMENTO/AWARENESS/REACH → OUTCOME_AWARENESS; LEADS → OUTCOME_LEADS. ` +
-      `Para impulsionar Page/Instagram (brand boost) use OUTCOME_ENGAGEMENT (ou tag ENGAJAMENTO).`,
+      `Nao confunda engajamento social (POST_ENGAGEMENT+ON_POST) com conversas WA (CONVERSATIONS+WHATSAPP).`,
   };
 }

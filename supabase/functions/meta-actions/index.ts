@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.34)
+// supabase/functions/meta-actions/index.ts (v5.35)
+// v5.35 (21/08/2026) - FAMILIA MENSAGENS (CTWA): CONVERSATIONS + destination_type=WHATSAPP
+//   + page_id sob campanha OUTCOME_ENGAGEMENT. Nao forcar POST_ENGAGEMENT/ON_POST.
+//   Card 7d6563df: recusa optimization_goal_nao_suportado_para_engajamento.
 // v5.34 (21/08/2026) - GEO PRESET JURIDICO COHAPM: no criar_conjunto, meio Jurídico
 //   injeta/valida preset Salvador–BA; La Felicità isolada (não herda).
 // v5.33 (21/08/2026) - GEO/BAIRROS no criar_conjunto: payload.geo_locations sobrescreve
@@ -335,7 +338,10 @@ import {
   resolverObjetivoOdax,
   familiaDeObjetivo,
   ehFamiliaSocialTopo,
+  ehFamiliaSemMoldePermitida,
+  ehPedidoMensagens,
   defaultsConjuntoSocialTopo,
+  defaultsConjuntoMensagens,
   targetingPadraoSocialTopo,
   mensagemObjetivoNaoSuportado,
 } from "../_shared/objetivo_odax.ts";
@@ -1532,31 +1538,53 @@ export async function montarCriacao(
       };
     }
 
-    // Resolve familia social cedo (payload → tag → objective da campanha).
+    // Resolve familia cedo (payload → tag → objective da campanha).
+    // v5.35: mensagens (CTWA) distinta de engajamento social.
     let familiaPayload = String(p?.familia_objetivo ?? "").trim().toLowerCase();
     const tagPartes = String((p?.nome_partes as any)?.objetivo_tag ?? p?.objetivo_tag ?? "").trim();
-    if (!familiaPayload || familiaPayload === "conversao") {
+    const pedidoMensagensExec = ehPedidoMensagens({
+      optimization_goal: p?.optimization_goal,
+      destination_type: p?.destination_type,
+      familia_objetivo: p?.familia_objetivo,
+      objetivo_tag: tagPartes,
+      nome: `${p?.campanha_destino_nome ?? ""} ${p?.nome_novo ?? ""} ${nomeFinal}`,
+    });
+    if (pedidoMensagensExec) {
+      familiaPayload = "mensagens";
+    } else if (!familiaPayload || familiaPayload === "conversao") {
       if (ehFamiliaSocialTopo(tagPartes) || ehFamiliaSocialTopo(p?.objetivo)) {
         familiaPayload = familiaDeObjetivo(p?.objetivo ?? tagPartes);
       }
     }
-    if (!familiaPayload || familiaPayload === "conversao") {
-      const campObj = await g(`/${campanha}?fields=objective`);
+    if ((!familiaPayload || familiaPayload === "conversao") && !pedidoMensagensExec) {
+      const campObj = await g(`/${campanha}?fields=objective,name`);
       if (campObj.status === 200) {
         const objCamp = String((campObj.body as any)?.objective ?? "");
-        if (ehFamiliaSocialTopo(objCamp)) {
+        const nomeCamp = String((campObj.body as any)?.name ?? "");
+        if (
+          ehPedidoMensagens({
+            optimization_goal: p?.optimization_goal,
+            destination_type: p?.destination_type,
+            familia_objetivo: p?.familia_objetivo,
+            objetivo_tag: tagPartes,
+            nome: `${nomeCamp} ${p?.nome_novo ?? ""}`,
+          })
+        ) {
+          familiaPayload = "mensagens";
+        } else if (ehFamiliaSocialTopo(objCamp)) {
           familiaPayload = familiaDeObjetivo(objCamp);
         }
       }
     }
     const socialTopo =
       familiaPayload === "engajamento" || familiaPayload === "reconhecimento";
+    const mensagensTopo = familiaPayload === "mensagens";
 
-    if (semMoldeConj && !socialTopo) {
+    if (semMoldeConj && !ehFamiliaSemMoldePermitida(familiaPayload)) {
       return {
         erro: "sem_molde_so_para_familia_social",
         detalhe:
-          "sem_molde em criar_conjunto so vale para engajamento/reconhecimento (campanha OUTCOME_ENGAGEMENT/AWARENESS). Para LEADS/conversao continue com um conjunto molde real.",
+          "sem_molde em criar_conjunto so vale para engajamento/reconhecimento/mensagens (campanha OUTCOME_ENGAGEMENT/AWARENESS ou CTWA). Para LEADS/conversao continue com um conjunto molde real.",
       };
     }
 
@@ -1696,9 +1724,9 @@ export async function montarCriacao(
     }
     } // fim else criar_conjunto (plataformas)
 
-    // v5.28/v5.29: familia engajamento/reconhecimento — molde (se houver) so empresta targeting.
-    // Campanha OUTCOME_ENGAGEMENT/AWARENESS NAO aceita OFFSITE_CONVERSIONS+pixel do molde LEADS.
-    if (socialTopo) {
+    // v5.28/v5.29/v5.35: familia engajamento/reconhecimento/mensagens — molde so empresta targeting.
+    // Campanha OUTCOME_ENGAGEMENT + mensagens → CONVERSATIONS+WHATSAPP (CTWA), NAO POST+ON_POST.
+    if (mensagensTopo || socialTopo) {
       let pageId = String(p?.page_id ?? "").trim();
       if (!pageId && companyId) {
         const { data: cfgPage } = await supa
@@ -1708,11 +1736,17 @@ export async function montarCriacao(
           .maybeSingle();
         pageId = String((cfgPage as any)?.page_id ?? "").trim();
       }
-      const defs = defaultsConjuntoSocialTopo(
-        familiaPayload as "engajamento" | "reconhecimento",
-        pageId,
-        p?.optimization_goal,
-      );
+      const defs = mensagensTopo
+        ? defaultsConjuntoMensagens(pageId, {
+          whatsapp_phone_number: p?.whatsapp_phone_number,
+          destination_type: p?.destination_type,
+          optimization_goal: p?.optimization_goal,
+        })
+        : defaultsConjuntoSocialTopo(
+          familiaPayload as "engajamento" | "reconhecimento",
+          pageId,
+          p?.optimization_goal,
+        );
       if ("erro" in defs) {
         return { erro: defs.erro, detalhe: defs.detalhe };
       }
@@ -1725,16 +1759,27 @@ export async function montarCriacao(
       } else {
         delete body.destination_type;
       }
+      if (semMoldeConj && !body.targeting) {
+        body.targeting = JSON.stringify(targetingPadraoSocialTopo());
+      }
+      if (semMoldeConj && !body.bid_strategy) {
+        body.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
+      }
       posicionamento = {
         ...(posicionamento && typeof posicionamento === "object" ? posicionamento : {}),
         familia_objetivo: familiaPayload,
-        override_social_topo: true,
+        override_social_topo: socialTopo,
+        override_mensagens: mensagensTopo,
         sem_molde: semMoldeConj,
         optimization_goal: defs.optimization_goal,
         billing_event: defs.billing_event,
         destination_type: defs.destination_type,
         page_id: pageId,
-        declaracao_social: semMoldeConj
+        declaracao_social: mensagensTopo
+          ? (semMoldeConj
+            ? `Conjunto mensagens SEM MOLDE: CONVERSATIONS + WHATSAPP + page_id=${pageId}.`
+            : `Conjunto mensagens: molde so emprestou targeting; CONVERSATIONS + WHATSAPP + page_id=${pageId}.`)
+          : semMoldeConj
           ? `Conjunto ${familiaPayload} SEM MOLDE: targeting BR Advantage+ minimo; optimization_goal=${defs.optimization_goal}; destination_type=${defs.destination_type ?? "null"}; promoted_object.page_id=${pageId}.`
           : `Conjunto ${familiaPayload}: molde so emprestou targeting; optimization_goal=${defs.optimization_goal}, destination_type=${defs.destination_type ?? "null"}, promoted_object.page_id=${pageId} (pixel/LEAD do molde descartados).`,
       };
