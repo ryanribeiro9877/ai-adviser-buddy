@@ -1,4 +1,4 @@
-// supabase/functions/waba-sync/index.ts (v19 multi-empresa)
+// supabase/functions/waba-sync/index.ts (v21 platform_type)
 //
 // CONECTOR WABA — WhatsApp Business Management API (Graph) -> Supabase.
 // Traz: WABAs, numeros (qualidade + limite de mensagens nivel portfolio), templates,
@@ -41,7 +41,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GRAPH = "https://graph.facebook.com/v22.0";
 const ANALYTICS_DAYS = 30;
-const VERSAO = "waba-sync-v20-bm-por-empresa";
+const VERSAO = "waba-sync-v21-platform-type";
 
 function json(obj: unknown, status = 200) {
   return new Response(redactAllMetaTokens(JSON.stringify(obj)), {
@@ -169,7 +169,7 @@ async function syncEmpresa(
 
     // numeros (qualidade + limite de mensagens)
     const ph = await gGetAll(`${w.id}/phone_numbers`,
-      { fields: "id,display_phone_number,verified_name,status,quality_rating,messaging_limit_tier,whatsapp_business_manager_messaging_limit,name_status", limit: "50" }, token);
+      { fields: "id,display_phone_number,verified_name,status,quality_rating,messaging_limit_tier,whatsapp_business_manager_messaging_limit,name_status,platform_type", limit: "50" }, token);
     if (!ph.ok) wr.phones_error = ph.error;
     const phones = ph.ok ? ph.data : (ph as any).data ?? [];
     for (const p of phones) {
@@ -178,6 +178,7 @@ async function syncEmpresa(
         display_phone_number: p.display_phone_number ?? null, verified_name: p.verified_name ?? null,
         status: p.status ?? null, quality_rating: p.quality_rating ?? null,
         messaging_limit_tier: limStr(p), name_status: p.name_status ?? null,
+        platform_type: p.platform_type ?? null,
         raw: p, last_synced_at: new Date().toISOString(),
       }, { onConflict: "external_id" });
       await supa.from("waba_phone_snapshots").upsert({

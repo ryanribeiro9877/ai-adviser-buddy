@@ -19,12 +19,29 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 
-// Só CLOUD_API é número "vivo" na API: os demais (NOT_APPLICABLE, sem platform_type)
-// vêm de WABAs migradas ou sem acesso e não têm qualidade/tier legíveis.
-// CLICK_TO_WHATSAPP = inventário de destino de anúncio (wa.me), sem Cloud API.
+// Inventário Cloud/WABA: tudo que NÃO é Click-to-WhatsApp.
+// Inclui CLOUD_API, ON_PREMISE e linhas do waba-sync com platform_type null
+// (sync antigo sem o campo) — identificadas por external_id sem prefixo ads-wa:.
+// CLICK_TO_WHATSAPP = destino de anúncio (wa.me), sem qualidade/tier da Cloud API.
 const CLOUD = "CLOUD_API";
 const ADS_WA = "CLICK_TO_WHATSAPP";
 const DIAS_HISTORICO = 14;
+
+export function isClickToWhatsApp(p: { platform_type: string | null; external_id: string }) {
+  return p.platform_type === ADS_WA || p.external_id.startsWith("ads-wa:");
+}
+
+/** Números do inventário WABA (Cloud API / on-premise / sync sem platform_type). */
+export function isWabaInventory(p: { platform_type: string | null; external_id: string }) {
+  if (isClickToWhatsApp(p)) return false;
+  // NOT_APPLICABLE = migrado/inativo sem qualidade legível — fica em "outros".
+  if (p.platform_type === "NOT_APPLICABLE") return false;
+  return (
+    p.platform_type === CLOUD ||
+    p.platform_type === "ON_PREMISE" ||
+    p.platform_type == null
+  );
+}
 
 type Phone = {
   external_id: string;
@@ -221,13 +238,10 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
   const porNumeroAtivo = (porNumero.data ?? []).length > 0;
 
   const phones = useMemo(() => numeros.data ?? [], [numeros.data]);
-  const vivos = useMemo(() => phones.filter((p) => p.platform_type === CLOUD), [phones]);
-  const emAnuncios = useMemo(
-    () => phones.filter((p) => p.platform_type === ADS_WA),
-    [phones],
-  );
+  const vivos = useMemo(() => phones.filter(isWabaInventory), [phones]);
+  const emAnuncios = useMemo(() => phones.filter(isClickToWhatsApp), [phones]);
   const outrosSemCloud = useMemo(
-    () => phones.filter((p) => p.platform_type !== CLOUD && p.platform_type !== ADS_WA),
+    () => phones.filter((p) => !isWabaInventory(p) && !isClickToWhatsApp(p)),
     [phones],
   );
   const resumo = useMemo(() => {

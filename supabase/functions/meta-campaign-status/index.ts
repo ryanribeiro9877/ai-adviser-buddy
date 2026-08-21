@@ -1,4 +1,6 @@
-// supabase/functions/meta-campaign-status/index.ts (v16)
+// supabase/functions/meta-campaign-status/index.ts (v17)
+// v17 (21/08/2026) - Espelha effective_status da Graph em ads.status (nao so snapshots),
+//   para inventário Click-to-WA e RPCs que leem ads.status nao ficarem stale.
 // v16 (20/08/2026) - OPPORTUNITY SCORE / Recommendation Center. O badge "1 recomendacao"
 //   do Ads Manager NAO vinha do campo classico `recommendations` em campaign/adset/ad
 //   (meta_recommendations ficou 0 em todas as empresas). Fonte correta: GET
@@ -913,7 +915,7 @@ async function coletarMetaDicasAoVivo(corpo: any): Promise<Response> {
     candidatas: linhas.length,
     upsert,
     diagnostico,
-    versao: "meta-campaign-status-v16",
+    versao: "meta-campaign-status-v17",
     nota:
       "Refresh ao vivo do Opportunity Score (GET /act_*/recommendations). " +
       "Badge do Ads Manager pode exceder a lista da API (assimetria documentada pela Meta).",
@@ -1454,6 +1456,10 @@ Deno.serve(async (req) => {
     const graphAd = graphPorAd.get(adId);
     const creativeId = graphAd?.creative_id ?? (loc.creative_id ? String(loc.creative_id) : null);
     const patch: Record<string, unknown> = {};
+    // Espelha effective_status da Graph em ads.status (antes só ia para snapshots).
+    // Sem isto o inventário Click-to-WA lia status stale do Pipeboard e marcava
+    // "Em campanha ativa" com adset/campanha já pausados na Meta.
+    if (graphAd?.status) patch.status = graphAd.status;
     let tentouUrlTags = false;
     let tentouDestino = false;
 
@@ -1916,6 +1922,6 @@ Deno.serve(async (req) => {
       },
       nota: "v16: Opportunity Score GET /act_*/recommendations (badge Ads Manager) + campo classico recommendations em objetos ACTIVE. first_seen_on/last_seen_on + veredito via upsert_meta_recomendacoes.",
     },
-    versao: "meta-campaign-status-v16",
+    versao: "meta-campaign-status-v17",
   });
 });
