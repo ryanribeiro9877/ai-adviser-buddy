@@ -1,4 +1,11 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.8)
+// supabase/functions/traffic-agent-job/index.ts (v3.9)
+// v3.9 (21/08/2026) - RESGATE DE SINTESE POR TIMEOUT DE PRAZO: job d568e16d (COHAPM deep)
+//   coletou 6 especialistas com relatorios COMPLETOS, refez compliance/criativos no
+//   segmento 2 ate esgotar ~330s, e sintetizarComResgate caiu em stop+sintese_timeout
+//   com 0 tokens (prazo ja zero; hardDeadline virava 8s). Resgate so cobria 429.
+//   (1) na retomada de checkpoint, se prazo < CHECKPOINT_MIN_MS apos devolucao, segmenta
+//   com direto_para_sintese ANTES de tentar escrever; (2) resgate tambem em
+//   sintese_timeout / vazio nao-permanente (worker novo, orcamento zerado).
 // v3.8 (21/08/2026) - SINTESE RESILIENTE A 429 EM RELATORIO DEEP: job 6221da92 (COHAPM
 //   ~10:55 UTC) classificou DEEP certo, coletou 6 especialistas + 2 devolucoes, e a
 //   sintese morreu vazia em ~16s com openrouter_http_429 (v3.7 so tinha 4 retries curtos).
@@ -1180,6 +1187,14 @@ function ehRateLimitErro(s: string): boolean {
   return /openrouter_http_429|rate.?limit|(^|[^0-9])429([^0-9]|$)/i.test(s);
 }
 
+/** Falha de sintese que merece worker novo (orcamento cheio), sem refazer coleta. */
+function ehSinteseResgatavel(finish: string): boolean {
+  if (/401|403|invalid.?api|billing|forbidden/i.test(finish)) return false;
+  return ehRateLimitErro(finish)
+    || /sintese_timeout|sintese_segmentada_vazia|sem_finish/i.test(finish)
+    || /^stop(\+|$)/i.test(finish);
+}
+
 async function chamarLLM(messages: any[], opts: {
   tools?: any[]; maxTokens: number; reasoning?: any; model?: string; timeoutMs?: number;
   retries?: number; retryCapMs?: number; sessionId?: string | null; costTier?: AutoCostTier;
@@ -1610,8 +1625,8 @@ async function cooldownAntesDaSintese(jobId: string, tel: any, prazo: () => numb
 }
 
 /**
- * Sintese com resgate: 429+vazio na 1a tentativa → checkpoint direto_para_sintese
- * (worker novo, sem re-planejar) em vez de error permanente.
+ * Sintese com resgate: vazio na 1a tentativa (429 OU prazo esgotado) → checkpoint
+ * direto_para_sintese (worker novo, sem re-planejar) em vez de error permanente.
  * Retorna texto, ou null se o job foi reinvocado (caller deve return).
  */
 async function sintetizarComResgate(args: {
@@ -1634,15 +1649,24 @@ async function sintetizarComResgate(args: {
   if (String(texto ?? "").trim()) return texto;
 
   const finish = String(args.tel.sintese?.finish_reason ?? "sem_finish");
-  const podeResgatar = ehRateLimitErro(finish)
+  const podeResgatar = ehSinteseResgatavel(finish)
     && !args.jaRetentouSintese
     && args.segmento < MAX_SEGMENTOS
     && args.relatorios.length > 0;
 
   if (podeResgatar) {
     args.tel.sintese_resgate = { motivo: finish, de_segmento: args.segmento };
-    await pushProgresso(args.jobId, "sintese", "modelo sobrecarregado — retomando a escrita sem refazer a coleta…");
-    await new Promise((r) => setTimeout(r, SINT_COOLDOWN_POS_429_MS));
+    const porPrazo = /sintese_timeout/i.test(finish);
+    await pushProgresso(
+      args.jobId,
+      "sintese",
+      porPrazo
+        ? "prazo do worker esgotou na escrita — retomando só a síntese no próximo segmento…"
+        : "modelo sobrecarregado — retomando a escrita sem refazer a coleta…",
+    );
+    if (ehRateLimitErro(finish)) {
+      await new Promise((r) => setTimeout(r, SINT_COOLDOWN_POS_429_MS));
+    }
     await gravarCheckpointEReinvocar(args.jobId, args.convId, args.companyId, args.mcpKey, {
       pergunta: args.pergunta,
       plano: args.plano,
@@ -2004,8 +2028,8 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_SESSION_ID = convId || null;
   JOB_MODELO_ROTEADO = MODEL;
   const cap = classificarCapacidade(pergunta);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.8", subagentes: [] };
-  tel.versao = "job-v3.8";
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.9", subagentes: [] };
+  tel.versao = "job-v3.9";
   tel.capacidade = { tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas, devolucoes_max: cap.devolucoesMax };
   // Compat: telemetria antiga lia perfil_fast
   if (cap.tier === "lite") { tel.perfil_fast = true; tel.perfil_fast_motivo = cap.motivo; }
@@ -2063,6 +2087,14 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       }
       tel.rodadas_devolucao = rodada;
       tel.segmento = segmento;
+      // Mesmo guarda do caminho fresco: devolucao no segmento 2 pode consumir o prazo
+      // inteiro (caso d568e16d) — nao tente sintese com 0s; abra segmento so para escrever.
+      if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+        await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
+          pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel,
+          segmento: segmento + 1, direto_para_sintese: true });
+        return;
+      }
       const texto0 = await sintetizarComResgate({
         jobId, convId, companyId, mcpKey, companyName, pergunta, plano, relatorios,
         estilo: estilo0, memoria: memoria0, prazo, tel, segmento, rodada,
