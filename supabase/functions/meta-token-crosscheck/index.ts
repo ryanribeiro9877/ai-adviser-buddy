@@ -31,12 +31,16 @@ function tokenWabaEmpresa(slug: string) {
   );
 }
 const GRAPH = "https://graph.facebook.com/v21.0";
-const VERSAO = "meta-token-crosscheck-v2";
+const VERSAO = "meta-token-crosscheck-v3";
 
 const COHAPM = "57f755b9-c23d-4f58-a488-8173d697c010";
 const LEGAL = "ded20b38-f42e-4c71-800c-31b97ea48bcf";
 const ACT_LEGAL = "act_3302001729967572";
 const ACT_COHAPM = "act_1622612945584817";
+/** BM Cohapm (Graph) — mesmo id visto em act_….business */
+const BM_COHAPM = "870473609113498";
+/** ID exibido no BM UI do SU gestor-trafego (print 2026-08-21) — comparar com /me do token */
+const SU_UI_ID_GESTOR_TRAFEGO = "61593603570922";
 
 const ESCOPOS_ADS = ["ads_management", "ads_read", "business_management"];
 const ESCOPOS_WABA = ["whatsapp_business_management", "whatsapp_business_messaging", "business_management"];
@@ -166,15 +170,9 @@ async function lerConta(token: string, act: string) {
   };
 }
 
-async function wabaDoToken(token: string) {
-  if (!token) return { presente: false, wabas: [], erro: "secret_ausente" };
-  const assigned = await g(
-    `/me/assigned_whatsapp_business_accounts?fields=id,name&limit=50`,
-    token,
-  );
-  const lista = Array.isArray(assigned.body?.data) ? assigned.body.data : [];
+async function detalharWabas(token: string, lista: any[]) {
   const detalhe: any[] = [];
-  for (const w of lista.slice(0, 15)) {
+  for (const w of lista.slice(0, 20)) {
     const ph = await g(
       `/${w.id}/phone_numbers?fields=id,display_phone_number,verified_name,status,quality_rating,messaging_limit_tier,platform_type&limit=20`,
       token,
@@ -187,6 +185,7 @@ async function wabaDoToken(token: string) {
         ? (ph.body?.data ?? []).map((p: any) => ({
             id: p.id,
             display: p.display_phone_number,
+            verified_name: p.verified_name ?? null,
             quality: p.quality_rating,
             tier: p.messaging_limit_tier,
             platform: p.platform_type,
@@ -196,8 +195,84 @@ async function wabaDoToken(token: string) {
       phones_erro: ph.body?.error?.message ?? null,
     });
   }
+  return detalhe;
+}
+
+async function wabaDoToken(token: string) {
+  if (!token) return { presente: false, wabas: [], erro: "secret_ausente" };
+
+  const me = await g("/me?fields=id,name", token);
+  const meId = me.body?.id ? String(me.body.id) : null;
+  const meNome = me.body?.name ?? null;
+
+  const assigned = await g(
+    `/me/assigned_whatsapp_business_accounts?fields=id,name&limit=50`,
+    token,
+  );
+  const owned = await g(
+    `/${BM_COHAPM}/owned_whatsapp_business_accounts?fields=id,name&limit=50`,
+    token,
+  );
+  const client = await g(
+    `/${BM_COHAPM}/client_whatsapp_business_accounts?fields=id,name&limit=50`,
+    token,
+  );
+  const businesses = await g(`/me/businesses?fields=id,name&limit=50`, token);
+
+  const assignedLista = Array.isArray(assigned.body?.data) ? assigned.body.data : [];
+  const ownedLista = Array.isArray(owned.body?.data) ? owned.body.data : [];
+  const clientLista = Array.isArray(client.body?.data) ? client.body.data : [];
+
+  const byId = new Map<string, any>();
+  for (const w of [...ownedLista, ...clientLista, ...assignedLista]) {
+    byId.set(String(w.id), w);
+  }
+  const lista = Array.from(byId.values());
+  const detalhe = await detalharWabas(token, lista);
+
+  const idUiBateComToken = meId === SU_UI_ID_GESTOR_TRAFEGO;
+
   return {
     presente: true,
+    diagnostico_system_user: {
+      token_me_id: meId,
+      token_me_nome: meNome,
+      bm_ui_id_print_gestor_trafego: SU_UI_ID_GESTOR_TRAFEGO,
+      ids_iguais: idUiBateComToken,
+      alerta: idUiBateComToken
+        ? null
+        : "O ID do System User na tela do BM (61593603570922) NAO e o mesmo do token nas Edge Secrets (/me = 122097…). Voce pode estar atribuindo WABA a um SU e o app esta autenticando com outro (mesmo nome).",
+    },
+    discovery: {
+      assigned: {
+        http: assigned.status,
+        erro: assigned.body?.error?.message ?? null,
+        count: assignedLista.length,
+        nomes: assignedLista.map((w: any) => w.name),
+      },
+      bm_owned: {
+        business_id: BM_COHAPM,
+        http: owned.status,
+        erro: owned.body?.error?.message ?? null,
+        count: ownedLista.length,
+        nomes: ownedLista.map((w: any) => w.name),
+      },
+      bm_client: {
+        business_id: BM_COHAPM,
+        http: client.status,
+        erro: client.body?.error?.message ?? null,
+        count: clientLista.length,
+        nomes: clientLista.map((w: any) => w.name),
+      },
+      me_businesses: {
+        http: businesses.status,
+        erro: businesses.body?.error?.message ?? null,
+        count: Array.isArray(businesses.body?.data) ? businesses.body.data.length : 0,
+        lista: Array.isArray(businesses.body?.data)
+          ? businesses.body.data.map((b: any) => ({ id: b.id, name: b.name }))
+          : [],
+      },
+    },
     http: assigned.status,
     erro: assigned.body?.error?.message ?? null,
     wabas: detalhe,

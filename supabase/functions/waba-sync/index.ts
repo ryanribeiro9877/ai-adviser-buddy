@@ -5,7 +5,7 @@
 // analytics diario (enviadas/entregues) e analytics por template (sent/delivered/read/clicked).
 //
 // v19 (multi-empresa): loop por empresa com token WABA isolado (meta_company_tokens).
-//   Nunca faz fallback de token entre empresas. META_BUSINESS_ID so para COMPANY_LEGAL.
+//   Nunca faz fallback de token entre empresas. BM via businessIdPorCompanyId (COHAPM + Legal).
 //   Fallback da tabela wabas filtra por company_id e exclui ads-destino-%.
 //
 // v18.1 (29/07/2026) — F5.4 coleta POR NUMERO + template_name:
@@ -21,7 +21,7 @@
 // Segredos (Edge Function Secrets):
 //   WHATSAPP_ACCESS_TOKEN          Legal (via meta_company_tokens)
 //   WHATSAPP_ACCESS_TOKEN_COHAPM   COHAPM (aceita typo WHATSAPP_ACESS_TOKEN_COHAPM)
-//   META_BUSINESS_ID               opcional; so usado quando company_id === COMPANY_LEGAL
+//   META_BUSINESS_ID               opcional; BM Legal (COHAPM usa business_id no shared)
 //
 // Auth: Authorization: Bearer <mcp_config.api_key> (ou x-mcp-key). verify_jwt=false.
 // Idempotente (upserts). Janela de analytics: ultimos 30 dias.
@@ -31,6 +31,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import {
   COMPANY_LEGAL,
+  businessIdPorCompanyId,
   empresasComTokenWaba,
   redactAllMetaTokens,
   tokenWabaPorCompanyId,
@@ -40,7 +41,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GRAPH = "https://graph.facebook.com/v22.0";
 const ANALYTICS_DAYS = 30;
-const VERSAO = "waba-sync-v19-multi-empresa";
+const VERSAO = "waba-sync-v20-bm-por-empresa";
 
 function json(obj: unknown, status = 200) {
   return new Response(redactAllMetaTokens(JSON.stringify(obj)), {
@@ -108,10 +109,8 @@ async function syncEmpresa(
   const token = emp.token; // isolado: so este token nesta iteracao
   const report: any[] = [];
 
-  // META_BUSINESS_ID so para Legal (BM compartilhado no secret legado)
-  const bizId = companyId === COMPANY_LEGAL
-    ? (Deno.env.get("META_BUSINESS_ID") ?? "").trim()
-    : "";
+  // BM por empresa (COHAPM hardcode; Legal via META_BUSINESS_ID)
+  const bizId = businessIdPorCompanyId(companyId);
 
   // ---- 1) Descobrir WABAs (cadeia: BM owned/client -> assigned ao system user -> tabela) ----
   let wabas: { id: string; name?: string; currency?: string; timezone_id?: string; raw?: any }[] = [];

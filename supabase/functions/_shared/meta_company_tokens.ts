@@ -22,6 +22,8 @@ export type EmpresaMetaCfg = {
   nome: string;
   /** Contas act_… operacionais desta empresa (monitor/BM). */
   ad_accounts: string[];
+  /** Business Manager id (Graph) — owned/client WABA discovery. */
+  business_id: string | null;
   ads_secret_names: string[];
   waba_secret_names: string[];
 };
@@ -33,6 +35,8 @@ export const EMPRESAS_META: EmpresaMetaCfg[] = [
     slug: "LEGAL",
     nome: "Legal é Viver",
     ad_accounts: ["act_3302001729967572"],
+    // Legado: META_BUSINESS_ID no secret; se ausente, discovery cai em assigned.
+    business_id: null,
     ads_secret_names: ["META_ADS_TOKEN"],
     waba_secret_names: ["WHATSAPP_ACCESS_TOKEN"],
   },
@@ -41,6 +45,8 @@ export const EMPRESAS_META: EmpresaMetaCfg[] = [
     slug: "COHAPM",
     nome: "COHAPM",
     ad_accounts: ["act_1622612945584817"],
+    // BM "Cohapm" (visto em act_1622612945584817.business)
+    business_id: "870473609113498",
     ads_secret_names: ["META_ADS_TOKEN_COHAPM"],
     waba_secret_names: [
       "WHATSAPP_ACCESS_TOKEN_COHAPM",
@@ -48,6 +54,17 @@ export const EMPRESAS_META: EmpresaMetaCfg[] = [
     ],
   },
 ];
+
+/** BM Graph id para discovery de WABA (owned/client). */
+export function businessIdPorCompanyId(companyId: string | null | undefined): string {
+  const cfg = cfgEmpresa(companyId);
+  if (!cfg) return "";
+  if (cfg.business_id) return cfg.business_id;
+  if (cfg.company_id === COMPANY_LEGAL) {
+    return (Deno.env.get("META_BUSINESS_ID") ?? "").trim();
+  }
+  return "";
+}
 
 function lerSecret(nomes: string[]): { valor: string; ref: string } | null {
   for (const nome of nomes) {
