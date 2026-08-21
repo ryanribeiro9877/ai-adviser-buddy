@@ -1,4 +1,11 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.9)
+// supabase/functions/traffic-agent-job/index.ts (v4.0)
+// v4.0 (21/08/2026) - TETO AGIL 5 MIN (pedido do gestor): jobs deep "supergestor"/avaliacao
+//   completa estavam em 6 especialistas + 2 devolucoes + ate 3 segmentos (~11 min parede,
+//   caso d568e16d) para perguntas que so pedem leitura de DB/Pipeboard/Meta. Mudancas:
+//   (1) parede GLOBAL 300s desde created_at (segmentos nao somam 3x330s); (2) deep <=3
+//   especialistas, 0 devolucao; (3) plano forcado magro para overview/supergestor;
+//   (4) subagente com menos reasoning/iteracoes e reserva obrigatoria para sintese;
+//   (5) 2o segmento so para resgate de escrita, nunca para re-coleta longa.
 // v3.9 (21/08/2026) - RESGATE DE SINTESE POR TIMEOUT DE PRAZO: job d568e16d (COHAPM deep)
 //   coletou 6 especialistas com relatorios COMPLETOS, refez compliance/criativos no
 //   segmento 2 ate esgotar ~330s, e sintetizarComResgate caiu em stop+sintese_timeout
@@ -219,39 +226,41 @@ let JOB_MODELO_ROTEADO = MODEL;
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
 const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? "").trim();
 
-// Orcamentos do JOB (parede de ~400s do worker; 330s de trabalho + reserva de gravacao).
-const JOB_LIMIT_MS = 330_000;
-const RESERVA_FINAL_MS = 12_000;
-// v2: segmentos e devolucao
-const MAX_SEGMENTOS = 3;
-const DEVOLUCOES_MAX = 2;          // rodadas de devolucao por job (nao por subagente)
-const CHECKPOINT_MIN_MS = 75_000;  // se falta trabalho e o prazo esta abaixo disto, segmenta
-// v3.5: caps por tier de capacidade (roteador deterministico).
+// Orcamentos do JOB — v4.0: teto AGIL de 5 min de parede para o gestor.
+// Worker Supabase ~400s; GLOBAL_WALL cobre a experiencia ponta a ponta (todos os segmentos).
+const GLOBAL_WALL_MS = 300_000;     // 5 min desde created_at do job
+const JOB_LIMIT_MS = 270_000;       // teto por invocacao (ainda limitado pelo global)
+const RESERVA_FINAL_MS = 10_000;
+const SINT_RESERVA_MS = 75_000;     // reserva minima para escrever a resposta
+// Segmentos: no maximo 2 — o 2o so para resgate de sintese (429/timeout), nao maratona.
+const MAX_SEGMENTOS = 2;
+const DEVOLUCOES_MAX = 0;           // v4.0: deep nao reexecuta (custo > ganho sob teto 5min)
+const CHECKPOINT_MIN_MS = 55_000;   // se falta so escrever e o prazo aperta, segmenta
+// v3.5/v4.0: caps por tier de capacidade (roteador deterministico).
 const LITE_MAX_ESPECIALISTAS = 1;
 const STANDARD_MAX_ESPECIALISTAS = 2;
-const LITE_OPENROUTER_TIMEOUT_MS = 60_000;
-const STANDARD_OPENROUTER_TIMEOUT_MS = 90_000;
-const OPENROUTER_TIMEOUT_MS = 120_000;
+const DEEP_MAX_ESPECIALISTAS = 3;
+const LITE_OPENROUTER_TIMEOUT_MS = 45_000;
+const STANDARD_OPENROUTER_TIMEOUT_MS = 60_000;
+const OPENROUTER_TIMEOUT_MS = 75_000;
 const LITE_DEVOLUCOES_MAX = 0;
-const STANDARD_DEVOLUCOES_MAX = 1;
-// deep usa DEVOLUCOES_MAX (2)
+const STANDARD_DEVOLUCOES_MAX = 0;
+// deep usa DEVOLUCOES_MAX (0 em v4.0)
 // v2.2: pipeline de visao
 const VISAO_LOTE = 6;               // imagens por chamada de visao
 const VISAO_MAX_POR_RODADA = 30;    // teto de arquivos analisados por segmento
 const VISAO_MIN_PRAZO_MS = 45_000;  // abaixo disto, para o lote e declara parcial
 const TOKENS_POR_SEGUNDO = 60;
 // Planner: classificacao curta, sem raciocinio longo.
-const PLANNER_MAX_TOKENS = 1200;
-// Subagente: ate 6 rodadas de tool + relatorio.
-// v1.1: 3500 -> 5000 (o corte em 3500 produziu falso negativo em producao) e o relatorio
-// ganha continuacao interna de ate SUB_RELATORIO_MAX_PARTES partes, guardada pelo prazo.
-const SUB_MAX_ITER = 6;
-const SUB_MAX_TOKENS = 5000;
-const SUB_RELATORIO_MAX_PARTES = 3;
-const SUB_REASONING = { max_tokens: 2000 };
-// Sintese: partes de ate 10000 tokens, com continuacao interna ate 4 partes.
-const SINT_MAX_TOKENS = 10_000;
-const SINT_MAX_PARTES = 4;
+const PLANNER_MAX_TOKENS = 800;
+// Subagente: v4.0 — menos iteracoes/reasoning; prioriza tools locais e fecha o relatorio.
+const SUB_MAX_ITER = 4;
+const SUB_MAX_TOKENS = 4000;
+const SUB_RELATORIO_MAX_PARTES = 2;
+const SUB_REASONING = { max_tokens: 600 };
+// Sintese: partes de ate 8000 tokens, com continuacao interna ate 3 partes.
+const SINT_MAX_TOKENS = 8_000;
+const SINT_MAX_PARTES = 3;
 const REASONING_OFF = { enabled: false };
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
@@ -293,13 +302,19 @@ const RE_STATUS_SIMPLES = /\b(status|como (esta|estao)|ta ativa|esta ativa|pausa
 const RE_JULGAMENTO_CURTO = /^(sim|nao|ok|pode|confirma|vale a pena|e bom|e ruim)\b|\b(essas? (duas|2)|1[-–]2|uma ou duas)\b.*\b(recomend|dica|opca)/;
 const FOCO_META_DICAS =
   "Levantar as dicas/recomendacoes da Meta (get_meta_dicas) citadas na pergunta — em especial musica/boost/Opportunity Score — e devolver julgamento acionavel (viavel ou nao + o que fazer). Nao inventariar criativos nem abrir outras frentes.";
+const FOCO_DESEMPENHO_OVERVIEW =
+  "Desde a ativacao das campanhas atuais: overview, funil, ranking de anuncios, gasto/resultados por campanha e teto vigente. Preferir DB; Pipeboard so se faltar numero. Relatorio denso com numeros+fonte+janela.";
+const FOCO_CRIATIVOS_OVERVIEW =
+  "Conteudo em operacao: legendas/titulos/CTA e gasto por peca (get_criativos_conteudo). Ranking por alcance/conversas se a ferramenta trouxer. Sem auditoria FIN/CRI/LGL.";
+const FOCO_ALERTAS_OVERVIEW =
+  "Alertas ativos, recomendacoes internas e dicas Meta (get_meta_dicas). Veredito curto do que exige acao agora.";
 // Parede da fase de sintese: alem do timeout por chamada OpenRouter, a fase inteira
 // nao pode ficar "escrevendo" alem disto (worker morto deixa job running para sempre).
-// v3.8: 180s — cabe retries longos de 429 sem fingir que o worker morreu.
-const SINT_FASE_HARD_MS = 180_000;
+// v4.0: 90s — cabe no teto de 5 min com coleta magra.
+const SINT_FASE_HARD_MS = 90_000;
 // Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
 const SINT_CHARS_SEGMENTAR = 70_000;
-const SINT_COOLDOWN_POS_429_MS = 12_000;
+const SINT_COOLDOWN_POS_429_MS = 6_000;
 
 function classificarCapacidade(pergunta: string): Capacidade {
   const raw = pergunta.trim();
@@ -311,14 +326,25 @@ function classificarCapacidade(pergunta: string): Capacidade {
     || len >= 1400
     || (len >= 900 && (perguntas >= 3 || linhas >= 8))
     || (perguntas >= 4 && len >= 500);
+  // Overview/supergestor: leitura de numeros — plano magro, sem compliance/waba/estrutura
+  // a menos que o texto peca auditoria/WhatsApp/CBO explicitamente.
+  const overviewLean = /\b(supergestor|avaliacao completa|analise completa|relatorio completo|visao geral|panorama|desde.{0,50}ativac)\b/.test(p)
+    && !/\b(compliance|auditoria de (legenda|credito)|whatsapp|waba|cbo|abo|estrutura da conta|regras fin)\b/.test(p);
   if (deepHit) {
     return {
       tier: "deep",
-      motivo: RE_DEEP.test(p) ? "brief amplo / multi-familia" : "pedido longo multi-parte",
-      maxEspecialistas: 99,
+      motivo: overviewLean ? "deep overview (plano magro 5min)" : RE_DEEP.test(p) ? "brief amplo / multi-familia" : "pedido longo multi-parte",
+      maxEspecialistas: DEEP_MAX_ESPECIALISTAS,
       devolucoesMax: DEVOLUCOES_MAX,
       permitirCheckpoint: true,
       openRouterTimeoutMs: OPENROUTER_TIMEOUT_MS,
+      ...(overviewLean ? {
+        forcarPlano: [
+          { nome: "desempenho_campanhas", foco: FOCO_DESEMPENHO_OVERVIEW },
+          { nome: "criativos", foco: FOCO_CRIATIVOS_OVERVIEW },
+          { nome: "alertas_recomendacoes", foco: FOCO_ALERTAS_OVERVIEW },
+        ],
+      } : {}),
     };
   }
   const metaDica = RE_META_DICA.test(p);
@@ -980,33 +1006,33 @@ const DEF: Record<string, any> = {
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
     tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_campaign_detail: 3, computar_perfil_vencedor: 1, ler_pipeboard: 5, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 11,
-    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir DB; se faltar dado use listar_ferramentas_pipeboard + ler_pipeboard. Respeitar literalmente lacunas e guardas das RPCs; ranking medio isolado nunca prescreve pausa.",
+    maxPorTool: { get_campaign_detail: 2, computar_perfil_vencedor: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 8,
+    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir DB; use ler_pipeboard so se faltar numero critico (nao catalogue o Pipeboard por curiosidade). Relatorio denso e curto. Respeitar lacunas e guardas das RPCs; ranking medio isolado nunca prescreve pausa.",
   },
   criativos: {
     tools: ["get_criativos_conteudo", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_criativos_conteudo: 4, get_conhecimento: 3, validar_pedido_contra_contrato: 2, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 10,
-    missao: "CONTEUDO REAL DAS PECAS em operacao: legendas, titulos, CTAs, gasto e formularios por legenda distinta, hooks e formatos (fundamentar na base de conhecimento de criativo). Pode validar pedido contra contrato_de_execucao antes de propor criacao. Se o sync nao trouxe o detalhe, use ler_pipeboard (get_creative_details/get_ad_details). NAO faz auditoria de compliance (dominio do especialista compliance) nem analisa metricas de campanha (dominio do desempenho_campanhas).",
+    maxPorTool: { get_criativos_conteudo: 3, get_conhecimento: 2, validar_pedido_contra_contrato: 1, ler_pipeboard: 2, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 7,
+    missao: "CONTEUDO REAL DAS PECAS em operacao: legendas, titulos, CTAs, gasto e formularios por legenda distinta, hooks e formatos. Preferir get_criativos_conteudo; Pipeboard so se faltar detalhe. NAO faz auditoria de compliance nem metricas de campanha.",
   },
   compliance: {
     tools: ["check_compliance", "checar_par_texto_e_peca", "get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { check_compliance: 8, checar_par_texto_e_peca: 8, get_criativos_conteudo: 3, get_conhecimento: 2 }, maxToolsTotal: 13,
-    missao: "AUDITORIA DE COMPLIANCE: validar o PAR legenda+peca quando houver drive_file_id, declarando exatamente a cobertura e lacunas; para acervo em operacao, validar cada legenda distinta. Deteccao automatica nao e aprovacao.",
+    maxPorTool: { check_compliance: 4, checar_par_texto_e_peca: 4, get_criativos_conteudo: 2, get_conhecimento: 1 }, maxToolsTotal: 8,
+    missao: "AUDITORIA DE COMPLIANCE: amostrar as legendas de maior gasto (ate o teto de tools); validar o PAR legenda+peca quando houver drive_file_id. Declare cobertura e lacunas — nao tente auditar o universo inteiro em uma rodada.",
   },
   estrutura_conta: {
     tools: ["get_estrutura_conjuntos", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_estrutura_conjuntos: 1, get_conhecimento: 2, ler_pipeboard: 5, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 7,
-    missao: "ESTRUTURA da conta: CBO vs ABO, orcamentos por conjunto, estrategia de lance, targeting, pegada e destino. Preferir get_estrutura_conjuntos; se faltar (activities, config fresca, pages), use ler_pipeboard. Apontar riscos com o dado visivel, sem inventar configuracao nao coletada.",
+    maxPorTool: { get_estrutura_conjuntos: 1, get_conhecimento: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 5,
+    missao: "ESTRUTURA da conta: CBO vs ABO, orcamentos por conjunto, estrategia de lance, targeting, pegada e destino. Preferir get_estrutura_conjuntos; Pipeboard so se faltar. Relatorio curto com riscos visiveis.",
   },
   whatsapp_waba: {
     tools: ["get_waba_status", "get_waba_template_insights", "get_conhecimento"],
-    maxPorTool: { get_waba_status: 1, get_waba_template_insights: 2, get_conhecimento: 2 }, maxToolsTotal: 5,
-    missao: "CANAL WHATSAPP: tier de envio dos numeros (caminho para o TIER_UNLIMITED), qualidade GREEN/YELLOW/RED, envios, entregas, leituras e CLIQUES por template com taxa de clique. Declarar que o recorte por numero ainda nao e coletado quando relevante.",
+    maxPorTool: { get_waba_status: 1, get_waba_template_insights: 2, get_conhecimento: 1 }, maxToolsTotal: 4,
+    missao: "CANAL WHATSAPP: tier de envio, qualidade, envios/leituras/cliques por template. Uma rodada de coleta basta.",
   },
   alertas_recomendacoes: {
     tools: ["get_alerts", "get_recommendations", "get_meta_dicas", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest"],
-    maxPorTool: { get_alerts: 1, get_recommendations: 1, get_meta_dicas: 1, saude_das_integracoes: 1, custo_llm_periodo: 2, score_de_prontidao: 1, saude_dos_tokens: 1, ler_entregas_digest: 1 }, maxToolsTotal: 8,
-    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes INTERNAS e dicas da Meta (get_meta_dicas com veredito interno). Em pergunta sobre dica/boost/musica/Opportunity Score: levante as dicas e devolva julgamento acionavel (viavel ou nao + o que fazer) — nunca so listar. Tambem saude das integracoes, custo LLM, score de prontidao (ESP-38), saude dos tokens Meta (ESP-30) e entregas do digest (ESP-41), tudo read-only. Repetir divergencias, premissas e lacunas dos retornos.",
+    maxPorTool: { get_alerts: 1, get_recommendations: 1, get_meta_dicas: 1, saude_das_integracoes: 1, custo_llm_periodo: 1, score_de_prontidao: 1, saude_dos_tokens: 1, ler_entregas_digest: 1 }, maxToolsTotal: 6,
+    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes INTERNAS e dicas da Meta. Em dica/boost/musica: julgamento acionavel. Inclua saude/score/tokens so se o foco pedir — nao inventarie tudo por default.",
   },
   analise_visual_drive: {
     tools: [], maxPorTool: {}, maxToolsTotal: 0,  // pipeline codificado - nao usa loop de tools
@@ -1169,12 +1195,11 @@ async function t_drive_criativos(companyId: string) {
 // LLM
 // ============================================================================
 const OPENROUTER_RETRIAVEL = new Set([429, 502, 503]);
-const OPENROUTER_RETRY_MAX = 4;
-// v3.8: sintese de relatorio deep merece retries mais longos — o caso 6221da92
-// esgotou 4×~8s e marcou sintese_vazia com relatorios ja prontos.
-const OPENROUTER_RETRY_MAX_SINTESE = 8;
-const OPENROUTER_RETRY_CAP_MS = 20_000;
-const OPENROUTER_RETRY_CAP_SINTESE_MS = 35_000;
+const OPENROUTER_RETRY_MAX = 3;
+// v4.0: retries de sintese cabem no teto de 5 min (antes 8×35s estourava a parede).
+const OPENROUTER_RETRY_MAX_SINTESE = 5;
+const OPENROUTER_RETRY_CAP_MS = 12_000;
+const OPENROUTER_RETRY_CAP_SINTESE_MS = 18_000;
 
 function esperaRetryOpenRouter(resp: Response, tentativa: number, capMs = OPENROUTER_RETRY_CAP_MS): number {
   const ra = Number(resp.headers.get("retry-after"));
@@ -1320,7 +1345,7 @@ async function planejar(pergunta: string, tel: any, cap?: Capacidade): Promise<{
     ? "\nMODO LITE: no maximo 1 especialista; um dominio so."
     : cap?.tier === "standard"
       ? "\nMODO STANDARD: no maximo 2 especialistas; preferir 1 quando um dominio cobre."
-      : "\nMODO DEEP: pode usar varios especialistas se a pergunta cruzar dominios; auditoria ampla inclui todos os pertinentes.";
+      : "\nMODO DEEP (teto 5 min): no maximo 3 especialistas. Overview/supergestor/avaliacao desde ativacao = desempenho_campanhas + criativos + alertas_recomendacoes. So acrescente compliance/estrutura/whatsapp se a pergunta pedir EXPLICITAMENTE esses dominios.";
   const sys = `Voce e o ROTEADOR de um gestor de trafego Meta Ads. Dada a pergunta do gestor, encaminhe a tarefa para o MENOR conjunto de especialistas que a cobre por inteiro - tarefa de um unico dominio vai para UM unico especialista.
 Especialistas disponiveis (use exatamente estes nomes):
 - desempenho_campanhas: numeros de midia (gasto, CTR, custos, ranking, series, metas)
@@ -1334,7 +1359,7 @@ Especialistas disponiveis (use exatamente estes nomes):
 REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive; dica/recomendacao/boost/musica/Opportunity Score da Meta -> SOMENTE alertas_recomendacoes (NAO acrescente criativos so porque a dica menciona musica). NAO inclua especialista cujo dominio a pergunta nao toca.${hintCap}
 Responda APENAS com JSON valido, sem markdown, no formato:
 {"subagentes":[{"nome":"...","foco":"instrucao curta e especifica do que ELE deve levantar"}]}
-Para auditoria ampla da conta, inclua todos os pertinentes.`;
+Para overview amplo, 3 especialistas bastam — nao dispare a equipe inteira.`;
   const r = await chamarLLM(
     [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 12000) }],
     { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB, timeoutMs: cap?.openRouterTimeoutMs ?? OPENROUTER_TIMEOUT_MS },
@@ -1378,12 +1403,15 @@ async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx:
 MISSAO: ${cfg.missao}
 FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio (ex.: metricas de campanha para um especialista de criativo), NAO tente responder com suas ferramentas - registre na linha LACUNAS que aquilo e de outro especialista e siga apenas com a sua parte.
-REGRAS: todo numero vem de ferramenta CHAMADA AGORA (nunca de memoria); distinga zero / nao existe / nao coletado; incorpore campos 'nota'/'aviso' dos retornos; amostra pequena e hipotese; nao misture janelas.\nPAGINACAO OBRIGATORIA: se um retorno trouxer restantes > 0 ou aviso de corte E o seu foco exigir cobertura da lista inteira, chame a MESMA ferramenta pedindo a proxima pagina ate cobrir ou esgotar seu teto de consultas. Aceitar o corte sem tentar a proxima pagina e falha sua; se esgotar o teto antes de cobrir, declare em LACUNAS exatamente quantos itens ficaram sem leitura.
+VELOCIDADE: o job tem teto de ~5 min. Chame so as tools necessarias (DB local primeiro; Pipeboard/Meta so se faltar o numero). Nao inventarie catalogos. Apos 2-3 tools uteis, ESCREVA o relatorio.
+REGRAS: todo numero vem de ferramenta CHAMADA AGORA (nunca de memoria); distinga zero / nao existe / nao coletado; incorpore campos 'nota'/'aviso' dos retornos; amostra pequena e hipotese; nao misture janelas.\nPAGINACAO: se restantes > 0 E o foco exigir cobertura total, peca a proxima pagina ate o teto; senao declare o corte em LACUNAS.
 Ao terminar a coleta, escreva um RELATORIO conciso e denso em markdown com numeros + fonte + janela, terminando com a linha 'LACUNAS:' listando o que nao conseguiu cobrir (ou 'nenhuma').`;
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
   let tin = 0, tout = 0, reas = 0, relatorio = "", finish = "";
   for (let iter = 0; iter < SUB_MAX_ITER; iter++) {
+    // Reserva da sintese: para de coletar e escreve com o que tem.
+    if (prazo() < SINT_RESERVA_MS) { finish = finish || "reserva_sintese"; break; }
     if (prazo() <= 0) { finish = "prazo_do_job"; break; }
     const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, model: MODEL_SUB });
     if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; break; }
@@ -2023,14 +2051,24 @@ async function gravarCheckpointEReinvocar(
 
 async function processarJob(jobId: string, convId: string, companyId: string, pergunta: string, mcpKey: string, retomada?: any) {
   const t0 = Date.now();
-  const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
+  // Parede global desde created_at: segmentos nao podem somar 3x o orcamento (v4.0).
+  const { data: jobMeta } = await supa.from("chat_jobs").select("created_at").eq("id", jobId).maybeSingle();
+  const createdMs = jobMeta?.created_at ? new Date(String(jobMeta.created_at)).getTime() : t0;
+  const prazo = () => {
+    const porInvocacao = JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
+    const porParede = GLOBAL_WALL_MS - (Date.now() - createdMs) - RESERVA_FINAL_MS;
+    return Math.min(porInvocacao, porParede);
+  };
   const segmento: number = Number(retomada?.segmento ?? 1);
   JOB_SESSION_ID = convId || null;
   JOB_MODELO_ROTEADO = MODEL;
   const cap = classificarCapacidade(pergunta);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.9", subagentes: [] };
-  tel.versao = "job-v3.9";
-  tel.capacidade = { tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas, devolucoes_max: cap.devolucoesMax };
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.0", subagentes: [] };
+  tel.versao = "job-v4.0";
+  tel.capacidade = {
+    tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
+    devolucoes_max: cap.devolucoesMax, parede_ms: GLOBAL_WALL_MS,
+  };
   // Compat: telemetria antiga lia perfil_fast
   if (cap.tier === "lite") { tel.perfil_fast = true; tel.perfil_fast_motivo = cap.motivo; }
   try {
@@ -2052,8 +2090,16 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       const plano: { nome: string; foco: string }[] = retomada.plano ?? [];
       let rodada: number = Number(retomada.rodada ?? 0);
       const devolucoesCap = cap.devolucoesMax;
-      // devolucoes pendentes deste checkpoint (ja com parecer da coordenacao anexavel)
-      if (!retomada.direto_para_sintese && Array.isArray(retomada.devolver) && retomada.devolver.length) {
+      // v4.0: se a parede global ja esta na reserva de sintese, NAO reexecuta devolucao —
+      // escreve com o que ha (caso d568e16d queimava o segmento 2 em compliance).
+      const pularDevolucaoPorPrazo = prazo() < SINT_RESERVA_MS;
+      if (
+        !retomada.direto_para_sintese
+        && Array.isArray(retomada.devolver)
+        && retomada.devolver.length
+        && devolucoesCap > 0
+        && !pularDevolucaoPorPrazo
+      ) {
         await pushProgresso(jobId, "subagentes", `reexecutando: ${retomada.devolver.map((d: any) => d.nome).join(", ")}`);
         const refeitos = await executarLote(
           retomada.devolver.map((d: any) => ({ nome: String(d.nome),
@@ -2065,13 +2111,15 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
         }
         // uma re-validacao final se ainda ha rodadas e prazo
-        while (rodada < devolucoesCap) {
+        while (rodada < devolucoesCap && prazo() >= SINT_RESERVA_MS) {
           const devolver2 = await validarRelatorios(pergunta, plano, relatorios, tel);
           if (!devolver2.length) break;
           rodada++;
+          // v4.0: checkpoint de devolucao virou direto_para_sintese — nao reabre coleta no segmento 2
           if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
             await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
-              pergunta, plano, relatorios, devolver: devolver2, rodada, tel_parcial: tel, segmento: segmento + 1 });
+              pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel,
+              segmento: segmento + 1, direto_para_sintese: true });
             return;
           }
           await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver2.map((d) => d.nome).join(", ")}`);
@@ -2084,6 +2132,9 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
             if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
           }
         }
+      } else if (!retomada.direto_para_sintese && Array.isArray(retomada.devolver) && retomada.devolver.length) {
+        tel.devolucao_pulada = pularDevolucaoPorPrazo ? "reserva_sintese" : `capacidade_${cap.tier}`;
+        await pushProgresso(jobId, "subagentes", "pulando recoleta — priorizando a resposta dentro do teto de 5 min");
       }
       tel.rodadas_devolucao = rodada;
       tel.segmento = segmento;
@@ -2140,19 +2191,19 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey }, prazo, tel);
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
 
-    // FASE 2.5 - VALIDACAO + DEVOLUCAO (escala com o tier)
+    // FASE 2.5 - VALIDACAO + DEVOLUCAO (v4.0: deep/standard = 0 por padrao)
     let rodada = 0;
     const falhosDefinitivos: string[] = [];
-    if (cap.devolucoesMax > 0) {
-      while (rodada < cap.devolucoesMax) {
+    if (cap.devolucoesMax > 0 && prazo() >= SINT_RESERVA_MS) {
+      while (rodada < cap.devolucoesMax && prazo() >= SINT_RESERVA_MS) {
         const devolver = await validarRelatorios(pergunta, plano, relatorios, tel);
         if (!devolver.length) break;
         rodada++;
         await pushProgresso(jobId, "devolucao", `rodada ${rodada}: ${devolver.map((d) => d.nome).join(", ")}`);
-        if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
-          await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
-            pergunta, plano, relatorios, devolver, rodada, tel_parcial: tel, segmento: segmento + 1 });
-          return;
+        // sob teto 5 min: se o prazo apertar, escreve — nao abre segmento so para recolher
+        if (prazo() < CHECKPOINT_MIN_MS) {
+          tel.devolucao_interrompida = "reserva_sintese";
+          break;
         }
         await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver.map((d) => d.nome).join(", ")}`);
         const refeitos = await executarLote(
@@ -2169,7 +2220,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         }
       }
     } else {
-      tel.devolucao_pulada = `capacidade_${cap.tier}`;
+      tel.devolucao_pulada = prazo() < SINT_RESERVA_MS ? "reserva_sintese" : `capacidade_${cap.tier}`;
       await pushProgresso(jobId, "subagentes", `capacidade ${rotuloTier}: seguindo direto para a resposta (sem devolucao)`);
     }
     if (falhosDefinitivos.length) {
