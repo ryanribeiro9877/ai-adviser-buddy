@@ -1331,12 +1331,19 @@ async function driveToken(): Promise<string> {
 // O segredo fica como FALLBACK DECLARADO: se a RPC nao devolver pasta ativa, ele e usado E o
 // retorno avisa - falha de leitura da tabela nao pode deixar o sistema cego em silencio.
 async function t_drive_criativos(companyId: string) {
-  const { data: plano, error: ePlano } = await supa.rpc("drive_plano_de_varredura", { p_company_id: companyId });
+  const { data: plano, error: ePlano } = await supa.rpc("drive_plano_de_varredura", {
+    p_company_id: companyId,
+    p_base_desejada: "thumbnail",
+  });
   const pastasAtivas: any[] = Array.isArray((plano as any)?.pastas_ativas) ? (plano as any).pastas_ativas : [];
   const desativadas: any[] = Array.isArray((plano as any)?.pastas_desativadas) ? (plano as any).pastas_desativadas : [];
 
-  let raizes: { folder_id: string; nome: string }[] = pastasAtivas
-    .map((p: any) => ({ folder_id: String(p.folder_id ?? ""), nome: String(p.nome ?? "(sem nome)") }))
+  let raizes: { folder_id: string; nome: string; meio: string | null }[] = pastasAtivas
+    .map((p: any) => ({
+      folder_id: String(p.folder_id ?? ""),
+      nome: String(p.nome ?? "(sem nome)"),
+      meio: p.meio != null && String(p.meio).trim() ? String(p.meio).trim() : null,
+    }))
     .filter((p) => p.folder_id);
   let avisoFallback: string | null = null;
   if (!raizes.length) {
@@ -1351,9 +1358,9 @@ async function t_drive_criativos(companyId: string) {
   try { token = await driveToken(); }
   catch (e) { return { erro: String((e as any)?.message ?? e), aviso: "Sem acesso ao Drive nesta rodada - o dado NAO foi lido; nao trate como pasta vazia. Verificar credencial e compartilhamento da pasta com a service account." }; }
   const MAX_PASTAS = 40, MAX_ARQUIVOS = 250, MAX_PROFUNDIDADE = 4;
-  type No = { id: string; caminho: string; nivel: number; raiz: string };
+  type No = { id: string; caminho: string; nivel: number; raiz: string; meio: string | null };
   // Tetos GLOBAIS entre as raizes: o que protege e o payload, que nao sabe de quantas pastas veio.
-  const fila: No[] = raizes.map((r) => ({ id: r.folder_id, caminho: "", nivel: 0, raiz: r.nome }));
+  const fila: No[] = raizes.map((r) => ({ id: r.folder_id, caminho: "", nivel: 0, raiz: r.nome, meio: r.meio }));
   const arquivos: any[] = [];
   const porPasta: Record<string, number> = {};
   let pastasLidas = 0, cortado = false;
@@ -1375,10 +1382,12 @@ async function t_drive_criativos(companyId: string) {
       if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
       for (const f of j.files ?? []) {
         if (f.mimeType === "application/vnd.google-apps.folder") {
-          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz });
+          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz, meio: no.meio });
         } else if (arquivos.length < MAX_ARQUIVOS) {
-          arquivos.push({ id: f.id, nome: f.name, caminho: no.caminho || "(raiz)",
+          const caminhoRel = no.caminho || "(raiz)";
+          arquivos.push({ id: f.id, nome: f.name, caminho: `${no.raiz}/${caminhoRel}`,
             pasta_monitorada: no.raiz,
+            meio: no.meio,
             formato_pasta: (no.caminho.split("/")[0] || "(raiz)"),
             eixo_pasta: (no.caminho.split("/")[1] ?? null),
             tipo: f.mimeType, tamanho_bytes: Number(f.size ?? 0) || null,
@@ -2120,11 +2129,14 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
         company_id: ctx.companyId, drive_file_id: String(arq.id ?? arq.nome), drive_modified_time: arq.modificado_em ?? "",
         base_da_analise: base,
         nome: arq.nome, caminho: arq.caminho, formato_pasta: arq.formato_pasta, eixo_pasta: arq.eixo_pasta, mime: arq.tipo,
+        pasta_monitorada: arq.pasta_monitorada ?? null,
+        meio: arq.meio ?? null,
         produto_detectado: String(it?.produto_detectado ?? "indeterminado").slice(0, 120),
         texto_visivel: String(it?.texto_visivel ?? "").slice(0, 800),
         riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
         aproveitavel: aprov,
         motivo: `${String(it?.motivo ?? "sem motivo")}${extras ? ` [${extras}]` : ""}`.slice(0, 400),
+        aprovado_pelo_gestor: false,
         modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
       }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
       if (eUp) { falhasGravacao++; continue; }
@@ -2155,10 +2167,13 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
         company_id: ctx.companyId, drive_file_id: String(arq.id ?? arq.nome), drive_modified_time: arq.modificado_em ?? "",
         base_da_analise: base,
         nome: arq.nome, caminho: arq.caminho, formato_pasta: arq.formato_pasta, eixo_pasta: arq.eixo_pasta, mime: arq.tipo,
+        pasta_monitorada: arq.pasta_monitorada ?? null,
+        meio: arq.meio ?? null,
         produto_detectado: String(it?.produto_detectado ?? "indeterminado").slice(0, 120),
         texto_visivel: String(it?.texto_visivel ?? "").slice(0, 800),
         riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
         aproveitavel: aprov, motivo: String(it?.motivo ?? "sem motivo").slice(0, 400),
+        aprovado_pelo_gestor: false,
         modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
         // v2.6: o onConflict TEM de citar as tres colunas da uq_drive_analise. A versao anterior
         // citava (drive_file_id, drive_modified_time) e esse indice de 2 colunas NAO EXISTE MAIS -
