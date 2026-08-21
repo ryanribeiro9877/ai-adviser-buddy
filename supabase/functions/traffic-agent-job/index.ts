@@ -1,4 +1,6 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.1)
+// supabase/functions/traffic-agent-job/index.ts (v4.2)
+// v4.2 (21/08/2026) - WHATSAPP DE PE vs CTWA: get_waba_status via get_waba_phones
+//   (Cloud+ON_PREMISE, nao so CLOUD_API); filtro meio; doutrina JUR/LF COHAPM.
 // v4.1 (21/08/2026) - FIDELIDADE AO PEDIDO (auditoria COHAPM): o agente misturou serie
 //   historica SALT (mar/26) com "desde a ativacao dessas campanhas", omitiu alcance por
 //   criativo (dado existia em ad_metric_snapshots) e disse serie JUR indisponivel.
@@ -480,14 +482,14 @@ function classificarCapacidade(pergunta: string): Capacidade {
   const overviewLean = /\b(supergestor|avaliacao completa|analise completa|relatorio completo|visao geral|panorama|desde.{0,50}ativac)\b/.test(p)
     && !/\b(compliance|auditoria de (legenda|credito)|regras fin)\b/.test(p);
   // WhatsApp/numeros no pedido → inclui whatsapp_waba no plano magro no lugar de alertas se preciso
-  const pedeWaba = /\b(whatsapp|waba|numeros cadastrados|numeros?\b.*conversas)\b/.test(p);
+  const pedeWaba = /\b(whatsapp|waba|numeros cadastrados|numeros?\b.*conversas|de pe|click.?to|wa\.me|linkar.*(wa|whats)|qual (wa|whats)|juridico.*whats|whats.*juridico)\b/.test(p);
   if (deepHit) {
     const planoMagro = overviewLean
       ? [
           { nome: "desempenho_campanhas", foco: FOCO_DESEMPENHO_OVERVIEW },
           { nome: "criativos", foco: FOCO_CRIATIVOS_OVERVIEW },
           pedeWaba
-            ? { nome: "whatsapp_waba", foco: "Status dos numeros e conversas/templates no universo do CONTRATO DO PEDIDO. Cruzar com conjuntos (nome WA) das campanhas do universo." }
+            ? { nome: "whatsapp_waba", foco: "get_waba_status com meio se o pedido for Juridico/La Felicita. Separe WABA Cloud/ON_PREMISE (CONNECTED=de pe) de CTWA inventario (IN_ADS nao e de pe). Declare DISCONNECTED. Nao diga que so ha wa.me dos anuncios." }
             : { nome: "alertas_recomendacoes", foco: FOCO_ALERTAS_OVERVIEW },
         ]
       : undefined;
@@ -1005,34 +1007,22 @@ async function t_conhecimento(tema: string, secao?: string) {
     instrucao: n < secoes.length ? "Tema extenso, veio parcial. As secoes nao entregues EXISTEM: chame de novo com 'secao'." : undefined };
 }
 
-// [WABA - F5.4/F5.5 viram ferramenta] Leitura das tabelas alimentadas pelo waba-sync (09:30)
-// e monitoradas pelo evaluate_waba_tier_alerts (09:40).
-async function t_waba_status(companyId: string) {
-  const { data: nums } = await supa.from("waba_phone_numbers")
-    .select("display_phone_number,verified_name,status,quality_rating,messaging_limit_tier,platform_type")
-    .eq("company_id", companyId).eq("platform_type", "CLOUD_API");
-  const { data: ads } = await supa.from("waba_phone_numbers")
-    .select("display_phone_number,verified_name,status,platform_type")
-    .eq("company_id", companyId).eq("platform_type", "CLICK_TO_WHATSAPP");
+// [WABA] Inventario via get_waba_phones: Cloud+ON_PREMISE vs CTWA, meio, de_pe.
+// Bug 21/08/2026: filtro so CLOUD_API omitia ON_PREMISE "Cohapm Juridico" DISCONNECTED.
+async function t_waba_status(companyId: string, meio?: string) {
+  const { data, error } = await supa.rpc("get_waba_phones", {
+    p_company_id: companyId,
+    p_meio: meio && String(meio).trim() ? String(meio).trim().toLowerCase() : null,
+  });
+  if (error) return { erro: error.message };
   const { data: snaps } = await supa.from("waba_phone_snapshots")
     .select("snapshot_date").eq("company_id", companyId).order("snapshot_date", { ascending: false }).limit(1);
-  const porTier = new Map<string, number>();
-  const porQual = new Map<string, number>();
-  for (const n of nums ?? []) {
-    porTier.set(n.messaging_limit_tier ?? "sem tier", (porTier.get(n.messaging_limit_tier ?? "sem tier") ?? 0) + 1);
-    porQual.set(n.quality_rating ?? "sem dado", (porQual.get(n.quality_rating ?? "sem dado") ?? 0) + 1);
-  }
+  const payload = data && typeof data === "object" ? data as Record<string, unknown> : {};
   return {
-    numeros_vivos_cloud_api: (nums ?? []).length,
-    numeros_click_to_whatsapp_anuncios: (ads ?? []).length,
-    distribuicao_tier: Object.fromEntries(porTier),
-    distribuicao_qualidade: Object.fromEntries(porQual),
-    numeros: (nums ?? []).map((n) => ({ numero: n.display_phone_number, nome: n.verified_name, tier: n.messaging_limit_tier, qualidade: n.quality_rating, status: n.status, origem: "cloud_api" })),
-    numeros_em_anuncios: (ads ?? []).map((n) => ({ numero: n.display_phone_number, contexto: n.verified_name, status: n.status, origem: "click_to_whatsapp" })),
+    ...payload,
     ultimo_snapshot: snaps?.[0]?.snapshot_date ?? null,
-    nota: (nums ?? []).length === 0 && (ads ?? []).length > 0
-      ? "Esta empresa nao tem WABA Cloud API no sync; os numeros listados sao destinos Click-to-WhatsApp dos anuncios (sem qualidade/tier)."
-      : "Tier define o limite diario de envios (TIER_UNLIMITED e o alvo). Mudancas de tier/qualidade geram alerta automatico diario; qualidade YELLOW/RED antecede queda de tier.",
+    nota_agente:
+      "OBRIGATORIO separar waba_cloud_on_premise de click_to_whatsapp_inventario. de_pe=true so em WABA CONNECTED ou CTWA IN_ACTIVE_ADS. Nunca diga que so existem os CTWA se a lista WABA veio no retorno.",
   };
 }
 async function t_waba_template_insights(companyId: string, days = 30) {
@@ -1185,7 +1175,7 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       }
       case "check_compliance": return await t_check_compliance(ctx.companyId, String(args?.legenda ?? "").trim(), ctx.mcpKey);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
-      case "get_waba_status": return await t_waba_status(ctx.companyId);
+      case "get_waba_status": return await t_waba_status(ctx.companyId, args?.meio != null ? String(args.meio) : undefined);
       case "get_waba_template_insights": return await t_waba_template_insights(ctx.companyId, Number(args?.days ?? 30));
       default: return { erro: `tool desconhecida: ${name}` };
     }
@@ -1226,12 +1216,12 @@ const DEF: Record<string, any> = {
   get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando o gestor perguntar quem trouxe mais alcance. Inclui conversas/formularios/gasto.", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, somente_ativas: { type: "boolean" }, date_from: { type: "string" }, name_like: { type: "string" } } } } },
   get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria 14d de UMA campanha pelo nome, com totais do periodo. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture: ctr_link/cpc_link usam SO cliques no link (use ao falar de 'CTR/CPC de link'); ctr_todos/cpc_todos usam TODOS os cliques (engajamento amplo). visualizacoes_lp e resultado valido e deve ser reportado (nao omita), sobretudo em engajamento/trafego. Esta e a fonte por-campanha de metricas basicas E avancadas - NUNCA diga que sao indisponiveis. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios; traz tambem destino_url e destino (whatsapp quando wa.me, senao site) - o numero de WhatsApp de destino da peca sai daqui (CONFIG do criativo, nao a analitica WABA congelada). Sem busca_nome: PAGINADO por gasto (20). Com busca_nome: sobrecarga (somente_ativas, company, offset, limit, busca_nome) para achar molde sem folhear; default somente_ativas=false quando busca. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, busca_nome: { type: "string", description: "Parte do nome do anuncio (ex.: LPV2_A2_Reel02 ou TESTE-GT02 no molde)." }, pagina: { type: "integer", description: "Pagina de 20, comecando em 1." } } } } },
-  get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto. Traz tambem a PEGADA por conjunto (optimization_goal, destination_type, pegada=engajamento_topo|trafego|trafego_para_whatsapp_nao_otimizado|conversao_mensagem_otimizada|leads|conversao_site, destino_predominante e numeros_whatsapp): use para classificar organico/engajamento x conversao-WhatsApp e dizer QUAL numero recebe cada conjunto.", parameters: { type: "object", properties: {} } } },
+  get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto. Inclui entregando (adset+campanha ACTIVE), pegada e numeros_whatsapp (=destino CTWA wa.me, NAO inventario WABA). Para de pe / Cloud / ON_PREMISE use get_waba_status.", parameters: { type: "object", properties: {} } } },
   listar_ferramentas_pipeboard: { type: "function", function: { name: "listar_ferramentas_pipeboard", description: "Catalogo ao vivo das ferramentas de LEITURA do Pipeboard. Use antes de ler_pipeboard quando nao souber o nome do endpoint.", parameters: { type: "object", properties: {} } } },
   ler_pipeboard: { type: "function", function: { name: "ler_pipeboard", description: "Leitura AO VIVO do Pipeboard (so get_/list_/search_/...). Preferir DB quando bastar; use ao vivo para breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca. Escopo: contas da empresa do job.", parameters: { type: "object", properties: { ferramenta: { type: "string" }, argumentos: { type: "object" } }, required: ["ferramenta"] } } },
   check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL).", parameters: { type: "object", properties: { legenda: { type: "string" } }, required: ["legenda"] } } },
   get_conhecimento: { type: "function", function: { name: "get_conhecimento", description: "Base tecnica: politicas Meta, metricas, otimizacao, criativo. Use 'secao' p/ temas extensos.", parameters: { type: "object", properties: { tema: { type: "string" }, secao: { type: "string" } }, required: ["tema"] } } },
-  get_waba_status: { type: "function", function: { name: "get_waba_status", description: "Numeros WhatsApp vivos: tier de envio (caminho p/ TIER_UNLIMITED), qualidade (GREEN/YELLOW/RED) e status, por numero e agregado.", parameters: { type: "object", properties: {} } } },
+  get_waba_status: { type: "function", function: { name: "get_waba_status", description: "INVENTARIO WHATSAPP da empresa (RPC get_waba_phones). SEMPRE use quando perguntarem numero de pe, qual WA linkar, WABA, Cloud, qualidade/tier, Juridico vs La Felicita. Devolve DUAS listas: waba_cloud_on_premise (CLOUD_API+ON_PREMISE+null; de_pe=CONNECTED; qualidade/tier) e click_to_whatsapp_inventario (destino wa.me; de_pe so IN_ACTIVE_ADS). NUNCA trate CTWA IN_ADS como de pe nem como unico candidato. Filtro meio=juridico|la_felicita|financeiro|outro.", parameters: { type: "object", properties: { meio: { type: "string", description: "Opcional: juridico | la_felicita | financeiro | outro" } } } } },
   get_waba_template_insights: { type: "function", function: { name: "get_waba_template_insights", description: "Insights por TEMPLATE WhatsApp numa janela: envios, entregues, leituras, cliques e taxa de clique. Detalhe por numero ainda nao e coletado (declarado no retorno).", parameters: { type: "object", properties: { days: { type: "number", description: "janela em dias (default 30)" } } } } },
 };
 
@@ -1261,8 +1251,8 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   },
   whatsapp_waba: {
     tools: ["get_waba_status", "get_waba_template_insights", "get_conhecimento"],
-    maxPorTool: { get_waba_status: 1, get_waba_template_insights: 2, get_conhecimento: 1 }, maxToolsTotal: 4,
-    missao: "CANAL WHATSAPP: tier de envio, qualidade, envios/leituras/cliques por template. Uma rodada de coleta basta.",
+    maxPorTool: { get_waba_status: 2, get_waba_template_insights: 2, get_conhecimento: 1 }, maxToolsTotal: 5,
+    missao: "CANAL WHATSAPP: chame get_waba_status (com meio=juridico/la_felicita se o pedido recortar). Separe WABA Cloud/ON_PREMISE (CONNECTED=de pe; DISCONNECTED=declare) de CTWA inventario (IN_ADS nao e de pe). NUNCA diga que so ha os numeros wa.me dos anuncios se a lista WABA veio no retorno. Templates so se o foco pedir.",
   },
   alertas_recomendacoes: {
     tools: ["get_alerts", "get_recommendations", "get_meta_dicas", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest"],
@@ -1603,7 +1593,7 @@ Especialistas disponiveis (use exatamente estes nomes):
 - criativos: conteudo real das pecas (legendas, titulos, CTA, hooks, formatos) E ranking por alcance/gasto/conversas
 - compliance: auditoria das legendas contra as regras de credito (FIN/CRI/LGL)
 - estrutura_conta: CBO/ABO, orcamento por conjunto, lance, targeting, optimization_goal
-- whatsapp_waba: numeros WhatsApp (tier, qualidade) e templates (envios, leituras, cliques)
+- whatsapp_waba: inventario WhatsApp (get_waba_status): WABA Cloud/ON_PREMISE vs CTWA, de_pe, meio JUR/LF; templates so se pedido
 - alertas_recomendacoes: alertas ativos, recomendacoes pendentes e DICAS DA META (Opportunity Score, boost, musica)
 - criativos_drive: pasta de criativos NOVOS no Google Drive (inventario, formatos, eixos, comparacao com vencedores)\n- analise_visual_drive: analise VISUAL arquivo a arquivo das pecas do Drive (produto, texto visivel, riscos, veredito aproveitavel) - so quando pedirem CLASSIFICAR/ANALISAR CONTEUDO das pecas
 - conhecimento: fundamento tecnico puro (so quando a pergunta exige conceito alem do operacional)
