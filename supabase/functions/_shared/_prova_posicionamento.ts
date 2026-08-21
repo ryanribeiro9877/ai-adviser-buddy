@@ -3,6 +3,7 @@ import {
   aplicarPadraoPosicionamentoVideo,
   aplicarPosicionamentoPorPlataformas,
   FACEBOOK_POSITIONS_VIDEO_PADRAO,
+  sanitizarTargetingCreateAdset,
   targetingCompativelComFormato,
   validarPlataformasPublicacao,
 } from "./posicionamento.ts";
@@ -71,6 +72,19 @@ check("FB+IG: tem instagram_positions", Array.isArray(fbIg.targeting?.instagram_
 check("FB+IG: sem explore", !(fbIg.targeting?.instagram_positions as string[])?.includes("explore"));
 check("FB+IG: sem explore_home", !(fbIg.targeting?.instagram_positions as string[])?.includes("explore_home"));
 check("FB+IG: sem threads_positions", fbIg.targeting?.threads_positions === undefined);
+
+// PROVA 5b: sanitize Advantage+ remove age_max e clamp age_min
+const aPlusSujo = sanitizarTargetingCreateAdset({
+  age_min: 35,
+  age_max: 54,
+  targeting_automation: { advantage_audience: 1 },
+  instagram_positions: ["stream", "explore", "reels"],
+  publisher_platforms: ["facebook", "instagram", "threads"],
+});
+check("A+: age_min clamp 25", aPlusSujo.targeting.age_min === 25, aPlusSujo.targeting);
+check("A+: sem age_max", aPlusSujo.targeting.age_max === undefined, aPlusSujo.targeting);
+check("A+: sem explore", !(aPlusSujo.targeting.instagram_positions as string[])?.includes("explore"));
+check("A+: sem threads pub", !(aPlusSujo.targeting.publisher_platforms as string[])?.includes("threads"));
 
 // PROVA 6: corretivo video (compat) ainda monta os 8
 const video = aplicarPadraoPosicionamentoVideo(moldeTargeting);

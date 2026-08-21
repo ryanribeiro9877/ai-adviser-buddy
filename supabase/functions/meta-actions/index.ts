@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.37)
+// supabase/functions/meta-actions/index.ts (v5.38)
+// v5.38 (21/08/2026) - Targeting create_adset: Advantage+ sem age_max; age_min<=25;
+//   familia mensagens NAO herda publico/idade do molde LF (base limpa + geo + placements).
+//   Meta 1870188 no card JURIDICO_CONJ.01.
 // v5.37 (21/08/2026) - Remove IG Explore/explore_home (Meta 2490589 descontinuou).
 // v5.36 (21/08/2026) - CTWA/mensagens: forca bid_strategy=LOWEST_COST_WITHOUT_CAP e
 //   remove bid_amount herdado do molde (card 1687f34f, Meta 2490487: teto sem valor).
@@ -323,7 +326,7 @@ import {
   aplicarPosicionamentoPorPlataformas,
   FACEBOOK_POSITIONS_VIDEO_PADRAO,
   PUBLISHER_PLATFORMS_VIDEO_PADRAO,
-  sanitizarPosicionamentosInstagramDescontinuados,
+  sanitizarTargetingCreateAdset,
   targetingCompativelComFormato,
 } from "../_shared/posicionamento.ts";
 import {
@@ -1658,8 +1661,10 @@ export async function montarCriacao(
     // ===== v5.15: PLATAFORMAS PEDIDAS + VIDEO SEM COLUNA + THREADS OFF (Ryan 11/08) =====
     const formatoPrevisto = String(p?.formato_midia_previsto ?? "").trim().toLowerCase();
     const plataformasPedidas = p?.plataformas_publicacao ?? p?.publisher_platforms ?? null;
+    // v5.38: mensagens/CTWA — base limpa (nao herda idade/A+/LAL do molde LF).
+    // Molde so servia para targeting; no Juridico isso puxava age_max+Advantage+ e Meta 1870188.
     const baseTargeting = (() => {
-      if (semMoldeConj) return targetingPadraoSocialTopo();
+      if (semMoldeConj || mensagensTopo) return targetingPadraoSocialTopo();
       if (mb.targeting && typeof mb.targeting === "object") {
         return mb.targeting as Record<string, unknown>;
       }
@@ -1873,7 +1878,7 @@ export async function montarCriacao(
       }
     }
 
-    // v5.36: sanitize lance antes de enviar — Meta 2490487 se teto sem valor.
+    // v5.36–v5.38: sanitize lance + targeting antes de enviar.
     const bidStrat = String(body.bid_strategy ?? "").trim().toUpperCase();
     const bidAmt = String(body.bid_amount ?? "").trim();
     const exigeValor =
@@ -1892,15 +1897,14 @@ export async function montarCriacao(
       }
     }
 
-    // v5.37: IG Explore descontinuado (Meta 2490589) — tira do targeting mesmo se molde antigo.
     if (body.targeting) {
       try {
         const tgt = JSON.parse(String(body.targeting));
         if (tgt && typeof tgt === "object") {
-          const limpo = sanitizarPosicionamentosInstagramDescontinuados(tgt as Record<string, unknown>);
+          const limpo = sanitizarTargetingCreateAdset(tgt as Record<string, unknown>);
           body.targeting = JSON.stringify(limpo.targeting);
-          if (limpo.removidos.length && posicionamento && typeof posicionamento === "object") {
-            (posicionamento as any).instagram_explore_removido = limpo.removidos;
+          if (limpo.ajustes.length && posicionamento && typeof posicionamento === "object") {
+            (posicionamento as any).targeting_sanitizado = limpo.ajustes;
           }
         }
       } catch {

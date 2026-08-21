@@ -251,6 +251,14 @@ const ASSINATURAS: {
     frase:
       "a Meta descontinuou o posicionamento Instagram Explore (explore/explore_home). O sistema remove esses placements automaticamente — reemitir ou tentar de novo.",
   },
+  {
+    // Medido 21/08/2026: Advantage+ com age_min>25 ou age_max no payload (subcode 1870188).
+    recusa: "advantage_plus_idade_incompativel",
+    quando:
+      /1870188|advantage\+.*idade|idade m[ií]nima.*25|age_min.*advantage|controlo da idade m[ií]nima/i,
+    frase:
+      "com publico Advantage+ a Meta so aceita idade minima entre 18 e 25 e nao aceita age_max no pedido (o teto fica em 65). O sistema agora sanitiza isso automaticamente — reemitir ou tentar de novo.",
+  },
 ];
 
 /**

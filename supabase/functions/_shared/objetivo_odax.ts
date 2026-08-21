@@ -373,14 +373,13 @@ export function defaultsConjuntoMensagens(
 }
 
 /**
- * Targeting minimo BR Advantage+ para conjunto social SEM molde.
- * Sem interesses/LAL inventados — so geo+idade+advantage_audience; plataformas
- * entram depois via aplicarPosicionamentoPorPlataformas.
+ * Targeting minimo BR Advantage+ para conjunto social/mensagens SEM molde.
+ * Com advantage_audience=1 a Meta NAO aceita age_max no payload (fixo em 65) e
+ * age_min so pode ser 18–25 (erro 1870188 se age_min>25 ou age_max enviado).
  */
 export function targetingPadraoSocialTopo(): Record<string, unknown> {
   return {
     age_min: 18,
-    age_max: 65,
     geo_locations: { countries: ["BR"] },
     targeting_automation: { advantage_audience: 1 },
   };

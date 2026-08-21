@@ -83,5 +83,7 @@ assert(normalizarObjetivoOdax("CONVERSATIONS") === "OUTCOME_ENGAGEMENT", "CONVER
 const tgt = targetingPadraoSocialTopo();
 assert((tgt.geo_locations as any)?.countries?.[0] === "BR", "geo BR");
 assert((tgt.targeting_automation as any)?.advantage_audience === 1, "advantage");
+assert(tgt.age_min === 18, "age_min 18");
+assert(tgt.age_max === undefined, "sem age_max no A+");
 
 console.log("ok: _prova_objetivo_odax");
