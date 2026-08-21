@@ -1011,6 +1011,9 @@ async function t_waba_status(companyId: string) {
   const { data: nums } = await supa.from("waba_phone_numbers")
     .select("display_phone_number,verified_name,status,quality_rating,messaging_limit_tier,platform_type")
     .eq("company_id", companyId).eq("platform_type", "CLOUD_API");
+  const { data: ads } = await supa.from("waba_phone_numbers")
+    .select("display_phone_number,verified_name,status,platform_type")
+    .eq("company_id", companyId).eq("platform_type", "CLICK_TO_WHATSAPP");
   const { data: snaps } = await supa.from("waba_phone_snapshots")
     .select("snapshot_date").eq("company_id", companyId).order("snapshot_date", { ascending: false }).limit(1);
   const porTier = new Map<string, number>();
@@ -1021,11 +1024,15 @@ async function t_waba_status(companyId: string) {
   }
   return {
     numeros_vivos_cloud_api: (nums ?? []).length,
+    numeros_click_to_whatsapp_anuncios: (ads ?? []).length,
     distribuicao_tier: Object.fromEntries(porTier),
     distribuicao_qualidade: Object.fromEntries(porQual),
-    numeros: (nums ?? []).map((n) => ({ numero: n.display_phone_number, nome: n.verified_name, tier: n.messaging_limit_tier, qualidade: n.quality_rating, status: n.status })),
+    numeros: (nums ?? []).map((n) => ({ numero: n.display_phone_number, nome: n.verified_name, tier: n.messaging_limit_tier, qualidade: n.quality_rating, status: n.status, origem: "cloud_api" })),
+    numeros_em_anuncios: (ads ?? []).map((n) => ({ numero: n.display_phone_number, contexto: n.verified_name, status: n.status, origem: "click_to_whatsapp" })),
     ultimo_snapshot: snaps?.[0]?.snapshot_date ?? null,
-    nota: "Tier define o limite diario de envios (TIER_UNLIMITED e o alvo). Mudancas de tier/qualidade geram alerta automatico diario; qualidade YELLOW/RED antecede queda de tier.",
+    nota: (nums ?? []).length === 0 && (ads ?? []).length > 0
+      ? "Esta empresa nao tem WABA Cloud API no sync; os numeros listados sao destinos Click-to-WhatsApp dos anuncios (sem qualidade/tier)."
+      : "Tier define o limite diario de envios (TIER_UNLIMITED e o alvo). Mudancas de tier/qualidade geram alerta automatico diario; qualidade YELLOW/RED antecede queda de tier.",
   };
 }
 async function t_waba_template_insights(companyId: string, days = 30) {
@@ -2314,7 +2321,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const cap = classificarCapacidade(pergunta);
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.1";
+  tel.versao = "job-v4.2";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,

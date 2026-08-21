@@ -60,14 +60,14 @@ describe("com empresa", () => {
 
   it("nomeia a empresa no subtitulo", () => {
     render(<Pagina />);
-    expect(screen.getByText(/desempenho dos templates de JCR2/)).toBeInTheDocument();
+    expect(screen.getByText(/Click-to-WhatsApp de JCR2/)).toBeInTheDocument();
   });
 
   it("declara que a tela e somente leitura e de onde vem o dado", () => {
     // Expectativa: a tela nao age no WhatsApp, so mostra o resultado do sync.
     render(<Pagina />);
     expect(screen.getByText(/Somente leitura/)).toBeInTheDocument();
-    expect(screen.getByText(/sync diário da API oficial/)).toBeInTheDocument();
+    expect(screen.getByText(/Cloud API vem do sync diário/)).toBeInTheDocument();
   });
 
   it("tem titulo de nivel 1", () => {

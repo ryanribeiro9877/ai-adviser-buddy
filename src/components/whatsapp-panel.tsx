@@ -21,7 +21,9 @@ import { cn } from "@/lib/utils";
 
 // Só CLOUD_API é número "vivo" na API: os demais (NOT_APPLICABLE, sem platform_type)
 // vêm de WABAs migradas ou sem acesso e não têm qualidade/tier legíveis.
+// CLICK_TO_WHATSAPP = inventário de destino de anúncio (wa.me), sem Cloud API.
 const CLOUD = "CLOUD_API";
+const ADS_WA = "CLICK_TO_WHATSAPP";
 const DIAS_HISTORICO = 14;
 
 type Phone = {
@@ -96,6 +98,10 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
   const numeros = useQuery({
     queryKey: ["waba-phones", companyId],
     queryFn: async () => {
+      // Inventário Click-to-WhatsApp a partir dos anúncios (idempotente; falha não bloqueia).
+      await supabase.rpc("sincronizar_whatsapp_numeros_de_anuncios", {
+        p_company_id: companyId,
+      });
       const { data, error } = await supabase
         .from("waba_phone_numbers")
         .select(
@@ -214,10 +220,16 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
 
   const porNumeroAtivo = (porNumero.data ?? []).length > 0;
 
-  // Mesmo motivo de app-context: `?? []` novo a cada render anulava os useMemo
-  // de `vivos` e `resumo`, que recalculavam sempre.
   const phones = useMemo(() => numeros.data ?? [], [numeros.data]);
   const vivos = useMemo(() => phones.filter((p) => p.platform_type === CLOUD), [phones]);
+  const emAnuncios = useMemo(
+    () => phones.filter((p) => p.platform_type === ADS_WA),
+    [phones],
+  );
+  const outrosSemCloud = useMemo(
+    () => phones.filter((p) => p.platform_type !== CLOUD && p.platform_type !== ADS_WA),
+    [phones],
+  );
   const resumo = useMemo(() => {
     const conta = (q: string) => vivos.filter((p) => (p.quality_rating ?? "UNKNOWN") === q).length;
     const tiers = new Map<string, number>();
@@ -250,12 +262,18 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
     return m;
   }, [snaps.data]);
 
-  // "Sem acesso" = WABA sem nenhum número CLOUD_API legível (ativo não atribuído ao
-  // System User no BM). Não é erro do sistema: é pendência de permissão no Business Manager.
+  // "Sem acesso" = WABA Cloud real sem número CLOUD_API (não conta inventário de anúncios).
   const wabasSemAcesso = useMemo(() => {
     const comCloud = new Set(vivos.map((p) => p.waba_external_id));
-    return (wabas.data ?? []).filter((w) => !comCloud.has(w.external_id));
+    return (wabas.data ?? []).filter(
+      (w) => !w.external_id.startsWith("ads-destino-") && !comCloud.has(w.external_id),
+    );
   }, [wabas.data, vivos]);
+
+  const wabasCloud = useMemo(
+    () => (wabas.data ?? []).filter((w) => !w.external_id.startsWith("ads-destino-")),
+    [wabas.data],
+  );
 
   if (numeros.isLoading || wabas.isLoading) {
     return (
@@ -269,14 +287,25 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
   if (phones.length === 0 && (wabas.data ?? []).length === 0) {
     return (
       <Card className="p-6 text-sm text-muted-foreground">
-        Nenhuma conta de WhatsApp Business conectada a esta empresa.
+        Nenhuma conta de WhatsApp Business conectada a esta empresa e nenhum número
+        Click-to-WhatsApp encontrado nos anúncios.
       </Card>
     );
   }
 
+  const soAnuncios = vivos.length === 0 && emAnuncios.length > 0;
+
   return (
     <div className="space-y-6">
-      {/* 1) Resumo */}
+      {soAnuncios && (
+        <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+          Esta empresa não tem WABA Cloud API no sync oficial. Abaixo estão os números usados
+          como destino Click-to-WhatsApp nos anúncios (sem qualidade/tier da Meta Cloud API).
+        </div>
+      )}
+
+      {/* 1) Resumo Cloud API — só quando há números vivos */}
+      {vivos.length > 0 && (
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Card className="p-4">
           <div className="text-xs text-muted-foreground">Números ativos (Cloud API)</div>
@@ -303,12 +332,35 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
         </Card>
         <Card className="p-4">
           <div className="text-xs text-muted-foreground">Contas (WABAs)</div>
-          <div className="mt-1 text-2xl font-semibold">{(wabas.data ?? []).length}</div>
+          <div className="mt-1 text-2xl font-semibold">{wabasCloud.length}</div>
           <div className="mt-1 text-[11px] text-muted-foreground">
             {wabasSemAcesso.length > 0 ? `${wabasSemAcesso.length} sem acesso` : "todas com acesso"}
           </div>
         </Card>
       </div>
+      )}
+
+      {emAnuncios.length > 0 && vivos.length === 0 && (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <Card className="p-4">
+            <div className="text-xs text-muted-foreground">Números em anúncios</div>
+            <div className="mt-1 text-2xl font-semibold">{emAnuncios.length}</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">Click-to-WhatsApp (wa.me)</div>
+          </Card>
+          <Card className="p-4">
+            <div className="text-xs text-muted-foreground">Em campanhas ativas</div>
+            <div className="mt-1 text-2xl font-semibold">
+              {emAnuncios.filter((p) => p.status === "IN_ACTIVE_ADS").length}
+            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground">sinal de anúncio/conjunto ativo</div>
+          </Card>
+          <Card className="p-4">
+            <div className="text-xs text-muted-foreground">Cloud API</div>
+            <div className="mt-1 text-2xl font-semibold">0</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">sem WABA conectada nesta empresa</div>
+          </Card>
+        </div>
+      )}
 
       {resumo.red > 0 && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-3">
@@ -327,12 +379,12 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
         </div>
       )}
 
-      {/* 2) Números */}
+      {/* 2) Números Cloud API */}
+      {vivos.length > 0 && (
       <div>
         <div className="mb-2 flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold">Números</h2>
-          {vivos.length > 0 && (
-            <Button
+          <h2 className="text-lg font-semibold">Números (Cloud API)</h2>
+          <Button
               size="sm"
               variant="outline"
               onClick={() =>
@@ -354,7 +406,6 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
               <Download className="mr-1 h-4 w-4" />
               Exportar
             </Button>
-          )}
         </div>
         <div className="rounded-md border border-border">
           <div className="overflow-x-auto">
@@ -401,26 +452,85 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
                     </TableCell>
                   </TableRow>
                 ))}
-                {vivos.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={6} className="text-sm text-muted-foreground">
-                      Nenhum número ativo na Cloud API.
-                    </TableCell>
-                  </TableRow>
-                )}
               </TableBody>
             </Table>
           </div>
         </div>
-        {phones.length > vivos.length && (
+        {outrosSemCloud.length > 0 && (
           <p className="mt-2 text-xs text-muted-foreground">
-            {phones.length - vivos.length} número(s) não aparecem acima: são linhas migradas ou de
-            contas sem acesso, sem qualidade e tier legíveis pela API.
+            {outrosSemCloud.length} número(s) migrados ou sem acesso Cloud API não aparecem acima
+            (sem qualidade/tier legíveis).
           </p>
         )}
       </div>
+      )}
 
-      {/* 3) Templates */}
+      {/* 2b) Números Click-to-WhatsApp em anúncios */}
+      {emAnuncios.length > 0 && (
+        <div>
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">Números em anúncios</h2>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                exportarXlsx(
+                  emAnuncios.map((p) => ({
+                    Contexto: p.verified_name ?? "",
+                    Número: p.display_phone_number ?? "",
+                    Status: p.status === "IN_ACTIVE_ADS" ? "Em campanha ativa" : "Em anúncios",
+                    Origem: "Click-to-WhatsApp (wa.me)",
+                  })),
+                  `whatsapp_anuncios_${new Date().toISOString().slice(0, 10)}.xlsx`,
+                  "Anúncios",
+                )
+              }
+            >
+              <Download className="mr-1 h-4 w-4" />
+              Exportar
+            </Button>
+          </div>
+          <div className="rounded-md border border-border">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Contexto (conjunto)</TableHead>
+                    <TableHead>Número</TableHead>
+                    <TableHead>Uso</TableHead>
+                    <TableHead>Origem</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {emAnuncios.map((p) => (
+                    <TableRow key={p.external_id}>
+                      <TableCell className="max-w-[360px] truncate font-medium">
+                        {p.verified_name ?? "—"}
+                      </TableCell>
+                      <TableCell className="tabular-nums">{p.display_phone_number ?? "—"}</TableCell>
+                      <TableCell>
+                        <Badge variant={p.status === "IN_ACTIVE_ADS" ? "default" : "secondary"}>
+                          {p.status === "IN_ACTIVE_ADS" ? "Em campanha ativa" : "Em anúncios"}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        Click-to-WhatsApp
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            Inventário derivado dos destinos wa.me / nomes de conjunto. Sem qualidade e tier da
+            Cloud API — esses números não passam pelo waba-sync oficial.
+          </p>
+        </div>
+      )}
+
+      {/* 3) Templates — só faz sentido com Cloud API */}
+      {!soAnuncios && (
       <div>
         <div className="mb-2 flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold">Templates</h2>
@@ -548,8 +658,10 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
           </div>
         </div>
       </div>
+      )}
 
       {/* 4) Envios por número — honesto sobre a coleta ainda não ativa */}
+      {!soAnuncios && (
       <div>
         <h2 className="mb-2 text-lg font-semibold">Envios por número</h2>
         {porNumeroAtivo ? (
@@ -567,25 +679,37 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
           </Card>
         )}
       </div>
+      )}
 
       {/* 5) Contas (WABAs) */}
       <div>
-        <h2 className="mb-2 text-lg font-semibold">Contas (WABAs)</h2>
+        <h2 className="mb-2 text-lg font-semibold">
+          {soAnuncios ? "Origem do inventário" : "Contas (WABAs)"}
+        </h2>
         <div className="grid gap-2 md:grid-cols-2">
           {(wabas.data ?? []).map((w) => {
-            const numerosDaWaba = vivos.filter((p) => p.waba_external_id === w.external_id);
-            const semAcesso = numerosDaWaba.length === 0;
+            const isAds = w.external_id.startsWith("ads-destino-");
+            const numerosDaWaba = isAds
+              ? emAnuncios.filter((p) => p.waba_external_id === w.external_id)
+              : vivos.filter((p) => p.waba_external_id === w.external_id);
+            const semAcesso = !isAds && numerosDaWaba.length === 0;
             return (
               <Card key={w.external_id} className="flex items-start justify-between gap-3 p-3">
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium">{w.name ?? w.external_id}</div>
                   <div className="text-[11px] text-muted-foreground">
-                    {semAcesso
-                      ? "nenhum número legível pela API"
-                      : `${numerosDaWaba.length} número(s) ativo(s)`}
+                    {isAds
+                      ? `${numerosDaWaba.length} número(s) em anúncios`
+                      : semAcesso
+                        ? "nenhum número legível pela API"
+                        : `${numerosDaWaba.length} número(s) ativo(s)`}
                   </div>
                 </div>
-                {semAcesso ? (
+                {isAds ? (
+                  <Badge variant="secondary" className="shrink-0 font-normal">
+                    anúncios
+                  </Badge>
+                ) : semAcesso ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Badge variant="outline" className="shrink-0 gap-1 font-normal">

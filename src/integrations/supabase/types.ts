@@ -1213,6 +1213,10 @@ export type Database = {
         Args: { _company_id: string; _user_id: string };
         Returns: boolean;
       };
+      sincronizar_whatsapp_numeros_de_anuncios: {
+        Args: { p_company_id?: string | null };
+        Returns: Json;
+      };
     };
     Enums: {
       alert_severity: "low" | "medium" | "high" | "critical";

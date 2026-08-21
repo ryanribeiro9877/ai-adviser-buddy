@@ -22,8 +22,9 @@ function WhatsAppPage() {
           WhatsApp
         </h1>
         <p className="text-sm text-muted-foreground">
-          Saúde dos números e desempenho dos templates de {selectedCompany.name}. Somente leitura —
-          os dados vêm do sync diário da API oficial.
+          Saúde dos números Cloud API e inventário Click-to-WhatsApp de {selectedCompany.name}.
+          Somente leitura — Cloud API vem do sync diário; números em anúncios vêm dos destinos
+          wa.me.
         </p>
       </div>
 
