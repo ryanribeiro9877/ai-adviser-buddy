@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.48)
+// supabase/functions/traffic-chat/index.ts (v28.49)
+// v28.49 (21/08/2026) - GEO PRESET JURIDICO COHAPM: default Salvador–BA obrigatório
+//   só no meio Jurídico; rejeita geo diferente; La Felicità isolada (não herda).
+//   buscar_geolocalizacao força Salvador+BA no contexto Jurídico.
 // v28.48 (21/08/2026) - GEO/BAIRROS NO CRIAR_CONJUNTO: params.geo_locations | params.bairros
 //   (keys Meta) no card; tool buscar_geolocalizacao (Graph adgeolocation, lotes <=40);
 //   checar_segmentacao quando geo presente; executor aplica no targeting.
@@ -555,6 +558,12 @@ import {
   buscarGeolocalizacoesMeta,
   normalizarGeoDoPedido,
 } from "../_shared/geo_targeting.ts";
+import {
+  aplicarGateGeoCriarConjunto,
+  companyElegivelPresetGeoJuridico,
+  MEIO_JURIDICO,
+  resolverMeioGeoCohapm,
+} from "../_shared/geo_preset_juridico.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -1517,12 +1526,37 @@ async function t_buscar_geolocalizacao(companyId: string, args: any) {
   const nomes = Array.isArray(nomesRaw)
     ? nomesRaw.map((n: unknown) => String(n ?? "").trim()).filter(Boolean)
     : [];
+
+  // COHAPM Jurídico: força Salvador+BA e rejeita matches fora (duplo check).
+  const meioArg = args?.meio != null ? String(args.meio) : null;
+  const meio = resolverMeioGeoCohapm(
+    companyId,
+    { meio: meioArg, ...(args ?? {}) },
+    meioArg,
+    args?.cidade_contexto != null ? String(args.cidade_contexto) : null,
+  );
+  const forcarJuridicoSsa =
+    companyElegivelPresetGeoJuridico(companyId) &&
+    (meio === MEIO_JURIDICO ||
+      args?.exigir_salvador_ba === true ||
+      String(args?.cidade_contexto ?? "").toLowerCase().includes("salvador"));
+
   return await buscarGeolocalizacoesMeta({
     token: tok.token,
     nomes,
     tipo: args?.tipo != null ? String(args.tipo) : "neighborhood",
     country_code: args?.country_code != null ? String(args.country_code) : "BR",
-    cidade_contexto: args?.cidade_contexto != null ? String(args.cidade_contexto) : undefined,
+    cidade_contexto: forcarJuridicoSsa
+      ? "Salvador"
+      : args?.cidade_contexto != null
+      ? String(args.cidade_contexto)
+      : undefined,
+    regiao_contexto: forcarJuridicoSsa
+      ? "Bahia"
+      : args?.regiao_contexto != null
+      ? String(args.regiao_contexto)
+      : undefined,
+    exigir_salvador_ba: forcarJuridicoSsa,
     limit_por_query: args?.limit_por_query != null ? Number(args.limit_por_query) : undefined,
   });
 }
@@ -2060,15 +2094,39 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     if (!dest) return { erro: `campanha de destino '${campanhaDestino}' nao encontrada nem no sistema nem entre as criadas por pedido aprovado. Se ela ainda nao existe, proponha criar_campanha primeiro e aguarde a aprovacao. NAO invente o identificador.` };
     if (!dest.external_id) return { erro: `a campanha '${dest.name}' existe no sistema mas ainda nao tem identificador da Meta sincronizado - sem ele o conjunto nao tem onde nascer. Aguarde a proxima sincronizacao.` };
 
-    // v28.48: geo/bairros opcionais — keys Meta ja resolvidas (buscar_geolocalizacao).
+    // v28.48/v28.49: geo/bairros — no Jurídico COHAPM aplica preset Salvador–BA (default + rejeição).
     const geoNorm = normalizarGeoDoPedido(params as Record<string, unknown>);
     if (geoNorm.erro) {
       return { erro: geoNorm.erro, detalhe: geoNorm.detalhe };
     }
-    if (geoNorm.geo) {
+    const tokGeo = tokenAdsPorCompanyId(companyId);
+    const gateGeo = await aplicarGateGeoCriarConjunto({
+      companyId,
+      params: params as Record<string, unknown>,
+      sinaisMeio: [
+        dest.name,
+        nomeNovo,
+        molde?.name ?? null,
+        String(params?.meio ?? ""),
+        campanhaDestino,
+      ],
+      geoNorm,
+      supa,
+      tokenAds: tokGeo?.token ?? null,
+    });
+    if (gateGeo.erro) {
+      return {
+        erro: gateGeo.erro,
+        detalhe: gateGeo.detalhe,
+        meio: gateGeo.meio,
+        aplica_preset_juridico: gateGeo.aplica_preset,
+      };
+    }
+    const geoEfetivo = gateGeo.geo;
+    if (geoEfetivo) {
       const { data: seg } = await supa.rpc("checar_segmentacao", {
         p_company_id: companyId,
-        p_targeting: { geo_locations: geoNorm.geo },
+        p_targeting: { geo_locations: geoEfetivo },
       });
       if (seg && typeof seg === "object" && (seg as any).aplica === true && (seg as any).permitido === false) {
         return {
@@ -2120,8 +2178,8 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
           ? ` — familia engajamento SEM MOLDE: POST_ENGAGEMENT + destination_type=ON_POST + page_id (targeting BR Advantage+ minimo).`
           : ` — familia engajamento: molde so empresta targeting; executor sobrescreve OFFSITE/pixel por POST_ENGAGEMENT + ON_POST + page_id.`))
       : "";
-    const notaGeo = geoNorm.geo
-      ? ` — Geo: ${geoNorm.resumo} (sobrescreve geo_locations do molde/sem_molde; idade/plataformas permanecem).`
+    const notaGeo = geoEfetivo
+      ? ` — Geo: ${gateGeo.resumo ?? "preset"}${gateGeo.default_aplicado ? " [default preset Jurídico Salvador–BA]" : gateGeo.aplica_preset ? " [preset Jurídico validado]" : ""} (sobrescreve geo_locations do molde/sem_molde; idade/plataformas permanecem).`
       : "";
     const summary = semMoldeConj
       ? `Criar conjunto "${nomeNovo}" SEM MOLDE na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce ACTIVE` +
@@ -2151,11 +2209,14 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
         ? (familiaEfetiva === "reconhecimento" ? null : "ON_POST")
         : null,
       destino_social: socialEfetivo,
-      ...(geoNorm.geo
+      ...(gateGeo.meio ? { meio: gateGeo.meio } : {}),
+      ...(geoEfetivo
         ? {
-          geo_locations: geoNorm.geo,
-          geo_resumo: geoNorm.resumo ?? null,
-          geo_contagem: geoNorm.contagem ?? null,
+          geo_locations: geoEfetivo,
+          geo_resumo: gateGeo.resumo ?? null,
+          geo_contagem: gateGeo.contagem ?? null,
+          geo_preset_juridico: gateGeo.aplica_preset === true,
+          geo_default_aplicado: gateGeo.default_aplicado === true,
         }
         : {}),
       posicionamento_padrao_video: formatoEfetivo === "video" && plataformas.includes("facebook") ? {
@@ -3730,7 +3791,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 == DOUTRINA DE DECISAO ==
 - DIGA DE QUEM FALA: empresa e categoria regulatoria antes do nivel (conta/campanha/conjunto/anuncio). Doutrina de credito NAO se aplica a empresa que nao e de credito. NUNCA compare empresas de categorias distintas.
 - LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, get_waba_status, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
-- GEO/BAIRROS NO CRIAR_CONJUNTO (21/08/2026): HA campo. Use buscar_geolocalizacao (lotes <=40) para resolver nomes → keys Meta; no propose_action criar_conjunto_a_partir_de passe params.bairros (array de keys) OU params.geo_locations ({neighborhoods:[{key}]}). NUNCA diga que a API de criacao nao tem campo para bairros.
+- GEO/BAIRROS NO CRIAR_CONJUNTO (21/08/2026, rev. preset): HA campo. Use buscar_geolocalizacao (lotes <=40). No propose: params.bairros ou params.geo_locations. COHAPM JURIDICO: preset Salvador–BA automatico (geo_targeting_presets); geo diferente REJEITADA. La Felicita NAO herda. Legal NAO herda. NUNCA diga que falta campo de bairros.
 - WHATSAPP / NUMEROS DE PE (21/08/2026): pergunta sobre numero operacional, de pe, qual WA linkar, WABA, qualidade/tier OU isolamento Juridico vs La Felicita OBRIGA get_waba_status (meio=juridico|la_felicita quando o pedido recortar). get_estrutura_conjuntos / get_criativos_conteudo so mostram destino wa.me do anuncio (Click-to-WA) — NAO substituem. Separe sempre: (1) WABA Cloud/ON_PREMISE — de_pe so CONNECTED; (2) CTWA — inventario; de_pe so IN_ACTIVE_ADS. NUNCA peca escolher so entre CTWA como se fossem os unicos. Conjunto ACTIVE sob campanha PAUSED = entregando=false (nao esta no ar). COHAPM: isole JUR vs LF.
 - DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations SO se quiser a fila INTERNA de custo). Cite SEMPRE o veredito interno — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta. get_recommendations NAO e o badge do Ads Manager. Se get_meta_dicas vier vazio apos sync e o gestor apontar badge na UI, diga a assimetria documentada pela Meta (API pode listar menos que Ads Manager) — nao invente o texto da dica.
 - Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.

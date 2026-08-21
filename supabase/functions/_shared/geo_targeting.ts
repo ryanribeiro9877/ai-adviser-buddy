@@ -254,22 +254,73 @@ export type ResultadoBuscaGeo = {
   erro?: string;
 };
 
+function stripAccentsGeo(s: string): string {
+  return String(s ?? "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase();
+}
+
+/** Duplo check: local Meta deve ser Salvador + Bahia (BR). */
+export function ehLocalSalvadorBA(row: {
+  primary_city?: string;
+  region?: string;
+  country_code?: string;
+  name?: string;
+}): boolean {
+  const country = String(row.country_code ?? "").trim().toUpperCase();
+  if (country && country !== "BR") return false;
+  const city = stripAccentsGeo(row.primary_city ?? "");
+  const region = stripAccentsGeo(row.region ?? "");
+  const cityOk = city.includes("salvador");
+  const regionOk =
+    region.includes("bahia") ||
+    region === "ba" ||
+    region.includes("state of bahia");
+  // Ideal: cidade + UF.
+  if (cityOk && regionOk) return true;
+  // Graph as vezes omite region mas traz primary_city=Salvador.
+  if (cityOk && !region) return true;
+  // Graph as vezes omite primary_city em neighborhood mas traz region=Bahia + country BR.
+  // Aceita so se region for Bahia (evita SP/RJ); o pickMelhor ainda exige nome.
+  if (!city && regionOk) return true;
+  return false;
+}
+
 function pickMelhor(
   query: string,
   rows: ResultadoBuscaGeo["encontrados"],
   cidadeContexto?: string,
+  regiaoContexto?: string,
+  exigirSalvadorBa?: boolean,
 ): { escolhido: ResultadoBuscaGeo["escolhido"]; ambiguo: boolean } {
   if (!rows.length) return { escolhido: null, ambiguo: false };
   const q = query.trim().toLowerCase();
   const cidade = (cidadeContexto ?? "").trim().toLowerCase();
+  const regiao = (regiaoContexto ?? "").trim().toLowerCase();
 
   let pool = rows;
-  if (cidade) {
+  if (exigirSalvadorBa) {
+    const soSsa = rows.filter((r) => ehLocalSalvadorBA(r));
+    // Sem match Salvador–BA: NAO cai no pool de outra cidade (evita key errada).
+    if (!soSsa.length) return { escolhido: null, ambiguo: false };
+    pool = soSsa;
+  } else if (cidade) {
     const filtrado = rows.filter((r) => {
       const pc = String(r.primary_city ?? "").toLowerCase();
       const reg = String(r.region ?? "").toLowerCase();
       const nm = String(r.name ?? "").toLowerCase();
-      return pc.includes(cidade) || reg.includes(cidade) || nm.includes(cidade);
+      const cityHit = pc.includes(cidade) || nm.includes(cidade);
+      const regionHit = regiao
+        ? reg.includes(regiao) || reg.includes(regiao.slice(0, 2))
+        : true;
+      return cityHit || (reg.includes(cidade) && regionHit);
+    });
+    if (filtrado.length) pool = filtrado;
+  } else if (regiao) {
+    const filtrado = rows.filter((r) => {
+      const reg = String(r.region ?? "").toLowerCase();
+      return reg.includes(regiao);
     });
     if (filtrado.length) pool = filtrado;
   }
@@ -325,16 +376,29 @@ export async function buscarGeolocalizacoesMeta(opts: {
   tipo?: string;
   country_code?: string;
   cidade_contexto?: string;
+  /** Ex.: Bahia — usado com cidade_contexto / exigir_salvador_ba. */
+  regiao_contexto?: string;
+  /** Se true: so aceita matches com primary_city Salvador + region Bahia (BR). */
+  exigir_salvador_ba?: boolean;
   limit_por_query?: number;
 }): Promise<{
   ok: boolean;
   tipo: string;
   country_code: string;
   total_pedidos: number;
-  resolvidos: Array<{ query: string; key: string; name: string; type?: string }>;
+  resolvidos: Array<{
+    query: string;
+    key: string;
+    name: string;
+    type?: string;
+    primary_city?: string;
+    region?: string;
+    country_code?: string;
+  }>;
   ambiguos: ResultadoBuscaGeo[];
   nao_encontrados: string[];
   erros: Array<{ query: string; erro: string }>;
+  rejeitados_fora_salvador_ba: string[];
   geo_locations_sugerido: Record<string, unknown> | null;
   bairros_keys: string[];
   nota: string;
@@ -342,22 +406,34 @@ export async function buscarGeolocalizacoesMeta(opts: {
   detalhe?: string;
 }> {
   const tipoRaw = String(opts.tipo ?? "neighborhood").trim().toLowerCase() || "neighborhood";
+  const empty = (extra: Record<string, unknown> = {}) => ({
+    ok: false,
+    tipo: tipoRaw,
+    country_code: "BR",
+    total_pedidos: 0,
+    resolvidos: [] as Array<{
+      query: string;
+      key: string;
+      name: string;
+      type?: string;
+      primary_city?: string;
+      region?: string;
+      country_code?: string;
+    }>,
+    ambiguos: [] as ResultadoBuscaGeo[],
+    nao_encontrados: [] as string[],
+    erros: [] as Array<{ query: string; erro: string }>,
+    rejeitados_fora_salvador_ba: [] as string[],
+    geo_locations_sugerido: null as Record<string, unknown> | null,
+    bairros_keys: [] as string[],
+    nota: "",
+    ...extra,
+  });
   if (!(GEO_TIPOS_BUSCA as readonly string[]).includes(tipoRaw)) {
-    return {
-      ok: false,
-      tipo: tipoRaw,
-      country_code: "BR",
-      total_pedidos: 0,
-      resolvidos: [],
-      ambiguos: [],
-      nao_encontrados: [],
-      erros: [],
-      geo_locations_sugerido: null,
-      bairros_keys: [],
-      nota: "",
+    return empty({
       erro: "tipo_geo_nao_suportado",
       detalhe: `Use: ${GEO_TIPOS_BUSCA.join(", ")}.`,
-    };
+    });
   }
   const country = String(opts.country_code ?? "BR").trim().toUpperCase() || "BR";
   const nomes = (opts.nomes ?? []).map((n) => String(n ?? "").trim()).filter(Boolean);
@@ -370,105 +446,86 @@ export async function buscarGeolocalizacoesMeta(opts: {
     uniq.push(n);
   }
   if (!uniq.length) {
-    return {
-      ok: false,
-      tipo: tipoRaw,
+    return empty({
       country_code: country,
-      total_pedidos: 0,
-      resolvidos: [],
-      ambiguos: [],
-      nao_encontrados: [],
-      erros: [],
-      geo_locations_sugerido: null,
-      bairros_keys: [],
-      nota: "",
       erro: "nomes_obrigatorios",
       detalhe: "Informe nomes[] com pelo menos um local para buscar.",
-    };
+    });
   }
   if (uniq.length > MAX_BUSCA_POR_CHAMADA) {
-    return {
-      ok: false,
-      tipo: tipoRaw,
+    return empty({
       country_code: country,
       total_pedidos: uniq.length,
-      resolvidos: [],
-      ambiguos: [],
-      nao_encontrados: [],
-      erros: [],
-      geo_locations_sugerido: null,
-      bairros_keys: [],
-      nota: "",
       erro: "lote_acima_do_limite",
       detalhe:
         `Maximo ${MAX_BUSCA_POR_CHAMADA} nomes por chamada (evita timeout). Recebi ${uniq.length}. ` +
         `Chame de novo em lotes; ao final monte params.bairros com todas as keys.`,
-    };
+    });
   }
 
-  const limit = Math.min(25, Math.max(1, Number(opts.limit_por_query ?? 8) || 8));
   const cidadeCtx = opts.cidade_contexto;
+  const regiaoCtx = opts.regiao_contexto;
+  const exigirSsa = opts.exigir_salvador_ba === true;
+  const limit = Math.min(50, Math.max(1, Number(opts.limit_por_query ?? (exigirSsa ? 25 : 8)) || 8));
 
   const resultados = await mapPool(uniq, CONCORRENCIA_BUSCA, async (query) => {
-    const qs = new URLSearchParams({
-      type: "adgeolocation",
-      q: query,
-      location_types: JSON.stringify([tipoRaw]),
-      country_code: country,
-      limit: String(limit),
-      access_token: opts.token,
-    });
-    try {
-      const r = await fetch(`${GRAPH_SEARCH}?${qs.toString()}`);
-      const t = await r.text();
-      let body: any;
+    // Com contexto Salvador–BA: tenta q enriquecida; se vazio, cai no nome puro + filtro.
+    const variantesQ = exigirSsa
+      ? [`${query} Salvador Bahia`, `${query} Salvador`, query]
+      : cidadeCtx
+      ? [`${query} ${cidadeCtx}`, query]
+      : [query];
+
+    let encontradosAll: ResultadoBuscaGeo["encontrados"] = [];
+    let lastErro: string | undefined;
+
+    for (const qBusca of variantesQ) {
+      const qs = new URLSearchParams({
+        type: "adgeolocation",
+        q: qBusca,
+        location_types: JSON.stringify([tipoRaw]),
+        country_code: country,
+        limit: String(limit),
+        access_token: opts.token,
+      });
       try {
-        body = JSON.parse(t);
-      } catch {
-        return {
-          query,
-          tipo_pedido: tipoRaw,
-          encontrados: [],
-          escolhido: null,
-          ambiguo: false,
-          nao_encontrado: true,
-          erro: `resposta_nao_json_${r.status}`,
-        } satisfies ResultadoBuscaGeo;
+        const r = await fetch(`${GRAPH_SEARCH}?${qs.toString()}`);
+        const t = await r.text();
+        let body: any;
+        try {
+          body = JSON.parse(t);
+        } catch {
+          lastErro = `resposta_nao_json_${r.status}`;
+          continue;
+        }
+        if (!r.ok || body?.error) {
+          lastErro = String(body?.error?.message ?? `http_${r.status}`).slice(0, 200);
+          continue;
+        }
+        const data = Array.isArray(body?.data) ? body.data : [];
+        const encontrados = data
+          .map((row: any) => ({
+            key: String(row.key ?? ""),
+            name: String(row.name ?? ""),
+            type: row.type != null ? String(row.type) : undefined,
+            country_code: row.country_code != null ? String(row.country_code) : undefined,
+            region: row.region != null ? String(row.region) : undefined,
+            region_id: row.region_id,
+            primary_city: row.primary_city != null ? String(row.primary_city) : undefined,
+            primary_city_id: row.primary_city_id,
+          }))
+          .filter((x: { key: string }) => !!x.key);
+        if (encontrados.length) {
+          encontradosAll = encontrados;
+          // Se ja tem match Salvador–BA, para; senao tenta proxima variante.
+          if (!exigirSsa || encontrados.some((e) => ehLocalSalvadorBA(e))) break;
+        }
+      } catch (e) {
+        lastErro = String((e as Error)?.message ?? e).slice(0, 200);
       }
-      if (!r.ok || body?.error) {
-        return {
-          query,
-          tipo_pedido: tipoRaw,
-          encontrados: [],
-          escolhido: null,
-          ambiguo: false,
-          nao_encontrado: true,
-          erro: String(body?.error?.message ?? `http_${r.status}`).slice(0, 200),
-        } satisfies ResultadoBuscaGeo;
-      }
-      const data = Array.isArray(body?.data) ? body.data : [];
-      const encontrados = data
-        .map((row: any) => ({
-          key: String(row.key ?? ""),
-          name: String(row.name ?? ""),
-          type: row.type != null ? String(row.type) : undefined,
-          country_code: row.country_code != null ? String(row.country_code) : undefined,
-          region: row.region != null ? String(row.region) : undefined,
-          region_id: row.region_id,
-          primary_city: row.primary_city != null ? String(row.primary_city) : undefined,
-          primary_city_id: row.primary_city_id,
-        }))
-        .filter((x: { key: string }) => !!x.key);
-      const { escolhido, ambiguo } = pickMelhor(query, encontrados, cidadeCtx);
-      return {
-        query,
-        tipo_pedido: tipoRaw,
-        encontrados: encontrados.slice(0, 8),
-        escolhido,
-        ambiguo,
-        nao_encontrado: !escolhido,
-      } satisfies ResultadoBuscaGeo;
-    } catch (e) {
+    }
+
+    if (!encontradosAll.length) {
       return {
         query,
         tipo_pedido: tipoRaw,
@@ -476,27 +533,64 @@ export async function buscarGeolocalizacoesMeta(opts: {
         escolhido: null,
         ambiguo: false,
         nao_encontrado: true,
-        erro: String((e as Error)?.message ?? e).slice(0, 200),
+        erro: lastErro,
       } satisfies ResultadoBuscaGeo;
     }
+
+    const { escolhido, ambiguo } = pickMelhor(
+      query,
+      encontradosAll,
+      cidadeCtx,
+      regiaoCtx,
+      exigirSsa,
+    );
+    return {
+      query,
+      tipo_pedido: tipoRaw,
+      encontrados: encontradosAll.slice(0, 12),
+      escolhido,
+      ambiguo,
+      nao_encontrado: !escolhido,
+    } satisfies ResultadoBuscaGeo;
   });
 
-  const resolvidos: Array<{ query: string; key: string; name: string; type?: string }> = [];
+  const resolvidos: Array<{
+    query: string;
+    key: string;
+    name: string;
+    type?: string;
+    primary_city?: string;
+    region?: string;
+    country_code?: string;
+  }> = [];
   const ambiguos: ResultadoBuscaGeo[] = [];
   const nao_encontrados: string[] = [];
   const erros: Array<{ query: string; erro: string }> = [];
+  const rejeitados_fora_salvador_ba: string[] = [];
 
   for (const r of resultados) {
     if (r.erro) erros.push({ query: r.query, erro: r.erro });
     if (r.escolhido) {
+      const metaRow = r.encontrados.find((e) => e.key === r.escolhido!.key);
+      if (exigirSsa && metaRow && !ehLocalSalvadorBA(metaRow)) {
+        rejeitados_fora_salvador_ba.push(r.query);
+        nao_encontrados.push(r.query);
+        continue;
+      }
       resolvidos.push({
         query: r.query,
         key: r.escolhido.key,
         name: r.escolhido.name,
         type: r.escolhido.type,
+        primary_city: metaRow?.primary_city,
+        region: metaRow?.region,
+        country_code: metaRow?.country_code,
       });
       if (r.ambiguo) ambiguos.push(r);
     } else {
+      if (exigirSsa && r.encontrados.some((e) => e.key) && !r.encontrados.some((e) => ehLocalSalvadorBA(e))) {
+        rejeitados_fora_salvador_ba.push(r.query);
+      }
       nao_encontrados.push(r.query);
     }
   }
@@ -531,12 +625,18 @@ export async function buscarGeolocalizacoesMeta(opts: {
     ambiguos,
     nao_encontrados,
     erros,
+    rejeitados_fora_salvador_ba,
     geo_locations_sugerido,
     bairros_keys: keysUniq.map((r) => r.key),
     nota:
-      `Busca Meta adgeolocation (${tipoRaw}, ${country}). ` +
+      `Busca Meta adgeolocation (${tipoRaw}, ${country}` +
+      (exigirSsa ? ", filtro estrito Salvador+Bahia" : "") +
+      `). ` +
       `Max ${MAX_BUSCA_POR_CHAMADA}/chamada, concorrencia ${CONCORRENCIA_BUSCA}. ` +
       `Para criar_conjunto: params.bairros = bairros_keys OU params.geo_locations = geo_locations_sugerido. ` +
-      `Ambiguos: revise escolhido vs encontrados antes de emitir o card.`,
+      `Ambiguos: revise escolhido vs encontrados antes de emitir o card.` +
+      (rejeitados_fora_salvador_ba.length
+        ? ` Rejeitados fora Salvador–BA: ${rejeitados_fora_salvador_ba.length}.`
+        : ""),
   };
 }

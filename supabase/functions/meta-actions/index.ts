@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.33)
+// supabase/functions/meta-actions/index.ts (v5.34)
+// v5.34 (21/08/2026) - GEO PRESET JURIDICO COHAPM: no criar_conjunto, meio Jurídico
+//   injeta/valida preset Salvador–BA; La Felicità isolada (não herda).
 // v5.33 (21/08/2026) - GEO/BAIRROS no criar_conjunto: payload.geo_locations sobrescreve
 //   targeting.geo_locations herdado do molde/sem_molde (neighborhoods/cities/custom/…).
 // v5.31 (20/08/2026) - ANUNCIO engajamento: destino_url pode ser Page/IG (nao so LP CLT).
@@ -328,6 +330,7 @@ import {
   aplicarGeoNoTargeting,
   normalizarGeoDoPedido,
 } from "../_shared/geo_targeting.ts";
+import { aplicarGateGeoCriarConjunto } from "../_shared/geo_preset_juridico.ts";
 import {
   resolverObjetivoOdax,
   familiaDeObjetivo,
@@ -1737,7 +1740,7 @@ export async function montarCriacao(
       };
     }
 
-    // v5.33: geo/bairros do card sobrescrevem geo_locations (idade/plataformas permanecem).
+    // v5.33/v5.34: geo/bairros do card; Jurídico COHAPM aplica preset Salvador–BA.
     // So em criar_conjunto — escala continua herdando targeting do molde sem override livre.
     if (acao === "criar_conjunto_a_partir_de") {
       const geoNorm = normalizarGeoDoPedido({
@@ -1748,11 +1751,36 @@ export async function montarCriacao(
       if (geoNorm.erro) {
         return { erro: geoNorm.erro, detalhe: geoNorm.detalhe };
       }
-      if (geoNorm.geo) {
+      const tokGeo = companyId ? tokenAdsPorCompanyId(companyId) : null;
+      const gateGeo = companyId
+        ? await aplicarGateGeoCriarConjunto({
+          companyId,
+          params: (p ?? {}) as Record<string, unknown>,
+          sinaisMeio: [
+            String(p?.campanha_destino_nome ?? ""),
+            String(p?.nome_novo ?? ""),
+            String(p?.molde_nome ?? ""),
+            String(p?.meio ?? ""),
+            String(body?.name ?? ""),
+          ],
+          geoNorm,
+          supa,
+          tokenAds: tokGeo?.token ?? null,
+        })
+        : { meio: null, aplica_preset: false, geo: geoNorm.geo, resumo: geoNorm.resumo, contagem: geoNorm.contagem };
+      if ((gateGeo as any).erro) {
+        return {
+          erro: (gateGeo as any).erro,
+          detalhe: (gateGeo as any).detalhe,
+          meio: (gateGeo as any).meio,
+        };
+      }
+      const geoEfetivo = (gateGeo as any).geo as Record<string, unknown> | undefined;
+      if (geoEfetivo) {
         if (companyId) {
           const { data: seg } = await supa.rpc("checar_segmentacao", {
             p_company_id: companyId,
-            p_targeting: { geo_locations: geoNorm.geo },
+            p_targeting: { geo_locations: geoEfetivo },
           });
           if (seg && typeof seg === "object" && (seg as any).aplica === true && (seg as any).permitido === false) {
             return {
@@ -1769,13 +1797,16 @@ export async function montarCriacao(
           tgtAtual = {};
         }
         if (!tgtAtual || typeof tgtAtual !== "object") tgtAtual = {};
-        const tgtNovo = aplicarGeoNoTargeting(tgtAtual, geoNorm.geo);
+        const tgtNovo = aplicarGeoNoTargeting(tgtAtual, geoEfetivo);
         body.targeting = JSON.stringify(tgtNovo);
         posicionamento = {
           ...(posicionamento && typeof posicionamento === "object" ? posicionamento : {}),
           geo_locations_override: true,
-          geo_resumo: geoNorm.resumo ?? null,
-          geo_contagem: geoNorm.contagem ?? null,
+          geo_resumo: (gateGeo as any).resumo ?? null,
+          geo_contagem: (gateGeo as any).contagem ?? null,
+          geo_preset_juridico: (gateGeo as any).aplica_preset === true,
+          geo_default_aplicado: (gateGeo as any).default_aplicado === true,
+          meio: (gateGeo as any).meio ?? null,
         };
       }
     }

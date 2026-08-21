@@ -65,6 +65,10 @@ verify_jwt = false
 [functions.meta-identity-probe]
 verify_jwt = false
 
+# Resolve keys Meta do preset Jurídico Salvador–BA (cache one-shot). MCP auth na edge.
+[functions.geo-preset-resolve]
+verify_jwt = false
+
 # ESP-37: traffic-chat chama com x-mcp-key; a propria edge autentica via mcp_key_valida.
 [functions.gerar-legendas]
 verify_jwt = false
