@@ -189,13 +189,25 @@ import {
   scopeArgsToCompany,
   truncatePipeboardPayload,
 } from "../_shared/pipeboard_read.ts";
+import {
+  costTierOpenRouter,
+  extrasAutoRouter,
+  modeloEfetivoDaResposta,
+  modeloOpenRouterPadrao,
+  modeloOpenRouterSubPadrao,
+  type AutoCostTier,
+} from "../_shared/openrouter_auto.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "openai/gpt-5.6-luna").trim();
+const MODEL = modeloOpenRouterPadrao();
 // v2: modelo dos SUBAGENTES e do planejador (extracao estrita nao precisa do modelo caro).
-const MODEL_SUB = ((Deno.env.get("OPENROUTER_MODEL_SUB") ?? "").trim()) || MODEL;
+const MODEL_SUB = modeloOpenRouterSubPadrao();
+// 21/08/2026: padrao = openrouter/auto-beta (Auto Router). Ver _shared/openrouter_auto.ts.
+/** Sticky session do Auto Router para o job atual (conversation_id). */
+let JOB_SESSION_ID: string | null = null;
+let JOB_MODELO_ROTEADO = MODEL;
 // v2: credencial do Drive (service account) + pasta raiz dos criativos.
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
 const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? "").trim();
@@ -1170,9 +1182,20 @@ function ehRateLimitErro(s: string): boolean {
 
 async function chamarLLM(messages: any[], opts: {
   tools?: any[]; maxTokens: number; reasoning?: any; model?: string; timeoutMs?: number;
-  retries?: number; retryCapMs?: number;
+  retries?: number; retryCapMs?: number; sessionId?: string | null; costTier?: AutoCostTier;
 }): Promise<any> {
-  const payload: any = { model: opts.model ?? MODEL, messages, max_tokens: opts.maxTokens };
+  const model = opts.model ?? MODEL;
+  const tier = opts.costTier ?? (model === MODEL_SUB ? costTierOpenRouter("medium") : costTierOpenRouter("high"));
+  const payload: any = {
+    model,
+    messages,
+    max_tokens: opts.maxTokens,
+    ...extrasAutoRouter({
+      model,
+      sessionId: opts.sessionId ?? JOB_SESSION_ID,
+      costTier: tier,
+    }),
+  };
   if (opts.tools?.length) { payload.tools = opts.tools; payload.tool_choice = "auto"; }
   if (opts.reasoning) payload.reasoning = opts.reasoning;
   const timeoutMs = opts.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
@@ -1213,7 +1236,13 @@ async function chamarLLM(messages: any[], opts: {
     if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   }
   if (!resp.ok) return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };
-  try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
+  try {
+    const parsed = JSON.parse(text);
+    JOB_MODELO_ROTEADO = modeloEfetivoDaResposta(parsed, JOB_MODELO_ROTEADO);
+    return { parsed };
+  } catch {
+    return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) };
+  }
 }
 function usoDe(parsed: any) {
   const u = parsed?.usage ?? {};
@@ -1972,6 +2001,8 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
+  JOB_SESSION_ID = convId || null;
+  JOB_MODELO_ROTEADO = MODEL;
   const cap = classificarCapacidade(pergunta);
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.8", subagentes: [] };
   tel.versao = "job-v3.8";
@@ -2042,7 +2073,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       tel.ms_total = Date.now() - t0;
       const finishSint0 = tel.sintese?.finish_reason ?? "stop";
       await supa.from("chat_messages").insert({
-        conversation_id: convId, company_id: companyId, role: "assistant", content: texto0, model: MODEL,
+        conversation_id: convId, company_id: companyId, role: "assistant", content: texto0, model: JOB_MODELO_ROTEADO,
         tokens_in: tel.subagentes.reduce((a: number, s2: any) => a + (s2.tokens_in ?? 0), 0) + (tel.sintese?.tokens_in ?? 0),
         tokens_out: tel.subagentes.reduce((a: number, s2: any) => a + (s2.tokens_out ?? 0), 0) + (tel.sintese?.tokens_out ?? 0),
         diagnostico: { ...tel, finish_reason: finishSint0, origem: "traffic-agent-job" },
@@ -2138,7 +2169,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     tel.ms_total = Date.now() - t0;
     const finishSint = tel.sintese?.finish_reason ?? "stop";
     await supa.from("chat_messages").insert({
-      conversation_id: convId, company_id: companyId, role: "assistant", content: texto, model: MODEL,
+      conversation_id: convId, company_id: companyId, role: "assistant", content: texto, model: JOB_MODELO_ROTEADO,
       tokens_in: (tel.planner?.tokens_in ?? 0) + tel.subagentes.reduce((a: number, s: any) => a + (s.tokens_in ?? 0), 0) + (tel.sintese?.tokens_in ?? 0),
       tokens_out: (tel.planner?.tokens_out ?? 0) + tel.subagentes.reduce((a: number, s: any) => a + (s.tokens_out ?? 0), 0) + (tel.sintese?.tokens_out ?? 0),
       diagnostico: { ...tel, finish_reason: finishSint, origem: "traffic-agent-job" },
@@ -2154,7 +2185,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       content: ehRateLimitErro(erro)
         ? "O modelo ficou sobrecarregado nesta rodada (limite temporário). A coleta já feita foi preservada — reenvie a pergunta; em geral a segunda tentativa conclui."
         : "O processamento em segundo plano falhou antes de concluir. Tente de novo; se repetir, o problema esta registrado para o suporte tecnico.",
-      model: MODEL, diagnostico: { ...tel, erro, origem: "traffic-agent-job", finish_reason: "erro_job" },
+      model: JOB_MODELO_ROTEADO, diagnostico: { ...tel, erro, origem: "traffic-agent-job", finish_reason: "erro_job" },
     }).then(() => {}, () => {});
     await supa.from("chat_jobs").update({ status: "error", erro, finished_at: new Date().toISOString(), diagnostico: tel }).eq("id", jobId);
   }

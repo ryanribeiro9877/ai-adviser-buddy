@@ -5,11 +5,12 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import { extrasAutoRouter } from "../_shared/openrouter_auto.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL_SUB") ?? Deno.env.get("OPENROUTER_MODEL") ?? "openai/gpt-5.6-luna").trim();
+const MODEL = (Deno.env.get("OPENROUTER_MODEL_SUB") ?? Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/auto-beta").trim();
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
@@ -117,6 +118,7 @@ REGRAS INEGOCIAVEIS:
           { role: "user", content: user },
         ],
         response_format: { type: "json_object" },
+        ...extrasAutoRouter({ model: MODEL, costTier: "low" }),
       }),
     });
     const body = await res.json();

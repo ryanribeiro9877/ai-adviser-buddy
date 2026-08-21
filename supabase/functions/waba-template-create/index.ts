@@ -18,12 +18,13 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import { extrasAutoRouter } from "../_shared/openrouter_auto.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TOKEN = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "openai/gpt-5.6-luna").trim();
+const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/auto-beta").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
 const VERSAO = "create-v1";
 
@@ -192,7 +193,9 @@ ${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"`
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${OR_KEY}` },
     body: JSON.stringify({ model: OR_MODEL, max_tokens: 900, reasoning: { enabled: false },
-      messages: [{ role: "system", content: sys }, { role: "user", content: `Objetivo do template: ${objetivo}` }] }),
+      messages: [{ role: "system", content: sys }, { role: "user", content: `Objetivo do template: ${objetivo}` }],
+      ...extrasAutoRouter({ model: OR_MODEL, costTier: "medium" }),
+    }),
   });
   const rj = await rl.json().catch(() => null);
   const bruto = String(rj?.choices?.[0]?.message?.content ?? "").trim().replace(/^```json|```$/g, "").trim();

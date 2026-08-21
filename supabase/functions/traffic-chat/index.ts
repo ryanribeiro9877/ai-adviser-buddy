@@ -539,15 +539,19 @@ import {
   scopeArgsToCompany,
   truncatePipeboardPayload,
 } from "../_shared/pipeboard_read.ts";
+import {
+  extrasAutoRouter,
+  modeloEfetivoDaResposta,
+  modeloOpenRouterPadrao,
+} from "../_shared/openrouter_auto.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "openai/gpt-5.6-luna").trim();
+const MODEL = modeloOpenRouterPadrao();
 // v28: OPENROUTER_MODEL = chat principal; OPENROUTER_MODEL_SUB = subagentes do traffic-agent-job.
-// 20/08/2026: padrao da casa = OpenAI GPT-5.6 Luna (slug OpenRouter openai/gpt-5.6-luna).
-// no modelo atual (extracao estrita nao precisa de Opus e custa 5x). Nada a mudar AQUI alem
-// do secret; a separacao e feita na edge do job.
+// 21/08/2026: padrao = OpenRouter Auto Router Beta (openrouter/auto-beta) — roteia por tarefa.
+// Secrets + plugins cost_tier/session_id em _shared/openrouter_auto.ts.
 // v28.1: credencial do Drive (mesma service account do job) + pasta raiz dos criativos.
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
 const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? "").trim();
@@ -4426,6 +4430,7 @@ Deno.serve(async (req) => {
   const actionCards: CardInfo[] = [];
   const ctx = { companyId: company.id, convId: convId!, requestedBy: requestedBy!, cards: actionCards, imgAtts, mcpKey: cfg?.api_key ?? "" };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
+  let modeloRoteado = MODEL;
   // v19: buffer do texto emitido JUNTO com tool_calls, que antes era descartado.
   const preambulos: string[] = [];
   // v19: orcamento dinamico de geracao (tInicio declarado no topo do handler).
@@ -4478,7 +4483,12 @@ Deno.serve(async (req) => {
       return { erro: "orcamento_tempo_esgotado", detalhe: `restam ${restanteMs}ms — sem tempo util para nova geracao` };
     }
     const usarCache = !cacheDesativado;
-    const payload: any = { model: MODEL, messages: usarCache ? messages : semCache(messages), max_tokens: maxTokens };
+    const payload: any = {
+      model: MODEL,
+      messages: usarCache ? messages : semCache(messages),
+      max_tokens: maxTokens,
+      ...extrasAutoRouter({ model: MODEL, sessionId: convId, costTier: "medium" }),
+    };
     if (comTools) { payload.tools = TOOLS; payload.tool_choice = "auto"; }
     // v21: na sintese o raciocinio e excluido para que TODO o orcamento va para o texto.
     if (!reasoningDesativado) payload.reasoning = semRaciocinio ? REASONING_SINTESE : REASONING_LOOP;
@@ -4606,6 +4616,7 @@ Deno.serve(async (req) => {
       tokensIn += Number(p?.usage?.prompt_tokens ?? 0);
       tokensOut += Number(p?.usage?.completion_tokens ?? 0);
       somarCache(p?.usage); somarReasoning(p?.usage);
+      modeloRoteado = modeloEfetivoDaResposta(p, modeloRoteado);
       finishReason = String(p?.choices?.[0]?.finish_reason ?? "") + "+atalho_meta_dicas";
       reply = String(p?.choices?.[0]?.message?.content ?? "").trim();
       iteracoes = 1;
@@ -4643,6 +4654,7 @@ Deno.serve(async (req) => {
     tokensIn += Number(parsed?.usage?.prompt_tokens ?? 0);
     tokensOut += Number(parsed?.usage?.completion_tokens ?? 0);
     somarCache(parsed?.usage); somarReasoning(parsed?.usage);
+    modeloRoteado = modeloEfetivoDaResposta(parsed, modeloRoteado);
     finishReason = String(parsed?.choices?.[0]?.finish_reason ?? "");
     const msg = parsed?.choices?.[0]?.message;
     if (!msg) return json({ error: "openrouter_empty" }, 502);
@@ -4722,6 +4734,7 @@ Deno.serve(async (req) => {
       tokensIn += Number(p?.usage?.prompt_tokens ?? 0);
       tokensOut += Number(p?.usage?.completion_tokens ?? 0);
       somarCache(p?.usage); somarReasoning(p?.usage);
+      modeloRoteado = modeloEfetivoDaResposta(p, modeloRoteado);
       finishReason = String(p?.choices?.[0]?.finish_reason ?? finishReason) + "+sintese_final";
       reply = p?.choices?.[0]?.message?.content ?? "";
     } else if (rf.erro === "openrouter_timeout" || rf.erro === "orcamento_tempo_esgotado") {
@@ -4911,11 +4924,12 @@ Deno.serve(async (req) => {
     toolres_ferramentas_reinjetadas: toolresFerramentas, toolres_chars_reinjetados: toolresChars,
     rota_familias: rota.familias, rota_falhou: rotaFalhou || null,
     tokens_in: tokensIn, tokens_out: tokensOut, versao: VERSAO,
+    modelo_roteado: modeloRoteado, modelo_pedido: MODEL,
     continuar_turno: continuarTurno, segmento_turno: segmentoAtual,
     retomada: ehRetomada, pedido_ato: pedidoAto };
 
   await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
-    tool_calls: toolsUsed.length ? toolsUsed : null, model: MODEL, tokens_in: tokensIn, tokens_out: tokensOut,
+    tool_calls: toolsUsed.length ? toolsUsed : null, model: modeloRoteado, tokens_in: tokensIn, tokens_out: tokensOut,
     diagnostico, tool_results: toolResults.length ? toolResults : null,
     attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
@@ -4933,6 +4947,8 @@ Deno.serve(async (req) => {
     rota_falhou: rotaFalhou || null,
     tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas,
     action_cards: actionCards,
+    model: modeloRoteado,
+    modelo_pedido: MODEL,
     continuar: continuarTurno,
     segmento: segmentoAtual,
   });

@@ -14,11 +14,12 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import { extrasAutoRouter, modeloOpenRouterPadrao } from "../_shared/openrouter_auto.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "openai/gpt-5.6-luna").trim();
+const MODEL = modeloOpenRouterPadrao();
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 const CORS = {
@@ -158,6 +159,7 @@ Deno.serve(async (req) => {
       model: MODEL,
       max_tokens: 2000,
       messages: [{ role: "user", content }],
+      ...extrasAutoRouter({ model: MODEL, costTier: "medium" }),
     }),
   });
   const raw = await resp.text();
