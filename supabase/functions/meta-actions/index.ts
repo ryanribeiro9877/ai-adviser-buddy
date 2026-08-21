@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.31)
+// supabase/functions/meta-actions/index.ts (v5.33)
+// v5.33 (21/08/2026) - GEO/BAIRROS no criar_conjunto: payload.geo_locations sobrescreve
+//   targeting.geo_locations herdado do molde/sem_molde (neighborhoods/cities/custom/…).
 // v5.31 (20/08/2026) - ANUNCIO engajamento: destino_url pode ser Page/IG (nao so LP CLT).
 //   destino_do_anuncio.caso=engajamento_social e honrado via destinoDoPedidoCompat.
 // v5.30 (20/08/2026) - ENGAGEMENT exige destination_type=ON_POST com POST_ENGAGEMENT
@@ -322,6 +324,10 @@ import {
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
+import {
+  aplicarGeoNoTargeting,
+  normalizarGeoDoPedido,
+} from "../_shared/geo_targeting.ts";
 import {
   resolverObjetivoOdax,
   familiaDeObjetivo,
@@ -1729,6 +1735,49 @@ export async function montarCriacao(
           ? `Conjunto ${familiaPayload} SEM MOLDE: targeting BR Advantage+ minimo; optimization_goal=${defs.optimization_goal}; destination_type=${defs.destination_type ?? "null"}; promoted_object.page_id=${pageId}.`
           : `Conjunto ${familiaPayload}: molde so emprestou targeting; optimization_goal=${defs.optimization_goal}, destination_type=${defs.destination_type ?? "null"}, promoted_object.page_id=${pageId} (pixel/LEAD do molde descartados).`,
       };
+    }
+
+    // v5.33: geo/bairros do card sobrescrevem geo_locations (idade/plataformas permanecem).
+    // So em criar_conjunto — escala continua herdando targeting do molde sem override livre.
+    if (acao === "criar_conjunto_a_partir_de") {
+      const geoNorm = normalizarGeoDoPedido({
+        geo_locations: p?.geo_locations,
+        bairros: p?.bairros,
+        neighborhoods: p?.neighborhoods,
+      } as Record<string, unknown>);
+      if (geoNorm.erro) {
+        return { erro: geoNorm.erro, detalhe: geoNorm.detalhe };
+      }
+      if (geoNorm.geo) {
+        if (companyId) {
+          const { data: seg } = await supa.rpc("checar_segmentacao", {
+            p_company_id: companyId,
+            p_targeting: { geo_locations: geoNorm.geo },
+          });
+          if (seg && typeof seg === "object" && (seg as any).aplica === true && (seg as any).permitido === false) {
+            return {
+              erro: "segmentacao_recusada_pelo_gate",
+              detalhe: String((seg as any).mensagem_para_o_gestor ?? (seg as any).motivo ?? "checar_segmentacao recusou o geo."),
+              segmentacao: seg,
+            };
+          }
+        }
+        let tgtAtual: Record<string, unknown> = {};
+        try {
+          tgtAtual = body.targeting ? JSON.parse(String(body.targeting)) : {};
+        } catch {
+          tgtAtual = {};
+        }
+        if (!tgtAtual || typeof tgtAtual !== "object") tgtAtual = {};
+        const tgtNovo = aplicarGeoNoTargeting(tgtAtual, geoNorm.geo);
+        body.targeting = JSON.stringify(tgtNovo);
+        posicionamento = {
+          ...(posicionamento && typeof posicionamento === "object" ? posicionamento : {}),
+          geo_locations_override: true,
+          geo_resumo: geoNorm.resumo ?? null,
+          geo_contagem: geoNorm.contagem ?? null,
+        };
+      }
     }
 
     return {
