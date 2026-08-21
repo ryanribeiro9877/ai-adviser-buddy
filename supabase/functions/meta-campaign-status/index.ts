@@ -1,4 +1,10 @@
-// supabase/functions/meta-campaign-status/index.ts (v17)
+// supabase/functions/meta-campaign-status/index.ts (v18)
+// v18 (21/08/2026) - Graph v26+ quebrou GET /?ids=... (parametro `ids` deprecado).
+//   lerCampoPorIds passou a GET /{id}?fields=... (caminho por objeto). Sem isso a coleta
+//   pontual de is_dynamic_creative falhava (HTTP 500), o portao de emissao fail-closava
+//   com estado_conjunto_destino_nao_verificado, e cards criar_anuncio nao saiam mesmo
+//   com conjunto valido (ex.: JURIDICO_CONJ.01 - MATURACAO). Regra de negocio intacta:
+//   so libera anuncio avulso quando is_dynamic_creative === false.
 // v17 (21/08/2026) - Espelha effective_status da Graph em ads.status (nao so snapshots),
 //   para inventário Click-to-WA e RPCs que leem ads.status nao ficarem stale.
 // v16 (20/08/2026) - OPPORTUNITY SCORE / Recommendation Center. O badge "1 recomendacao"
@@ -245,6 +251,10 @@ function exemploSeguro(v: unknown): unknown {
 // Consulta um unico campo por vez. Se a Graph ignorar um modificador desconhecido em silencio,
 // `com_chave` fica zero e nenhum dado e escrito. Separar os campos impede que um candidato
 // invalido derrube a leitura dos demais.
+//
+// Graph v26+ (changelog 29/07/2026): GET /?ids=... no root retorna erro de parametro.
+// Usa GET /{id}?fields=... (mesmo padrao de meta-actions / meta-health). Lotes em paralelo
+// (ate 20) preservam o throughput da corrida diaria sem reintroduzir o query param deprecado.
 async function lerCampoPorIds(
   ids: string[],
   nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
@@ -269,27 +279,38 @@ async function lerCampoPorIds(
   }
   for (let i = 0; i < ids.length; i += 20) {
     const lote = ids.slice(i, i + 20);
-    const url = `${GRAPH}/?ids=${encodeURIComponent(lote.join(","))}&fields=${encodeURIComponent(campo)}&access_token=${encodeURIComponent(tok)}`;
-    const r = await fetch(url);
-    const t = await r.text();
-    let p: any;
-    try {
-      p = JSON.parse(t);
-    } catch {
-      p = null;
-    }
-    if (!r.ok || !p || typeof p !== "object") {
-      diagnostico.erros.push(`graph ${r.status}: ${redact(t).slice(0, 240)}`);
-      continue;
-    }
-    for (const id of lote) {
-      const obj = p[id];
-      if (!obj || typeof obj !== "object") continue;
+    const leituras = await Promise.all(lote.map(async (id) => {
+      const url =
+        `${GRAPH}/${encodeURIComponent(id)}?fields=${encodeURIComponent(campo)}` +
+        `&access_token=${encodeURIComponent(tok)}`;
+      try {
+        const r = await fetch(url);
+        const t = await r.text();
+        let p: any;
+        try {
+          p = JSON.parse(t);
+        } catch {
+          p = null;
+        }
+        if (!r.ok || !p || typeof p !== "object") {
+          return { id, ok: false as const, erro: `graph ${r.status}: ${redact(t).slice(0, 240)}` };
+        }
+        return { id, ok: true as const, obj: p };
+      } catch (e) {
+        return { id, ok: false as const, erro: `fetch: ${String(e).slice(0, 200)}` };
+      }
+    }));
+    for (const item of leituras) {
+      if (!item.ok) {
+        diagnostico.erros.push(`${item.id}: ${item.erro}`);
+        continue;
+      }
+      const obj = item.obj;
       diagnostico.respostas++;
-      respondidos.add(id);
+      respondidos.add(item.id);
       if (!temChave(obj, campo)) continue;
       const valor = obj[campo];
-      valores.set(id, valor);
+      valores.set(item.id, valor);
       diagnostico.com_chave++;
       if (diagnostico.exemplos.length < 2) diagnostico.exemplos.push(exemploSeguro(valor));
     }
@@ -433,7 +454,7 @@ async function coletarEstadoDeUmConjunto(externalId: string, corpo: any): Promis
   }
   TOKEN = tokInfo.token;
 
-  // Reuso do parser de campo por ids (nada duplicado). Um unico id no lote.
+  // Reuso do leitor por objeto (GET /{id}?fields=...) — nada duplicado. Um unico id.
   const r = await lerCampoPorIds([externalId], "conjunto", "is_dynamic_creative", tokInfo.token);
   const respondido = r.respondidos.has(externalId);
   const valor = r.valores.has(externalId) ? r.valores.get(externalId) : null;
