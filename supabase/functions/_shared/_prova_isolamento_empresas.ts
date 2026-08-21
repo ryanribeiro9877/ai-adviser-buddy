@@ -6,6 +6,18 @@ const chat = await Deno.readTextFile(
 const job = await Deno.readTextFile(
   new URL("../traffic-agent-job/index.ts", import.meta.url),
 );
+const compliance = await Deno.readTextFile(
+  new URL("../compliance-check/index.ts", import.meta.url),
+);
+const legendas = await Deno.readTextFile(
+  new URL("../gerar-legendas/index.ts", import.meta.url),
+);
+const metaActions = await Deno.readTextFile(
+  new URL("../meta-actions/index.ts", import.meta.url),
+);
+const empCredito = await Deno.readTextFile(
+  new URL("./empresa_credito.ts", import.meta.url),
+);
 
 function assert(condition: unknown, message: string) {
   if (!condition) throw new Error(message);
@@ -44,6 +56,45 @@ assert(
   chat.includes("company_id: companyId") &&
     job.includes("JSON.stringify({ company_id: companyId, legenda })"),
   "compliance deve receber company_id",
+);
+
+// v28.53: isolamento credito vs COHAPM
+assert(empCredito.includes("empresaEhCredito"), "helper empresa_credito existe");
+assert(
+  !compliance.includes(
+    "Guardião de Compliance de anúncios de crédito consignado (Legal é Viver)",
+  ),
+  "compliance-check nao pode hardcodar so Legal no prompt unico",
+);
+assert(
+  compliance.includes("empresaEhCredito") && compliance.includes("filtrarRegrasPorEmpresa"),
+  "compliance-check deve ramificar por empresa",
+);
+assert(
+  !legendas.includes("LEV_COMPANY") && legendas.includes("company_id_obrigatorio"),
+  "gerar-legendas nao pode defaultar LEV",
+);
+assert(
+  chat.includes("MAX_PROPOSE_ANUNCIO_POR_SEGMENTO") &&
+    chat.includes('verdAtual() === "atencao"'),
+  "traffic-chat: atencao apto + limite propose por segmento",
+);
+assert(
+  chat.includes("empresaEhCredito(companyId)") &&
+    !chat.includes('special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"]'),
+  "criar_campanha nao forca FINANCIAL para todas as empresas",
+);
+assert(
+  metaActions.includes("empresaEhCredito") && metaActions.includes("catsEspeciais"),
+  "meta-actions cria campanha com cats por empresa",
+);
+assert(
+  job.includes("promptVideoNaoCredito") && job.includes("promptImgNaoCredito"),
+  "job visao deve ramificar COHAPM",
+);
+assert(
+  !job.includes("EXCLUSIVAMENTE de credito consignado CLT"),
+  "job visao nao pode forcar CLT exclusivo",
 );
 
 console.log("ok: _prova_isolamento_empresas");

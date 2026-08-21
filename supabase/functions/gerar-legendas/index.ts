@@ -1,24 +1,22 @@
-// supabase/functions/gerar-legendas/index.ts (v2)
-// ESP-37 (12/08/2026): motor de legenda Meta Ads — framework A (Hook → Benefício/prova →
-//   CTA + CET na legenda FIN-04), N=3 fixo. Redator OpenRouter + guardião compliance-check
-//   por variante (+ checar_par_texto_e_peca quando drive_file_id). NÃO emite card e NÃO
-//   escreve na Meta. Auth: x-mcp-key (mcp_key_valida).
-// v2 - ESP-36 (12/08/2026): consome ler_brand_identity(company_id) — voz/tom, dos/donts,
-//   disclaimers e linhas de produto entram no prompt do redator (marca deixa de ser hardcoded).
-//   Fix: promessas_proibidas usa a coluna 'seguro' (antes 'substituto_seguro', que vinha vazio).
+// supabase/functions/gerar-legendas/index.ts (v3)
+// v3 (21/08/2026): isolamento multi-empresa. company_id OBRIGATORIO (sem fallback LEV).
+//   produto obrigatorio OU linhas_produto da brand — NUNCA inventa CLT para COHAPM.
+//   Bloco CET/FIN-04 so para empresa de credito. Framework Hook→Beneficio→CTA para todos.
+// ESP-37 (12/08/2026): motor de legenda Meta Ads — N=3 fixo. Redator OpenRouter +
+//   guardião compliance-check por variante. NÃO emite card e NÃO escreve na Meta.
+// v2 - ESP-36: consome ler_brand_identity(company_id).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { extrasAutoRouter, modeloOpenRouterPadrao } from "../_shared/openrouter_auto.ts";
+import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
 const OR_MODEL = modeloOpenRouterPadrao();
-const VERSAO = "gerar-legendas-v1";
+const VERSAO = "gerar-legendas-v3";
 const N = 3;
-
-const LEV_COMPANY = "ded20b38-f42e-4c71-800c-31b97ea48bcf";
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -54,10 +52,14 @@ function extrairJson(bruto: string): unknown {
   return null;
 }
 
-function complianceAprovado(compl: any, httpOk: boolean): boolean {
-  if (!httpOk || !compl) return false;
+function complianceAptoParaCard(compl: any, httpOk: boolean): boolean {
+  if (!httpOk || !compl || compl?.erro) return false;
   const verd = String(compl?.veredito ?? compl?.verdict ?? "").toLowerCase();
-  if (verd === "aprovado" || verd.includes("aprov") || verd.includes("green") || verd.includes("pass")) {
+  if (verd === "reprovado" || verd.includes("reprov")) return false;
+  const viol = Array.isArray(compl?.violacoes) ? compl.violacoes : [];
+  if (viol.some((v: any) => String(v?.severidade ?? "").toLowerCase() === "bloqueia")) return false;
+  // aprovado e atencao (ex. LGL-04 sem CNPJ no body) sao aptos para emitir card.
+  if (verd === "aprovado" || verd === "atencao" || verd.includes("aprov") || verd.includes("atenc")) {
     return compl?.aprovado !== false;
   }
   if (compl?.aprovado === true) return true;
@@ -83,14 +85,22 @@ Deno.serve(async (req) => {
     /* */
   }
 
-  const companyId = String(body?.company_id ?? body?.company ?? LEV_COMPANY).trim() || LEV_COMPANY;
-  const produto = String(body?.produto ?? "CLT").trim().toUpperCase() || "CLT";
+  const companyId = String(body?.company_id ?? body?.company ?? "").trim();
+  if (!companyId) {
+    return json({
+      erro: "company_id_obrigatorio",
+      detalhe: "Informe company_id da conversa. O motor nao usa Legal/LEV como fallback.",
+    }, 400);
+  }
+  const ehCredito = empresaEhCredito(companyId);
+  let produto = String(body?.produto ?? "").trim();
   const objetivo = String(body?.objetivo ?? body?.eixo ?? "").trim();
   if (!objetivo) {
     return json({
       erro: "objetivo_obrigatorio",
-      detalhe:
-        "Informe objetivo (ou eixo): o que a legenda deve comunicar em linguagem de negocio (ex.: 'abrir simulacao CLT para quem quer dinheiro rapido sem burocracia').",
+      detalhe: ehCredito
+        ? "Informe objetivo (ou eixo): o que a legenda deve comunicar (ex.: 'abrir simulacao CLT')."
+        : "Informe objetivo (ou eixo): o que a legenda deve comunicar (ex.: 'orientar sobre cobranca indevida no WhatsApp juridico').",
     }, 400);
   }
 
@@ -111,19 +121,23 @@ Deno.serve(async (req) => {
     }
   }
 
-  // Amostra de promessas proibidas (texto curto) para o redator nao inventar.
-  const { data: promessas } = await supa
-    .from("promessas_proibidas")
-    .select("proibido,seguro")
-    .limit(40);
-  const listaPromessas = (promessas ?? [])
-    .map((p: any) => `- "${p.proibido}" → use "${p.seguro}"`)
-    .slice(0, 25)
-    .join("\n");
+  // Amostra de promessas proibidas — so credito (mapa e de consignado).
+  let listaPromessas = "";
+  if (ehCredito) {
+    const { data: promessas } = await supa
+      .from("promessas_proibidas")
+      .select("proibido,seguro")
+      .limit(40);
+    listaPromessas = (promessas ?? [])
+      .map((p: any) => `- "${p.proibido}" → use "${p.seguro}"`)
+      .slice(0, 25)
+      .join("\n");
+  }
 
   // ESP-36: identidade de marca da empresa (voz/tom, dos/donts, disclaimers, produtos).
   let brandBloco = "";
-  let marcaNome = "a marca (credito consignado Brasil)";
+  let marcaNome = ehCredito ? "Legal e Viver (credito consignado)" : "COHAPM (cooperativa / juridico)";
+  let linhasProduto: string[] = [];
   try {
     const { data: bi } = await supa.rpc("ler_brand_identity", { p_company_id: companyId });
     const brand = (bi as any)?.brand;
@@ -133,7 +147,7 @@ Deno.serve(async (req) => {
       const dos: string[] = Array.isArray(brand?.dos) ? brand.dos : [];
       const donts: string[] = Array.isArray(brand?.donts) ? brand.donts : [];
       const discl: string[] = Array.isArray(brand?.disclaimers_obrigatorios) ? brand.disclaimers_obrigatorios : [];
-      const linhas: string[] = Array.isArray(brand?.linhas_produto) ? brand.linhas_produto : [];
+      linhasProduto = Array.isArray(brand?.linhas_produto) ? brand.linhas_produto.map(String) : [];
       brandBloco = [
         `\n=== IDENTIDADE DE MARCA (ESP-36 — ${marcaNome}) ===`,
         voz?.tom ? `Tom: ${voz.tom}` : "",
@@ -142,23 +156,44 @@ Deno.serve(async (req) => {
         dos.length ? `FACA:\n${dos.map((d) => `- ${d}`).join("\n")}` : "",
         donts.length ? `NAO FACA:\n${donts.map((d) => `- ${d}`).join("\n")}` : "",
         discl.length ? `Disclaimers obrigatorios:\n${discl.map((d) => `- ${d}`).join("\n")}` : "",
-        linhas.length ? `Linhas de produto: ${linhas.join(", ")}` : "",
+        linhasProduto.length ? `Linhas de produto: ${linhasProduto.join(", ")}` : "",
       ].filter(Boolean).join("\n");
     }
   } catch {
-    /* brand nao bloqueia: cai no tom padrao + promessas_proibidas */
+    /* brand nao bloqueia */
   }
 
+  if (!produto) {
+    produto = linhasProduto[0] ? String(linhasProduto[0]) : "";
+  }
+  if (!produto) {
+    return json({
+      erro: "produto_obrigatorio",
+      detalhe: ehCredito
+        ? "Informe produto (ex.: CLT / consignado_clt) ou semeie brand_identity.linhas_produto."
+        : "Informe produto (ex.: juridico_whatsapp) ou semeie brand_identity.linhas_produto. Nao ha fallback CLT.",
+      linhas_produto_brand: linhasProduto,
+    }, 400);
+  }
+
+  const blocoCet = ehCredito
+    ? `4) CET — o CET (ou referencia ao CET da oferta) MORA NA LEGENDA DA PUBLICACAO (FIN-04 v4). Preferencia da casa quando NAO ha taxa oficial: "consulte o CET na sua simulacao". Isso E suficiente. NUNCA invente percentual.`
+    : `4) FECHO — CTA + canal oficial (WhatsApp/juridico). NUNCA invente CET, consignado CLT, margem disponivel, correspondente bancario ou "Legal e Viver".`;
+
+  const regrasDuras = ehCredito
+    ? `- Proibido: garantia de aprovacao, "sem consulta", "100% aprovado", dinheiro "gratis", omitir risco de credito.`
+    : `- Proibido: inventar credito/CLT/CET; prometer resultado juridico garantido; direcionar a numero de terceiro nao identificado.`;
+
   const sys = `Voce e redator de legendas de Meta Ads para ${marcaNome}.
-Framework OBRIGATORIO (ESP-37, opcao A), nesta ordem em CADA legenda:
+Framework OBRIGATORIO (ESP-37), nesta ordem em CADA legenda:
 1) HOOK — primeira linha que para o scroll (use tatica de hook distinta em cada variante).
-2) BENEFICIO/PROVA — o que o produto entrega, sem promessa ilegal.
-3) CTA — acao clara (ex.: simular, falar com especialista).
-4) CET — o CET (ou referencia ao CET da oferta) MORA NA LEGENDA DA PUBLICACAO (FIN-04 v4). Preferencia da casa quando NAO ha taxa oficial: "consulte o CET na sua simulacao". Isso E suficiente. NUNCA invente percentual. NUNCA peca ao gestor um numero de CET depois que ele autorizou a formulacao de consulta.
+2) BENEFICIO/PROVA — o que a oferta/orientacao entrega, sem promessa ilegal.
+3) CTA — acao clara.
+${blocoCet}
 
 Regras duras:
 - Portugues do Brasil; tom direto, conversacional, sem exagero de urgencia falsa.
-- Proibido: garantia de aprovacao, "sem consulta", "100% aprovado", dinheiro "gratis", omitir risco de credito.
+${regrasDuras}
 - N = ${N} variantes DISTINTAS (hooks diferentes). Nao repita a mesma abertura.
 - Cada texto: 2 a 6 frases curtas; adequado a Feed/Reels (legenda de publicacao).
 - Responda APENAS JSON valido, sem markdown:
@@ -245,7 +280,7 @@ ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.sl
       compl = { fail_closed: true, erro: String(e).slice(0, 200) };
     }
 
-    const okCompl = complianceAprovado(compl, httpOk);
+    const okCompl = complianceAptoParaCard(compl, httpOk);
     let par: any = null;
     let parOk = true;
     if (driveFileId) {
@@ -302,7 +337,8 @@ ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.sl
   return json({
     ok: true,
     versao: VERSAO,
-    framework: "hook_beneficio_cta_cet",
+    framework: ehCredito ? "hook_beneficio_cta_cet" : "hook_beneficio_cta",
+    empresa_credito: ehCredito,
     n: N,
     produto,
     objetivo,
@@ -310,7 +346,7 @@ ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.sl
     variantes: variantesOut,
     aptas,
     instrucao:
-      "ESP-37: escolha UMA variante com apto_para_card=true e use em propose_action criar_anuncio_a_partir_de com params.legenda, legenda_fonte=agente e legenda_referencias (hooks/objetivo). Variantes reprovadas NAO entram no card. Nada foi publicado na Meta.",
+      "ESP-37: escolha UMA variante com apto_para_card=true e use em propose_action criar_anuncio_a_partir_de com params.legenda, legenda_fonte=agente e legenda_referencias. Variantes reprovadas NAO entram no card. Nada foi publicado na Meta.",
     redator_meta: { model: OR_MODEL, tokens: rj?.usage ?? null },
   });
 });

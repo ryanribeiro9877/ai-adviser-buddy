@@ -1,4 +1,10 @@
-// supabase/functions/traffic-chat/index.ts (v28.52)
+// supabase/functions/traffic-chat/index.ts (v28.53)
+// v28.53 (21/08/2026) - Isolamento COHAPM/Legal na emissao:
+//   (1) compliance atencao = apto (so reprovado/bloqueia barra card); sem FIN-01 margem
+//       auto-append fora de credito; special_ad_categories financeira so Legal;
+//   (2) gerar_legendas / doutrina CET so credito; max 2 propose criar_anuncio por
+//       segmento HTTP (checkpoint continuar) — evita Erro de conexao no lote 3+;
+//   (3) cache compliance por legenda+company no mesmo turno.
 // v28.52 (21/08/2026) - Portao de video em propose_action: t_status_video passa
 //   company_id. Sem isso upload-midia usava token Legal em videos COHAPM → Graph 400
 //   e pedido_incompleto (nao emite card). Fail-closed permanece: so emite se pronto.
@@ -567,6 +573,7 @@ import {
   modeloOpenRouterPadrao,
 } from "../_shared/openrouter_auto.ts";
 import { tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
+import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import {
   buscarGeolocalizacoesMeta,
   normalizarGeoDoPedido,
@@ -617,6 +624,9 @@ const MAX_POR_FERRAMENTA_DEFAULT = 2;
 // propose_action de criacao nao consome o teto global do turno (so o teto por ferramenta).
 // Assim releituras opcionais nao "roubam" as vagas dos cards quando o slate ja esta no chat.
 const ACOES_CRIACAO_NO_TETO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
+// v28.53: 3× compliance + status_video no mesmo HTTP estoura gateway → Erro de conexao.
+// Emite no max 2 criar_anuncio por segmento; o restante via continuar=true.
+const MAX_PROPOSE_ANUNCIO_POR_SEGMENTO = 2;
 const MAX_TOKENS = 12000;
 // v21: orcamento de raciocinio. max_tokens cobre raciocinio + texto; sem teto, o modelo
 // gastava os 6000 pensando e devolvia content vazio. 2000 preserva o protocolo de 5 passos
@@ -627,7 +637,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.48";
+const VERSAO = "chat-v28.53";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -1838,7 +1848,15 @@ async function t_renomear_campanha(companyId: string, convId: string, requestedB
 // de campanha, o nome do objeto que vai nascer).
 const ACOES_CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
-async function t_propose_criacao(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[], mcpKey: string) {
+async function t_propose_criacao(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+  mcpKey: string,
+  complianceCache?: Map<string, any>,
+) {
   const action = String(args?.action_type ?? "");
   const nomeAlvo = String(args?.target_name ?? "").trim();
   const justificativa = String(args?.justificativa ?? "").trim();
@@ -1929,7 +1947,18 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     const notaSocial = socialTopo
       ? ` — familia ${familia}: destino Page/Instagram (nao LP). ODAX ${objetivo} (via ${resolvidoObj.origem}).`
       : "";
-    const summary = `Criar campanha "${nomeFinal}" (objetivo ${objetivo}${papel ? `, papel ${papel}` : ""}) - nasce ACTIVE, categoria especial de credito obrigatoria — nome ${resolvidoNome.origem}${notaSocial}`;
+    const ehCreditoCamp = empresaEhCredito(companyId);
+    const catsEspeciais = ehCreditoCamp
+      ? ["FINANCIAL_PRODUCTS_SERVICES"]
+      : (Array.isArray(params?.special_ad_categories)
+        ? (params.special_ad_categories as unknown[]).map((x) => String(x)).filter(Boolean)
+        : []);
+    const notaCat = ehCreditoCamp
+      ? ", categoria especial de credito obrigatoria"
+      : (catsEspeciais.length
+        ? `, special_ad_categories=${catsEspeciais.join(",")}`
+        : ", SEM categoria especial financeira (empresa nao-credito)");
+    const summary = `Criar campanha "${nomeFinal}" (objetivo ${objetivo}${papel ? `, papel ${papel}` : ""})${notaCat} - nasce ACTIVE — nome ${resolvidoNome.origem}${notaSocial}`;
     return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
       nome_novo: nomeFinal,
       nome_origem: resolvidoNome.origem,
@@ -1940,7 +1969,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       page_id: socialTopo ? pageId : null,
       destino_social: socialTopo,
       conta_destino: contaDaEmpresa,
-      special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"],
+      special_ad_categories: catsEspeciais,
       status_inicial: "ACTIVE",
       justificativa,
       reversa,
@@ -2473,16 +2502,18 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       .select("marca_tag")
       .eq("company_id", companyId)
       .maybeSingle();
-    const marcaDefault = String((cfgNomeAd as any)?.marca_tag || "LEV").trim() || "LEV";
+    const marcaDefault = String((cfgNomeAd as any)?.marca_tag || (empresaEhCredito(companyId) ? "LEV" : "COHAPM")).trim()
+      || (empresaEhCredito(companyId) ? "LEV" : "COHAPM");
     const nomeLivreAd = String(params?.nome_novo ?? params?.nome ?? params?.name ?? "").trim();
+    const ehCreditoAd = empresaEhCredito(companyId);
     const paramsNomeAd = nomeLivreAd
       ? params
       : {
           ...params,
           marca: String(params?.marca ?? "").trim() || marcaDefault,
-          canal: String(params?.canal ?? "").trim() || "LP",
+          canal: String(params?.canal ?? "").trim() || (ehCreditoAd ? "LP" : "WA"),
           objetivo_tag: String(params?.objetivo_tag ?? "").trim() || "LEADS",
-          produto: String(params?.produto ?? "").trim() || "CLT",
+          produto: String(params?.produto ?? "").trim() || (ehCreditoAd ? "CLT" : "JURIDICO"),
           periodo: String(params?.periodo ?? "").trim() || periodoMetaAtual(),
           rotulo: String(params?.rotulo ?? "").trim()
             || String(params?.utm_campaign ?? "").trim()
@@ -2917,11 +2948,8 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       }
     }
 
-    // v25 TRAVA 3: compliance BLOQUEANTE, agora sobre a legenda DECIDIDA acima - do molde na
-    // replicacao, do gestor ou herdada na peca nova. Quem escreveu nao muda a exposicao
-    // regulatoria de um anuncio de credito, e por isso as duas passam pelas mesmas 16 regras.
-    // v28.45: impulsão educativa — se FIN-01 so pede "Consulte sua margem…", anexa e revalida
-    // uma vez (gestor autorizou engajamento social; nao trava o emit por frase faltante).
+    // v25 TRAVA 3: compliance BLOQUEANTE. v28.53: atencao = apto para emitir;
+    // so reprovado / severidade bloqueia / erro hard-blockam. FIN-01 "margem" so Legal.
     if (!legenda) {
       return {
         erro: semMolde
@@ -2930,21 +2958,30 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       };
     }
     const FRASE_MARGEM_FIN01 = "Consulte sua margem disponivel";
+    const ehCreditoEmit = empresaEhCredito(companyId);
     let legendaCompliance = legenda;
-    let comp: any = await t_check_compliance(companyId, legendaCompliance, [], mcpKey);
-    let vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
-    if (!vereditoOk && anuncioSocialTopo) {
+    let comp: any = await t_check_compliance(companyId, legendaCompliance, [], mcpKey, complianceCache);
+    const verdAtual = () => String(comp?.veredito ?? "").toLowerCase();
+    const temBloqueia = () =>
+      (Array.isArray(comp?.violacoes) ? comp.violacoes : []).some(
+        (v: any) => String(v?.severidade ?? "").toLowerCase() === "bloqueia",
+      );
+    let vereditoOk =
+      !!comp && !comp.erro && verdAtual() !== "reprovado" && !temBloqueia() &&
+      (verdAtual() === "aprovado" || verdAtual() === "atencao" || comp.aprovado === true);
+    if (!vereditoOk && anuncioSocialTopo && ehCreditoEmit) {
       const blob = JSON.stringify(comp ?? {});
       const fin01Margem = /FIN-01/i.test(blob) && /margem/i.test(blob);
       const jaTemFrase = /consulte\s+sua\s+margem/i.test(legendaCompliance);
       if (fin01Margem && !jaTemFrase) {
         legendaCompliance = `${legendaCompliance.trim()}\n\n${FRASE_MARGEM_FIN01}.`;
         legenda = legendaCompliance;
-        comp = await t_check_compliance(companyId, legendaCompliance, [], mcpKey);
-        vereditoOk = comp && (comp.veredito === "aprovado" || comp.aprovado === true) && !comp.erro;
-      } else if (fin01Margem && jaTemFrase && /atencao|aprovado/i.test(String(comp?.veredito ?? ""))) {
-        // Ja tem a frase e so atencao residual — nao bloqueia emit de impulsão autorizada.
-        vereditoOk = !comp?.erro && String(comp?.veredito ?? "").toLowerCase() !== "reprovado";
+        comp = await t_check_compliance(companyId, legendaCompliance, [], mcpKey, complianceCache);
+        vereditoOk =
+          !!comp && !comp.erro && verdAtual() !== "reprovado" && !temBloqueia() &&
+          (verdAtual() === "aprovado" || verdAtual() === "atencao" || comp.aprovado === true);
+      } else if (fin01Margem && jaTemFrase && /atencao|aprovado/i.test(verdAtual())) {
+        vereditoOk = !comp?.erro && verdAtual() !== "reprovado" && !temBloqueia();
       }
     }
     if (!vereditoOk) {
@@ -2975,13 +3012,17 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     }
 
     const cabeca = temCarrossel
-      ? `Criar anuncio "${nomeNovo}" CARROSSEL (${(childAttachmentsRaw as any[]).length} slides) no conjunto "${dest.name}", SEM molde (ESP-35) - compliance de texto aprovado, nasce ACTIVE`
+      ? `Criar anuncio "${nomeNovo}" CARROSSEL (${(childAttachmentsRaw as any[]).length} slides) no conjunto "${dest.name}", SEM molde (ESP-35) - compliance ${comp?.veredito ?? "aprovado"}, nasce ACTIVE`
       : semMolde
-      ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", SEM molde (ESP-35: page/CTA/destino da config) - compliance de texto aprovado, nasce ACTIVE`
+      ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", SEM molde (ESP-35: page/CTA/destino da config) - compliance ${comp?.veredito ?? "aprovado"}, nasce ACTIVE`
       : driveFileId
-      ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", usando "${molde.name}" como molde de configuracao - compliance de texto aprovado, nasce ACTIVE`
-      : `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance aprovado, nasce ACTIVE`;
-    const summary = `${cabeca}\n\n${msgGestor}`.trim();
+      ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", usando "${molde.name}" como molde de configuracao - compliance ${comp?.veredito ?? "aprovado"}, nasce ACTIVE`
+      : `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance ${comp?.veredito ?? "aprovado"}, nasce ACTIVE`;
+    const violResumo = Array.isArray(comp?.violacoes) && comp.violacoes.length
+      ? `\nCompliance (${comp.veredito}): ` +
+        comp.violacoes.map((v: any) => `${v.code}/${v.severidade}`).join(", ")
+      : "";
+    const summary = `${cabeca}${violResumo}\n\n${msgGestor}`.trim();
     return await gravarCard(companyId, convId, requestedBy, action, "ad", molde?.id ?? dest.id, summary, {
       nome_novo: nomeNovo,
       nome_origem: resolvidoAd.origem,
@@ -3006,7 +3047,12 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       nota_visual_da_peca: v.nota_visual_da_peca ?? null,
       destino_url: destinoUrlCard,
       destino_do_anuncio: destAnuncio,
-      compliance: { veredito: comp?.veredito ?? "aprovado", regras_aplicadas: comp?.regras_aplicadas ?? null, validado_em: new Date().toISOString() },
+      compliance: {
+        veredito: comp?.veredito ?? "aprovado",
+        regras_aplicadas: comp?.regras_aplicadas ?? null,
+        violacoes: Array.isArray(comp?.violacoes) ? comp.violacoes : [],
+        validado_em: new Date().toISOString(),
+      },
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
@@ -3032,15 +3078,28 @@ async function gravarCard(companyId: string, convId: string, requestedBy: string
     aviso: "Pedido PENDENTE. Nada foi criado na Meta ainda. Ao ser aprovado, campanha/conjunto/anuncio nascem ACTIVE (a aprovacao do card autoriza entrega). Para religar objeto ja PAUSED use ativar_campanha, ativar_conjunto ou ativar_criativo. O pedido expira em 24h se nao for decidido." };
 }
 
-async function t_check_compliance(companyId: string, legenda: string, imgAtts: { mime: string; b64: string }[], mcpKey: string) {
+async function t_check_compliance(
+  companyId: string,
+  legenda: string,
+  imgAtts: { mime: string; b64: string }[],
+  mcpKey: string,
+  cache?: Map<string, any>,
+) {
   const img = imgAtts[0];
   if (!legenda && !img) return { erro: "forneca a legenda e/ou anexe o criativo" };
+  const cacheKey = !img ? `${companyId}::${legenda}` : "";
+  if (cacheKey && cache?.has(cacheKey)) {
+    return { ...cache.get(cacheKey), cache_hit: true };
+  }
   const body: any = { company_id: companyId };
   if (legenda) body.legenda = legenda;
   if (img) { body.image_base64 = img.b64; body.mime = img.mime; }
   const r = await fetch(`${SUPABASE_URL}/functions/v1/compliance-check`, { method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey }, body: JSON.stringify(body) });
   const t = await r.text();
-  try { return JSON.parse(t); } catch { return { erro: `compliance-check falhou (${r.status})` }; }
+  let parsed: any;
+  try { parsed = JSON.parse(t); } catch { parsed = { erro: `compliance-check falhou (${r.status})` }; }
+  if (cacheKey && cache && !parsed?.erro) cache.set(cacheKey, parsed);
+  return parsed;
 }
 
 // ESP-37: motor de legenda (N=3). Nao cria anuncio — so devolve variantes com veredito.
@@ -3063,7 +3122,7 @@ async function t_gerar_legendas(
     produto: String(args?.produto ?? "").trim(),
     objetivo,
   };
-  if (!body.produto) return { erro: "produto_obrigatorio", detalhe: "Informe o produto da empresa; o sistema nao usa CLT como fallback." };
+  // produto pode vir vazio: a edge resolve de brand.linhas_produto (sem fallback CLT).
   const drive = String(args?.drive_file_id ?? "").trim();
   if (drive) body.drive_file_id = drive;
   if (Array.isArray(args?.referencias) && args.referencias.length) {
@@ -3371,7 +3430,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
   { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE permitido — use target_name / params.nome / params.nome_novo / params.novo_nome com a string que o gestor quiser. O padrao [MARCA][CANAL][OBJ][PROD?][PAPEL?][ROT?][PER] e SUGESTAO OPCIONAL (so monte pelas partes se o gestor pedir ou se nao houver nome livre). Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (so familia engajamento/reconhecimento). Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal para social. PROIBIDO recusar IMPULSAO por falta de molde POST_ENGAGEMENT. Tudo que e criado nasce ACTIVE.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
-  { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA+CET (FIN-04). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. As variantes ficam GRAVADAS em conversation_legendas desta conversa (peca_chave/drive_file_id). Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true e passe em propose_action criar_anuncio_a_partir_de com params.legenda, legenda_fonte=agente e legenda_referencias. VOCE preenche legenda_referencias — NUNCA peca ao gestor para confirmar a referencia. Nao improvise legendas soltas no chat sem registrar depois com registrar_legenda_da_conversa.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: CLT (default)." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, peca_chave: { type: "string", description: "Chave estavel no slate (ex.: carrossel_5, card_capa_1). Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
+  { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA (CET/FIN-04 so se a empresa for de credito). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. As variantes ficam GRAVADAS em conversation_legendas desta conversa. Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true (aprovado OU atencao) e passe em propose_action criar_anuncio_a_partir_de. VOCE preenche legenda_referencias — NUNCA peca ao gestor. Nao invente CLT/CET para COHAPM.", parameters: { type: "object", properties: { produto: { type: "string", description: "Obrigatorio se brand nao tiver linhas_produto. Ex.: consignado_clt (Legal) ou juridico_whatsapp (COHAPM). SEM default CLT." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, peca_chave: { type: "string", description: "Chave estavel no slate (ex.: carrossel_5, card_capa_1). Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "get_legendas_da_conversa", description: "MEMORIA DURAVEL de legendas desta conversa (conversation_legendas). Devolve texto INTEGRAL por peca_chave/drive_file_id. OBRIGATORIO chamar ANTES de dizer que legenda 'nao existe' / 'texto integral nao disponivel' ou de pedir ao gestor para colar copy. Se a peca esta aqui, use o texto — nunca invente amnesia.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, drive_file_id: { type: "string" } } } } },
   { type: "function", function: { name: "registrar_legenda_da_conversa", description: "Grava/atualiza UMA legenda no store duravel desta conversa. Use quando voce propuser copy no chat SEM passar por gerar_legendas (ex.: slate de impulsão com legenda editorial), ou para marcar a variante selecionada pelo gestor. peca_chave estavel (carrossel_2, card_capa_1, …) + legenda integral. Com drive_file_id quando houver.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, legenda: { type: "string" }, drive_file_id: { type: "string" }, variante_indice: { type: "number" }, selecionada: { type: "boolean" }, objetivo: { type: "string" } }, required: ["peca_chave", "legenda"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida UMA legenda (texto integral) e/ou criativo anexado contra compliance_rules. Para esbocos que voce escreveu nesta conversa, PASSE o texto em legenda= — NAO use get_criativos_conteudo vazio como desculpa de '0 textos'. Para anuncios ja publicados, pegue a legenda em get_criativos_conteudo/legendas_unicas e passe aqui. Devolve veredito deterministicamente.", parameters: { type: "object", properties: { legenda: { type: "string", description: "Texto integral da legenda a validar (obrigatorio se nao houver imagem anexada)." } }, required: ["legenda"] } } },
@@ -3700,13 +3759,20 @@ async function runTool(name: string, args: any, ctx: any) {
       case "get_funil_credito": return await t_funil_credito(Number(args?.dias ?? 90));
       case "propose_action": {
         const at = String(args?.action_type ?? "");
-        if (ACOES_CRIACAO.includes(at)) return await t_propose_criacao(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey);
+        if (ACOES_CRIACAO.includes(at)) {
+          return await t_propose_criacao(
+            ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey, ctx.complianceCache,
+          );
+        }
         return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       }
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "auditar_compliance_financeira":
         return await t_auditar_compliance_financeira(ctx.companyId, String(args?.name_like ?? ""));
-      case "check_compliance": return await t_check_compliance(ctx.companyId, String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey);
+      case "check_compliance":
+        return await t_check_compliance(
+          ctx.companyId, String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey, ctx.complianceCache,
+        );
       case "gerar_legendas": return await t_gerar_legendas(ctx.companyId, ctx.mcpKey, args, ctx.convId);
       case "get_legendas_da_conversa": return await t_get_legendas_da_conversa(ctx.companyId, ctx.convId, args);
       case "registrar_legenda_da_conversa": return await t_registrar_legenda_da_conversa(ctx.companyId, ctx.convId, args);
@@ -3863,7 +3929,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 - Criacao em lote e degrau, nao rajada: proponha em etapas com leitura entre elas (motivo documentavel: limite de chamada e reinicio de aprendizado - nao invoque teoria de deteccao de automacao).
 - Divergencia persistente se registra, nao se vence: se o gestor sobrepor sem novo dado, declare a divergencia, registre a evidencia e execute a decisao dele.
 - Atribuicao com canais fora do sistema e DISPUTADA, nao apenas conservadora: outro canal pode ter originado o contato. Nao use atribuicao de canal unico como base para escalar.
-- Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar. Pedido de criar legendas: chame gerar_legendas (ESP-37, N=3, framework Hook→Beneficio→CTA+CET). Entregue as 3 com veredito; so apto_para_card=true pode ir ao card. NAO invente legendas no chat sem a ferramenta (se improvisar por excecao editorial, registre com registrar_legenda_da_conversa IMEDIATAMENTE — uma chamada por variante).
+- Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar. Pedido de criar legendas: chame gerar_legendas (ESP-37, N=3, Hook→Beneficio→CTA; CET so se empresa de credito). Entregue as 3 com veredito; apto_para_card=true inclui aprovado e atencao. NAO invente legendas no chat sem a ferramenta (se improvisar por excecao editorial, registre com registrar_legenda_da_conversa IMEDIATAMENTE — uma chamada por variante).
 - LEGENDAS JA PROPOSTAS NESTA CONVERSA: chame get_legendas_da_conversa ANTES de dizer que o texto "nao existe" / "nao esta disponivel". O store e o historico sao a memoria — PROIBIDO pedir ao gestor para re-colar copy que voce escreveu.
 - COMPLIANCE DE ESBOCOS DESTA CONVERSA (21/08/2026): se o gestor pedir "rode compliance" / "verifique as legendas" DEPOIS de voce ter escrito esbocos nesta conversa, o insumo e ESSES TEXTOS. Chame check_compliance com params.legenda = cada esboco (ate 3). Se ainda nao gravou, registre com registrar_legenda_da_conversa e depois cheque. PROIBIDO: (a) chamar so get_criativos_conteudo e declarar "0 textos" / "nada para validar"; (b) dizer que precisa sincronizar a Meta para auditar copy que VOCE acabou de propor; (c) inventar amnesia. get_criativos_conteudo e para anuncios JA publicados no espelho — nao substitui esbocos do chat.
 
@@ -3909,21 +3975,21 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   antes de auditar ou emitir. PROIBIDO trocar por outro conjunto (ex. "5 videos 22-27" so porque
   estao liberados no acervo). Inventario apto ≠ pedido. Se perder o slate no historico, peca
   confirmacao — nao invente.
-- EMITE OS N (anti-loop, 20/08/2026 v28.45): se o gestor disser "emite os N" / "emite os cards" e o
+- EMITE OS N (anti-loop + anti-timeout, 21/08/2026 v28.53): se o gestor disser "emite os N" / "emite os cards" e o
   slate (drive_file_id / meta ids / legendas) JA estiver nesta conversa (mensagem atual,
-  historico reinjetado OU conversation_legendas via get_legendas_da_conversa), EMITA agora com
-  propose_action×N — PRIMEIRO, sem releitura obrigatoria de nota_visual / checar_par /
-  get_acervo completo, sem reabrir compliance se a legenda ja foi confirmada, e SEM pedir ao
-  gestor para repetir "emite os N". PROIBIDO gastar o turno re-narrando o slate ou re-buscando
-  acervo quando os IDs ja estao no store. Use get_acervo_para_anuncio com drive_file_ids so
-  se precisar confirmar biblioteca. ANUNCIO em conjunto ENGAJAMENTO/RECONHECIMENTO: sem_molde
-  + page_id; o codigo preenche destino Page/IG automaticamente — NAO passe LP de conversao e
-  NAO diga que falta destino_url/produto CLT. Se o teto cortar no meio, emita o que couber e
-  diga o que falta — nunca "manda emite de novo" nem "Continuando automaticamente" sem chamar
-  propose_action de novo.
-- CET (FIN-04 v4): "consulte o CET na sua simulacao" e formulacao APROVADA pelo gestor e pela
-  regra. Se o gestor pediu essa formulacao, USE e NAO volte a exigir numero. Nao ha taxa de CET
-  fixa da LEV no sistema. Aceitar e depois recusar a mesma formulacao e falta grave.
+  historico reinjetado OU conversation_legendas via get_legendas_da_conversa), EMITA agora.
+  Por segmento HTTP: no maximo 1–2 propose_action criar_anuncio (compliance+status_video
+  custam 3–6s cada; 3 no mesmo HTTP estouram gateway → Erro de conexao). Emita 1–2, declare
+  approval_ids, e deixe o sistema continuar=true para o restante — NUNCA force 3+ proposes
+  + narracao longa no mesmo turno. Sem releitura obrigatoria de nota_visual / checar_par /
+  get_acervo completo se a legenda ja foi confirmada. PROIBIDO gastar o turno re-narrando o
+  slate. ANUNCIO em conjunto ENGAJAMENTO/RECONHECIMENTO: sem_molde + page_id; destino Page/IG
+  automatico — NAO passe LP CLT. Compliance veredito=atencao E apto (so reprovado/bloqueia
+  barra). Se o teto cortar no meio, emita o que couber e diga o que falta — nunca "manda
+  emite de novo" sem chamar propose_action de novo.
+- CET (FIN-04 v4) — SO EMPRESA DE CREDITO (Legal): "consulte o CET na sua simulacao" e
+  formulacao APROVADA. COHAPM/nao-credito: NAO exija CET, NAO anexe "Consulte sua margem",
+  NAO sugira consignado CLT. Aceitar e depois recusar a mesma formulacao (na Legal) e falta grave.
 - PECA ESPECIFICA DO DRIVE: antes de recomendar, classificar ou listar uma peca como candidata,
   chame nota_visual_da_peca com o drive_file_id atual (o id vem de get_acervo_para_anuncio ou
   get_analise_visual_drive). get_analise_visual_drive serve para inventario/triagem; nao autoriza
@@ -4669,7 +4735,15 @@ Deno.serve(async (req) => {
   // v28.11: o que cada ferramenta DEVOLVEU, para gravar em chat_messages.tool_results.
   const toolResults: ToolResult[] = [];
   const actionCards: CardInfo[] = [];
-  const ctx = { companyId: company.id, convId: convId!, requestedBy: requestedBy!, cards: actionCards, imgAtts, mcpKey: cfg?.api_key ?? "" };
+  const ctx = {
+    companyId: company.id,
+    convId: convId!,
+    requestedBy: requestedBy!,
+    cards: actionCards,
+    imgAtts,
+    mcpKey: cfg?.api_key ?? "",
+    complianceCache: new Map<string, any>(),
+  };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
   let modeloRoteado = MODEL;
   // v19: buffer do texto emitido JUNTO com tool_calls, que antes era descartado.
@@ -4933,6 +5007,24 @@ Deno.serve(async (req) => {
         const eCriacao =
           nomeTc === "propose_action" &&
           ACOES_CRIACAO_NO_TETO.includes(String(args?.action_type ?? ""));
+        const eCriarAnuncio =
+          nomeTc === "propose_action" &&
+          String(args?.action_type ?? "") === "criar_anuncio_a_partir_de";
+        const jaCriouAnuncioNesteSegmento = toolsUsed.filter((t) =>
+          t.tool === "propose_action" &&
+          String((t.args as any)?.action_type ?? "") === "criar_anuncio_a_partir_de"
+        ).length;
+        if (eCriarAnuncio && jaCriouAnuncioNesteSegmento >= MAX_PROPOSE_ANUNCIO_POR_SEGMENTO) {
+          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
+            erro: "limite_propose_anuncio_por_segmento",
+            aviso: `Ja foram ate ${MAX_PROPOSE_ANUNCIO_POR_SEGMENTO} criar_anuncio neste segmento HTTP. Cite os approval_ids ja emitidos; o sistema continua no proximo segmento (continuar=true) para os cards restantes. NAO peca ao gestor para repetir "emite".`,
+          }) });
+          toolResults.push({
+            tool: nomeTc, args, chars: 0, cortado: false, retorno: null,
+            erro: "limite_propose_anuncio_por_segmento",
+          });
+          continue;
+        }
         const tetoGlobal = !eCriacao && toolsUsed.filter((t) => {
           if (t.tool !== "propose_action") return true;
           const at = String((t.args as any)?.action_type ?? "");

@@ -1,20 +1,20 @@
-// supabase/functions/compliance-check/index.ts (v3)
-// v3 (05/08/2026 CODE 1.4): alem do verificador LLM, devolve o substituto seguro das
-//   promessas proibidas (checar_promessas_proibidas) e, quando o payload traz targeting +
-//   company_id, a pre-checagem de segmentacao injusta (checar_segmentacao). As duas RPCs
-//   sao auxiliares: ausencia de casamento NAO e aprovacao — isso vem escrito na resposta
-//   delas. O veredito final do material continua deterministico a partir das severidades
-//   da base compliance_rules.
-// v2: (a) veredito final calculado DETERMINISTICAMENTE pela edge a partir das severidades
-//     das violações (bloqueia=>reprovado; atencao=>atencao; nenhuma=>aprovado) — o modelo
-//     só identifica violações; (b) max_tokens 2000 + explicações curtas por instrução;
-//     (c) extração de JSON robusta (primeiro '{' ao último '}').
-// v1: base. Valida LEGENDA e/ou CRIATIVO contra public.compliance_rules (versionada).
+// supabase/functions/compliance-check/index.ts (v4)
+// v4 (21/08/2026): isolamento multi-empresa. company_id governa o LLM:
+//   - Legal/credito: Guardião consignado + FIN/CET + promessas_proibidas.
+//   - COHAPM/nao-credito: Guardião cooperativa/juridico WA — SEM CET/CLT/consignado;
+//     filtra regras FIN-* / LGL-01/02; nao roda mapa de promessas de credito.
+//   Veredito continua DETERMINISTICO por severidade. sugestao_reescrita NAO inventa
+//   "Legal e Viver" / correspondente bancario fora da empresa de credito.
+// v3 (05/08/2026 CODE 1.4): substituto seguro + checar_segmentacao.
 // Auth: x-mcp-key OU Bearer JWT. Body: { legenda?, image_base64?, mime?, company_id?, targeting? }.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { extrasAutoRouter, modeloOpenRouterPadrao } from "../_shared/openrouter_auto.ts";
+import {
+  empresaEhCredito,
+  filtrarRegrasPorEmpresa,
+} from "../_shared/empresa_credito.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -79,12 +79,26 @@ Deno.serve(async (req) => {
     return json({ error: "envie legenda, image_base64 e/ou targeting" }, 400);
   }
 
-  // CODE 1.4: substituto seguro das promessas + gate de segmentacao. Rodam ANTES do LLM
-  // (baratos, determinísticos) e entram na resposta mesmo se o modelo falhar depois.
+  const ehCredito = empresaEhCredito(companyId);
+  let marcaNome = ehCredito ? "Legal e Viver" : "COHAPM";
+  try {
+    if (companyId) {
+      const { data: bi } = await supa.rpc("ler_brand_identity", { p_company_id: companyId });
+      const brand = (bi as any)?.brand;
+      if (brand?.marca_nome) marcaNome = String(brand.marca_nome);
+    }
+  } catch { /* brand opcional */ }
+
+  // CODE 1.4: mapa de promessas e de CREDITO — so Legal. COHAPM nao herda substitutos CLT.
   let promessas: unknown = null;
-  if (legenda) {
+  if (legenda && ehCredito) {
     const { data, error } = await supa.rpc("checar_promessas_proibidas", { p_texto: legenda });
     promessas = error ? { erro: error.message } : data;
+  } else if (legenda && !ehCredito) {
+    promessas = {
+      avaliado: false,
+      motivo: "promessas_proibidas e mapa de credito — nao aplica a empresa nao-credito",
+    };
   }
   let segmentacao: unknown = null;
   if (targeting != null && companyId) {
@@ -123,9 +137,10 @@ Deno.serve(async (req) => {
     .order("code");
   if (!rules?.length) return json({ error: "base de regras vazia" }, 500);
   const escopo = legenda && imgB64 ? "ambos" : legenda ? "legenda" : "criativo";
-  const aplicaveis = rules.filter(
+  const porEscopo = rules.filter(
     (r) => r.categoria === "ambos" || r.categoria === escopo || escopo === "ambos",
   );
+  const aplicaveis = filtrarRegrasPorEmpresa(porEscopo, companyId);
   const sevMap = new Map(aplicaveis.map((r) => [r.code, r.severidade]));
 
   const regrasTxt = aplicaveis
@@ -133,7 +148,11 @@ Deno.serve(async (req) => {
       (r) => `${r.code} [${r.severidade}] (${r.categoria}): ${r.regra} Ex.: ${r.exemplos_violacao}`,
     )
     .join("\n");
-  const instru = `Você é o Guardião de Compliance de anúncios de crédito consignado (Legal é Viver). Identifique VIOLAÇÕES do material contra as regras abaixo. Seja rigoroso mas justo: só aponte violação com base concreta no material; não invente. Responda SOMENTE com JSON válido, sem markdown:\n{"violacoes":[{"code":"...","trecho_ou_elemento":"...","explicacao":"máx 20 palavras"}],"sugestao_reescrita":"legenda corrigida ou null"}\nSe não houver violações: {"violacoes":[],"sugestao_reescrita":null}.\nREGRAS DE INTERPRETAÇÃO OBRIGATÓRIAS (valem sobre ambiguidade nos exemplos):\n- FIN-04: a menção "consulte o CET na sua simulação" (ou "consulte o CET da oferta") SATISFAZ a exigência de CET. NÃO exija percentual numérico de CET. NÃO trate X%/Y%/Z% de exemplos como pendência do anunciante.\n- LGL-04: se a identificação do anunciante estiver na LP/URL de destino, isso é ATENÇÃO no máximo — não invente bloqueio exigindo CNPJ na legenda quando o gestor declarou que fica na LP.\nREGRAS:\n${regrasTxt}`;
+  const instruCredito =
+    `Você é o Guardião de Compliance de anúncios de crédito consignado (${marcaNome}). Identifique VIOLAÇÕES do material contra as regras abaixo. Seja rigoroso mas justo: só aponte violação com base concreta no material; não invente. Responda SOMENTE com JSON válido, sem markdown:\n{"violacoes":[{"code":"...","trecho_ou_elemento":"...","explicacao":"máx 20 palavras"}],"sugestao_reescrita":"legenda corrigida ou null"}\nSe não houver violações: {"violacoes":[],"sugestao_reescrita":null}.\nREGRAS DE INTERPRETAÇÃO OBRIGATÓRIAS (valem sobre ambiguidade nos exemplos):\n- FIN-04: a menção "consulte o CET na sua simulação" (ou "consulte o CET da oferta") SATISFAZ a exigência de CET. NÃO exija percentual numérico de CET. NÃO trate X%/Y%/Z% de exemplos como pendência do anunciante.\n- LGL-04: se a identificação do anunciante estiver na LP/URL de destino, isso é ATENÇÃO no máximo — não invente bloqueio exigindo CNPJ na legenda quando o gestor declarou que fica na LP.\nREGRAS:\n${regrasTxt}`;
+  const instruNaoCredito =
+    `Você é o Guardião de Compliance de anúncios da cooperativa habitacional / núcleo jurídico (${marcaNome}). NÃO é empresa de crédito consignado. Identifique VIOLAÇÕES só contra as regras listadas. Seja rigoroso mas justo: só aponte violação com base concreta; não invente. Responda SOMENTE com JSON válido, sem markdown:\n{"violacoes":[{"code":"...","trecho_ou_elemento":"...","explicacao":"máx 20 palavras"}],"sugestao_reescrita":"legenda corrigida ou null"}\nSe não houver violações: {"violacoes":[],"sugestao_reescrita":null}.\nPROIBIDO na sugestao_reescrita: inventar CET, consignado CLT, simulação de margem, "Correspondente Bancário", "Legal é Viver", crédito sujeito a análise bancária, ou qualquer oferta financeira de terceiros.\nSe reescrever: preserve temas jurídicos (conta de luz, cobrança indevida, empréstimo abusivo, contratos) e, quando LGL-04 aplicar, sugira razão social/CNPJ/WhatsApp oficial da cooperativa — NÃO de correspondente bancário.\nLGL-04: ausência de CNPJ na legenda é ATENÇÃO no máximo se a identificação estiver no destino/WhatsApp oficial — não invente bloqueio.\nREGRAS APLICÁVEIS A ESTA EMPRESA:\n${regrasTxt}`;
+  const instru = ehCredito ? instruCredito : instruNaoCredito;
 
   const content: any[] = [
     {
@@ -193,6 +212,9 @@ Deno.serve(async (req) => {
   return json({
     ok: true,
     escopo,
+    company_id: companyId,
+    empresa_credito: ehCredito,
+    marca: marcaNome,
     regras_aplicadas: aplicaveis.length,
     veredito,
     violacoes,

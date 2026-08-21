@@ -352,6 +352,7 @@ import {
   targetingPadraoSocialTopo,
   mensagemObjetivoNaoSuportado,
 } from "../_shared/objetivo_odax.ts";
+import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
   argsAdDeGraph,
@@ -1386,13 +1387,21 @@ export async function montarCriacao(
       return mensagemObjetivoNaoSuportado(resolvidoObj.bruto);
     }
     const objetivo = resolvidoObj.objetivo;
+    const ehCredito = empresaEhCredito(companyId);
+    const catsPayload = Array.isArray(p?.special_ad_categories)
+      ? (p.special_ad_categories as unknown[]).map((x) => String(x).trim()).filter(Boolean)
+      : null;
+    // Legal: FINANCIAL obrigatorio. COHAPM/nao-credito: [] salvo pedido explicito no card.
+    const catsEspeciais = catsPayload != null
+      ? catsPayload
+      : (ehCredito ? ["FINANCIAL_PRODUCTS_SERVICES"] : []);
     return {
       path: `/${conta}/campaigns`,
       body: {
         name: nome,
         objective: objetivo,
         status: "ACTIVE", // v5.26: aprovar criar_campanha = cria ACTIVE
-        special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]), // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
+        special_ad_categories: JSON.stringify(catsEspeciais),
         buying_type: "AUCTION",
         is_adset_budget_sharing_enabled: "false", // v4: exigido pela Meta em ABO; false = sem compartilhamento de orcamento entre conjuntos
         use_adset_level_budgets: "true", // v5.5: ABO real — impede o Pipeboard de injetar orcamento de campanha (CBO)
@@ -1400,6 +1409,7 @@ export async function montarCriacao(
       regime_orcamento: "abo",
       nome_partes: nomePartesGravar,
       familia_objetivo: familiaDeObjetivo(objetivo),
+      special_ad_categories: catsEspeciais,
     };
   }
 
@@ -2661,7 +2671,9 @@ async function espelhar(
           lifetime_budget: objeto?.lifetime_budget != null ? Number(objeto.lifetime_budget) : null,
           external_id: novoId,
           external_account_id: contaSemPrefixo,
-          special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"],
+          special_ad_categories: Array.isArray(p?.special_ad_categories)
+            ? p.special_ad_categories
+            : (empresaEhCredito(companyId) ? ["FINANCIAL_PRODUCTS_SERVICES"] : []),
           criado_pelo_sistema: true,
           criado_por_approval_id: approvalId,
           nome_partes: p?.nome_partes ?? null,

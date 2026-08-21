@@ -833,8 +833,16 @@ export function OperacaoChat() {
       }
       setPending(null);
       setLive(null); // as mensagens canônicas do banco assumem a partir daqui
-    } catch {
-      toast.error("Erro de conexão. Tente novamente.");
+    } catch (err) {
+      const msg = String((err as any)?.message ?? err ?? "");
+      const pareceTimeout =
+        /FunctionsHttpError|504|Gateway Timeout|Failed to fetch|AbortError|timed out|timeout/i.test(msg) ||
+        /non-2xx|Edge Function/i.test(msg);
+      toast.error(
+        pareceTimeout
+          ? "A resposta demorou demais; use Continuar ou peça de novo os cards restantes."
+          : "Erro de conexão. Tente novamente.",
+      );
       if (!reenvio) setInput(text);
       setPending(null);
       setLive(null);
