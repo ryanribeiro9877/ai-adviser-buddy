@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.45)
+// supabase/functions/traffic-chat/index.ts (v28.46)
+// v28.46 (21/08/2026) - FIDELIDADE AO PEDIDO + ranking por alcance: interpretacao literal
+//   da pergunta (nao expandir janela/historico); get_ads_ranking ordena por
+//   gasto|alcance|conversas e expoe reach (fecha lacuna "alcance indisponivel").
 // v28.45 (20/08/2026) - EMISSAO ENGAJAMENTO (lote 5 cards IMPULSAO):
 //   (1) sem_molde em conjunto OUTCOME_ENGAGEMENT/AWARENESS auto-preenche destino
 //   Page/IG (nao exige LP/produto CLT) — fecha peca_nova_sem_molde_incompleta;
@@ -1012,30 +1015,60 @@ async function t_funnel(companyId: string, date_from?: string, date_to?: string)
     campanhas_sem_formulario_nem_conversa: semEvento.length,
     nota: "funil de MIDIA agregado da conta. cliques_todos = todos os cliques; cliques_no_link = so os que levam ao destino - nao misture as bases. visualizacoes_lp e resultado valido, reporte. CUSTO POR RESULTADO: por_formulario e por_conversa usam SO o gasto das campanhas que registraram aquele evento (veja gasto_base_do_*), justamente para nao diluir a regua com campanha que nem persegue o evento - e PROIBIDO recalcular dividindo `gasto` total pelo evento. Se a janela mistura objetivos (ex.: periodo de mensagens + periodo de engajamento), diga QUAL campanha sustenta o custo antes de usar como benchmark. Proposta/contrato/receita estao FORA do escopo desde 28/07/2026 - nao existe fonte de conversao final; trate custo por clique/LP como proxy e declare isso." };
 }
-async function t_ads_ranking(companyId: string, days = 7) {
-  const from = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+async function t_ads_ranking(companyId: string, days = 30, ordenar_por = "gasto", date_from?: string) {
+  const d = Math.min(Math.max(Number(days) || 30, 1), 120);
+  const ordenar = String(ordenar_por ?? "gasto").toLowerCase();
+  const from = date_from?.slice(0, 10) || new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
   const { data: ads } = await supa.from("ads").select("external_id,name,campaign_id").eq("company_id", companyId);
   const { data: camps } = await supa.from("campaigns").select("id,name,category").eq("company_id", companyId).eq("status", "active");
   const campMap = new Map((camps ?? []).map((c) => [c.id, c]));
   const active = (ads ?? []).filter((a) => campMap.has(a.campaign_id));
   if (!active.length) return { ranking: [], nota: "sem criativos em campanhas ativas" };
   const ids = active.map((a) => a.external_id);
-  const { data: snaps } = await supa.from("ad_metric_snapshots").select("ad_external_id,spend,form_leads,messaging_started").gte("snapshot_date", from).in("ad_external_id", ids);
-  const agg = new Map<string, { spend: number; res: number }>();
+  const { data: snaps } = await supa.from("ad_metric_snapshots")
+    .select("ad_external_id,spend,form_leads,messaging_started,reach,impressions,link_clicks")
+    .gte("snapshot_date", from).in("ad_external_id", ids);
+  type Agg = { spend: number; forms: number; convs: number; reach: number; imp: number; link: number };
+  const agg = new Map<string, Agg>();
   for (const s of snaps ?? []) {
-    const ad = active.find((a) => a.external_id === s.ad_external_id); if (!ad) continue;
-    const cat = campMap.get(ad.campaign_id)?.category;
-    const res = cat === "mensagem" ? Number(s.messaging_started || 0) : Number(s.form_leads || 0);
-    const cur = agg.get(s.ad_external_id) ?? { spend: 0, res: 0 };
-    cur.spend += Number(s.spend || 0); cur.res += res; agg.set(s.ad_external_id, cur);
+    const cur = agg.get(s.ad_external_id) ?? { spend: 0, forms: 0, convs: 0, reach: 0, imp: 0, link: 0 };
+    cur.spend += Number(s.spend || 0);
+    cur.forms += Number(s.form_leads || 0);
+    cur.convs += Number(s.messaging_started || 0);
+    cur.reach += Number(s.reach || 0);
+    cur.imp += Number(s.impressions || 0);
+    cur.link += Number(s.link_clicks || 0);
+    agg.set(s.ad_external_id, cur);
   }
-  const rows = [...agg.entries()].filter(([, v]) => v.spend > 0).map(([id, v]) => {
+  const rows = [...agg.entries()].filter(([, v]) => v.spend > 0 || v.imp > 0).map(([id, v]) => {
     const ad = active.find((a) => a.external_id === id)!;
-    return { criativo: ad.name, campanha: campMap.get(ad.campaign_id)?.name, gasto: brl(v.spend), resultados: v.res,
-      custo_por_resultado: v.res ? brl(v.spend / v.res) : "sem resultado", amostra_pequena: v.res < 20, _c: v.res ? v.spend / v.res : 1e9 };
-  }).sort((a, b) => a._c - b._c).map(({ _c, ...r }) => r);
-  return { janela_dias: days, ranking: rows.slice(0, 15),
-    nota: "ranking por custo de MIDIA (formulario/conversa). NAO e ranking por contrato pago - para receita use get_funil_credito.por_campanha (campo criativo_utm_content)." };
+    const cat = campMap.get(ad.campaign_id)?.category;
+    const res = cat === "mensagem" ? v.convs : (v.forms || v.convs);
+    return {
+      criativo: ad.name, campanha: campMap.get(ad.campaign_id)?.name,
+      gasto: brl(v.spend), gasto_num: v.spend,
+      alcance_soma_diaria: v.reach, impressoes: v.imp, cliques_link: v.link,
+      formularios: v.forms, conversas: v.convs, resultados: res,
+      custo_por_resultado: res ? brl(v.spend / res) : "sem resultado",
+      amostra_pequena: res < 20,
+    };
+  });
+  rows.sort((a, b) => {
+    if (ordenar === "alcance") return b.alcance_soma_diaria - a.alcance_soma_diaria;
+    if (ordenar === "conversas") return b.conversas - a.conversas || b.gasto_num - a.gasto_num;
+    if (ordenar === "impressoes") return b.impressoes - a.impressoes;
+    if (ordenar === "custo") {
+      const ca = a.resultados ? a.gasto_num / a.resultados : 1e9;
+      const cb = b.resultados ? b.gasto_num / b.resultados : 1e9;
+      return ca - cb;
+    }
+    return b.gasto_num - a.gasto_num;
+  });
+  return {
+    date_from: from, ordenar_por: ordenar,
+    ranking: rows.slice(0, 20).map(({ gasto_num, ...r }) => r),
+    nota: "alcance_soma_diaria nao e unico. ordenar_por=alcance|gasto|conversas|impressoes|custo. PROIBIDO dizer alcance indisponivel se o ranking veio preenchido. Ranking por custo medio NAO autoriza pausa sozinho (Breakdown Effect).",
+  };
 }
 async function t_campaign_detail(companyId: string, name_like: string) {
   const { data: all } = await supa
@@ -3161,7 +3194,7 @@ const TOOLS = [
   { type: "function", function: { name: "avaliar_pacing", description: "Calcula capacidade diaria da estrutura e, se meta_leads_dia for informada, o PISO de verba diaria ao custo atual. Exige company_id da conversa; meta_leads_dia e opcional. Declara que nao existe meta registrada e que a projecao nao e estimativa: escalar tende a elevar o custo, portanto a verba real pode ser maior.", parameters: { type: "object", properties: { meta_leads_dia: { type: "number" } } } } },
   { type: "function", function: { name: "validar_pedido_contra_contrato", description: "Valida um pedido (json) contra o contrato declarado em contrato_de_execucao para a acao. Assinatura real: (acao text, pedido jsonb). Se nao houver linhas vigentes para a acao, devolve valido=false com motivo contrato_desconhecido (nao inventa campos). Se faltar campo obrigatorio, recusa com faltando[]. Campos extras NAO invalidam - vao em nao_previstos_no_contrato para decisao humana. O contrato de criar_anuncio_a_partir_de e o MESMO vocabulario que pedido_de_anuncio_completo aceita: um pedido valido aqui e entendido la, e vice-versa. LACUNAS HONESTAS: o contrato foi derivado do codigo montarCriacao (meta-actions), nao de card executado; url_tags e opcional e vai no adcreative, nao no ad; meta_video_id/legenda/thumbnail_url sao opcionais da rota peca nova; status_inicial e opcional porque o executor FORCA ACTIVE no body (campanha/conjunto/anuncio) e nao le o payload. NAO substitui pedido_de_anuncio_completo (biblioteca, compliance, procedencia).", parameters: { type: "object", properties: { acao: { type: "string", description: "Ex.: criar_anuncio_a_partir_de, criar_conjunto_a_partir_de, criar_campanha." }, pedido: { type: "object", description: "Objeto com os campos do payload que o executor leria." } }, required: ["acao", "pedido"] } } },
   { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real (dias efetivamente com dado). Nao contem proposta/contrato.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
-  { type: "function", function: { name: "get_ads_ranking", description: "RECORTE de criativos por custo MEDIO de midia numa janela de dias. ATENCAO - este e um recorte (breakdown) e serve para ENTENDER, nunca para PRESCREVER: a Meta aloca verba por custo MARGINAL (do proximo resultado), entao um criativo com media mais alta pode estar segurando o custo total. E PROIBIDO propor pausar ou reduzir um criativo com base apenas nesta ordenacao; prescricao exige teste isolado ou tendencia temporal. Para decidir escala ou corte, cruze com get_funil_credito (contrato pago por criativo) e consulte get_conhecimento(tema=otimizacao).", parameters: { type: "object", properties: { days: { type: "number" } } } } },
+  { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando perguntarem maior alcance. PROIBIDO dizer alcance indisponivel sem chamar isto. Custo medio sozinho NAO autoriza pausa (Breakdown Effect).", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, date_from: { type: "string" } } } } },
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de UMA campanha pelo nome, com totais do periodo. Inclui special_ad_categories da CAMPANHA (FINANCIAL_PRODUCTS_SERVICES quando marcada) — a Meta aplica categoria especial no nivel campanha e os anuncios herdam. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "auditar_compliance_financeira", description: "Auditoria de categoria especial + regras financeiras de UMA campanha e seus anuncios. Devolve special_ad_categories do espelho, se e financeira, lista de anuncios (status/CTA/destino/criado_pelo_sistema), alertas de segmentacao (idade/genero/LAL) e as regras ativas FIN/LGL/CRI. Use quando o gestor perguntar se anuncios respeitam finanças/categoria especial/regras da Meta. NAO diga que o campo nao existe: esta tool e get_campaign_detail leem. Complemente com get_conhecimento(tema=compliance) e check_compliance nas legendas. Confirmacao ao vivo: ler_pipeboard get_campaign_details.", parameters: { type: "object", properties: { name_like: { type: "string", description: "Nome (ou trecho) da campanha" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
@@ -3467,7 +3500,12 @@ async function runTool(name: string, args: any, ctx: any) {
       case "avaliar_pacing": return await t_rpc("avaliar_pacing", { p_company_id: ctx.companyId, p_meta_leads_dia: args?.meta_leads_dia == null ? null : Number(args.meta_leads_dia) });
       case "validar_pedido_contra_contrato": return await t_rpc("validar_pedido_contra_contrato", { p_acao: String(args?.acao ?? ""), p_pedido: args?.pedido ?? {} });
       case "get_funnel": return await t_funnel(ctx.companyId, args?.date_from, args?.date_to);
-      case "get_ads_ranking": return await t_ads_ranking(ctx.companyId, Number(args?.days ?? 7));
+      case "get_ads_ranking": return await t_ads_ranking(
+        ctx.companyId,
+        Number(args?.days ?? 30),
+        String(args?.ordenar_por ?? "gasto"),
+        args?.date_from ? String(args.date_from) : undefined,
+      );
       case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
       case "get_funil_credito": return await t_funil_credito(Number(args?.dias ?? 90));
       case "propose_action": {
@@ -3592,6 +3630,12 @@ function systemPrompt(companyName: string, memoria: string, estilo: string, indi
   return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()} (fuso de Brasilia). Responde ao gestor (Roberto) em portugues brasileiro.
 PERFIL EMPRESARIAL: ${perfil}
 HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar uma janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado.
+
+== FIDELIDADE AO PEDIDO (interpretacao fria) ==
+- Leia a pergunta de forma LITERAL. Nao amplie o brief: se pediu "desde a ativacao dessas campanhas", NAO entregue serie historica da conta inteira (SALT/pausadas antigas) como corpo da analise.
+- Responda cada pergunta atomica do gestor (melhor criativo, maior alcance, mais conversas, numeros WA). Se faltar dado, diga 'nao coletado nesta rodada' apos tentar a tool — PROIBIDO 'indisponivel' para alcance sem chamar get_ads_ranking(ordenar_por=alcance).
+- Distinga objective da campanha vs optimization_goal do conjunto (ex.: OUTCOME_ENGAGEMENT + LANDING_PAGE_VIEWS).
+- Historico fora do pedido: no maximo uma linha rotulada FORA DO PEDIDO.
 
 == QUEM VOCE E ==
 Voce nao e um assistente que responde perguntas: e o profissional responsavel por onde o dinheiro de midia e colocado e por que. A conversa e entre pares - sem didatismo, sem entusiasmo de vendedor, sem se desculpar por dar ma noticia. Sua missao: captar mais e melhor pelo menor custo sustentavel - SEM comprar volume barato que nao vira negocio, SEM arriscar a conta de anuncios, SEM queimar os numeros de WhatsApp, SEM degradar pagina e perfil (ativo organico e infraestrutura de midia - ja houve conta com ~R$94 mil gastos derrubada por propagacao de restricao do organico) e SEM transformar base sem consentimento em publico.
