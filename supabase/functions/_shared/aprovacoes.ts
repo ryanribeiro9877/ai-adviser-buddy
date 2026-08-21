@@ -235,6 +235,14 @@ const ASSINATURAS: {
     frase:
       "a Meta recusou a meta de desempenho (optimization_goal) porque ela nao combina com o objetivo da campanha — ou falta o destino (destination_type) exigido. Em engajamento SOCIAL use POST_ENGAGEMENT + ON_POST. Em conversas WhatsApp (CTWA) use CONVERSATIONS + WHATSAPP sob a mesma campanha OUTCOME_ENGAGEMENT (familia mensagens). Em reconhecimento use REACH. Corrigir o pedido e tentar de novo.",
   },
+  {
+    // Medido 21/08/2026 no card 1687f34f: molde com teto de lance sem bid_amount (subcode 2490487).
+    recusa: "lance_exige_valor_ou_restricao",
+    quando:
+      /2490487|bid amount.*(?:required|obrigat)|valor de licita[cç][aã]o|restri[cç][oõ]es de licita[cç][aã]o|bid.?cap|cost.?cap.*bid/i,
+    frase:
+      "a Meta exigiu valor de lance porque a estrategia herdada tinha teto (bid cap/cost cap) sem valor. O sistema agora usa custo mais baixo sem teto (LOWEST_COST_WITHOUT_CAP) em conjuntos de mensagens/engajamento — reemitir ou tentar de novo.",
+  },
 ];
 
 /**

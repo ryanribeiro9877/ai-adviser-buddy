@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.35)
+// supabase/functions/meta-actions/index.ts (v5.36)
+// v5.36 (21/08/2026) - CTWA/mensagens: forca bid_strategy=LOWEST_COST_WITHOUT_CAP e
+//   remove bid_amount herdado do molde (card 1687f34f, Meta 2490487: teto sem valor).
 // v5.35 (21/08/2026) - FAMILIA MENSAGENS (CTWA): CONVERSATIONS + destination_type=WHATSAPP
 //   + page_id sob campanha OUTCOME_ENGAGEMENT. Nao forcar POST_ENGAGEMENT/ON_POST.
 //   Card 7d6563df: recusa optimization_goal_nao_suportado_para_engajamento.
@@ -1759,11 +1761,23 @@ export async function montarCriacao(
       } else {
         delete body.destination_type;
       }
+      // v5.36: molde LF CONV pode trazer LOWEST_COST_WITH_BID_CAP / COST_CAP sem bid_amount
+      // (ou bid_amount que a Graph nao devolve na leitura). Meta 2490487. Padrao da casa:
+      // custo mais baixo sem teto — sem bid_amount.
+      const bidPedido = String(p?.bid_strategy ?? "").trim().toUpperCase();
+      const bidAmountPedido = p?.bid_amount != null && String(p.bid_amount).trim() !== ""
+        ? String(p.bid_amount).trim()
+        : "";
+      const precisaTeto = bidPedido === "LOWEST_COST_WITH_BID_CAP" || bidPedido === "COST_CAP";
+      if (precisaTeto && bidAmountPedido) {
+        body.bid_strategy = bidPedido;
+        body.bid_amount = bidAmountPedido;
+      } else {
+        body.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
+        delete body.bid_amount;
+      }
       if (semMoldeConj && !body.targeting) {
         body.targeting = JSON.stringify(targetingPadraoSocialTopo());
-      }
-      if (semMoldeConj && !body.bid_strategy) {
-        body.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
       }
       posicionamento = {
         ...(posicionamento && typeof posicionamento === "object" ? posicionamento : {}),
@@ -1774,14 +1788,15 @@ export async function montarCriacao(
         optimization_goal: defs.optimization_goal,
         billing_event: defs.billing_event,
         destination_type: defs.destination_type,
+        bid_strategy: body.bid_strategy,
         page_id: pageId,
         declaracao_social: mensagensTopo
           ? (semMoldeConj
-            ? `Conjunto mensagens SEM MOLDE: CONVERSATIONS + WHATSAPP + page_id=${pageId}.`
-            : `Conjunto mensagens: molde so emprestou targeting; CONVERSATIONS + WHATSAPP + page_id=${pageId}.`)
+            ? `Conjunto mensagens SEM MOLDE: CONVERSATIONS + WHATSAPP + page_id=${pageId}; bid=${body.bid_strategy}.`
+            : `Conjunto mensagens: molde so emprestou targeting; CONVERSATIONS + WHATSAPP + page_id=${pageId}; bid=${body.bid_strategy} (teto do molde descartado se sem valor).`)
           : semMoldeConj
-          ? `Conjunto ${familiaPayload} SEM MOLDE: targeting BR Advantage+ minimo; optimization_goal=${defs.optimization_goal}; destination_type=${defs.destination_type ?? "null"}; promoted_object.page_id=${pageId}.`
-          : `Conjunto ${familiaPayload}: molde so emprestou targeting; optimization_goal=${defs.optimization_goal}, destination_type=${defs.destination_type ?? "null"}, promoted_object.page_id=${pageId} (pixel/LEAD do molde descartados).`,
+          ? `Conjunto ${familiaPayload} SEM MOLDE: targeting BR Advantage+ minimo; optimization_goal=${defs.optimization_goal}; destination_type=${defs.destination_type ?? "null"}; bid=${body.bid_strategy}; promoted_object.page_id=${pageId}.`
+          : `Conjunto ${familiaPayload}: molde so emprestou targeting; optimization_goal=${defs.optimization_goal}, destination_type=${defs.destination_type ?? "null"}, bid=${body.bid_strategy}, promoted_object.page_id=${pageId} (pixel/LEAD do molde descartados).`,
       };
     }
 
@@ -1853,6 +1868,25 @@ export async function montarCriacao(
           geo_default_aplicado: (gateGeo as any).default_aplicado === true,
           meio: (gateGeo as any).meio ?? null,
         };
+      }
+    }
+
+    // v5.36: sanitize lance antes de enviar — Meta 2490487 se teto sem valor.
+    const bidStrat = String(body.bid_strategy ?? "").trim().toUpperCase();
+    const bidAmt = String(body.bid_amount ?? "").trim();
+    const exigeValor =
+      bidStrat === "LOWEST_COST_WITH_BID_CAP" ||
+      bidStrat === "COST_CAP" ||
+      bidStrat === "LOWEST_COST_WITH_MIN_ROAS";
+    if (!bidStrat || (exigeValor && !bidAmt)) {
+      body.bid_strategy = "LOWEST_COST_WITHOUT_CAP";
+      delete body.bid_amount;
+      if (posicionamento && typeof posicionamento === "object") {
+        (posicionamento as any).bid_strategy_sanitizado = "LOWEST_COST_WITHOUT_CAP";
+        (posicionamento as any).bid_motivo =
+          !bidStrat
+            ? "bid_strategy ausente — default sem teto"
+            : `molde/pedido tinha ${bidStrat} sem bid_amount — convertido para LOWEST_COST_WITHOUT_CAP`;
       }
     }
 
