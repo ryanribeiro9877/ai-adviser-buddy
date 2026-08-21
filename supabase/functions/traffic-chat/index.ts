@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.51)
+// supabase/functions/traffic-chat/index.ts (v28.52)
+// v28.52 (21/08/2026) - Portao de video em propose_action: t_status_video passa
+//   company_id. Sem isso upload-midia usava token Legal em videos COHAPM → Graph 400
+//   e pedido_incompleto (nao emite card). Fail-closed permanece: so emite se pronto.
 // v28.51 (21/08/2026) - MEMORIA COMPLIANCE: se o gestor pedir compliance de esbocos/
 //   legendas JA propostas nesta conversa, NUNCA use get_criativos_conteudo vazio como
 //   "0 textos". Use check_compliance(legenda=...) com o texto do historico ou
@@ -2866,6 +2869,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
       const { data: up } = await supa.from("media_uploads")
         .select("meta_video_id, meta_image_hash, tipo")
         .eq("drive_file_id", driveFileId)
+        .eq("company_id", companyId)
         .eq("status", "enviado")
         .or("meta_video_id.not.is.null,meta_image_hash.not.is.null")
         .order("enviado_em", { ascending: false })
@@ -2887,7 +2891,7 @@ async function t_propose_criacao(companyId: string, convId: string, requestedBy:
     // Video na Meta e assincrono: o id existe antes do processamento terminar.
     // Card apontando para video ainda processando falha na execucao - recusa aqui.
     if (metaVideoId) {
-      const st = await t_status_video(metaVideoId, mcpKey);
+      const st = await t_status_video(metaVideoId, mcpKey, companyId);
       if (st?.ok && st.pronto === false) {
         return {
           pedido_incompleto: true,
@@ -3272,11 +3276,17 @@ async function t_sincronizar_meta_dicas(companyId: string, mcpKey: string) {
 }
 
 // Video na Meta e assincrono: id existe antes de status.video_status=ready.
-async function t_status_video(videoId: string, mcpKey: string) {
+// companyId obrigatorio para o token Ads certo (Legal vs COHAPM) — sem isso Graph 400.
+async function t_status_video(videoId: string, mcpKey: string, companyId: string) {
   const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
-    body: JSON.stringify({ acao: "status_video", video_id: videoId }),
+    body: JSON.stringify({
+      acao: "status_video",
+      video_id: videoId,
+      company_id: companyId,
+      company: companyId,
+    }),
   });
   const t = await r.text();
   try { return JSON.parse(t); } catch { return { ok: false, erro: `status_video falhou (${r.status})` }; }

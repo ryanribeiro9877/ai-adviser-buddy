@@ -1,5 +1,8 @@
-// supabase/functions/upload-midia/index.ts (v5)
+// supabase/functions/upload-midia/index.ts (v5.2)
 // =============================================================================
+// v5.2 (21/08/2026) - status_video: token Ads POR EMPRESA (company_id/company ou
+//   resolve via media_uploads). Sem isso COHAPM lia com token Legal → Graph 400
+//   (#100) e o portao de emissao de card falhava fechado. Leitura: GET /{id}?fields=id,status.
 // v5 (11/08/2026) - acao "escoar_imagens": sobe as imagens aproveitaveis do acervo que
 //   ainda nao tem meta_image_hash, em sequencia, respeitando max_actions_per_hour.
 //   Cron horario chama isto; quando nao ha pendente, devolve enviados=0 e para sozinho.
@@ -316,28 +319,56 @@ Deno.serve(async (req) => {
   // v5.1 (11/08/2026) - status de processamento de um video JA na biblioteca.
   // advideos devolve id antes do video ficar pronto; anuncio apontando para video
   // ainda processando falha. Esta acao e LEITURA pura do status.video_status.
+  // v5.2: token da EMPRESA dona do video (nao default cego para Legal).
   if (acao === "status_video") {
-    const companyProbe = String(body?.company_id ?? "").trim() || COMPANY_LEGAL;
-    const ativ = ativarTokenEmpresa(companyProbe);
-    if (!ativ.ok) return json({ error: ativ.error }, 500);
     const vid = String(body?.video_id ?? body?.meta_video_id ?? "").trim();
     if (!vid) return json({ error: "informe video_id ou meta_video_id" }, 400);
-    const url = `${GRAPH}/${vid}?fields=id,title,length,status&access_token=${encodeURIComponent(META_ADS_TOKEN)}`;
+
+    let companyProbe = String(body?.company_id ?? body?.company ?? "").trim();
+    let accountHint: string | null = null;
+    // Dono do video no espelho prevalece: token da empresa que enviou (evita Graph 400
+    // com token Legal em video COHAPM, e vice-versa).
+    const { data: row } = await supa.from("media_uploads")
+      .select("company_id, account_external_id")
+      .eq("meta_video_id", vid)
+      .eq("status", "enviado")
+      .order("enviado_em", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (row?.company_id) companyProbe = String(row.company_id);
+    if (row?.account_external_id) accountHint = String(row.account_external_id);
+    if (!companyProbe || !/^[0-9a-f-]{36}$/i.test(companyProbe)) {
+      companyProbe = COMPANY_LEGAL;
+    }
+
+    const ativ = ativarTokenEmpresa(companyProbe);
+    if (!ativ.ok) return json({ error: ativ.error }, 500);
+
+    // Meta docs: GET /{video-id}?fields=status → status.video_status (ready|processing|error).
+    // Nao pedir title/length: desnecessarios para o portao e historicamente sensiveis a #100.
+    const url =
+      `${GRAPH}/${encodeURIComponent(vid)}?fields=id,status` +
+      `&access_token=${encodeURIComponent(META_ADS_TOKEN)}`;
     const r = await fetch(url);
     const t = await r.text();
     let j: any; try { j = JSON.parse(t); } catch { j = { parse_error: t.slice(0, 200) }; }
     if (!r.ok) {
-      return json({ ok: false, acao: "status_video", video_id: vid,
-        erro: `graph ${r.status}`, detalhe: JSON.stringify(j).slice(0, 300) }, 502);
+      return json({
+        ok: false, acao: "status_video", video_id: vid,
+        company_id: companyProbe, account_external_id: accountHint,
+        erro: `graph ${r.status}`, detalhe: JSON.stringify(j).slice(0, 300),
+      }, 502);
     }
     const st = j?.status ?? null;
-    const videoStatus = String(st?.video_status ?? st?.processing_phase ?? "").trim() || null;
+    const videoStatus = (st && typeof st === "object")
+      ? (String(st.video_status ?? "").trim() || null)
+      : null;
     const pronto = videoStatus === "ready";
     return json({
-      ok: true, acao: "status_video", versao: "upload-midia-v5.1",
+      ok: true, acao: "status_video", versao: "upload-midia-v5.2",
       video_id: String(j?.id ?? vid),
-      titulo: j?.title ?? null,
-      length_sec: j?.length ?? null,
+      company_id: companyProbe,
+      account_external_id: accountHint,
       status_cru: st,
       status_processamento: videoStatus,
       pronto,
@@ -756,10 +787,15 @@ Deno.serve(async (req) => {
     let pronto: boolean | null = existente.meta_image_hash ? true : null;
     if (existente.meta_video_id && META_ADS_TOKEN) {
       try {
-        const sr = await fetch(`${GRAPH}/${existente.meta_video_id}?fields=id,status&access_token=${encodeURIComponent(META_ADS_TOKEN)}`);
+        const sr = await fetch(
+          `${GRAPH}/${encodeURIComponent(existente.meta_video_id)}?fields=id,status` +
+            `&access_token=${encodeURIComponent(META_ADS_TOKEN)}`,
+        );
         const sj = await sr.json();
         const st = sj?.status ?? null;
-        status_processamento = String(st?.video_status ?? st?.processing_phase ?? "").trim() || null;
+        status_processamento = (st && typeof st === "object")
+          ? (String(st.video_status ?? "").trim() || null)
+          : null;
         pronto = status_processamento === "ready";
       } catch {
         status_processamento = "consulta_falhou";
@@ -800,7 +836,10 @@ Deno.serve(async (req) => {
     let pronto: boolean | null = null;
     if (video_id) {
       try {
-        const sr = await fetch(`${GRAPH}/${video_id}?fields=status&access_token=${encodeURIComponent(META_ADS_TOKEN)}`);
+        const sr = await fetch(
+          `${GRAPH}/${encodeURIComponent(video_id)}?fields=id,status` +
+            `&access_token=${encodeURIComponent(META_ADS_TOKEN)}`,
+        );
         const sj = await sr.json();
         status_processamento = String(sj?.status?.video_status ?? "").trim() || null;
         pronto = status_processamento === "ready";
