@@ -1,11 +1,9 @@
-// ESP-40 + ESP-39 — nome Meta composto a partir de campos estruturados.
-// Ordem canonica:
-//   [MARCA][CANAL][OBJETIVO][PRODUTO?][PAPEL?][ROTULO?][PERIODO]
-// Ex. campanha TESTE:  [LEV][LP][LEADS][CLT][TESTE][HOOK-A][AGO26]
-// Ex. campanha ESCALA: [LEV][LP][LEADS][CLT][ESCALA][V1][AGO26]
-// Nome livre NAO e aceito em criacao/renomeacao sancionada: o sistema MONTA o nome.
-// ESP-39: papel TESTE|ESCALA e obrigatorio em campanha (criar/renomear); vencedores e
-// testes vivem em campanhas SEPARADAS.
+// Nomenclatura Meta — NOME LIVRE e o contrato vigente.
+// O gestor/agente pode passar qualquer string em nome / nome_novo / novo_nome / target_name.
+// O padrao estruturado [MARCA][CANAL][OBJETIVO][PRODUTO?][PAPEL?][ROTULO?][PERIODO] e apenas
+// SUGESTAO OPCIONAL (helper montarNomeMeta / resolverNomePartesDoParams) quando pedirem
+// ou quando so houver partes sem string livre.
+// Ex. sugestao: [LEV][LP][LEADS][CLT][TESTE][HOOK-A][AGO26]
 
 export type PapelCampanha = "teste" | "escala" | "desconhecido";
 
@@ -14,7 +12,7 @@ export type NomePartes = {
   canal: string;
   objetivo_tag: string;
   produto?: string | null;
-  /** TESTE | ESCALA — obrigatorio em campanha (ESP-39). */
+  /** TESTE | ESCALA — opcional; so entra no composto se informado. */
   papel?: string | null;
   rotulo?: string | null;
   periodo: string;
@@ -41,10 +39,24 @@ export type NomeMontado =
       faltando?: string[];
     };
 
+export type NomeResolvido =
+  | {
+      ok: true;
+      nome: string;
+      origem: "livre" | "composto";
+      partes: Extract<NomeMontado, { ok: true }>["partes"] | null;
+    }
+  | {
+      ok: false;
+      erro: string;
+      detalhe: string;
+      faltando?: string[];
+    };
+
 const TOKEN_OK = /^[A-Z0-9][A-Z0-9._+-]*$/;
 const PAPEIS = new Set(["TESTE", "ESCALA"]);
 
-/** Normaliza um pedaco do nome: maiusculas, espacos viram -, sem colchetes. */
+/** Normaliza um pedaco do nome composto: maiusculas, espacos viram -, sem colchetes. */
 export function sanitizarToken(raw: unknown, campo: string): { ok: true; token: string } | { ok: false; erro: string } {
   const s = String(raw ?? "").trim().toUpperCase().replace(/\s+/g, "-");
   if (!s) return { ok: false, erro: `${campo}_vazio` };
@@ -81,9 +93,8 @@ export function classificarPapelCampanha(nome: string): PapelCampanha {
 }
 
 /**
- * Monta o nome Meta a partir dos campos.
- * marca, canal, objetivo_tag e periodo sao sempre obrigatorios.
- * papel (TESTE|ESCALA) e obrigatorio quando opts.exigirPapel (campanha).
+ * Helper OPCIONAL: monta sugestao estruturada a partir dos campos.
+ * Nao e obrigatorio para criar/renomear — use resolverNomeFinal quando houver nome livre.
  */
 export function montarNomeMeta(
   input: Partial<NomePartes> & Record<string, unknown>,
@@ -98,10 +109,10 @@ export function montarNomeMeta(
   if (faltando.length) {
     return {
       ok: false,
-      erro: "campos_de_nomenclatura_obrigatorios",
+      erro: "campos_de_nomenclatura_incompletos_para_sugestao",
       detalhe: exigirPapel
-        ? "Informe marca, canal, objetivo_tag, papel (TESTE|ESCALA) e periodo. Opcional: produto, rotulo. Padrao [MARCA][CANAL][OBJ][PROD?][PAPEL][ROT?][PER]."
-        : "Informe marca, canal, objetivo_tag e periodo. Opcional: produto, papel, rotulo.",
+        ? "Para sugerir o padrao estruturado informe marca, canal, objetivo_tag, papel (TESTE|ESCALA) e periodo. Opcional: produto, rotulo. Ou passe nome livre."
+        : "Para sugerir o padrao estruturado informe marca, canal, objetivo_tag e periodo. Opcional: produto, papel, rotulo. Ou passe nome livre.",
       faltando,
     };
   }
@@ -134,15 +145,15 @@ export function montarNomeMeta(
       return {
         ok: false,
         erro: "papel_invalido",
-        detalhe: `papel deve ser TESTE ou ESCALA (recebi "${pap.token}"). ESP-39: vencedores e testes em campanhas separadas.`,
+        detalhe: `papel deve ser TESTE ou ESCALA (recebi "${pap.token}").`,
       };
     }
     papel = pap.token;
   } else if (exigirPapel) {
     return {
       ok: false,
-      erro: "papel_obrigatorio",
-      detalhe: "Campanha exige papel=TESTE ou ESCALA.",
+      erro: "papel_obrigatorio_na_sugestao",
+      detalhe: "Sugestao de campanha pediu papel=TESTE ou ESCALA. Ou passe nome livre.",
       faltando: ["papel"],
     };
   }
@@ -177,8 +188,8 @@ export function montarNomeMeta(
 }
 
 /**
- * Resolve partes a partir do params do card. Se objetivo_tag faltar, tenta derivar do
- * objective ODAX (params.objetivo). marca pode vir de defaultMarca (config da empresa).
+ * Resolve partes a partir do params do card (helper de sugestao).
+ * Se objetivo_tag faltar, tenta derivar do objective ODAX.
  */
 export function resolverNomePartesDoParams(
   params: Record<string, unknown> | null | undefined,
@@ -204,7 +215,54 @@ export function resolverNomePartesDoParams(
   );
 }
 
-/** Na execucao: se o payload traz nome_partes, o nome_novo TEM de bater com o composto. */
+/**
+ * Contrato vigente: NOME LIVRE tem prioridade.
+ * 1) Se houver string livre (nome/nome_novo/novo_nome/target_name util) → usa.
+ * 2) Senao, se der para montar pelas partes → usa o composto (sugestao).
+ * 3) Senao → erro pedindo um nome.
+ */
+export function resolverNomeFinal(opts: {
+  nomeLivre?: string | null;
+  params?: Record<string, unknown> | null;
+  defaultMarca?: string | null;
+  objetivoOdax?: string | null;
+  /** So para fallback composto; nao bloqueia nome livre. */
+  preferirPapelNoComposto?: boolean;
+}): NomeResolvido {
+  const livre = String(opts.nomeLivre ?? "").trim();
+  if (livre) {
+    let partes: Extract<NomeMontado, { ok: true }>["partes"] | null = null;
+    const montado = resolverNomePartesDoParams(opts.params, {
+      defaultMarca: opts.defaultMarca,
+      objetivoOdax: opts.objetivoOdax,
+      exigirPapel: false,
+    });
+    if (montado.ok) partes = montado.partes;
+    return { ok: true, nome: livre, origem: "livre", partes };
+  }
+
+  const montado = resolverNomePartesDoParams(opts.params, {
+    defaultMarca: opts.defaultMarca,
+    objetivoOdax: opts.objetivoOdax,
+    exigirPapel: opts.preferirPapelNoComposto === true,
+  });
+  if (montado.ok) {
+    return { ok: true, nome: montado.nome, origem: "composto", partes: montado.partes };
+  }
+  return {
+    ok: false,
+    erro: "nome_obrigatorio",
+    detalhe:
+      "Informe um nome livre (nome / nome_novo / novo_nome / target_name). O padrao [MARCA][CANAL][…] e opcional — so use se quiser sugestao estruturada.",
+    faltando: montado.faltando,
+  };
+}
+
+/**
+ * Soft-check: se ha nome_partes E quiser validar alinhamento com o composto.
+ * Com nome livre vigente, divergencia NAO e erro duro — preferir resolverNomeFinal.
+ * Mantido para compatibilidade / auditoria opcional.
+ */
 export function conferirNomeComPartes(
   nomeNovo: string,
   partes: Record<string, unknown> | null | undefined,
@@ -220,7 +278,7 @@ export function conferirNomeComPartes(
     return {
       ok: false,
       erro: "nome_divergiu_das_partes",
-      detalhe: `nome_novo="${nomeNovo}" mas as partes montam "${montado.nome}". O nome e derivado dos campos — nao edite nome_novo a mao.`,
+      detalhe: `nome_novo="${nomeNovo}" e as partes montam "${montado.nome}". Com nome livre vigente, use o nome_novo como fonte da verdade (ignore o alinhamento) ou alinhe as partes.`,
     };
   }
   return { ok: true, nome: montado.nome, partes: montado.partes };

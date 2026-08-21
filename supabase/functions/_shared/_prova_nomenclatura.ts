@@ -2,6 +2,7 @@
 import {
   montarNomeMeta,
   resolverNomePartesDoParams,
+  resolverNomeFinal,
   conferirNomeComPartes,
   classificarPapelCampanha,
 } from "./nomenclatura.ts";
@@ -40,7 +41,16 @@ const semPapelCamp = montarNomeMeta({
   objetivo_tag: "LEADS",
   periodo: "AGO26",
 }, { exigirPapel: true });
-assert(!semPapelCamp.ok && semPapelCamp.faltando?.includes("papel"), "papel obrigatorio em campanha");
+assert(!semPapelCamp.ok && semPapelCamp.faltando?.includes("papel"), "papel so na sugestao composta");
+
+const livre = resolverNomeFinal({ nomeLivre: "Campanha Verao RR" });
+assert(livre.ok && livre.origem === "livre" && livre.nome === "Campanha Verao RR", "nome livre");
+
+const livreGanha = resolverNomeFinal({
+  nomeLivre: "Meu Nome Livre",
+  params: { marca: "LEV", canal: "LP", objetivo_tag: "LEADS", periodo: "AGO26", papel: "TESTE" },
+});
+assert(livreGanha.ok && livreGanha.nome === "Meu Nome Livre" && livreGanha.origem === "livre", "livre > composto");
 
 const conjSemPapel = montarNomeMeta({
   marca: "LEV",

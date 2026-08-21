@@ -19,10 +19,11 @@
 // v5.23 (12/08/2026) - ESP-29: driver de transporte resolvido POR ACAO (driverParaAcao):
 //   override em meta_execution_config.driver_por_acao > driver_escrita (empresa) > graph.
 //   pode_executar_acao/resolver_driver aplicam a matriz de capacidade (renomear=pipeboard-only).
-// v5.22 (12/08/2026) - ESP-39: campanha exige papel TESTE|ESCALA no nome_partes; escalar_duplicar
-//   recusa destino TESTE (vencedores em campanha ESCALA separada).
-// v5.21 (12/08/2026) - ESP-40: na criacao/renomeacao, se o payload traz nome_partes, o nome_novo
-//   TEM de bater com o composto; grava nome_partes no espelho. Nome livre sem partes: recusa.
+// v5.32 (21/08/2026) - NOME LIVRE: criar/renomear aceitam nome_novo/novo_nome free-form.
+//   nome_partes deixa de ser obrigatorio; padrao estruturado e so metadado/sugestao opcional.
+// v5.22 (12/08/2026) - ESP-39: testes vs escala em campanhas separadas (negocio).
+//   Nao forca mais nomenclatura estruturada no nome.
+// v5.21 (12/08/2026) - ESP-40 (legado): nome_partes alinhado ao composto. Superado em v5.32.
 // v5.20 (12/08/2026) - ESP-25: escalar_duplicar. Criacao de conjunto com +20% so se
 //   avaliar_escala.apto na proposta E de novo na execucao; orcamento travado na escada;
 //   targeting herdado do molde (sem redes livres). redistribuir fica de fora.
@@ -320,7 +321,7 @@ import {
   destinoDoPedidoCompat,
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
-import { conferirNomeComPartes, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
+import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import {
   resolverObjetivoOdax,
   familiaDeObjetivo,
@@ -1328,22 +1329,13 @@ export async function montarCriacao(
   companyId: string | null = null,
 ) {
   if (acao === "criar_campanha") {
-    const nome = String(p?.nome_novo ?? "").trim();
-    if (!nome) return { erro: "payload sem nome_novo" };
+    const nome = String(p?.nome_novo ?? p?.nome ?? p?.name ?? "").trim();
+    if (!nome) return { erro: "payload sem nome_novo (nome livre obrigatorio)" };
 
-    // ESP-40/39: nome_partes obrigatorias; campanha exige papel TESTE|ESCALA.
+    // Nome livre e a fonte da verdade. nome_partes e metadado opcional (nao bloqueia).
     const partes = (p?.nome_partes ?? null) as Record<string, unknown> | null;
-    if (!partes || typeof partes !== "object") {
-      return {
-        erro: "nome_partes_obrigatorias",
-        detalhe:
-          "ESP-40/39: criacao de campanha exige nome_partes (marca/canal/objetivo_tag/papel/periodo). Cards antigos sem partes nao executam — emita card novo.",
-      };
-    }
-    const conf = conferirNomeComPartes(nome, partes, { exigirPapel: true });
-    if (!conf.ok) {
-      return { erro: conf.erro, detalhe: conf.detalhe };
-    }
+    const nomePartesGravar =
+      partes && typeof partes === "object" ? partes : null;
 
     // ============ v5.5: REGIME DE ORCAMENTO DECLARADO; ABO REAL PELO PIPEBOARD ============
     // O gestor decide o regime no pedido (regime_orcamento). Hoje o UNICO regime suportado e ABO -
@@ -1375,7 +1367,7 @@ export async function montarCriacao(
     return {
       path: `/${conta}/campaigns`,
       body: {
-        name: conf.nome,
+        name: nome,
         objective: objetivo,
         status: "ACTIVE", // v5.26: aprovar criar_campanha = cria ACTIVE
         special_ad_categories: JSON.stringify(["FINANCIAL_PRODUCTS_SERVICES"]), // TRAVA (forcado; v4.1: a Meta aposentou CREDIT - erro 2909060 - e exige a categoria nova "Produtos e servicos financeiros")
@@ -1384,7 +1376,7 @@ export async function montarCriacao(
         use_adset_level_budgets: "true", // v5.5: ABO real — impede o Pipeboard de injetar orcamento de campanha (CBO)
       } as Record<string, string>,
       regime_orcamento: "abo",
-      nome_partes: conf.partes,
+      nome_partes: nomePartesGravar,
       familia_objetivo: familiaDeObjetivo(objetivo),
     };
   }
@@ -1411,22 +1403,16 @@ export async function montarCriacao(
       };
     if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
 
-    // ESP-40: criar_conjunto exige nome_partes. escalar_duplicar herda nome derivado (pode ter ESC+20).
+    // Nome livre e a fonte da verdade. nome_partes e metadado opcional.
     let nomeFinal = nome;
     let nomePartesGravar: Record<string, unknown> | null = null;
     if (acao === "criar_conjunto_a_partir_de") {
       const partes = (p?.nome_partes ?? null) as Record<string, unknown> | null;
-      if (!partes || typeof partes !== "object") {
-        return {
-          erro: "nome_partes_obrigatorias",
-          detalhe:
-            "ESP-40: criar conjunto exige nome_partes. Cards antigos sem partes nao executam — emita card novo.",
-        };
+      if (partes && typeof partes === "object") {
+        nomePartesGravar = partes;
       }
-      const conf = conferirNomeComPartes(nome, partes);
-      if (!conf.ok) return { erro: conf.erro, detalhe: conf.detalhe };
-      nomeFinal = conf.nome;
-      nomePartesGravar = conf.partes;
+      // Mantem nome_novo livre; nao exige alinhamento com composto.
+      nomeFinal = nome;
     }
     // ESP-26: o juiz e a RPC, nao a comparacao local. Sem companyId nao ha como consultar.
     if (!companyId) {
@@ -1772,18 +1758,8 @@ export async function montarCriacao(
     if (!creativeMolde && !pecaNovaSemMolde)
       return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
 
-    // ESP-40: anuncio novo exige nome_partes alinhado ao nome_novo.
-    const partesAd = (p?.nome_partes ?? null) as Record<string, unknown> | null;
-    if (!partesAd || typeof partesAd !== "object") {
-      return {
-        erro: "nome_partes_obrigatorias",
-        detalhe:
-          "ESP-40: criar anuncio exige nome_partes. Cards antigos sem partes nao executam — emita card novo.",
-      };
-    }
-    const confAd = conferirNomeComPartes(nome, partesAd);
-    if (!confAd.ok) return { erro: confAd.erro, detalhe: confAd.detalhe };
-    nome = confAd.nome;
+    // Nome livre e a fonte da verdade. nome_partes e metadado opcional (nao bloqueia).
+    // Usa o nome_novo do payload sem exigir alinhamento ao composto.
 
     // ============ v5.24: FORMATOS ============
     // Carrossel HABILITADO (child_attachments). Video/imagem/carrossel sao mutuamente exclusivos.
@@ -3607,32 +3583,14 @@ Deno.serve(async (req) => {
         });
         continue;
       }
-      // ESP-40/39: renomear exige nome_partes alinhadas + papel TESTE|ESCALA.
-      const partesRen = (r.payload?.nome_partes ?? null) as Record<string, unknown> | null;
-      if (!partesRen || typeof partesRen !== "object") {
-        const motivo = "nome_partes_obrigatorias";
-        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
-          motivo, detalhe: "ESP-40/39: renomear exige nome_partes com papel. Emita card novo.",
-          acao, driver_escrita: driver,
-        });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
-        continue;
-      }
-      const confRen = conferirNomeComPartes(novoNome, partesRen, { exigirPapel: true });
-      if (!confRen.ok) {
-        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
-          motivo: confRen.erro, detalhe: confRen.detalhe, acao, driver_escrita: driver,
-        });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo: confRen.erro, driver_escrita: driver });
-        continue;
-      }
+      // Nome livre: novo_nome e a fonte da verdade. nome_partes e metadado opcional.
       if (driver !== "pipeboard") {
         const motivo = `renomear_campanha_exige_pipeboard (driver atual: ${driver})`;
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao, driver_escrita: driver });
         resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
         continue;
       }
-      post = { name: confRen.nome };
+      post = { name: novoNome };
     }
     if (acao === "alterar_orcamento") {
       const reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
