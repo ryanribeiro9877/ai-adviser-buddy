@@ -204,7 +204,7 @@ const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
 const MODEL = modeloOpenRouterPadrao();
 // v2: modelo dos SUBAGENTES e do planejador (extracao estrita nao precisa do modelo caro).
 const MODEL_SUB = modeloOpenRouterSubPadrao();
-// 21/08/2026: padrao = openrouter/auto-beta (Auto Router). Ver _shared/openrouter_auto.ts.
+// 21/08/2026: padrao = openrouter/auto (Auto Router estavel). Ver _shared/openrouter_auto.ts.
 /** Sticky session do Auto Router para o job atual (conversation_id). */
 let JOB_SESSION_ID: string | null = null;
 let JOB_MODELO_ROTEADO = MODEL;

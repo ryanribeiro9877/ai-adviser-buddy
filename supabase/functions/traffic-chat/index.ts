@@ -550,7 +550,7 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
 const MODEL = modeloOpenRouterPadrao();
 // v28: OPENROUTER_MODEL = chat principal; OPENROUTER_MODEL_SUB = subagentes do traffic-agent-job.
-// 21/08/2026: padrao = OpenRouter Auto Router Beta (openrouter/auto-beta) — roteia por tarefa.
+// 21/08/2026: padrao = OpenRouter Auto Router estavel (openrouter/auto) — roteia por tarefa.
 // Secrets + plugins cost_tier/session_id em _shared/openrouter_auto.ts.
 // v28.1: credencial do Drive (mesma service account do job) + pasta raiz dos criativos.
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();

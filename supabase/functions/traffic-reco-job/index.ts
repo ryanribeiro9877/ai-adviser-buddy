@@ -10,7 +10,7 @@ import { extrasAutoRouter } from "../_shared/openrouter_auto.ts";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL_SUB") ?? Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/auto-beta").trim();
+const MODEL = (Deno.env.get("OPENROUTER_MODEL_SUB") ?? Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/auto").trim();
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 

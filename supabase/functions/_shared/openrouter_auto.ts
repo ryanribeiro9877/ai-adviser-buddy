@@ -1,10 +1,13 @@
-// Config compartilhada do OpenRouter Auto Router (Beta).
+// Config compartilhada do OpenRouter Auto Router (estavel).
 // Docs: https://openrouter.ai/docs/guides/routing/routers/auto-router
-// Slug: openrouter/auto-beta — plugin id: auto-beta-router
+// Slug: openrouter/auto — plugin id: auto-router
+// (auto-beta fica disponivel se o secret apontar para openrouter/auto-beta)
 // Sem surcharge: paga-se a taxa do modelo roteado (campo `model` da resposta).
 
-export const OPENROUTER_AUTO_SLUG = "openrouter/auto-beta";
-export const OPENROUTER_AUTO_PLUGIN_ID = "auto-beta-router";
+export const OPENROUTER_AUTO_SLUG = "openrouter/auto";
+export const OPENROUTER_AUTO_PLUGIN_ID = "auto-router";
+export const OPENROUTER_AUTO_BETA_SLUG = "openrouter/auto-beta";
+export const OPENROUTER_AUTO_BETA_PLUGIN_ID = "auto-beta-router";
 
 /** Default da casa quando o secret OPENROUTER_MODEL estiver ausente. */
 export function modeloOpenRouterPadrao(): string {
@@ -44,7 +47,9 @@ export function extrasAutoRouter(opts?: {
   const model = (opts?.model ?? modeloOpenRouterPadrao()).trim();
   if (!isAutoRouterModel(model)) return {};
 
-  const pluginId = model.includes("auto-beta") ? OPENROUTER_AUTO_PLUGIN_ID : "auto-router";
+  const pluginId = model.includes("auto-beta")
+    ? OPENROUTER_AUTO_BETA_PLUGIN_ID
+    : OPENROUTER_AUTO_PLUGIN_ID;
   const plugin: Record<string, unknown> = {
     id: pluginId,
     cost_tier: opts?.costTier ?? costTierOpenRouter("medium"),

@@ -24,7 +24,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TOKEN = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/auto-beta").trim();
+const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/auto").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
 const VERSAO = "create-v1";
 
