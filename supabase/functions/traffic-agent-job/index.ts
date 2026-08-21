@@ -1978,19 +1978,47 @@ async function sintetizarComResgate(args: {
 // ============================================================================
 // v2.2 - ANALISE VISUAL DO DRIVE (pipeline codificado com visao, persistido)
 // ============================================================================
-async function baixarThumb(url: string): Promise<{ b64: string; mime: string } | null> {
-  try {
-    const alta = url.replace(/=s\d+(-c)?$/, "=s1600");
-    let r = await fetch(alta);
-    if (!r.ok) { const t = await driveToken(); r = await fetch(alta, { headers: { authorization: `Bearer ${t}` } }); }
-    if (!r.ok) return null;
-    const mime = r.headers.get("content-type") ?? "image/jpeg";
-    const u = new Uint8Array(await r.arrayBuffer());
-    if (u.length > 1_800_000) return null; // grande demais p/ lote - pula com registro
-    let bin = ""; const CH = 0x8000;
-    for (let i = 0; i < u.length; i += CH) bin += String.fromCharCode.apply(null, u.subarray(i, i + CH) as any);
-    return { b64: btoa(bin), mime };
-  } catch { return null; }
+// v2.9.1: cascade de tamanhos + thumbnail por fileId. Antes so tentava =s1600 e descartava
+// >1.8MB sem fallback - 13 pecas La Felicita Junho ficavam eternamente em falhas_thumb.
+async function baixarThumb(url: string, fileId?: string): Promise<{ b64: string; mime: string } | null> {
+  const candidatos: string[] = [];
+  for (const sz of ["s800", "s1200", "s400", "s1600"]) {
+    const u = url.replace(/=s\d+(-c)?$/, `=${sz}`);
+    if (u && !candidatos.includes(u)) candidatos.push(u);
+  }
+  if (url && !candidatos.includes(url)) candidatos.push(url);
+  const id = String(fileId ?? "").trim();
+  if (id) {
+    for (const sz of ["w800", "w400", "w1200"]) {
+      const u = `https://drive.google.com/thumbnail?id=${encodeURIComponent(id)}&sz=${sz}`;
+      if (!candidatos.includes(u)) candidatos.push(u);
+    }
+  }
+
+  let token: string | null = null;
+  const authHeaders = async (): Promise<Record<string, string>> => {
+    if (!token) token = await driveToken();
+    return { authorization: `Bearer ${token}` };
+  };
+
+  for (const cand of candidatos) {
+    try {
+      let r = await fetch(cand, { redirect: "follow" });
+      if (!r.ok) {
+        try { r = await fetch(cand, { headers: await authHeaders(), redirect: "follow" }); }
+        catch { continue; }
+      }
+      if (!r.ok) continue;
+      const mime = r.headers.get("content-type") ?? "image/jpeg";
+      if (!String(mime).startsWith("image/")) continue;
+      const u = new Uint8Array(await r.arrayBuffer());
+      if (u.length < 64 || u.length > 1_800_000) continue;
+      let bin = ""; const CH = 0x8000;
+      for (let i = 0; i < u.length; i += CH) bin += String.fromCharCode.apply(null, u.subarray(i, i + CH) as any);
+      return { b64: btoa(bin), mime };
+    } catch { /* tenta proximo candidato */ }
+  }
+  return null;
 }
 
 // v2.6 (04/08/2026) - BASE DA ANALISE NO CONTRATO. A chave de drive_midia_analises passou a ser
@@ -2149,7 +2177,7 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
     const lote = fila.slice(i, i + VISAO_LOTE);
     const imagens: { arq: any; b64: string; mime: string }[] = [];
     for (const arq of lote) {
-      const th = await baixarThumb(String(arq.thumbnail));
+      const th = await baixarThumb(String(arq.thumbnail), String(arq.id ?? ""));
       if (th) imagens.push({ arq, b64: th.b64, mime: th.mime }); else falhasThumb++;
     }
     if (!imagens.length) continue;
@@ -2616,7 +2644,7 @@ Deno.serve(async (req) => {
     const r = await rodarAnaliseVisual("varredura automatica do Drive",
       { companyId, mcpKey: String(cfg?.api_key ?? "") }, prazoW, telW, opts);
     const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0, falhas_gravacao: 0 };
-    return json({ ok: true, modo: "drive_watch", versao: "job-v2.9",
+    return json({ ok: true, modo: "drive_watch", versao: "job-v2.9.1",
       base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, limite: opts.limite ?? null },
       pastas_ativas: nPastas, pastas_desativadas: nDesativadas,
       pecas_novas_analisadas: v.analisados_nesta_rodada,
