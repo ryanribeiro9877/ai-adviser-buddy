@@ -243,6 +243,14 @@ const ASSINATURAS: {
     frase:
       "a Meta exigiu valor de lance porque a estrategia herdada tinha teto (bid cap/cost cap) sem valor. O sistema agora usa custo mais baixo sem teto (LOWEST_COST_WITHOUT_CAP) em conjuntos de mensagens/engajamento — reemitir ou tentar de novo.",
   },
+  {
+    // Medido 21/08/2026 no card ae4c277e: IG Explore descontinuado (subcode 2490589).
+    recusa: "instagram_explore_descontinuado",
+    quando:
+      /2490589|explorar do ig|instagram explore|explore_home|posicionamento explorar/i,
+    frase:
+      "a Meta descontinuou o posicionamento Instagram Explore (explore/explore_home). O sistema remove esses placements automaticamente — reemitir ou tentar de novo.",
+  },
 ];
 
 /**

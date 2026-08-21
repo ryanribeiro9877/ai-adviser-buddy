@@ -1,4 +1,5 @@
-// supabase/functions/meta-actions/index.ts (v5.36)
+// supabase/functions/meta-actions/index.ts (v5.37)
+// v5.37 (21/08/2026) - Remove IG Explore/explore_home (Meta 2490589 descontinuou).
 // v5.36 (21/08/2026) - CTWA/mensagens: forca bid_strategy=LOWEST_COST_WITHOUT_CAP e
 //   remove bid_amount herdado do molde (card 1687f34f, Meta 2490487: teto sem valor).
 // v5.35 (21/08/2026) - FAMILIA MENSAGENS (CTWA): CONVERSATIONS + destination_type=WHATSAPP
@@ -322,6 +323,7 @@ import {
   aplicarPosicionamentoPorPlataformas,
   FACEBOOK_POSITIONS_VIDEO_PADRAO,
   PUBLISHER_PLATFORMS_VIDEO_PADRAO,
+  sanitizarPosicionamentosInstagramDescontinuados,
   targetingCompativelComFormato,
 } from "../_shared/posicionamento.ts";
 import {
@@ -1887,6 +1889,22 @@ export async function montarCriacao(
           !bidStrat
             ? "bid_strategy ausente — default sem teto"
             : `molde/pedido tinha ${bidStrat} sem bid_amount — convertido para LOWEST_COST_WITHOUT_CAP`;
+      }
+    }
+
+    // v5.37: IG Explore descontinuado (Meta 2490589) — tira do targeting mesmo se molde antigo.
+    if (body.targeting) {
+      try {
+        const tgt = JSON.parse(String(body.targeting));
+        if (tgt && typeof tgt === "object") {
+          const limpo = sanitizarPosicionamentosInstagramDescontinuados(tgt as Record<string, unknown>);
+          body.targeting = JSON.stringify(limpo.targeting);
+          if (limpo.removidos.length && posicionamento && typeof posicionamento === "object") {
+            (posicionamento as any).instagram_explore_removido = limpo.removidos;
+          }
+        }
+      } catch {
+        /* targeting invalido — Graph vai recusar com outro erro */
       }
     }
 

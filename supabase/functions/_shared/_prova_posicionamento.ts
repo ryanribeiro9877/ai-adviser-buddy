@@ -68,6 +68,8 @@ check("SEM PLATAFORMAS: obrigatorio", sem.erro === "plataformas_de_publicacao_ob
 const fbIg = aplicarPosicionamentoPorPlataformas(moldeTargeting, "video", ["facebook", "instagram"]);
 check("FB+IG: publishers corretos", eq(fbIg.targeting?.publisher_platforms, ["facebook", "instagram"]));
 check("FB+IG: tem instagram_positions", Array.isArray(fbIg.targeting?.instagram_positions));
+check("FB+IG: sem explore", !(fbIg.targeting?.instagram_positions as string[])?.includes("explore"));
+check("FB+IG: sem explore_home", !(fbIg.targeting?.instagram_positions as string[])?.includes("explore_home"));
 check("FB+IG: sem threads_positions", fbIg.targeting?.threads_positions === undefined);
 
 // PROVA 6: corretivo video (compat) ainda monta os 8

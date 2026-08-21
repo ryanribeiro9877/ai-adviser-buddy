@@ -1,5 +1,5 @@
 // supabase/functions/_shared/posicionamento.ts
-// PADRAO DE POSICIONAMENTO (decisoes Ryan 11/08/2026).
+// PADRAO DE POSICIONAMENTO (decisoes Ryan 11/08/2026; IG Explore off 21/08/2026).
 //
 // 1) VIDEO + Facebook selecionado: facebook_positions manuais observados nos 3 conjuntos
 //    ACTIVE (8 posicoes), SEM right_hand_column. Coluna da direita nao veicula video.
@@ -8,6 +8,8 @@
 // 3) Plataformas de publicacao: o agente PERGUNTA (facebook, instagram, audience_network,
 //    messenger). Nao assume em silencio. Instagram usa a identidade oficial da config
 //    (@jcr2_legaleviver quando o id estiver comprovado).
+// 4) Instagram Explore / explore_home: DESCONTINUADOS pela Meta API (erro 2490589,
+//    21/08/2026) — nunca enviar.
 // Puro e sem efeito colateral de import, para prova isolada.
 
 export const PLATAFORMAS_PUBLICACAO_SUPORTADAS = [
@@ -32,12 +34,16 @@ export const FACEBOOK_POSITIONS_VIDEO_PADRAO = [
   "profile_feed",
 ] as const;
 
+/** IG Explore descontinuado (Meta API subcode 2490589, 21/08/2026). */
+export const INSTAGRAM_POSITIONS_DESCONTINUADAS = [
+  "explore",
+  "explore_home",
+] as const;
+
 export const INSTAGRAM_POSITIONS_PADRAO = [
   "stream",
   "story",
   "reels",
-  "explore",
-  "explore_home",
   "ig_search",
   "profile_feed",
 ] as const;
@@ -161,7 +167,10 @@ export function aplicarPosicionamentoPorPlataformas(
 
   if (plataformas.includes("instagram")) {
     novo.instagram_positions = [...INSTAGRAM_POSITIONS_PADRAO];
-    notes.push("Instagram selecionado: identidade oficial da config (@jcr2_legaleviver) deve ser usada no criativo.");
+    excluidos.push("instagram.explore", "instagram.explore_home");
+    notes.push(
+      "Instagram selecionado: stream/story/reels/ig_search/profile_feed. Explore e explore_home DESCONTINUADOS (Meta 2490589) — nunca enviar.",
+    );
   } else {
     delete novo.instagram_positions;
   }
@@ -185,6 +194,31 @@ export function aplicarPosicionamentoPorPlataformas(
     perfil: "plataformas_escolhidas_pelo_gestor_v1",
     declaracao: notes.join(" "),
   };
+}
+
+/**
+ * Remove posicionamentos Instagram descontinuados (explore / explore_home) de qualquer
+ * targeting — molde antigo ou lista manual. Meta API 2490589 (21/08/2026).
+ */
+export function sanitizarPosicionamentosInstagramDescontinuados(
+  targeting: Record<string, unknown>,
+): { targeting: Record<string, unknown>; removidos: string[] } {
+  const novo: Record<string, unknown> = { ...(targeting ?? {}) };
+  const ban = new Set(INSTAGRAM_POSITIONS_DESCONTINUADAS as readonly string[]);
+  const removidos: string[] = [];
+  if (Array.isArray(novo.instagram_positions)) {
+    const antes = (novo.instagram_positions as unknown[]).map(String);
+    const depois = antes.filter((p) => {
+      if (ban.has(p)) {
+        removidos.push(`instagram.${p}`);
+        return false;
+      }
+      return true;
+    });
+    if (depois.length) novo.instagram_positions = depois;
+    else delete novo.instagram_positions;
+  }
+  return { targeting: novo, removidos };
 }
 
 /** Compat: video-only facebook padrao (acao corretiva / criacao legada sem lista). */
