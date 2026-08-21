@@ -11,10 +11,27 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const T_ADS = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
-const T_WABA = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
+const T_ADS_GLOBAL = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
+const T_WABA_GLOBAL = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
+// Tokens por empresa (Edge Secrets): META_ADS_TOKEN_COHAPM, WHATSAPP_ACCESS_TOKEN_COHAPM
+// Aceita também o typo WHATSAPP_ACESS_TOKEN_COHAPM (1 S) se alguém cadastrou assim.
+function tokenAdsEmpresa(slug: string) {
+  const s = slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  return (
+    (Deno.env.get(`META_ADS_TOKEN_${s}`) ?? "").trim() ||
+    T_ADS_GLOBAL
+  );
+}
+function tokenWabaEmpresa(slug: string) {
+  const s = slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  return (
+    (Deno.env.get(`WHATSAPP_ACCESS_TOKEN_${s}`) ?? "").trim() ||
+    (Deno.env.get(`WHATSAPP_ACESS_TOKEN_${s}`) ?? "").trim() || // typo comum
+    T_WABA_GLOBAL
+  );
+}
 const GRAPH = "https://graph.facebook.com/v21.0";
-const VERSAO = "meta-token-crosscheck-v1";
+const VERSAO = "meta-token-crosscheck-v2";
 
 const COHAPM = "57f755b9-c23d-4f58-a488-8173d697c010";
 const LEGAL = "ded20b38-f42e-4c71-800c-31b97ea48bcf";
@@ -26,13 +43,13 @@ const ESCOPOS_WABA = ["whatsapp_business_management", "whatsapp_business_messagi
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
-function redact(s: string): string {
+function redact(s: string, ...tokens: string[]): string {
   let o = s;
-  for (const t of [T_ADS, T_WABA]) if (t) o = o.split(t).join("[TOKEN-REDACTED]");
+  for (const t of tokens) if (t) o = o.split(t).join("[TOKEN-REDACTED]");
   return o.replace(/access_token=[A-Za-z0-9_\-.]+/g, "access_token=[TOKEN-REDACTED]");
 }
-function json(obj: unknown, status = 200) {
-  return new Response(redact(JSON.stringify(obj)), {
+function json(obj: unknown, tokens: string[], status = 200) {
+  return new Response(redact(JSON.stringify(obj), ...tokens), {
     status,
     headers: { "content-type": "application/json" },
   });
@@ -226,9 +243,9 @@ function cruzar(graphCamps: { id: string; name: string | null; status: string | 
 }
 
 Deno.serve(async (req) => {
-  if (req.method !== "POST") return json({ error: "POST only" }, 405);
+  if (req.method !== "POST") return json({ error: "POST only" }, [], 405);
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-or-bearer"));
-  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
+  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, [], 401);
 
   let body: any = {};
   try {
@@ -237,16 +254,39 @@ Deno.serve(async (req) => {
     /* */
   }
   const companyId = String(body?.company_id ?? COHAPM);
-
   const { data: emp } = await supa.from("companies").select("id,name").eq("id", companyId).maybeSingle();
-  const adsMeta = await inspecionarToken("ads", T_ADS, "META_ADS_TOKEN");
-  const wabaMeta = await inspecionarToken("waba", T_WABA, "WHATSAPP_ACCESS_TOKEN");
+  const adsSlug = companyId === COHAPM ? "COHAPM" : companyId === LEGAL ? "LEGAL" : "COHAPM";
+  const T_ADS_EMP = tokenAdsEmpresa(adsSlug);
+  const T_WABA_EMP = tokenWabaEmpresa(adsSlug);
+  const tokensRedact = [T_ADS_GLOBAL, T_WABA_GLOBAL, T_ADS_EMP, T_WABA_EMP].filter(Boolean);
 
-  const graphCohapm = T_ADS
-    ? await lerConta(T_ADS, ACT_COHAPM)
-    : { act: ACT_COHAPM, acesso_conta: false, erro_conta: "META_ADS_TOKEN ausente", campanhas_graph: [] as any[] };
-  const graphLegal = T_ADS
-    ? await lerConta(T_ADS, ACT_LEGAL)
+  const adsRef =
+    (Deno.env.get(`META_ADS_TOKEN_${adsSlug}`) ?? "").trim()
+      ? `META_ADS_TOKEN_${adsSlug}`
+      : "META_ADS_TOKEN";
+  const wabaRef = (Deno.env.get(`WHATSAPP_ACCESS_TOKEN_${adsSlug}`) ?? "").trim()
+    ? `WHATSAPP_ACCESS_TOKEN_${adsSlug}`
+    : (Deno.env.get(`WHATSAPP_ACESS_TOKEN_${adsSlug}`) ?? "").trim()
+      ? `WHATSAPP_ACESS_TOKEN_${adsSlug}`
+      : "WHATSAPP_ACCESS_TOKEN";
+  const adsMeta = await inspecionarToken("ads", T_ADS_EMP, adsRef);
+  const wabaMeta = await inspecionarToken("waba", T_WABA_EMP, wabaRef);
+
+  const graphCohapm = T_ADS_EMP
+    ? await lerConta(T_ADS_EMP, ACT_COHAPM)
+    : {
+        act: ACT_COHAPM,
+        acesso_conta: false,
+        erro_conta: `${adsRef} ausente`,
+        campanhas_graph: [] as any[],
+      };
+  // Controle: o token DA EMPRESA enxerga a Legal? (esperado: nao, se for token isolado COHAPM)
+  const graphLegalComTokenEmp = T_ADS_EMP
+    ? await lerConta(T_ADS_EMP, ACT_LEGAL)
+    : { act: ACT_LEGAL, acesso_conta: false, erro_conta: "ausente", campanhas_graph: [] as any[] };
+  // Controle: o token GLOBAL ainda enxerga a Legal?
+  const graphLegalGlobal = T_ADS_GLOBAL
+    ? await lerConta(T_ADS_GLOBAL, ACT_LEGAL)
     : { act: ACT_LEGAL, acesso_conta: false, erro_conta: "META_ADS_TOKEN ausente", campanhas_graph: [] as any[] };
 
   const { data: dbCamps } = await supa
@@ -267,7 +307,7 @@ Deno.serve(async (req) => {
     .eq("provider", "meta_ads");
 
   const cruz = cruzar(graphCohapm.campanhas_graph ?? [], dbCamps ?? []);
-  const waba = await wabaDoToken(T_WABA);
+  const waba = await wabaDoToken(T_WABA_EMP);
 
   const utilitarioAds =
     adsMeta.valido &&
@@ -276,48 +316,68 @@ Deno.serve(async (req) => {
     (cruz.em_ambos ?? 0) > 0;
 
   const utilitarioRecs = graphCohapm.acesso_recommendations === true;
-  const utilitarioWabaCloud = (waba.total_wabas ?? 0) > 0 &&
-    (waba.wabas ?? []).some((w: any) => (w.phones ?? []).some((p: any) => p.platform === "CLOUD_API" || p.quality));
+  const utilitarioWabaCloud =
+    (waba.total_wabas ?? 0) > 0 &&
+    (waba.wabas ?? []).some((w: any) =>
+      (w.phones ?? []).some((p: any) => p.platform === "CLOUD_API" || p.quality)
+    );
 
   const metaDbTemCohapm = (dbTokens ?? []).some((t) => t.company_id === companyId);
+  const usouSecretEmpresa = adsRef.endsWith("_COHAPM") || adsRef.endsWith(`_${adsSlug}`);
 
-  return json({
-    ok: true,
-    versao: VERSAO,
-    empresa: emp ?? { id: companyId, name: null },
-    veredito: {
-      token_ads_funcional_na_cohapm: utilitarioAds,
-      recommendations_legiveis: utilitarioRecs,
-      waba_cloud_visivel_no_token: utilitarioWabaCloud,
-      meta_tokens_tem_linha_cohapm: metaDbTemCohapm,
-      legal_ainda_acessivel_pelo_mesmo_token: graphLegal.acesso_conta === true,
-      resumo: !T_ADS
-        ? "META_ADS_TOKEN ausente nos Edge Secrets — nada a validar."
-        : !adsMeta.valido
-          ? "Token Ads presente mas debug_token diz invalido."
-          : !graphCohapm.acesso_conta
-            ? `Token Ads NAO acessa a conta COHAPM (${ACT_COHAPM}): ${graphCohapm.erro_conta ?? "sem detalhe"}`
-            : utilitarioAds
-              ? "Token Ads acessa COHAPM e as campanhas batem com o Pipeboard — utilitario para Graph (dicas/BM/reconcile)."
-              : "Token acessa a conta, mas intersecao com Pipeboard e fraca — revisar sync ou escopo da conta.",
-    },
-    tokens_edge: { ads: adsMeta, waba: wabaMeta },
-    meta_tokens_banco: dbTokens ?? [],
-    integrations_cohapm: integ ?? [],
-    graph: {
-      cohapm: graphCohapm,
-      legal: {
-        acesso_conta: graphLegal.acesso_conta,
-        http_conta: graphLegal.http_conta,
-        erro_conta: graphLegal.erro_conta,
-        conta: graphLegal.conta,
-        campanhas: (graphLegal.campanhas_graph ?? []).length,
-        recommendations_count: graphLegal.recommendations_count,
+  return json(
+    {
+      ok: true,
+      versao: VERSAO,
+      empresa: emp ?? { id: companyId, name: null },
+      secrets_resolvidos: {
+        ads_ref: adsRef,
+        waba_ref: wabaRef,
+        ads_presente: !!T_ADS_EMP,
+        waba_presente: !!T_WABA_EMP,
+        tipagem_typo_acess: wabaRef.includes("ACESS") && !wabaRef.includes("ACCESS"),
+        usou_secret_por_empresa: usouSecretEmpresa,
       },
+      veredito: {
+        token_ads_funcional_na_cohapm: utilitarioAds,
+        recommendations_legiveis: utilitarioRecs,
+        waba_cloud_visivel_no_token: utilitarioWabaCloud,
+        meta_tokens_tem_linha_cohapm: metaDbTemCohapm,
+        legal_acessivel_pelo_token_da_empresa: graphLegalComTokenEmp.acesso_conta === true,
+        legal_acessivel_pelo_token_global: graphLegalGlobal.acesso_conta === true,
+        resumo: !T_ADS_EMP
+          ? `${adsRef} ausente nos Edge Secrets — nada a validar. (Cadastrou META_ADS_TOKEN_COHAPM? Redeploy da edge le secrets novos.)`
+          : !adsMeta.valido
+            ? `Token Ads (${adsRef}) presente mas debug_token diz invalido.`
+            : !graphCohapm.acesso_conta
+              ? `Token Ads (${adsRef}) NAO acessa a conta COHAPM (${ACT_COHAPM}): ${graphCohapm.erro_conta ?? "sem detalhe"}`
+              : utilitarioAds
+                ? `Token Ads (${adsRef}) acessa COHAPM e as campanhas batem com o Pipeboard — utilitario para Graph.`
+                : `Token (${adsRef}) acessa a conta, mas intersecao com Pipeboard e fraca.`,
+      },
+      tokens_edge: { ads: adsMeta, waba: wabaMeta },
+      meta_tokens_banco: dbTokens ?? [],
+      integrations_cohapm: integ ?? [],
+      graph: {
+        cohapm: graphCohapm,
+        legal_via_token_empresa: {
+          acesso_conta: graphLegalComTokenEmp.acesso_conta,
+          http_conta: graphLegalComTokenEmp.http_conta,
+          erro_conta: graphLegalComTokenEmp.erro_conta,
+          campanhas: (graphLegalComTokenEmp.campanhas_graph ?? []).length,
+        },
+        legal_via_token_global: {
+          acesso_conta: graphLegalGlobal.acesso_conta,
+          http_conta: graphLegalGlobal.http_conta,
+          erro_conta: graphLegalGlobal.erro_conta,
+          campanhas: (graphLegalGlobal.campanhas_graph ?? []).length,
+        },
+      },
+      cruzamento_pipeboard: cruz,
+      waba_assigned: waba,
+      nota:
+        "v2: resolve META_ADS_TOKEN_<EMPRESA> e WHATSAPP_ACCESS_TOKEN_<EMPRESA> (aceita typo ACESS). Edge Secrets nao sao a tabela integration_secrets. meta_tokens no SQL continua so metadado.",
     },
-    cruzamento_pipeboard: cruz,
-    waba_assigned: waba,
-    nota:
-      "meta_tokens no banco e METADADO populado pelo meta-token-monitor (hoje hardcoded na Legal). Este crosscheck usa os Edge Secrets globais META_ADS_TOKEN / WHATSAPP_ACCESS_TOKEN.",
-  });
+    tokensRedact,
+  );
 });
