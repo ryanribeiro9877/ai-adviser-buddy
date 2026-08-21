@@ -111,7 +111,7 @@ function isProgressOnlyReply(text: string): boolean {
 
 /** Stub gravado pelo traffic-agent-job no catch — nao conta como resposta real. */
 function isJobFailureStub(text: string): boolean {
-  return /processamento em segundo plano falhou/i.test(text ?? "");
+  return /processamento em segundo plano falhou|modelo ficou sobrecarregado nesta rodada/i.test(text ?? "");
 }
 
 /** Há resposta substantiva (não stub/progresso) depois do último user. */

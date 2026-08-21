@@ -137,6 +137,13 @@ function indiceDaFase(lista: Passo[]): number {
   return idx;
 }
 
+/** Rate-limit transitório (OpenRouter 429 / sintese_vazia) — auto-reenvio faz sentido. */
+function ehErroRateLimit(erro: string | null | undefined): boolean {
+  return /openrouter_http_429|sintese_vazia|rate.?limit|429/i.test(String(erro ?? ""));
+}
+
+const AUTO_RESEND_429_MS = 10_000;
+
 export function JobProgressCard({
   jobId,
   onDone,
@@ -150,13 +157,23 @@ export function JobProgressCard({
   const [lista, setLista] = useState<Passo[]>([]);
   const [erro, setErro] = useState<string | null>(null);
   const [ultimoAvanco, setUltimoAvanco] = useState(() => Date.now());
+  const [autoResendEm, setAutoResendEm] = useState<number | null>(null);
 
-  // `onDone` é recriado a cada render do pai, que tem relógio de 15 s. Com ele nas
-  // dependências, o canal do Realtime era desfeito e refeito a cada tique.
+  // `onDone`/`onResend` são recriados a cada render do pai. Refs evitam re-subscribe
+  // e disparam o auto-retry sem stale closure.
   const onDoneRef = useRef(onDone);
+  const onResendRef = useRef(onResend);
+  const autoResendFeito = useRef(false);
   useEffect(() => {
     onDoneRef.current = onDone;
   }, [onDone]);
+  useEffect(() => {
+    onResendRef.current = onResend;
+  }, [onResend]);
+  useEffect(() => {
+    autoResendFeito.current = false;
+    setAutoResendEm(null);
+  }, [jobId]);
 
   useEffect(() => {
     let vivo = true;
@@ -219,8 +236,24 @@ export function JobProgressCard({
   }, [jobId]);
 
   // Relógio só enquanto há o que esperar — e só para MEDIR silêncio, nunca para reprovar.
-  const aguardando = status !== "done" && status !== "error";
+  // Em error+429 também conta (countdown do auto-reenvio).
+  const rateLimitAtivo = status === "error" && ehErroRateLimit(erro);
+  const aguardando = (status !== "done" && status !== "error") || rateLimitAtivo;
   const agora = useAgora(aguardando);
+
+  // 21/08: em 429/sintese_vazia auto-reenvia 1× após ~10s (o reenvio manual costuma
+  // concluir; deixar só o botão era falso negativo operacional).
+  useEffect(() => {
+    if (!rateLimitAtivo || autoResendFeito.current) return;
+    autoResendFeito.current = true;
+    const disparaEm = Date.now() + AUTO_RESEND_429_MS;
+    setAutoResendEm(disparaEm);
+    const t = setTimeout(() => {
+      setAutoResendEm(null);
+      onResendRef.current();
+    }, AUTO_RESEND_429_MS);
+    return () => clearTimeout(t);
+  }, [rateLimitAtivo]);
 
   const ultimo = lista[lista.length - 1];
   const indiceAtual = indiceDaFase(lista);
@@ -237,10 +270,15 @@ export function JobProgressCard({
   // 20/08: sintese_vazia / openrouter_http_429 é rate-limit transitório — não jogar o slug
   // técnico na cara do gestor (e o pai já ignora error se houver job done mais novo).
   if (status === "error") {
-    const raw = String(erro ?? "");
-    const rateLimit = /openrouter_http_429|sintese_vazia|rate.?limit|429/i.test(raw);
+    const rateLimit = ehErroRateLimit(erro);
+    const secs =
+      rateLimit && autoResendEm != null
+        ? Math.max(0, Math.ceil((autoResendEm - agora) / 1000))
+        : null;
     const msg = rateLimit
-      ? "O modelo ficou sobrecarregado nesta rodada (limite temporário). Reenvie a pergunta — a conversa e o histórico foram preservados."
+      ? secs != null && secs > 0
+        ? `O modelo ficou sobrecarregado nesta rodada (limite temporário). Reenviando automaticamente em ${secs}s — a conversa e o histórico foram preservados.`
+        : "O modelo ficou sobrecarregado nesta rodada (limite temporário). Reenviando automaticamente… — a conversa e o histórico foram preservados."
       : (erro ?? "O processamento parou antes de concluir.");
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
@@ -248,9 +286,17 @@ export function JobProgressCard({
           <AlertTriangle className="h-4 w-4 text-destructive" />A resposta não foi concluída
         </div>
         <p className="mt-1 text-xs text-muted-foreground">{msg}</p>
-        <Button size="sm" variant="outline" className="mt-2" onClick={onResend}>
+        <Button
+          size="sm"
+          variant="outline"
+          className="mt-2"
+          onClick={() => {
+            setAutoResendEm(null);
+            onResend();
+          }}
+        >
           <RefreshCw className="mr-1 h-3.5 w-3.5" />
-          Reenviar
+          {rateLimit ? "Reenviar agora" : "Reenviar"}
         </Button>
       </div>
     );

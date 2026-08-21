@@ -1,4 +1,11 @@
-// supabase/functions/traffic-agent-job/index.ts (v3.7)
+// supabase/functions/traffic-agent-job/index.ts (v3.8)
+// v3.8 (21/08/2026) - SINTESE RESILIENTE A 429 EM RELATORIO DEEP: job 6221da92 (COHAPM
+//   ~10:55 UTC) classificou DEEP certo, coletou 6 especialistas + 2 devolucoes, e a
+//   sintese morreu vazia em ~16s com openrouter_http_429 (v3.7 so tinha 4 retries curtos).
+//   (1) retries longos so na sintese; (2) cool-down se a coleta ja veio cheia de erro_llm;
+//   (3) sintese segmentada quando o pacote de relatorios e enorme; (4) se ainda assim
+//   429+vazio, checkpoint direto_para_sintese + reinvoca (nao marca error permanente
+//   na 1a falha). UX: card auto-reenvia em 429.
 // v3.7 (20/08/2026) - RETRY OpenRouter 429/502/503 com backoff na sintese (e demais
 //   chamarLLM): rate-limit transitorio nao vira sintese_vazia/erro_job imediato. Caso
 //   medido: job 123c627d falhou em ~55s com openrouter_http_429 na sintese; reenvio
@@ -259,7 +266,7 @@ type Capacidade = {
   forcarPlano?: { nome: string; foco: string }[];
 };
 
-const RE_DEEP = /\b(analise tudo|analise completa|auditoria|todas as campanhas|todas campanhas|todas as contas|comparar|comparacao|cruzar|panorama|inventario|conta inteira|conta toda|relatorio completo|diagnostico completo|visao geral|tudo da conta|tudo sobre|multiplas campanhas|todas as pecas|cobertura total|pontos? a pontos?)\b/;
+const RE_DEEP = /\b(analise tudo|analise completa|avaliacao completa|auditoria|supergestor|todas as campanhas|todas campanhas|todas as contas|comparar|comparacao|cruzar|panorama|inventario|conta inteira|conta toda|relatorio completo|diagnostico completo|visao geral|tudo da conta|tudo sobre|multiplas campanhas|todas as pecas|cobertura total|pontos? a pontos?)\b/;
 // Prefixos com \w*: "recomendac\b" NAO casava "recomendacao"; "musica\b" NAO casava "musicas".
 const RE_META_DICA = /\b(dicas?|recomendac\w*|opportunity(?:\s*score)?|musicas?|boost|impulsionar|meta\s+emitiu|recomendacao\s+da\s+meta)\b/;
 const RE_FOLLOW_UP = /^(sobre|e |dessas|dessa|desses|desse|analise|me (informe|diga|recomenda)|o que (voce|acha)|e as |e os |e essas|e esses)|\b(essas duas|analise[- ]as|o que me recomenda|me informe o que|e viavel|faz sentido)\b/;
@@ -269,7 +276,11 @@ const FOCO_META_DICAS =
   "Levantar as dicas/recomendacoes da Meta (get_meta_dicas) citadas na pergunta — em especial musica/boost/Opportunity Score — e devolver julgamento acionavel (viavel ou nao + o que fazer). Nao inventariar criativos nem abrir outras frentes.";
 // Parede da fase de sintese: alem do timeout por chamada OpenRouter, a fase inteira
 // nao pode ficar "escrevendo" alem disto (worker morto deixa job running para sempre).
-const SINT_FASE_HARD_MS = 150_000;
+// v3.8: 180s — cabe retries longos de 429 sem fingir que o worker morreu.
+const SINT_FASE_HARD_MS = 180_000;
+// Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
+const SINT_CHARS_SEGMENTAR = 70_000;
+const SINT_COOLDOWN_POS_429_MS = 12_000;
 
 function classificarCapacidade(pergunta: string): Capacidade {
   const raw = pergunta.trim();
@@ -1140,19 +1151,33 @@ async function t_drive_criativos(companyId: string) {
 // ============================================================================
 const OPENROUTER_RETRIAVEL = new Set([429, 502, 503]);
 const OPENROUTER_RETRY_MAX = 4;
+// v3.8: sintese de relatorio deep merece retries mais longos — o caso 6221da92
+// esgotou 4×~8s e marcou sintese_vazia com relatorios ja prontos.
+const OPENROUTER_RETRY_MAX_SINTESE = 8;
+const OPENROUTER_RETRY_CAP_MS = 20_000;
+const OPENROUTER_RETRY_CAP_SINTESE_MS = 35_000;
 
-function esperaRetryOpenRouter(resp: Response, tentativa: number): number {
+function esperaRetryOpenRouter(resp: Response, tentativa: number, capMs = OPENROUTER_RETRY_CAP_MS): number {
   const ra = Number(resp.headers.get("retry-after"));
-  if (Number.isFinite(ra) && ra > 0) return Math.min(Math.floor(ra * 1000), 20_000);
-  // 1s, 2s, 4s, 8s — rate-limit costuma passar em poucos segundos.
-  return Math.min(1000 * 2 ** Math.max(0, tentativa - 1), 8_000);
+  if (Number.isFinite(ra) && ra > 0) return Math.min(Math.floor(ra * 1000), capMs);
+  // 2s, 4s, 8s, 16s… — rate-limit de pico em sintese costuma pedir dezenas de segundos.
+  return Math.min(2000 * 2 ** Math.max(0, tentativa - 1), capMs);
 }
 
-async function chamarLLM(messages: any[], opts: { tools?: any[]; maxTokens: number; reasoning?: any; model?: string; timeoutMs?: number }): Promise<any> {
+function ehRateLimitErro(s: string): boolean {
+  return /openrouter_http_429|rate.?limit|(^|[^0-9])429([^0-9]|$)/i.test(s);
+}
+
+async function chamarLLM(messages: any[], opts: {
+  tools?: any[]; maxTokens: number; reasoning?: any; model?: string; timeoutMs?: number;
+  retries?: number; retryCapMs?: number;
+}): Promise<any> {
   const payload: any = { model: opts.model ?? MODEL, messages, max_tokens: opts.maxTokens };
   if (opts.tools?.length) { payload.tools = opts.tools; payload.tool_choice = "auto"; }
   if (opts.reasoning) payload.reasoning = opts.reasoning;
   const timeoutMs = opts.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
+  const maxRetries = opts.retries ?? OPENROUTER_RETRY_MAX;
+  const retryCap = opts.retryCapMs ?? OPENROUTER_RETRY_CAP_MS;
   const headers = { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` };
   async function postOnce(body: any): Promise<{ resp: Response; text: string; aborted: boolean }> {
     const ac = new AbortController();
@@ -1181,9 +1206,9 @@ async function chamarLLM(messages: any[], opts: { tools?: any[]; maxTokens: numb
     ({ resp, text, aborted } = await postOnce(payload));
     if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   }
-  // v3.7: 429/502/503 sao transitórios — backoff antes de virar sintese_vazia na tela.
-  for (let t = 1; !resp.ok && OPENROUTER_RETRIAVEL.has(resp.status) && t <= OPENROUTER_RETRY_MAX; t++) {
-    await new Promise((r) => setTimeout(r, esperaRetryOpenRouter(resp, t)));
+  // v3.7/v3.8: 429/502/503 sao transitórios — backoff antes de virar sintese_vazia na tela.
+  for (let t = 1; !resp.ok && OPENROUTER_RETRIAVEL.has(resp.status) && t <= maxRetries; t++) {
+    await new Promise((r) => setTimeout(r, esperaRetryOpenRouter(resp, t, retryCap)));
     ({ resp, text, aborted } = await postOnce(payload));
     if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   }
@@ -1379,6 +1404,119 @@ Ao terminar a coleta, escreva um RELATORIO conciso e denso em markdown com numer
 // ============================================================================
 // FASE 3 - SINTESE com continuacao INTERNA (contexto preservado, zero re-coleta)
 // ============================================================================
+function montarSysSintese(companyName: string, estilo: string, memoria: string): string {
+  const isLegal = norm(companyName).includes("legal");
+  const perfil = isLegal
+    ? "empresa de credito consignado; regras financeiras so valem quando o produto estiver comprovado"
+    : "cooperativa habitacional; doutrina, benchmarks e identidades da Legal e Viver nao se aplicam";
+  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
+PERFIL EMPRESARIAL: ${perfil}.
+ESCOPO RIGIDO: somente trafego pago (midia, criativo, publico, orcamento, custo). Bancos, esteira interna, politica de credito, atendimento humano e conversao final do CRM estao FORA - se a pergunta tocar nisso, declare fora de escopo e siga.
+REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao disponivel'; NUNCA estime nem complete com plausibilidade. (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) alguns relatorios chegam marcados como INCOMPLETOS (cortados por limite de tamanho): o que nao esta neles pode MUITO BEM existir no sistema. Para esses, escreva 'o levantamento do especialista veio incompleto nesta rodada' - e PROIBIDO dizer 'nao disponivel', 'retornou vazio' ou tratar a ausencia como inexistencia. (R4) nao misture janelas. (R4b) HOJE e a data declarada na primeira linha deste prompt - NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar a janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes: se uma acao for recomendavel, descreva-a e diga que o gestor pode pedi-la no chat para virar pedido de aprovacao. (R9) incoerencia entre numeros: aponte. Sem jargao interno (nomes de ferramenta, codigos de regra, limites de implementacao).
+PROIBIDO NARRAR INTENCAO: nunca escreva "vou cruzar/ler/consultar/verificar". Entregue UMA resposta completa e elaborada neste turno — veredito + evidencia + recomendacao — mesmo quando o levantamento veio de um unico especialista (capacidade lite). Em dicas/recomendacoes da Meta (ex.: impulsionar com musica): diga se e viavel ou nao e o que fazer, sem filler operacional. Capacidade menor NAO autoriza resposta curta de dialogo nem "vou analisar".
+FORMATO (regras vigentes do sistema):
+${estilo}
+MEMORIA INSTITUCIONAL (fatos verificados):
+${memoria}
+Responda a pergunta INTEIRA, bloco a bloco na ordem pedida, com numero + fonte ('levantamento interno de hoje') + ressalva. Escreva de forma continua ate concluir.`;
+}
+
+async function chamarSinteseParte(
+  messages: any[],
+  maxTok: number,
+  callTimeout: number,
+): Promise<{ erro?: string; pedaco?: string; finish?: string; tin: number; tout: number }> {
+  const r = await chamarLLM(messages, {
+    maxTokens: maxTok,
+    reasoning: REASONING_OFF,
+    timeoutMs: callTimeout,
+    retries: OPENROUTER_RETRY_MAX_SINTESE,
+    retryCapMs: OPENROUTER_RETRY_CAP_SINTESE_MS,
+  });
+  if (r.erro) return { erro: r.erro, tin: 0, tout: 0 };
+  const u = usoDe(r.parsed);
+  const msg = r.parsed?.choices?.[0]?.message;
+  return {
+    pedaco: String(msg?.content ?? ""),
+    finish: String(r.parsed?.choices?.[0]?.finish_reason ?? ""),
+    tin: u.tin,
+    tout: u.tout,
+  };
+}
+
+/** Sintese em 2 rascunhos + fusao quando o pacote de relatorios e enorme (deep). */
+async function sintetizarSegmentada(
+  companyName: string,
+  pergunta: string,
+  relatorios: { nome: string; relatorio: string; completo: boolean }[],
+  estilo: string,
+  memoria: string,
+  prazo: () => number,
+  tel: any,
+  opts?: { timeoutMs?: number },
+): Promise<string> {
+  const sys = montarSysSintese(companyName, estilo, memoria);
+  const perCallTimeout = opts?.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
+  const hardDeadline = Date.now() + Math.min(SINT_FASE_HARD_MS, Math.max(prazo(), 8_000));
+  const meio = Math.ceil(relatorios.length / 2);
+  const grupos = [relatorios.slice(0, meio), relatorios.slice(meio)];
+  const rascunhos: string[] = [];
+  let tin = 0, tout = 0, partes = 0, finish = "";
+  for (let g = 0; g < grupos.length; g++) {
+    const grupo = grupos[g];
+    if (!grupo.length) continue;
+    const restanteMs = Math.min(prazo(), hardDeadline - Date.now());
+    if (restanteMs <= 8_000) break;
+    const blocos = grupo.map((r) =>
+      `=== RELATORIO ${r.nome} [${r.completo ? "COMPLETO" : "INCOMPLETO"}] ===\n${r.relatorio}`).join("\n\n");
+    const messages: any[] = [
+      { role: "system", content: sys },
+      { role: "user", content: `PERGUNTA DO GESTOR (responda o que estes relatorios cobrem; declare lacunas do que falta):\n${pergunta}\n\n=== RELATORIOS (bloco ${g + 1}/${grupos.length}) ===\n${blocos}` },
+    ];
+    const maxTok = Math.max(1500, Math.min(SINT_MAX_TOKENS, Math.floor((restanteMs / 1000) * TOKENS_POR_SEGUNDO)));
+    const callTimeout = Math.min(perCallTimeout, Math.max(5_000, restanteMs));
+    const r = await chamarSinteseParte(messages, maxTok, callTimeout);
+    tin += r.tin; tout += r.tout; partes++;
+    if (r.erro) {
+      finish = `erro_llm:${r.erro}`;
+      tel.sintese = { partes, tokens_in: tin, tokens_out: tout, finish_reason: finish, segmentada: true };
+      return "";
+    }
+    if (r.pedaco?.trim()) rascunhos.push(r.pedaco.trim());
+    finish = r.finish || finish;
+    // Pausa curta entre blocos — alivia rate-limit apos rajada de subagentes.
+    if (g + 1 < grupos.length && prazo() > 15_000) {
+      await new Promise((res) => setTimeout(res, 3_000));
+    }
+  }
+  if (!rascunhos.length) {
+    tel.sintese = { partes, tokens_in: tin, tokens_out: tout, finish_reason: finish || "sintese_segmentada_vazia", segmentada: true };
+    return "";
+  }
+  const restanteMs = Math.min(prazo(), hardDeadline - Date.now());
+  if (restanteMs <= 5_000) {
+    tel.sintese = { partes, tokens_in: tin, tokens_out: tout, finish_reason: finish || "stop", segmentada: true };
+    return rascunhos.join("\n\n");
+  }
+  const messagesFusao: any[] = [
+    { role: "system", content: sys },
+    { role: "user", content: `PERGUNTA DO GESTOR:\n${pergunta}\n\nVoce recebeu RASCUNHOS parciais de especialistas. Una num UNICO relatorio completo, sem repetir secoes, cobrindo a pergunta inteira. Declare lacunas se algum rascunho veio incompleto.\n\n=== RASCUNHO 1 ===\n${rascunhos[0] ?? "(vazio)"}\n\n=== RASCUNHO 2 ===\n${rascunhos[1] ?? "(nao houve segundo bloco)"}` },
+  ];
+  const maxTok = Math.max(1500, Math.min(SINT_MAX_TOKENS, Math.floor((restanteMs / 1000) * TOKENS_POR_SEGUNDO)));
+  const callTimeout = Math.min(perCallTimeout, Math.max(5_000, restanteMs));
+  const fusao = await chamarSinteseParte(messagesFusao, maxTok, callTimeout);
+  tin += fusao.tin; tout += fusao.tout; partes++;
+  if (fusao.erro) {
+    // Melhor entregar rascunhos juntos do que falhar vazio apos coleta cara.
+    finish = `erro_llm:${fusao.erro}+fusao_parcial`;
+    tel.sintese = { partes, tokens_in: tin, tokens_out: tout, finish_reason: finish, segmentada: true };
+    return rascunhos.join("\n\n---\n\n");
+  }
+  finish = fusao.finish || "stop";
+  tel.sintese = { partes, tokens_in: tin, tokens_out: tout, finish_reason: finish, segmentada: true };
+  return String(fusao.pedaco ?? "").trim() || rascunhos.join("\n\n");
+}
+
 async function sintetizar(
   companyName: string,
   pergunta: string,
@@ -1389,21 +1527,12 @@ async function sintetizar(
   tel: any,
   opts?: { timeoutMs?: number },
 ) {
-  const isLegal = norm(companyName).includes("legal");
-  const perfil = isLegal
-    ? "empresa de credito consignado; regras financeiras so valem quando o produto estiver comprovado"
-    : "cooperativa habitacional; doutrina, benchmarks e identidades da Legal e Viver nao se aplicam";
-  const sys = `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
-PERFIL EMPRESARIAL: ${perfil}.
-ESCOPO RIGIDO: somente trafego pago (midia, criativo, publico, orcamento, custo). Bancos, esteira interna, politica de credito, atendimento humano e conversao final do CRM estao FORA - se a pergunta tocar nisso, declare fora de escopo e siga.
-REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao disponivel'; NUNCA estime nem complete com plausibilidade. (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) alguns relatorios chegam marcados como INCOMPLETOS (cortados por limite de tamanho): o que nao esta neles pode MUITO BEM existir no sistema. Para esses, escreva 'o levantamento do especialista veio incompleto nesta rodada' - e PROIBIDO dizer 'nao disponivel', 'retornou vazio' ou tratar a ausencia como inexistencia. (R4) nao misture janelas. (R4b) HOJE e a data declarada na primeira linha deste prompt - NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar a janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes: se uma acao for recomendavel, descreva-a e diga que o gestor pode pedi-la no chat para virar pedido de aprovacao. (R9) incoerencia entre numeros: aponte. Sem jargao interno (nomes de ferramenta, codigos de regra, limites de implementacao).
-PROIBIDO NARRAR INTENCAO: nunca escreva "vou cruzar/ler/consultar/verificar". Entregue UMA resposta completa e elaborada neste turno — veredito + evidencia + recomendacao — mesmo quando o levantamento veio de um unico especialista (capacidade lite). Em dicas/recomendacoes da Meta (ex.: impulsionar com musica): diga se e viavel ou nao e o que fazer, sem filler operacional. Capacidade menor NAO autoriza resposta curta de dialogo nem "vou analisar".
-FORMATO (regras vigentes do sistema):
-${estilo}
-MEMORIA INSTITUCIONAL (fatos verificados):
-${memoria}
-Responda a pergunta INTEIRA, bloco a bloco na ordem pedida, com numero + fonte ('levantamento interno de hoje') + ressalva. Escreva de forma continua ate concluir.`;
+  const sys = montarSysSintese(companyName, estilo, memoria);
   const blocos = relatorios.map((r) => `=== RELATORIO ${r.nome} [${r.completo ? "COMPLETO" : "INCOMPLETO - cortado por limite de tamanho; ausencias aqui NAO significam que o dado nao existe"}] ===\n${r.relatorio}`).join("\n\n");
+  // v3.8: pacote enorme → sintese segmentada (menos 429 numa unica chamada monstro).
+  if (relatorios.length >= 4 && blocos.length >= SINT_CHARS_SEGMENTAR && prazo() > 60_000) {
+    return await sintetizarSegmentada(companyName, pergunta, relatorios, estilo, memoria, prazo, tel, opts);
+  }
   const messages: any[] = [
     { role: "system", content: sys },
     { role: "user", content: `PERGUNTA DO GESTOR (responda por completo):\n${pergunta}\n\n=== RELATORIOS DOS ESPECIALISTAS (sua unica fonte de numeros da conta) ===\n${blocos}` },
@@ -1419,16 +1548,15 @@ Responda a pergunta INTEIRA, bloco a bloco na ordem pedida, com numero + fonte (
     }
     const maxTok = Math.max(1500, Math.min(SINT_MAX_TOKENS, Math.floor((restanteMs / 1000) * TOKENS_POR_SEGUNDO)));
     const callTimeout = Math.min(perCallTimeout, Math.max(5_000, restanteMs));
-    const r = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, timeoutMs: callTimeout });
+    const r = await chamarSinteseParte(messages, maxTok, callTimeout);
     if (r.erro) {
       if (!texto) texto = "";
       finish = `erro_llm:${r.erro}`;
       break;
     }
-    const u = usoDe(r.parsed); tin += u.tin; tout += u.tout;
-    const msg = r.parsed?.choices?.[0]?.message;
-    const pedaco = String(msg?.content ?? "");
-    finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
+    tin += r.tin; tout += r.tout;
+    const pedaco = String(r.pedaco ?? "");
+    finish = String(r.finish ?? "");
     texto += pedaco;
     partes++;
     if (finish !== "length") break;
@@ -1441,6 +1569,65 @@ Responda a pergunta INTEIRA, bloco a bloco na ordem pedida, com numero + fonte (
     texto += "\n\n*(resposta encerrada no limite de tamanho do processamento; peca a parte que faltou que eu completo)*";
   }
   return texto;
+}
+
+/** Antes da sintese: se a coleta ja veio cheia de 429, espera o limite esfriar. */
+async function cooldownAntesDaSintese(jobId: string, tel: any, prazo: () => number) {
+  const subs: any[] = Array.isArray(tel?.subagentes) ? tel.subagentes : [];
+  const n429 = subs.filter((s) => ehRateLimitErro(String(s?.finish ?? s?.erro ?? ""))).length;
+  if (n429 < 2 || prazo() < 25_000) return;
+  await pushProgresso(jobId, "sintese", "aguardando alívio do limite do modelo antes de escrever…");
+  await new Promise((r) => setTimeout(r, Math.min(SINT_COOLDOWN_POS_429_MS, Math.max(0, prazo() - 20_000))));
+}
+
+/**
+ * Sintese com resgate: 429+vazio na 1a tentativa → checkpoint direto_para_sintese
+ * (worker novo, sem re-planejar) em vez de error permanente.
+ * Retorna texto, ou null se o job foi reinvocado (caller deve return).
+ */
+async function sintetizarComResgate(args: {
+  jobId: string; convId: string; companyId: string; mcpKey: string;
+  companyName: string; pergunta: string;
+  plano: { nome: string; foco: string }[];
+  relatorios: { nome: string; relatorio: string; completo: boolean }[];
+  estilo: string; memoria: string;
+  prazo: () => number; tel: any;
+  segmento: number; rodada: number;
+  timeoutMs: number;
+  jaRetentouSintese: boolean;
+}): Promise<string | null> {
+  await cooldownAntesDaSintese(args.jobId, args.tel, args.prazo);
+  await pushProgresso(args.jobId, "sintese", "escrevendo a resposta final");
+  const texto = await sintetizar(
+    args.companyName, args.pergunta, args.relatorios, args.estilo, args.memoria,
+    args.prazo, args.tel, { timeoutMs: args.timeoutMs },
+  );
+  if (String(texto ?? "").trim()) return texto;
+
+  const finish = String(args.tel.sintese?.finish_reason ?? "sem_finish");
+  const podeResgatar = ehRateLimitErro(finish)
+    && !args.jaRetentouSintese
+    && args.segmento < MAX_SEGMENTOS
+    && args.relatorios.length > 0;
+
+  if (podeResgatar) {
+    args.tel.sintese_resgate = { motivo: finish, de_segmento: args.segmento };
+    await pushProgresso(args.jobId, "sintese", "modelo sobrecarregado — retomando a escrita sem refazer a coleta…");
+    await new Promise((r) => setTimeout(r, SINT_COOLDOWN_POS_429_MS));
+    await gravarCheckpointEReinvocar(args.jobId, args.convId, args.companyId, args.mcpKey, {
+      pergunta: args.pergunta,
+      plano: args.plano,
+      relatorios: args.relatorios,
+      devolver: [],
+      rodada: args.rodada,
+      tel_parcial: args.tel,
+      segmento: args.segmento + 1,
+      direto_para_sintese: true,
+      sintese_retry: true,
+    });
+    return null; // job continua no segmento seguinte
+  }
+  throw new Error(`sintese_vazia (${finish})`);
 }
 
 // ============================================================================
@@ -1759,13 +1946,20 @@ async function executarLote(
 
 async function gravarCheckpointEReinvocar(
   jobId: string, convId: string, companyId: string, mcpKey: string,
-  cp: { pergunta: string; plano: any[]; relatorios: any[]; devolver: any[]; rodada: number; tel_parcial: any; segmento: number; direto_para_sintese?: boolean },
+  cp: {
+    pergunta: string; plano: any[]; relatorios: any[]; devolver: any[];
+    rodada: number; tel_parcial: any; segmento: number;
+    direto_para_sintese?: boolean; sintese_retry?: boolean;
+  },
 ) {
   await supa.from("chat_jobs").update({
     checkpoint: cp, segmento: cp.segmento,
     status: "running",
   }).eq("id", jobId);
-  await pushProgresso(jobId, "segmento", `prazo do worker esgotando: continuando no segmento ${cp.segmento} de ${MAX_SEGMENTOS} (nada sera re-pensado)`);
+  const rotulo = cp.sintese_retry
+    ? `retomando sintese apos rate-limit (segmento ${cp.segmento} de ${MAX_SEGMENTOS})`
+    : `prazo do worker esgotando: continuando no segmento ${cp.segmento} de ${MAX_SEGMENTOS} (nada sera re-pensado)`;
+  await pushProgresso(jobId, "segmento", rotulo);
   // Reinvoca a PROPRIA edge. fire-and-forget: se o POST falhar, o watchdog adota o orfao.
   await fetch(`${SUPABASE_URL}/functions/v1/traffic-agent-job`, {
     method: "POST",
@@ -1779,8 +1973,8 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
   const cap = classificarCapacidade(pergunta);
-  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.6", subagentes: [] };
-  tel.versao = "job-v3.6";
+  const tel: any = retomada?.tel_parcial ?? { versao: "job-v3.8", subagentes: [] };
+  tel.versao = "job-v3.8";
   tel.capacidade = { tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas, devolucoes_max: cap.devolucoesMax };
   // Compat: telemetria antiga lia perfil_fast
   if (cap.tier === "lite") { tel.perfil_fast = true; tel.perfil_fast_motivo = cap.motivo; }
@@ -1838,13 +2032,13 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       }
       tel.rodadas_devolucao = rodada;
       tel.segmento = segmento;
-      await pushProgresso(jobId, "sintese", "escrevendo a resposta final");
-      const texto0 = await sintetizar(companyName, pergunta, relatorios, estilo0, memoria0, prazo, tel, {
+      const texto0 = await sintetizarComResgate({
+        jobId, convId, companyId, mcpKey, companyName, pergunta, plano, relatorios,
+        estilo: estilo0, memoria: memoria0, prazo, tel, segmento, rodada,
         timeoutMs: cap.openRouterTimeoutMs,
+        jaRetentouSintese: !!retomada.sintese_retry,
       });
-      if (!String(texto0 ?? "").trim()) {
-        throw new Error(`sintese_vazia (${tel.sintese?.finish_reason ?? "sem_finish"})`);
-      }
+      if (texto0 === null) return; // resgate reinvocou
       tel.ms_total = Date.now() - t0;
       const finishSint0 = tel.sintese?.finish_reason ?? "stop";
       await supa.from("chat_messages").insert({
@@ -1932,14 +2126,14 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       return;
     }
 
-    // FASE 3 - sintese
-    await pushProgresso(jobId, "sintese", "escrevendo a resposta final");
-    const texto = await sintetizar(companyName, pergunta, relatorios, estilo, memoria, prazo, tel, {
+    // FASE 3 - sintese (com resgate 429)
+    const texto = await sintetizarComResgate({
+      jobId, convId, companyId, mcpKey, companyName, pergunta, plano, relatorios,
+      estilo, memoria, prazo, tel, segmento, rodada,
       timeoutMs: cap.openRouterTimeoutMs,
+      jaRetentouSintese: false,
     });
-    if (!String(texto ?? "").trim()) {
-      throw new Error(`sintese_vazia (${tel.sintese?.finish_reason ?? "sem_finish"})`);
-    }
+    if (texto === null) return;
 
     tel.ms_total = Date.now() - t0;
     const finishSint = tel.sintese?.finish_reason ?? "stop";
@@ -1957,7 +2151,9 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     // Degradar com aviso, nunca em silencio: o gestor recebe uma mensagem, nao um vacuo.
     await supa.from("chat_messages").insert({
       conversation_id: convId, company_id: companyId, role: "assistant",
-      content: "O processamento em segundo plano falhou antes de concluir. Tente de novo; se repetir, o problema esta registrado para o suporte tecnico.",
+      content: ehRateLimitErro(erro)
+        ? "O modelo ficou sobrecarregado nesta rodada (limite temporário). A coleta já feita foi preservada — reenvie a pergunta; em geral a segunda tentativa conclui."
+        : "O processamento em segundo plano falhou antes de concluir. Tente de novo; se repetir, o problema esta registrado para o suporte tecnico.",
       model: MODEL, diagnostico: { ...tel, erro, origem: "traffic-agent-job", finish_reason: "erro_job" },
     }).then(() => {}, () => {});
     await supa.from("chat_jobs").update({ status: "error", erro, finished_at: new Date().toISOString(), diagnostico: tel }).eq("id", jobId);

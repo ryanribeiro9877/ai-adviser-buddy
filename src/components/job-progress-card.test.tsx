@@ -262,6 +262,27 @@ describe("o BANCO decide — não o relógio", () => {
     expect(onResend).toHaveBeenCalled();
   });
 
+  it("429/sintese_vazia: avisa sobrecarga E auto-reenvia", async () => {
+    const { onResend } = montar();
+    chegaDoBanco({ status: "error", erro: "sintese_vazia (erro_llm:openrouter_http_429)" });
+    expect(
+      await screen.findByText(/modelo ficou sobrecarregado.*Reenviando automaticamente/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Reenviar agora/i })).toBeInTheDocument();
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+      await Promise.resolve();
+    });
+    expect(onResend).toHaveBeenCalled();
+  });
+
+  it("429: botão Reenviar agora dispara na hora (sem esperar countdown)", async () => {
+    const { onResend } = montar();
+    chegaDoBanco({ status: "error", erro: "openrouter_http_429" });
+    await userEvent.click(await screen.findByRole("button", { name: /Reenviar agora/i }));
+    expect(onResend).toHaveBeenCalled();
+  });
+
   it("status=done: o card SAI de cena e avisa o pai", async () => {
     // Ele se remove sozinho; depender so do evento de chat_messages deixaria o
     // card girando sobre um job ja pronto se o evento se perdesse.
