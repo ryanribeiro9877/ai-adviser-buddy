@@ -45,10 +45,16 @@
 // (mesmo motivo registrado em mcp-server/index.ts).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import {
+  COMPANY_LEGAL,
+  redactAllMetaTokens,
+  tokenAdsPorCompanyId,
+} from "../_shared/meta_company_tokens.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const META_ADS_TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
+/** Token Ads da empresa do request — nunca fallback cruzado. */
+let META_ADS_TOKEN = "";
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
 const MAX_IMG_BYTES = 8 * 1024 * 1024;
@@ -56,7 +62,24 @@ const MAX_VIDEO_BYTES = 45 * 1024 * 1024;
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 const json = (b: unknown, s = 200) =>
-  new Response(JSON.stringify(b), { status: s, headers: { "content-type": "application/json" } });
+  new Response(redactAllMetaTokens(JSON.stringify(b)), {
+    status: s,
+    headers: { "content-type": "application/json" },
+  });
+
+function ativarTokenEmpresa(companyId: string): { ok: true } | { ok: false; error: string } {
+  const t = tokenAdsPorCompanyId(companyId);
+  if (!t) {
+    META_ADS_TOKEN = "";
+    return {
+      ok: false,
+      error:
+        `token Ads ausente para company_id=${companyId} — sem fallback para outra empresa`,
+    };
+  }
+  META_ADS_TOKEN = t.token;
+  return { ok: true };
+}
 
 // ---------------- Drive (service account) ----------------
 let _tok: { t: string; exp: number } | null = null;
@@ -163,7 +186,10 @@ Deno.serve(async (req) => {
   // A resposta decide se `criar_anuncio_a_partir_de` com peca nova pode existir sem montar spec
   // do zero - e montar do zero exigiria a URL de destino, que nao esta em tabela nenhuma.
   if (acao === "creative") {
-    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    // Probe: company_id UUID se informado; senao Legal (META_ADS_TOKEN legado).
+    const companyProbe = String(body?.company_id ?? "").trim() || COMPANY_LEGAL;
+    const ativ = ativarTokenEmpresa(companyProbe);
+    if (!ativ.ok) return json({ error: ativ.error }, 500);
     const ids: string[] = Array.isArray(body?.creative_ids)
       ? body.creative_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
       : (body?.creative_id ? [String(body.creative_id).trim()] : []);
@@ -229,7 +255,9 @@ Deno.serve(async (req) => {
   // a Meta entrega 3+ quadros por video: se entregar, o pipeline de visao ganha multiquadro sem
   // download, sem ffmpeg e sem WASM - nenhum dos tres existe no runtime da edge.
   if (acao === "thumbnails") {
-    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    const companyProbe = String(body?.company_id ?? "").trim() || COMPANY_LEGAL;
+    const ativ = ativarTokenEmpresa(companyProbe);
+    if (!ativ.ok) return json({ error: ativ.error }, 500);
     const ids: string[] = Array.isArray(body?.video_ids)
       ? body.video_ids.map((x: unknown) => String(x).trim()).filter(Boolean)
       : (body?.video_id ? [String(body.video_id).trim()] : []);
@@ -289,7 +317,9 @@ Deno.serve(async (req) => {
   // advideos devolve id antes do video ficar pronto; anuncio apontando para video
   // ainda processando falha. Esta acao e LEITURA pura do status.video_status.
   if (acao === "status_video") {
-    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    const companyProbe = String(body?.company_id ?? "").trim() || COMPANY_LEGAL;
+    const ativ = ativarTokenEmpresa(companyProbe);
+    if (!ativ.ok) return json({ error: ativ.error }, 500);
     const vid = String(body?.video_id ?? body?.meta_video_id ?? "").trim();
     if (!vid) return json({ error: "informe video_id ou meta_video_id" }, 400);
     const url = `${GRAPH}/${vid}?fields=id,title,length,status&access_token=${encodeURIComponent(META_ADS_TOKEN)}`;
@@ -327,6 +357,10 @@ Deno.serve(async (req) => {
     : await supa.from("companies").select("id,name").ilike("name", `%${compRef}%`).maybeSingle();
   if (!comp) return json({ error: `empresa nao encontrada: ${compRef}` }, 404);
 
+  // Token Ads DA EMPRESA resolvida — se COHAPM sem secret, falha (não usa Legal).
+  const ativEmpresa = ativarTokenEmpresa(comp.id);
+  if (!ativEmpresa.ok) return json({ error: ativEmpresa.error }, 500);
+
   // travas
   const { data: ex } = await supa.from("meta_execution_config").select("*").eq("company_id", comp.id).maybeSingle();
   if (!ex) return json({ error: "empresa sem configuracao de execucao" }, 400);
@@ -338,7 +372,7 @@ Deno.serve(async (req) => {
   // Sequencial (nao paralelo) para o teto por hora ser medido de verdade a cada envio.
   // Quando nao ha pendente, devolve enviados=0 — o cron continua agendado mas nao faz nada.
   if (acao === "escoar_imagens") {
-    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    if (!META_ADS_TOKEN) return json({ error: `token Ads ausente para empresa ${comp.name}` }, 500);
     if (ex.master_enabled !== true) {
       return json({ ok: false, recusado: true, motivo: "master_enabled desligado para a empresa" }, 403);
     }
@@ -499,7 +533,7 @@ Deno.serve(async (req) => {
 
   // ============== escoar_videos (cron horario, mesmo teto) ==============
   if (acao === "escoar_videos") {
-    if (!META_ADS_TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+    if (!META_ADS_TOKEN) return json({ error: `token Ads ausente para empresa ${comp.name}` }, 500);
     if (ex.master_enabled !== true) {
       return json({ ok: false, recusado: true, motivo: "master_enabled desligado para a empresa" }, 403);
     }

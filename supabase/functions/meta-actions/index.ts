@@ -285,7 +285,7 @@
 //   UTMs serao as do molde - degradar com aviso, nunca silenciosamente.
 // v1: executor da fila de aprovações (pausar_criativo, pausar_campanha, alterar_orcamento).
 //   escalar_criativo segue NAO automatizado (pulado com nota — decisão manual).
-// Token: META_ADS_TOKEN (redigido de qualquer saída). Auth: x-mcp-key.
+// Token Ads: por empresa via meta_company_tokens (redigido). Auth: x-mcp-key.
 
 // Alinhado com as outras 24 edges e com _shared/mcp_auth.ts, que tipam contra
 // @2. O pin antigo em 2.49.1 fazia o SupabaseClient desta edge ser um tipo
@@ -293,6 +293,12 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
+import {
+  empresaPorAdAccount,
+  empresasComTokenAds,
+  redactAllMetaTokens,
+  tokenAdsPorCompanyId,
+} from "../_shared/meta_company_tokens.ts";
 import {
   aplicarIdentidadeInstagramNoSpec,
   avisoIdentidadeInstagram,
@@ -346,7 +352,8 @@ import {
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
+/** Token Ads ativo no request — trocado por empresa via ativarTokenEmpresa (sem fallback cruzado). */
+let TOKEN = "";
 const GRAPH = "https://graph.facebook.com/v21.0";
 const EXECUTAVEIS = [
   "pausar_criativo",
@@ -362,12 +369,47 @@ const EXECUTAVEIS = [
 const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+
+function ativarTokenEmpresa(companyId: string | null | undefined): {
+  ok: true;
+  slug: string;
+  ref: string;
+} | { ok: false; motivo: string } {
+  const t = tokenAdsPorCompanyId(companyId);
+  if (!t) {
+    TOKEN = "";
+    return {
+      ok: false,
+      motivo: companyId
+        ? `token Ads ausente para company_id=${companyId} (sem fallback para outra empresa)`
+        : "company_id ausente — nao e possivel escolher token Ads",
+    };
+  }
+  TOKEN = t.token;
+  return { ok: true, slug: t.slug, ref: t.ref };
+}
+
+function ativarTokenPorAdAccount(adAccount: string | null | undefined): {
+  ok: true;
+  slug: string;
+  ref: string;
+  company_id: string;
+} | { ok: false; motivo: string } {
+  const emp = empresaPorAdAccount(adAccount);
+  if (!emp) {
+    TOKEN = "";
+    return {
+      ok: false,
+      motivo: `ad_account ${adAccount ?? "(vazio)"} nao mapeado em EMPRESAS_META`,
+    };
+  }
+  const a = ativarTokenEmpresa(emp.company_id);
+  if (!a.ok) return a;
+  return { ok: true, slug: a.slug, ref: a.ref, company_id: emp.company_id };
+}
+
 function redact(s: string): string {
-  if (!TOKEN) return s;
-  return s
-    .split(TOKEN)
-    .join("[TOKEN-REDACTED]")
-    .replace(/access_token=[A-Za-z0-9]+/g, "access_token=[TOKEN-REDACTED]");
+  return redactAllMetaTokens(s);
 }
 function json(obj: unknown, status = 200) {
   return new Response(redact(JSON.stringify(obj)), {
@@ -2573,7 +2615,9 @@ async function espelhar(
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  if (!TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+  if (empresasComTokenAds().length === 0) {
+    return json({ error: "nenhum META_ADS_TOKEN* configurado para empresas Meta" }, 500);
+  }
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-only"));
   if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
 
@@ -2612,6 +2656,14 @@ Deno.serve(async (req) => {
     if (!/^\d+$/.test(adsetId)) {
       return json({ error: "adset_external_id numerico obrigatorio" }, 400);
     }
+    const companyId = String(body?.company_id ?? "").trim();
+    const adAccount = String(body?.ad_account ?? body?.account_id ?? "").trim();
+    const ativ = companyId
+      ? ativarTokenEmpresa(companyId)
+      : adAccount
+      ? ativarTokenPorAdAccount(adAccount)
+      : { ok: false as const, motivo: "informe company_id ou ad_account para escolher o token Ads" };
+    if (!ativ.ok) return json({ error: ativ.motivo }, 400);
     const lido = await g(`/${adsetId}?fields=id,name,status,effective_status,targeting`);
     return json({
       ok: lido.status === 200,
@@ -2680,6 +2732,11 @@ Deno.serve(async (req) => {
     const adAccount = String(body?.ad_account ?? "act_3302001729967572").trim();
     const pageId = String(body?.page_id ?? "1095196357012756").trim();
     const handleBuscado = String(body?.username ?? "").trim().replace(/^@/, "").toLowerCase();
+    const companyIdBody = String(body?.company_id ?? "").trim();
+    const ativ = companyIdBody
+      ? ativarTokenEmpresa(companyIdBody)
+      : ativarTokenPorAdAccount(adAccount);
+    if (!ativ.ok) return json({ error: ativ.motivo }, 400);
     const conta = await g(`/${adAccount}?fields=id,name,business`);
     const businessId = (conta.body as any)?.business?.id
       ? String((conta.body as any).business.id)
@@ -2812,6 +2869,8 @@ Deno.serve(async (req) => {
     if (!companyId) {
       return json({ error: "sonda_reconciliacao exige company_id (a evidencia e por empresa)" }, 400);
     }
+    const ativ = ativarTokenEmpresa(companyId);
+    if (!ativ.ok) return json({ error: ativ.motivo }, 400);
     return json({
       ok: true,
       modo: "sonda_reconciliacao",
@@ -2864,6 +2923,22 @@ Deno.serve(async (req) => {
     const alvoExt = String(r.payload?.target_external_id ?? "");
     const alvoNome = String(r.payload?.target_name ?? r.summary);
     const sistema = r.reviewed_by ?? r.requested_by;
+
+    // Token Ads DA EMPRESA DESTE CARD — se COHAPM sem secret, bloqueia (nao usa Legal).
+    const ativTok = ativarTokenEmpresa(r.company_id);
+    if (!ativTok.ok) {
+      await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+        motivo: ativTok.motivo,
+        acao,
+      });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: "bloqueado",
+        motivo: ativTok.motivo,
+      });
+      continue;
+    }
 
     // v3: config DA EMPRESA DESTE CARD. Sem linha propria, nada executa.
     const { data: conf } = await supa

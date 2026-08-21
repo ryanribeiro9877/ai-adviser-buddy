@@ -129,26 +129,40 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import {
+  empresaPorAdAccount,
+  empresasComTokenAds,
+  redactAllMetaTokens,
+  tokenAdsPorCompanyId,
+} from "../_shared/meta_company_tokens.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const TOKEN = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
+/** Token ativo no request — nunca um global para todas as contas. */
+let TOKEN = "";
 const GRAPH = "https://graph.facebook.com/v21.0";
 // Opportunity Score /act_*/recommendations estabilizou em versoes recentes da Marketing API.
 const GRAPH_OS = "https://graph.facebook.com/v22.0";
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 function redact(s: string) {
-  if (!TOKEN) return s;
-  return s
-    .split(TOKEN)
-    .join("[TOKEN-REDACTED]")
-    .replace(/access_token=[A-Za-z0-9]+/g, "access_token=[TOKEN-REDACTED]");
+  return redactAllMetaTokens(s);
 }
 function json(o: unknown, st = 200) {
   return new Response(redact(JSON.stringify(o)), {
     status: st,
     headers: { "content-type": "application/json" },
   });
+}
+
+function resolverTokenConta(
+  companyId: string | null | undefined,
+  externalId: string | null | undefined,
+): { token: string; company_id: string; slug: string; ref: string } | null {
+  const porCompany = tokenAdsPorCompanyId(companyId);
+  if (porCompany) return porCompany;
+  const emp = empresaPorAdAccount(externalId);
+  if (!emp) return null;
+  return tokenAdsPorCompanyId(emp.company_id);
 }
 
 type ConfigCampanha = {
@@ -233,7 +247,9 @@ async function lerCampoPorIds(
   ids: string[],
   nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
   campo: string,
+  tokenOverride?: string,
 ): Promise<ResultadoCampo> {
+  const tok = (tokenOverride ?? TOKEN).trim();
   const valores = new Map<string, unknown>();
   const respondidos = new Set<string>();
   const diagnostico: LeituraCampo = {
@@ -245,9 +261,13 @@ async function lerCampoPorIds(
     exemplos: [],
     erros: [],
   };
+  if (!tok) {
+    diagnostico.erros.push("token Ads ausente para esta leitura");
+    return { valores, respondidos, diagnostico };
+  }
   for (let i = 0; i < ids.length; i += 20) {
     const lote = ids.slice(i, i + 20);
-    const url = `${GRAPH}/?ids=${encodeURIComponent(lote.join(","))}&fields=${encodeURIComponent(campo)}&access_token=${encodeURIComponent(TOKEN)}`;
+    const url = `${GRAPH}/?ids=${encodeURIComponent(lote.join(","))}&fields=${encodeURIComponent(campo)}&access_token=${encodeURIComponent(tok)}`;
     const r = await fetch(url);
     const t = await r.text();
     let p: any;
@@ -273,6 +293,82 @@ async function lerCampoPorIds(
     }
   }
   return { valores, respondidos, diagnostico };
+}
+
+function mergeResultadoCampo(parts: ResultadoCampo[]): ResultadoCampo {
+  const valores = new Map<string, unknown>();
+  const respondidos = new Set<string>();
+  const diagnostico: LeituraCampo = {
+    nivel: parts[0]?.diagnostico.nivel ?? "anuncio",
+    campo: parts[0]?.diagnostico.campo ?? "",
+    solicitados: 0,
+    respostas: 0,
+    com_chave: 0,
+    exemplos: [],
+    erros: [],
+  };
+  for (const p of parts) {
+    diagnostico.nivel = p.diagnostico.nivel;
+    diagnostico.campo = p.diagnostico.campo;
+    diagnostico.solicitados += p.diagnostico.solicitados;
+    diagnostico.respostas += p.diagnostico.respostas;
+    diagnostico.com_chave += p.diagnostico.com_chave;
+    diagnostico.erros.push(...p.diagnostico.erros);
+    for (const ex of p.diagnostico.exemplos) {
+      if (diagnostico.exemplos.length < 2) diagnostico.exemplos.push(ex);
+    }
+    for (const [k, v] of p.valores) valores.set(k, v);
+    for (const id of p.respondidos) respondidos.add(id);
+  }
+  return { valores, respondidos, diagnostico };
+}
+
+/** Agrupa IDs pelo token da conta dona e le com o token certo (sem misturar empresas). */
+async function lerCampoPorIdsMultiToken(
+  ids: string[],
+  tokenDe: (id: string) => string | null,
+  nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
+  campo: string,
+): Promise<ResultadoCampo> {
+  const grupos = new Map<string, string[]>();
+  const semToken: string[] = [];
+  for (const id of ids) {
+    const tok = tokenDe(id);
+    if (!tok) {
+      semToken.push(id);
+      continue;
+    }
+    const arr = grupos.get(tok) ?? [];
+    arr.push(id);
+    grupos.set(tok, arr);
+  }
+  const parts: ResultadoCampo[] = [];
+  for (const [tok, groupIds] of grupos) {
+    parts.push(await lerCampoPorIds(groupIds, nivel, campo, tok));
+  }
+  if (!parts.length) {
+    return {
+      valores: new Map(),
+      respondidos: new Set(),
+      diagnostico: {
+        nivel,
+        campo,
+        solicitados: ids.length,
+        respostas: 0,
+        com_chave: 0,
+        exemplos: [],
+        erros: semToken.length
+          ? [`token_ausente_empresa para ${semToken.length} id(s)`]
+          : [],
+      },
+    };
+  }
+  const merged = mergeResultadoCampo(parts);
+  if (semToken.length) {
+    merged.diagnostico.erros.push(`token_ausente_empresa para ${semToken.length} id(s)`);
+    merged.diagnostico.solicitados = ids.length;
+  }
+  return merged;
 }
 
 function destinoDoCriativo(
@@ -321,8 +417,22 @@ async function coletarEstadoDeUmConjunto(externalId: string, corpo: any): Promis
   const accountBody = corpo?.account_id ? String(corpo.account_id).replace(/^act_/, "").trim() : null;
   const companyBody = corpo?.company_id ? String(corpo.company_id).trim() : null;
 
+  const tokInfo = resolverTokenConta(
+    companyBody,
+    accountBody ? `act_${accountBody}` : null,
+  );
+  if (!tokInfo) {
+    return json({
+      error: "token Ads ausente para a empresa deste conjunto (sem fallback)",
+      company_id: companyBody,
+      account_id: accountBody,
+      motivo: "token_ausente_empresa",
+    }, 400);
+  }
+  TOKEN = tokInfo.token;
+
   // Reuso do parser de campo por ids (nada duplicado). Um unico id no lote.
-  const r = await lerCampoPorIds([externalId], "conjunto", "is_dynamic_creative");
+  const r = await lerCampoPorIds([externalId], "conjunto", "is_dynamic_creative", tokInfo.token);
   const respondido = r.respondidos.has(externalId);
   const valor = r.valores.has(externalId) ? r.valores.get(externalId) : null;
   const boolLido = typeof valor === "boolean" ? valor : null;
@@ -342,7 +452,7 @@ async function coletarEstadoDeUmConjunto(externalId: string, corpo: any): Promis
     let accountId = accountBody;
     let nome: string | null = null;
     // Sem conta conhecida, pergunto a Graph pelo objeto (id, account_id, name) - ainda LEITURA.
-    const url = `${GRAPH}/${encodeURIComponent(externalId)}?fields=id,account_id,name&access_token=${encodeURIComponent(TOKEN)}`;
+    const url = `${GRAPH}/${encodeURIComponent(externalId)}?fields=id,account_id,name&access_token=${encodeURIComponent(tokInfo.token)}`;
     try {
       const g = await fetch(url);
       const gt = await g.text();
@@ -428,7 +538,7 @@ function achatarRecsOs(payload: any): Record<string, unknown>[] {
   return out;
 }
 
-async function fetchOpportunityRecommendations(accountId: string): Promise<{
+async function fetchOpportunityRecommendations(accountId: string, tokenOverride?: string): Promise<{
   ok: boolean;
   recs: Record<string, unknown>[];
   status: number;
@@ -436,6 +546,10 @@ async function fetchOpportunityRecommendations(accountId: string): Promise<{
   opportunity_score?: unknown;
   raw_shape?: string;
 }> {
+  const tok = (tokenOverride ?? TOKEN).trim();
+  if (!tok) {
+    return { ok: false, recs: [], status: 0, erro: "token_ausente_empresa" };
+  }
   const tryUrls: string[] = [];
   const fields = [
     "recommendation_signature",
@@ -450,11 +564,11 @@ async function fetchOpportunityRecommendations(accountId: string): Promise<{
   // Sem fields primeiro (alguns tokens devolvem lista so no shape default); depois com fields.
   for (const base of [GRAPH_OS, "https://graph.facebook.com/v25.0", GRAPH]) {
     tryUrls.push(
-      `${base}/act_${encodeURIComponent(accountId)}/recommendations?limit=100&access_token=${encodeURIComponent(TOKEN)}`,
+      `${base}/act_${encodeURIComponent(accountId)}/recommendations?limit=100&access_token=${encodeURIComponent(tok)}`,
     );
     tryUrls.push(
       `${base}/act_${encodeURIComponent(accountId)}/recommendations` +
-        `?fields=${encodeURIComponent(fields)}&limit=100&access_token=${encodeURIComponent(TOKEN)}`,
+        `?fields=${encodeURIComponent(fields)}&limit=100&access_token=${encodeURIComponent(tok)}`,
     );
   }
 
@@ -491,7 +605,7 @@ async function fetchOpportunityRecommendations(accountId: string): Promise<{
   try {
     const su =
       `${GRAPH_OS}/act_${encodeURIComponent(accountId)}` +
-      `?fields=opportunity_score&access_token=${encodeURIComponent(TOKEN)}`;
+      `?fields=opportunity_score&access_token=${encodeURIComponent(tok)}`;
     const sr = await fetch(su);
     const st = await sr.text();
     if (sr.ok) {
@@ -677,6 +791,21 @@ function linhasDeOpportunityScore(
 
 async function coletarMetaDicasAoVivo(corpo: any): Promise<Response> {
   const companyFilter = corpo?.company_id ? String(corpo.company_id).trim() : "";
+  // Com company_id: SOMENTE o token dessa empresa (sem fallback).
+  let tokenEmpresaFiltro: string | null = null;
+  if (companyFilter) {
+    const t = tokenAdsPorCompanyId(companyFilter);
+    if (!t) {
+      return json({
+        error: `token Ads ausente para company_id=${companyFilter} (sem fallback)`,
+        motivo: "token_ausente_empresa",
+        modo: "meta_dicas",
+      }, 400);
+    }
+    tokenEmpresaFiltro = t.token;
+    TOKEN = t.token;
+  }
+
   let q = supa.from("integrations").select("external_id, company_id, estado_operacional").eq("provider", "meta_ads");
   if (companyFilter) q = q.eq("company_id", companyFilter);
   const { data: integs } = await q;
@@ -708,7 +837,21 @@ async function coletarMetaDicasAoVivo(corpo: any): Promise<Response> {
   const linhas: Record<string, unknown>[] = [];
   const diagnostico: unknown[] = [];
   for (const acct of contas) {
-    const fetched = await fetchOpportunityRecommendations(acct);
+    const companyId = companyPorConta.get(acct) ?? (companyFilter || null);
+    const tok = tokenEmpresaFiltro
+      ?? resolverTokenConta(companyId, `act_${acct}`)?.token
+      ?? null;
+    if (!tok) {
+      diagnostico.push({
+        account_id: acct,
+        ok: false,
+        status: 0,
+        erro: "token_ausente_empresa",
+        motivo: "token_ausente_empresa",
+      });
+      continue;
+    }
+    const fetched = await fetchOpportunityRecommendations(acct, tok);
     const indice = await montarIndiceObjetosConta(acct);
     const companyFb = companyPorConta.get(acct) ?? [...indice.companyIds][0] ?? null;
     const montadas = fetched.ok
@@ -779,7 +922,9 @@ async function coletarMetaDicasAoVivo(corpo: any): Promise<Response> {
 
 Deno.serve(async (req) => {
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  if (!TOKEN) return json({ error: "META_ADS_TOKEN ausente" }, 500);
+  if (empresasComTokenAds().length === 0) {
+    return json({ error: "nenhum META_ADS_TOKEN* configurado para empresas Meta" }, 500);
+  }
   // Cron manda x-mcp-key; bearer tambem aceito. A RPC grava o chamador — evidencia
   // que autoriza revogar a chave legada depois (CODE 1.5).
   const auth = await mcpKeyValida(supa, chaveMcpDe(req, "header-or-bearer"));
@@ -798,17 +943,30 @@ Deno.serve(async (req) => {
 
   const { data: integs } = await supa
     .from("integrations")
-    .select("external_id, account_name")
+    .select("external_id, account_name, company_id")
     .eq("provider", "meta_ads");
-  const contas = [
-    ...new Set((integs ?? []).map((i: any) => String(i.external_id)).filter(Boolean)),
+  const contasMeta = [
+    ...new Map(
+      (integs ?? [])
+        .map((i: any) => {
+          const external_id = String(i.external_id ?? "").replace(/^act_/, "").trim();
+          if (!external_id) return null;
+          return [external_id, {
+            external_id,
+            company_id: i.company_id ? String(i.company_id) : null,
+            account_name: i.account_name ?? null,
+          }];
+        })
+        .filter(Boolean) as [string, { external_id: string; company_id: string | null; account_name: string | null }][],
+    ).values(),
   ];
 
   const reais = new Map<string, string>(); // campaign_id -> effective_status
   const nomesReais = new Map<string, string>(); // campaign_id -> name (nome real na Meta)
   const config = new Map<string, ConfigCampanha>(); // campaign_id -> configuracao lida da Graph
   const acessiveis: string[] = [];
-  const inacessiveis: string[] = [];
+  const inacessiveis: Array<{ account_id: string; motivo: string }> = [];
+  const tokenPorConta = new Map<string, string>(); // account_id sem act_ -> token
   // v5: o anuncio carrega o proprio objeto, nao apenas o id e o criativo. `status` guarda
   // effective_status - o estado que a Meta de fato aplica, o mesmo que o windsor-sync grava.
   type AnuncioGraph = {
@@ -837,8 +995,17 @@ Deno.serve(async (req) => {
     "buying_type",
   ].join(",");
 
-  for (const c of contas) {
-    let url = `${GRAPH}/act_${c}/campaigns?fields=${CAMPOS}&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
+  for (const meta of contasMeta) {
+    const c = meta.external_id;
+    const tokInfo = resolverTokenConta(meta.company_id, `act_${c}`);
+    if (!tokInfo) {
+      inacessiveis.push({ account_id: c, motivo: "token_ausente_empresa" });
+      continue;
+    }
+    TOKEN = tokInfo.token;
+    tokenPorConta.set(c, tokInfo.token);
+
+    let url = `${GRAPH}/act_${c}/campaigns?fields=${CAMPOS}&limit=200&access_token=${encodeURIComponent(tokInfo.token)}`;
     let pag = 0,
       okConta = false;
     while (url && pag < 5) {
@@ -863,14 +1030,18 @@ Deno.serve(async (req) => {
       url = p?.paging?.next ?? "";
       pag++;
     }
-    (okConta ? acessiveis : inacessiveis).push(c);
+    if (!okConta) {
+      inacessiveis.push({ account_id: c, motivo: "graph_inacessivel" });
+    } else {
+      acessiveis.push(c);
+    }
 
     // GT-12: a lista de anuncios e estado da conta, como a configuracao de campanha. So tenta
     // esta ponta quando a conta respondeu na Graph; conta inacessivel permanece nunca_lido.
     if (okConta) {
       // v7: conjuntos da conta — sem isso o espelho nao marca orfao de adset (ex.: TESTE-GT02).
       const adsetIds: string[] = [];
-      let urlSets = `${GRAPH}/act_${c}/adsets?fields=id&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
+      let urlSets = `${GRAPH}/act_${c}/adsets?fields=id&limit=200&access_token=${encodeURIComponent(tokInfo.token)}`;
       let pagSets = 0;
       while (urlSets && pagSets < 5) {
         const r = await fetch(urlSets);
@@ -892,7 +1063,7 @@ Deno.serve(async (req) => {
 
       const anuncios: AnuncioGraph[] = [];
       const CAMPOS_ADS = "id,name,effective_status,adset_id,campaign_id,creative{id}";
-      let urlAds = `${GRAPH}/act_${c}/ads?fields=${CAMPOS_ADS}&limit=200&access_token=${encodeURIComponent(TOKEN)}`;
+      let urlAds = `${GRAPH}/act_${c}/ads?fields=${CAMPOS_ADS}&limit=200&access_token=${encodeURIComponent(tokInfo.token)}`;
       let pagAds = 0;
       while (urlAds && pagAds < 5) {
         const r = await fetch(urlAds);
@@ -928,9 +1099,29 @@ Deno.serve(async (req) => {
     }
   }
 
-  // Sonda e coleta GT-12. Cada candidato e lido isoladamente: um campo invalido nao contamina
-  // outro, e `hasOwnProperty` impede transformar ausencia silenciosa em "nao tem UTM".
+  // Mapas id -> token da conta dona (leituras batch multi-empresa).
+  const contaDoAdset = new Map<string, string>();
+  for (const [acct, ids] of adsetsPorConta) {
+    for (const id of ids) contaDoAdset.set(id, acct);
+  }
+  const contaDoCamp = new Map<string, string>();
+  for (const [acct, ids] of campanhasPorConta) {
+    for (const id of ids) contaDoCamp.set(id, acct);
+  }
   const anunciosGraph = [...anunciosPorConta.values()].flat();
+  const contaDoAd = new Map(anunciosGraph.map((a) => [a.id, a.account_id]));
+  const contaDoCreative = new Map<string, string>();
+  for (const a of anunciosGraph) {
+    if (a.creative_id) contaDoCreative.set(a.creative_id, a.account_id);
+  }
+  const tokenDeConta = (accountId: string | null | undefined) =>
+    accountId ? (tokenPorConta.get(String(accountId).replace(/^act_/, "")) ?? null) : null;
+  const tokenDeAd = (id: string) => tokenDeConta(contaDoAd.get(id));
+  const tokenDeAdset = (id: string) => tokenDeConta(contaDoAdset.get(id));
+  const tokenDeCamp = (id: string) => tokenDeConta(contaDoCamp.get(id));
+  const tokenDeCreative = (id: string) => tokenDeConta(contaDoCreative.get(id));
+  const tokenDeAccountGraphId = (actId: string) =>
+    tokenDeConta(String(actId).replace(/^act_/, ""));
   const adIds = [...new Set(anunciosGraph.map((a) => a.id))];
   const creativeIds = [
     ...new Set(anunciosGraph.map((a) => a.creative_id).filter((x): x is string => !!x)),
@@ -989,7 +1180,7 @@ Deno.serve(async (req) => {
   // se um estouro do teto do cron interromper a corrida no meio das sondas de criativo, o que
   // nao pode faltar e justamente ele. Mesma licao da v5, aplicada ao nivel do conjunto.
   const adsetIds = [...new Set([...adsetsPorConta.values()].flat())];
-  const adsetDynamic = await lerCampoPorIds(adsetIds, "conjunto", "is_dynamic_creative");
+  const adsetDynamic = await lerCampoPorIdsMultiToken(adsetIds, tokenDeAdset, "conjunto", "is_dynamic_creative");
   diagnosticoCampos.push(adsetDynamic.diagnostico);
 
   let estadoConjuntos: unknown = { nota: "nenhum conjunto lido na Graph" };
@@ -1006,28 +1197,28 @@ Deno.serve(async (req) => {
     estadoConjuntos = error ? { erro: error.message } : data;
   }
 
-  const adUrlTags = await lerCampoPorIds(adIds, "anuncio", "url_tags");
+  const adUrlTags = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "url_tags");
   diagnosticoCampos.push(adUrlTags.diagnostico);
-  const trackingSpecs = await lerCampoPorIds(adIds, "anuncio", "tracking_specs");
+  const trackingSpecs = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "tracking_specs");
   diagnosticoCampos.push(trackingSpecs.diagnostico);
 
   // ESP-13: status configurado e status efetivo sao fatos distintos. Cada campo e consultado
   // sozinho; `issues_info` ausente nunca vira [].
-  const adStatus = await lerCampoPorIds(adIds, "anuncio", "status");
+  const adStatus = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "status");
   diagnosticoCampos.push(adStatus.diagnostico);
-  const adEffectiveStatus = await lerCampoPorIds(adIds, "anuncio", "effective_status");
+  const adEffectiveStatus = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "effective_status");
   diagnosticoCampos.push(adEffectiveStatus.diagnostico);
-  const adIssuesInfo = await lerCampoPorIds(adIds, "anuncio", "issues_info");
+  const adIssuesInfo = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "issues_info");
   diagnosticoCampos.push(adIssuesInfo.diagnostico);
 
   const accountGraphIds = acessiveis.map((id) => `act_${id}`);
-  const accountStatus = await lerCampoPorIds(accountGraphIds, "conta", "account_status");
+  const accountStatus = await lerCampoPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", "account_status");
   diagnosticoCampos.push(accountStatus.diagnostico);
-  const accountDisableReason = await lerCampoPorIds(accountGraphIds, "conta", "disable_reason");
+  const accountDisableReason = await lerCampoPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", "disable_reason");
   diagnosticoCampos.push(accountDisableReason.diagnostico);
-  const accountSpendCap = await lerCampoPorIds(accountGraphIds, "conta", "spend_cap");
+  const accountSpendCap = await lerCampoPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", "spend_cap");
   diagnosticoCampos.push(accountSpendCap.diagnostico);
-  const accountCapabilities = await lerCampoPorIds(accountGraphIds, "conta", "capabilities");
+  const accountCapabilities = await lerCampoPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", "capabilities");
   diagnosticoCampos.push(accountCapabilities.diagnostico);
 
   const camposCriativo = new Map<string, Map<string, unknown>>();
@@ -1040,7 +1231,7 @@ Deno.serve(async (req) => {
     "asset_feed_spec",
     "link_destination_display_url",
   ]) {
-    const lido = await lerCampoPorIds(creativeIds, "criativo", campo);
+    const lido = await lerCampoPorIdsMultiToken(creativeIds, tokenDeCreative, "criativo", campo);
     camposCriativo.set(campo, lido.valores);
     if (campo === "object_story_spec") storySpec = lido;
     if (campo === "asset_feed_spec") assetFeedSpec = lido;
@@ -1413,11 +1604,11 @@ Deno.serve(async (req) => {
   ];
   const adsAtivosIds = anunciosAtivos.map((a) => a.id);
 
-  const campRecs = await lerCampoPorIds(campanhasAtivasIds, "campanha", "recommendations");
+  const campRecs = await lerCampoPorIdsMultiToken(campanhasAtivasIds, tokenDeCamp, "campanha", "recommendations");
   diagnosticoCampos.push(campRecs.diagnostico);
-  const adsetRecs = await lerCampoPorIds(adsetsAtivosIds, "conjunto", "recommendations");
+  const adsetRecs = await lerCampoPorIdsMultiToken(adsetsAtivosIds, tokenDeAdset, "conjunto", "recommendations");
   diagnosticoCampos.push(adsetRecs.diagnostico);
-  const adRecs = await lerCampoPorIds(adsAtivosIds, "anuncio", "recommendations");
+  const adRecs = await lerCampoPorIdsMultiToken(adsAtivosIds, tokenDeAd, "anuncio", "recommendations");
   diagnosticoCampos.push(adRecs.diagnostico);
 
   const companyPorConta = new Map<string, string>();
@@ -1543,7 +1734,18 @@ Deno.serve(async (req) => {
   const linhasOs: Record<string, unknown>[] = [];
   const diagnosticoOs: unknown[] = [];
   for (const acct of acessiveis) {
-    const fetched = await fetchOpportunityRecommendations(acct);
+    const tok = tokenPorConta.get(acct);
+    if (!tok) {
+      diagnosticoOs.push({
+        account_id: acct,
+        ok: false,
+        status: 0,
+        erro: "token_ausente_empresa",
+        motivo: "token_ausente_empresa",
+      });
+      continue;
+    }
+    const fetched = await fetchOpportunityRecommendations(acct, tok);
     const indice = await montarIndiceObjetosConta(acct);
     const companyFb =
       [...indice.companyIds][0] ??
@@ -1631,7 +1833,8 @@ Deno.serve(async (req) => {
     mcp_chamador: auth.chamador,
     mcp_chave_legada: auth.legado,
     contas_acessiveis: acessiveis.length,
-    contas_inacessiveis: inacessiveis,
+    contas_inacessiveis: inacessiveis.map((x) => x.account_id),
+    contas_inacessiveis_detalhe: inacessiveis,
     campanhas_lidas_na_meta: reais.size,
     corrigidas_por_status_oficial: corrigidas.length,
     corrigidas,

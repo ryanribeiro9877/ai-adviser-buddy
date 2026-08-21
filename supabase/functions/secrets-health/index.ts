@@ -1,5 +1,6 @@
-// supabase/functions/secrets-health/index.ts (v3)
+// supabase/functions/secrets-health/index.ts (v4)
 // Verifica a PRESENÇA de segredos de runtime (env) SEM expor valores sensíveis.
+// v4: reporta presença (não valores) dos tokens Ads/WABA por empresa (Legal + COHAPM).
 // v3: adiciona OPENROUTER_MODEL — o slug do modelo NÃO é sensivel, então o VALOR é
 // reportado (permite conferir typo). Auth: Bearer <mcp_config.api_key>.
 
@@ -11,6 +12,14 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 function json(obj: unknown, status = 200) {
   return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+}
+
+function presenca(nome: string) {
+  const v = (Deno.env.get(nome) ?? "").trim();
+  return {
+    configured: v.length > 0,
+    looks_valid: v.length > 50,
+  };
 }
 
 Deno.serve(async (req) => {
@@ -37,6 +46,10 @@ Deno.serve(async (req) => {
       configured: wa.length > 0,
       looks_valid: wa.length > 50,
     },
+    meta_ads_token: presenca("META_ADS_TOKEN"),
+    meta_ads_token_cohapm: presenca("META_ADS_TOKEN_COHAPM"),
+    whatsapp_access_token_cohapm: presenca("WHATSAPP_ACCESS_TOKEN_COHAPM"),
+    whatsapp_acess_token_cohapm: presenca("WHATSAPP_ACESS_TOKEN_COHAPM"),
     meta_business_id: {
       configured: biz.length > 0,
       looks_valid: /^\d{5,}$/.test(biz),

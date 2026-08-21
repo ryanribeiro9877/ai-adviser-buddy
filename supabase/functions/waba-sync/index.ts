@@ -1,46 +1,56 @@
-// supabase/functions/waba-sync/index.ts (v18)
+// supabase/functions/waba-sync/index.ts (v19 multi-empresa)
 //
 // CONECTOR WABA — WhatsApp Business Management API (Graph) -> Supabase.
-// Traz: WABAs, números (qualidade + limite de mensagens nível portfólio), templates,
-// analytics diário (enviadas/entregues) e analytics por template (sent/delivered/read/clicked).
+// Traz: WABAs, numeros (qualidade + limite de mensagens nivel portfolio), templates,
+// analytics diario (enviadas/entregues) e analytics por template (sent/delivered/read/clicked).
 //
-// v18.1 (29/07/2026) — F5.4 coleta POR NÚMERO + template_name:
-//   (1) NOVO: analytics diário POR NÚMERO — grava linhas em waba_analytics_daily com
-//       phone_external_id PREENCHIDO. HISTÓRICO DA ABORDAGEM: a v18 tentou 1 chamada por
-//       WABA com dimensions(["PHONE"]), mas a Graph IGNOROU o modificador em silêncio
-//       (200 ok, pontos agregados sem phone_number, zero gravados — validação 29/07).
-//       A v18.1 usa filtro phone_numbers([digitos]) com 1 chamada POR NÚMERO: a atribuição
-//       é por construção. Telemetria guarda 1 amostra crua da resposta por sync
-//       (analytics_por_numero_amostra_raw) p/ diagnosticar futuras mudanças da Graph.
-//       Falha nessa etapa NÃO derruba a coleta agregada: degrada com aviso no report.
-//   (2) template_name agora é preenchido na origem (mapa id->name dos templates da própria
-//       WABA). Backfill das 728 linhas antigas já foi aplicado direto no banco em 29/07.
-//   (3) Marcador de versão no retorno (versao: "waba-sync-v18") p/ sonda pós-deploy.
-//   A coleta agregada (phone_external_id = '') segue INALTERADA — relatório diário e telas
-//   que a consomem não mudam de contrato.
+// v19 (multi-empresa): loop por empresa com token WABA isolado (meta_company_tokens).
+//   Nunca faz fallback de token entre empresas. META_BUSINESS_ID so para COMPANY_LEGAL.
+//   Fallback da tabela wabas filtra por company_id e exclui ads-destino-%.
 //
-// Segredos (Edge Function Secrets — invisíveis ao SQL):
-//   WHATSAPP_ACCESS_TOKEN  (obrigatório) token de System User (whatsapp_business_management+messaging+business_management)
-//   META_BUSINESS_ID       (opcional)    ID da BM p/ descobrir WABAs; sem ele, usa as WABAs já na tabela public.wabas
+// v18.1 (29/07/2026) — F5.4 coleta POR NUMERO + template_name:
+//   (1) analytics diario POR NUMERO — grava linhas em waba_analytics_daily com
+//       phone_external_id PREENCHIDO. A v18.1 usa filtro phone_numbers([digitos])
+//       com 1 chamada POR NUMERO (atribuicao por construcao). Telemetria guarda
+//       1 amostra crua (analytics_por_numero_amostra_raw). Falha nessa etapa NAO
+//       derruba a coleta agregada.
+//   (2) template_name preenchido na origem (mapa id->name dos templates da WABA).
+//   (3) Marcador de versao no retorno p/ sonda pos-deploy.
+//   Coleta agregada (phone_external_id = '') segue INALTERADA.
 //
-// Auth da função: Authorization: Bearer <mcp_config.api_key> (ou x-mcp-key). verify_jwt=false.
-// Idempotente (upserts). Janela de analytics: últimos 30 dias.
+// Segredos (Edge Function Secrets):
+//   WHATSAPP_ACCESS_TOKEN          Legal (via meta_company_tokens)
+//   WHATSAPP_ACCESS_TOKEN_COHAPM   COHAPM (aceita typo WHATSAPP_ACESS_TOKEN_COHAPM)
+//   META_BUSINESS_ID               opcional; so usado quando company_id === COMPANY_LEGAL
+//
+// Auth: Authorization: Bearer <mcp_config.api_key> (ou x-mcp-key). verify_jwt=false.
+// Idempotente (upserts). Janela de analytics: ultimos 30 dias.
+// Body opcional: { "company_id": "<uuid>" } para sync de uma empresa so.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import {
+  COMPANY_LEGAL,
+  empresasComTokenWaba,
+  redactAllMetaTokens,
+  tokenWabaPorCompanyId,
+} from "../_shared/meta_company_tokens.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GRAPH = "https://graph.facebook.com/v22.0";
 const ANALYTICS_DAYS = 30;
-const VERSAO = "waba-sync-v18.1";
+const VERSAO = "waba-sync-v19-multi-empresa";
 
 function json(obj: unknown, status = 200) {
-  return new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json" } });
+  return new Response(redactAllMetaTokens(JSON.stringify(obj)), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
 }
 const dayISO = (d: Date) => d.toISOString().slice(0, 10);
 const soDigitos = (s: unknown) => String(s ?? "").replace(/\D+/g, "");
-// limite de mensagens: campo novo (nível portfólio, out/2025) com fallback pro deprecado
+// limite de mensagens: campo novo (nivel portfolio, out/2025) com fallback pro deprecado
 const limStr = (p: any) => {
   const v = p.whatsapp_business_manager_messaging_limit ?? p.messaging_limit_tier ?? null;
   return v == null ? null : (typeof v === "object" ? JSON.stringify(v) : String(v));
@@ -58,7 +68,7 @@ async function gGet(path: string, params: Record<string, string>, token: string)
   return { ok: true as const, body };
 }
 
-// paginação (cursor next é URL completa já com token)
+// paginacao (cursor next e URL completa ja com token)
 async function gGetAll(path: string, params: Record<string, string>, token: string, maxPages = 20) {
   const out: any[] = [];
   let r = await gGet(path, params, token);
@@ -77,28 +87,31 @@ async function gGetAll(path: string, params: Record<string, string>, token: stri
   return { ok: true as const, data: out };
 }
 
-Deno.serve(async (req) => {
-  if (req.method !== "POST") return json({ error: "POST only" }, 405);
-  const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+type EmpresaAlvo = {
+  company_id: string;
+  slug: string;
+  nome: string;
+  token: string;
+  ref: string;
+};
 
-  // ---- auth (mesmo padrão do windsor-sync) ----
-  const auth = await mcpKeyValida(supa, chaveMcpDe(req, "bearer-or-header"));
-  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
-
-  const token = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
-  if (!token) return json({ error: "missing_WHATSAPP_ACCESS_TOKEN", hint: "cadastre em Edge Function Secrets" }, 400);
-  const bizId = (Deno.env.get("META_BUSINESS_ID") ?? "").trim();
-
-  // empresa default: os WhatsApps são da Legal é Viver
-  const { data: legal } = await supa.from("companies").select("id").ilike("name", "%legal%viver%").maybeSingle();
-  const companyId = legal?.id ?? null;
-
-  const today = new Date();
-  const start = new Date(today.getTime() - ANALYTICS_DAYS * 86400_000);
-  const startTs = Math.floor(start.getTime() / 1000);
-  const endTs = Math.floor(today.getTime() / 1000);
-
+/** Sync de UMA empresa com O SEU token WABA — nunca usa token de outra. */
+async function syncEmpresa(
+  // deno-lint-ignore no-explicit-any
+  supa: any,
+  emp: EmpresaAlvo,
+  startTs: number,
+  endTs: number,
+  today: Date,
+) {
+  const companyId = emp.company_id;
+  const token = emp.token; // isolado: so este token nesta iteracao
   const report: any[] = [];
+
+  // META_BUSINESS_ID so para Legal (BM compartilhado no secret legado)
+  const bizId = companyId === COMPANY_LEGAL
+    ? (Deno.env.get("META_BUSINESS_ID") ?? "").trim()
+    : "";
 
   // ---- 1) Descobrir WABAs (cadeia: BM owned/client -> assigned ao system user -> tabela) ----
   let wabas: { id: string; name?: string; currency?: string; timezone_id?: string; raw?: any }[] = [];
@@ -119,15 +132,27 @@ Deno.serve(async (req) => {
     wabas = wabas.filter((w) => (seen.has(w.id) ? false : (seen.add(w.id), true)));
   }
   if (wabas.length === 0) {
-    const { data: rows } = await supa.from("wabas").select("external_id,name");
+    // fallback: so WABAs desta empresa; exclui inventarios Click-to-WhatsApp (ads-destino-%)
+    const { data: rows } = await supa
+      .from("wabas")
+      .select("external_id,name")
+      .eq("company_id", companyId)
+      .not("external_id", "like", "ads-destino-%");
     wabas = (rows ?? []).map((r: any) => ({ id: r.external_id, name: r.name }));
     report.push({ step: "discover:fallback_table", count: wabas.length });
   }
-  if (wabas.length === 0) return json({
-    ok: false, versao: VERSAO, error: "nenhuma_waba_encontrada",
-    hint: "regenerar token incluindo business_management OU semear public.wabas(external_id)",
-    report,
-  }, 200);
+  if (wabas.length === 0) {
+    return {
+      company_id: companyId,
+      slug: emp.slug,
+      nome: emp.nome,
+      token_ref: emp.ref,
+      ok: false,
+      error: "nenhuma_waba_encontrada",
+      hint: "regenerar token incluindo business_management OU semear public.wabas(external_id)",
+      report,
+    };
+  }
 
   // upsert wabas
   for (const w of wabas) {
@@ -139,11 +164,11 @@ Deno.serve(async (req) => {
   }
   report.push({ step: "wabas", upserted: wabas.length });
 
-  // ---- 2) Por WABA: números, templates, analytics ----
+  // ---- 2) Por WABA: numeros, templates, analytics ----
   for (const w of wabas) {
     const wr: any = { waba: w.id, name: w.name ?? null };
 
-    // números (qualidade + limite de mensagens)
+    // numeros (qualidade + limite de mensagens)
     const ph = await gGetAll(`${w.id}/phone_numbers`,
       { fields: "id,display_phone_number,verified_name,status,quality_rating,messaging_limit_tier,whatsapp_business_manager_messaging_limit,name_status", limit: "50" }, token);
     if (!ph.ok) wr.phones_error = ph.error;
@@ -164,7 +189,7 @@ Deno.serve(async (req) => {
     }
     wr.phones = phones.length;
 
-    // v18: mapa dígitos do número -> external_id (a analytics por número devolve dígitos, não id)
+    // v18: mapa digitos do numero -> external_id (analytics por numero devolve digitos, nao id)
     const phoneIdPorDigitos = new Map<string, string>();
     for (const p of phones) {
       const dig = soDigitos(p.display_phone_number);
@@ -208,11 +233,9 @@ Deno.serve(async (req) => {
       wr.analytics_days = points.length;
     }
 
-    // v18.1: analytics POR NÚMERO via filtro phone_numbers([digitos]) — 1 chamada por número.
-    // Motivo da mudança: dimensions(["PHONE"]) foi IGNORADA silenciosamente pela Graph na
-    // validação de 29/07 (200 ok, pontos agregados sem phone_number, zero gravados). Com o
-    // filtro, a atribuição é por construção: pedi o número X, a resposta é do número X.
-    // Falha aqui degrada com aviso, nunca derruba a coleta agregada acima.
+    // v18.1: analytics POR NUMERO via filtro phone_numbers([digitos]) — 1 chamada por numero.
+    // Motivo: dimensions(["PHONE"]) foi IGNORADA silenciosamente pela Graph.
+    // Com o filtro, a atribuicao e por construcao. Falha degrada com aviso.
     {
       let gravados = 0; const errosNum: string[] = [];
       let amostraGuardada = false;
@@ -223,7 +246,7 @@ Deno.serve(async (req) => {
           { fields: `analytics.start(${startTs}).end(${endTs}).granularity(DAY).phone_numbers(["${dig}"])` }, token);
         if (!anPh.ok) { errosNum.push(anPh.error ?? "erro"); continue; }
         const points = anPh.body?.analytics?.data_points ?? [];
-        // telemetria de diagnóstico: guarda UMA amostra crua por sync (primeiro número com resposta)
+        // telemetria: guarda UMA amostra crua por sync (primeiro numero com resposta)
         if (!amostraGuardada) {
           wr.analytics_por_numero_amostra_raw = JSON.stringify(anPh.body?.analytics ?? anPh.body ?? {}).slice(0, 400);
           amostraGuardada = true;
@@ -232,7 +255,7 @@ Deno.serve(async (req) => {
           const d = dayISO(new Date((dp.start ?? 0) * 1000));
           await supa.from("waba_analytics_daily").upsert({
             company_id: companyId, waba_external_id: w.id,
-            phone_external_id: String(p.id), // atribuição por construção (filtro da chamada)
+            phone_external_id: String(p.id), // atribuicao por construcao (filtro da chamada)
             date: d, sent: dp.sent ?? 0, delivered: dp.delivered ?? 0, raw: dp,
           }, { onConflict: "waba_external_id,phone_external_id,date" });
           gravados++;
@@ -242,7 +265,7 @@ Deno.serve(async (req) => {
       if (errosNum.length) wr.analytics_por_numero_errors = [...new Set(errosNum)].slice(0, 3);
     }
 
-    // analytics por template (sent/delivered/read/clicked) — pode exigir habilitação; try & report
+    // analytics por template (sent/delivered/read/clicked) — pode exigir habilitacao; try & report
     const approvedIds = templates.filter((t: any) => t.status === "APPROVED" && t.id).map((t: any) => String(t.id));
     let tplDays = 0; const tplErrors: string[] = [];
     for (let i = 0; i < approvedIds.length; i += 10) {
@@ -279,5 +302,95 @@ Deno.serve(async (req) => {
     report.push(wr);
   }
 
-  return json({ ok: true, versao: VERSAO, window_days: ANALYTICS_DAYS, wabas: wabas.length, report });
+  return {
+    company_id: companyId,
+    slug: emp.slug,
+    nome: emp.nome,
+    token_ref: emp.ref,
+    ok: true,
+    wabas: wabas.length,
+    report,
+  };
+}
+
+Deno.serve(async (req) => {
+  if (req.method !== "POST") return json({ error: "POST only" }, 405);
+  const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
+
+  // ---- auth (mesmo padrao do windsor-sync) ----
+  const auth = await mcpKeyValida(supa, chaveMcpDe(req, "bearer-or-header"));
+  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
+
+  // body opcional: { company_id?: string }
+  let filtroCompanyId: string | null = null;
+  try {
+    const raw = await req.text();
+    if (raw.trim()) {
+      const parsed = JSON.parse(raw);
+      const cid = parsed?.company_id;
+      if (cid != null && String(cid).trim()) filtroCompanyId = String(cid).trim();
+    }
+  } catch {
+    return json({ error: "invalid_json_body" }, 400);
+  }
+
+  // lista de empresas com token WABA presente — sem fallback cruzado
+  let alvos: EmpresaAlvo[] = [];
+  if (filtroCompanyId) {
+    const tw = tokenWabaPorCompanyId(filtroCompanyId);
+    if (!tw) {
+      return json({
+        ok: false,
+        versao: VERSAO,
+        error: "missing_waba_token_for_company",
+        company_id: filtroCompanyId,
+        hint: "cadastre o secret WABA desta empresa (nao usamos token de outra empresa)",
+      }, 400);
+    }
+    const cfg = empresasComTokenWaba().find((e) => e.company_id === tw.company_id);
+    alvos = [{
+      company_id: tw.company_id,
+      slug: tw.slug,
+      nome: cfg?.nome ?? tw.slug,
+      token: tw.token,
+      ref: tw.ref,
+    }];
+  } else {
+    alvos = empresasComTokenWaba().map((e) => ({
+      company_id: e.company_id,
+      slug: e.slug,
+      nome: e.nome,
+      token: e.token,
+      ref: e.ref,
+    }));
+  }
+
+  if (alvos.length === 0) {
+    return json({
+      ok: false,
+      versao: VERSAO,
+      error: "nenhuma_empresa_com_token_waba",
+      hint: "cadastre WHATSAPP_ACCESS_TOKEN e/ou WHATSAPP_ACCESS_TOKEN_COHAPM",
+    }, 400);
+  }
+
+  const today = new Date();
+  const start = new Date(today.getTime() - ANALYTICS_DAYS * 86400_000);
+  const startTs = Math.floor(start.getTime() / 1000);
+  const endTs = Math.floor(today.getTime() / 1000);
+
+  const empresas: any[] = [];
+  for (const emp of alvos) {
+    // cada iteracao usa SOMENTE emp.token — isolado por company_id
+    const resultado = await syncEmpresa(supa, emp, startTs, endTs, today);
+    empresas.push(resultado);
+  }
+
+  const ok = empresas.every((e) => e.ok === true);
+  return json({
+    ok,
+    versao: VERSAO,
+    window_days: ANALYTICS_DAYS,
+    empresas,
+  });
 });
