@@ -90,6 +90,13 @@ assert(
   "CONV+WEBSITE nao e CTWA",
 );
 assert(
+  ehPedidoMensagens({
+    nome: "COHAPM_JURIDICO_CONV_LEVA02",
+    objetivo: "OUTCOME_TRAFFIC",
+  }) === false,
+  "CONV+OUTCOME_TRAFFIC nao e CTWA",
+);
+assert(
   ehPedidoTrafegoWebsite({
     destination_type: "WEBSITE",
     optimization_goal: "LANDING_PAGE_VIEWS",

@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.57)
+// supabase/functions/traffic-chat/index.ts (v28.58)
+// v28.58 (22/08/2026) - criar_anuncio: auto-preenche conjunto_destino; desambigua nome
+//   homonimo pela campanha; molde por id Meta; replica CTWA→WEBSITE com destino_url;
+//   sanitiza claim "cards emitidos" sem approval_id (incidente LEVA02 22/08).
 // v28.57 (22/08/2026) - WEBSITE + LANDING_PAGE_VIEWS (link wa.me) e familia trafego, nao CTWA,
 //   mesmo se o nome da campanha tiver CONV.
 // v28.56 (22/08/2026) - Card de criacao: summary so com nomes (campanha/conjunto/criativo).
@@ -571,7 +574,7 @@ import {
   mensagemObjetivoNaoSuportado,
   ODAX_OBJETIVOS,
 } from "../_shared/objetivo_odax.ts";
-import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, digitosWhatsApp, ctaPadraoMensagensWhatsApp, LINK_CTWA_API_WHATSAPP } from "../_shared/destino_url_lp.ts";
+import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, digitosWhatsApp, ctaPadraoMensagensWhatsApp, ctaPadraoTrafegoWebsite, LINK_CTWA_API_WHATSAPP } from "../_shared/destino_url_lp.ts";
 import { pipeboardToken } from "../_shared/pipeboard.ts";
 import {
   callReadTool,
@@ -656,7 +659,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.56";
+const VERSAO = "chat-v28.58";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -2594,9 +2597,29 @@ async function t_propose_criacao(
     // Nome do conjunto na fala do agente (ou id). O nome CANONICO no pedido/card/executor e
     // conjunto_destino_external_id — o que montarCriacao consome. Alias conjunto_destino so
     // resolve o objeto aqui; a RPC e o payload usam o external_id.
-    const conjuntoDestino = String(
+    const conjuntoDestinoParam = String(
       params?.conjunto_destino ?? params?.conjunto_destino_external_id ?? "",
     ).trim();
+    let conjuntoDestino = conjuntoDestinoParam;
+    if (!conjuntoDestino) {
+      // Ultimo conjunto criado NESTA conversa (aprovado com id_criado). Evita recusar
+      // replica so porque o agente esqueceu o campo apos criar o conjunto no turno anterior.
+      const { data: lastSets } = await supa
+        .from("approval_requests")
+        .select("execution_result, payload, created_at")
+        .eq("company_id", companyId)
+        .eq("conversation_id", convId)
+        .eq("action", "criar_conjunto_a_partir_de")
+        .eq("status", "approved")
+        .order("created_at", { ascending: false })
+        .limit(8);
+      const hitConj = (lastSets ?? []).find((r: any) =>
+        r?.execution_result?.ok === true && String(r?.execution_result?.id_criado ?? "").trim(),
+      );
+      if (hitConj) {
+        conjuntoDestino = String((hitConj as any).execution_result.id_criado).trim();
+      }
+    }
     let utmCampaign = String(params?.utm_campaign ?? "").trim();
     if (!utmCampaign) {
       // Deriva do rotulo/periodo/nome — nao entrevista o gestor por identificador generico.
@@ -2627,9 +2650,13 @@ async function t_propose_criacao(
     let molde: any = null;
     if (!semMolde) {
       const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id,adset_external_id").eq("company_id", companyId);
-      molde = (anuncios ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
+      molde = (anuncios ?? []).find((x) => norm(x.name) === norm(nomeAlvo))
+        ?? (anuncios ?? []).find((x) => String(x.external_id ?? "") === String(nomeAlvo))
+        ?? (anuncios ?? []).find((x) => String(x.creative_id ?? "") === String(nomeAlvo))
+        ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
       if (!molde) {
-        const pareceInventado = String(nomeAlvo).includes("[") || /LEV|LP|LEADS|TESTE|ESCALA|AGO\d{2}/i.test(String(nomeAlvo));
+        const pareceIdMeta = /^\d{10,}$/.test(String(nomeAlvo));
+        const pareceInventado = !pareceIdMeta && (String(nomeAlvo).includes("[") || /LEV|LP|LEADS|TESTE|ESCALA|AGO\d{2}/i.test(String(nomeAlvo)));
         const candidatos = (anuncios ?? [])
           .filter((a: any) => a.adset_external_id && String(conjuntoDestino).includes(String(a.adset_external_id)))
           .slice(0, 8)
@@ -2652,10 +2679,68 @@ async function t_propose_criacao(
       if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
     }
 
-    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,campaign_id,destination_type,optimization_goal,promoted_object").eq("company_id", companyId);
-    const dest = (sets ?? []).find((x) => x.external_id === conjuntoDestino)
-      ?? (sets ?? []).find((x) => norm(x.name) === norm(conjuntoDestino))
-      ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(conjuntoDestino)))[0];
+    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,campaign_id,destination_type,optimization_goal,promoted_object,created_at").eq("company_id", companyId);
+    const { data: campsAll } = await supa.from("campaigns").select("id,name,external_id,objective").eq("company_id", companyId);
+    const campanhaHint = String(
+      params?.campanha_destino ?? params?.campanha_destino_external_id ?? params?.campanha_destino_nome ?? "",
+    ).trim();
+    const campHintRow = campanhaHint
+      ? ((campsAll ?? []).find((c) => String(c.external_id ?? "") === campanhaHint)
+        ?? (campsAll ?? []).find((c) => norm(c.name) === norm(campanhaHint))
+        ?? (campsAll ?? []).filter((c) => norm(c.name).includes(norm(campanhaHint)))[0])
+      : null;
+    let dest = (sets ?? []).find((x) => x.external_id === conjuntoDestino) ?? null;
+    if (!dest) {
+      const byName = (sets ?? []).filter((x) =>
+        norm(x.name) === norm(conjuntoDestino) || norm(x.name).includes(norm(conjuntoDestino)),
+      );
+      if (byName.length === 1) dest = byName[0];
+      else if (byName.length > 1) {
+        const inCamp = campHintRow ? byName.filter((s) => s.campaign_id === campHintRow.id) : [];
+        if (inCamp.length === 1) dest = inCamp[0];
+        else if (inCamp.length > 1) {
+          dest = [...inCamp].sort((a: any, b: any) =>
+            String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
+          )[0];
+        } else {
+          const querWebsite = ehUrlWhatsApp(params?.destino_url) ||
+            ehPedidoTrafegoWebsite({
+              destination_type: params?.destination_type,
+              optimization_goal: params?.optimization_goal,
+              familia_objetivo: params?.familia_objetivo,
+              objetivo: params?.objetivo ?? campHintRow?.objective,
+            });
+          if (querWebsite) {
+            const webish = byName.filter((s) => {
+              const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
+              return String(s.destination_type ?? "").toUpperCase() === "WEBSITE" ||
+                String(camp?.objective ?? "") === "OUTCOME_TRAFFIC";
+            });
+            if (webish.length) {
+              dest = [...webish].sort((a: any, b: any) =>
+                String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
+              )[0];
+            }
+          }
+        }
+        if (!dest) {
+          return {
+            erro: "conjunto_destino_ambiguo",
+            detalhe:
+              `Ha ${byName.length} conjuntos chamados '${conjuntoDestino}'. Informe params.campanha_destino (nome ou id) ou o external_id do conjunto.`,
+            candidatos: byName.slice(0, 8).map((s: any) => {
+              const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
+              return {
+                nome: s.name,
+                external_id: s.external_id,
+                campanha: camp?.name ?? null,
+                destination_type: s.destination_type ?? null,
+              };
+            }),
+          };
+        }
+      }
+    }
     if (!dest) return { erro: `conjunto de destino '${conjuntoDestino}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro.` };
 
     // v28.45: familia do conjunto destino (campanha ODAX) — engajamento/reconhecimento
@@ -2675,8 +2760,16 @@ async function t_propose_criacao(
     const anuncioMensagens = ehPedidoMensagens({
       destination_type: (dest as any).destination_type,
       optimization_goal: (dest as any).optimization_goal,
+      objetivo: objetivoCampanhaDest ?? params?.objetivo,
+      familia_objetivo: params?.familia_objetivo,
       objetivo_tag: params?.objetivo_tag,
       nome: `${dest.name ?? ""} ${nomeCampanhaDest ?? ""}`,
+    });
+    const anuncioTrafegoWeb = !anuncioMensagens && ehPedidoTrafegoWebsite({
+      destination_type: (dest as any).destination_type,
+      optimization_goal: (dest as any).optimization_goal,
+      objetivo: objetivoCampanhaDest ?? params?.objetivo,
+      familia_objetivo: params?.familia_objetivo,
     });
     const familiaPorTag = ehFamiliaSocialTopo(params?.objetivo_tag) || ehFamiliaSocialTopo(params?.objetivo);
     const familiaPorCampanha = ehFamiliaSocialTopo(objetivoCampanhaDest);
@@ -2893,6 +2986,25 @@ async function t_propose_criacao(
           mensagem: "ESP-35: peca nova sem molde; destino informado/resolvido na emissao (sem heranca de URL de molde).",
         };
       }
+    } else if (anuncioTrafegoWeb || (ehUrlWhatsApp(destinoUrlPedido) && !anuncioMensagens)) {
+      let urlWeb = urlWhatsAppMe(destinoUrlPedido) || String(destinoUrlPedido ?? "").trim();
+      if (!urlWeb) urlWeb = urlWhatsAppMe(params?.whatsapp_phone_number);
+      if (urlWeb) {
+        destinoUrlPedido = urlWeb;
+        ctaPedido = ctaPadraoTrafegoWebsite(ctaPedido);
+        pedido.destino_url = urlWeb;
+        pedido.call_to_action_type = ctaPedido;
+        pedido.destino_do_anuncio = {
+          caso: "trafego_website",
+          produto: null,
+          url_final: urlWeb,
+          url_canonica: urlWeb,
+          corrigir: true,
+          aplicavel: true,
+          mensagem:
+            "Replica em conjunto de trafego WEBSITE: o link (wa.me) vai no criativo. CTA CONTACT_US, nao WHATSAPP_MESSAGE.",
+        };
+      }
     }
     const { data: ver, error: verErr } = await supa.rpc("pedido_de_anuncio_completo", { p_company_id: companyId, p_pedido: pedido });
     // Falha de verificacao NAO emite card - mesmo tratamento de pode_executar_acao e
@@ -3107,7 +3219,7 @@ async function t_propose_criacao(
     // Destino por PRODUTO: a RPC identifica a oferta, o sinal e a URL. A executora HONRA
     // destino_do_anuncio no payload (nao reinfere por dominio). v28.56: o ensaio da
     // verificacao NAO vai no summary visivel — so nomes; o texto fica em mensagem_para_o_gestor.
-    const destAnuncio = (semMolde ? pedido.destino_do_anuncio : null) ?? v.destino_do_anuncio ?? null;
+    const destAnuncio = pedido.destino_do_anuncio ?? v.destino_do_anuncio ?? null;
     const destinoUrlCard = destAnuncio?.url_final ?? destAnuncio?.url_do_molde ?? destinoUrlPedido ?? null;
 
     // v28.45: nao deixe a RPC colar "DESTINO: LP CLT" em card de engajamento social.
@@ -3116,6 +3228,10 @@ async function t_propose_criacao(
       msgGestor = msgGestor.replace(/\s*DESTINO:\s*[^.]*\./gi, " ");
       msgGestor = (msgGestor.trim() +
         ` DESTINO: engajamento/reconhecimento — Page/Instagram (${destinoUrlCard ?? "config"}). Sem LP de conversao.`).trim();
+    } else if (anuncioTrafegoWeb || destAnuncio?.caso === "trafego_website") {
+      msgGestor = msgGestor.replace(/\s*DESTINO:\s*[^.]*\./gi, " ");
+      msgGestor = (msgGestor.trim() +
+        ` DESTINO: trafego WEBSITE — ${destinoUrlCard ?? "informe destino_url"}. CTA ${ctaPedido || "CONTACT_US"} (nao Click-to-WhatsApp no conjunto).`).trim();
     }
 
     const summary = summaryPreviaCriacao({
@@ -4183,6 +4299,9 @@ EXCECAO TRAFEGO + LINK wa.me (22/08/2026): se o gestor pedir destino WEBSITE / L
 com URL wa.me, isso NAO e CTWA. familia_objetivo=trafego, destination_type=WEBSITE,
 optimization_goal=LANDING_PAGE_VIEWS. O numero fica no LINK do criativo. Nao recuse WEBSITE
 so porque o nome da campanha tem CONV. Nao chame defaults de mensagens nesse caso.
+Replica CTWA → conjunto WEBSITE: target_name = nome EXATO do anuncio (ou id Meta); params.conjunto_destino
+= nome ou id (se dois conjuntos tiverem o mesmo nome, passe campanha_destino); params.destino_url=https://wa.me/....
+CTA vira CONTACT_US. Sem approval_id no retorno de propose_action o card NAO existe.
 PROIBIDO emitir CONVERSATIONS com destination_type=ON_POST ou tratar CTWA como familia
 engajamento social (isso gerou a falha do card JURIDICO_CONJ.01 em 21/08/2026).
 PROIBIDO dizer "nao ha molde POST_ENGAGEMENT", "so no Ads Manager", "aguardar Ryan" ou
@@ -4382,7 +4501,7 @@ const RE_PEDIDO_DE_ATO = /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|pro
 const RE_TARGET_PLACEHOLDER = /^(composto|nome[_\s-]?composto|novo[_\s-]?nome|campanha(\s+nova)?|nova|n\/a|na|—|-|\.|\*)$/i;
 /** Claim de card emitido — so e verdade se actionCards tiver approval_id real. */
 const RE_CLAIM_CARD_EMITIDO =
-  /##\s*card\s+emitido|\bcard\s+emitido\b|\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)\b|\bpedido\s+(de\s+aprova[cç][aã]o\s+)?(foi\s+)?(emitido|registrado)\b|\baguardando\s+(sua\s+)?aprova/i;
+  /##\s*cards?\s+(re)?emitid|\bcards?\s+(foram\s+)?(re)?emitid|\bos\s+dois\s+(primeiros\s+)?cards?\s+foram\s+emitid|\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)\b|\bpedido\s+(de\s+aprova[cç][aã]o\s+)?(foi\s+)?(emitido|registrado)\b|\baguardando\s+(sua\s+)?aprova|\bpendente\s+de\s+aprova/i;
 
 type TurnCheckpoint = {
   v: 1;

@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.43)
+// supabase/functions/meta-actions/index.ts (v5.44)
+// v5.44 (22/08/2026) - Replica CTWA → conjunto WEBSITE: reescreve CTA+link (CONTACT_US + wa.me),
+//   sem app_destination. Espelho do conjunto grava destination_type/optimization_goal.
 // v5.43 (22/08/2026) - Trafego WEBSITE (LANDING_PAGE_VIEWS + wa.me no criativo) nao e CTWA.
 //   Nome CONV / familia mensagens nao recusa destination_type=WEBSITE (card 5b9fd669).
 // v5.42 (22/08/2026) - definir_whatsapp_conjunto: PATCH promoted_object.whatsapp_phone_number
@@ -350,9 +352,12 @@ import {
   urlWhatsAppMe,
   digitosWhatsApp,
   ctaPadraoMensagensWhatsApp,
+  ctaPadraoTrafegoWebsite,
   ctaValueCtwa,
   LINK_CTWA_API_WHATSAPP,
   sanitizarVideoDataParaGraph,
+  aplicarDestinoWebsiteNoVideoData,
+  aplicarDestinoWebsiteNoLinkData,
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
@@ -2740,10 +2745,30 @@ export async function montarCriacao(
     if (temStorySpec) {
       const spec: any = cb.object_story_spec;
       const vdRep: any = spec?.video_data ?? null;
+      const ldRep: any = spec?.link_data ?? null;
       // Destino POR PRODUTO (decidido na emissao): so corrige quando CLT; preserva o resto.
+      // v5.44: trafego_website reescreve CTA CTWA → CONTACT_US + wa.me (sem app_destination).
       const destinoRep = destinoDoPedidoCompat(p);
+      const linkPedido = String(p?.destino_url ?? destinoRep.url_final ?? "").trim();
+      const ctaPedido = String(p?.call_to_action_type ?? "").trim();
       let specFinal = spec;
-      if (destinoRep.aplicavel && destinoRep.corrigiu && vdRep && destinoRep.url_final) {
+      if (destinoRep.caso === "trafego_website" && (destinoRep.url_final || linkPedido)) {
+        const link = String(destinoRep.url_final || linkPedido);
+        const cta = ctaPedido || ctaPadraoTrafegoWebsite();
+        if (vdRep) {
+          specFinal = {
+            ...spec,
+            video_data: sanitizarVideoDataParaGraph(
+              aplicarDestinoWebsiteNoVideoData(vdRep, link, cta),
+            ),
+          };
+        } else if (ldRep) {
+          specFinal = {
+            ...spec,
+            link_data: aplicarDestinoWebsiteNoLinkData(ldRep, link, cta),
+          };
+        }
+      } else if (destinoRep.aplicavel && destinoRep.corrigiu && vdRep && destinoRep.url_final) {
         specFinal = {
           ...spec,
           video_data: aplicarLinkNoVideoData(vdRep, destinoRep.url_final),
@@ -2880,6 +2905,8 @@ async function espelhar(
           daily_budget: Math.round(Number(p?.orcamento_diario_reais ?? 0) * 100), // centavos
           bid_strategy: moldeLido?.bid_strategy ?? null,
           targeting: moldeLido?.targeting ?? null,
+          destination_type: String(objeto?.destination_type ?? p?.destination_type ?? "").trim() || null,
+          optimization_goal: String(objeto?.optimization_goal ?? p?.optimization_goal ?? "").trim() || null,
           criado_pelo_sistema: true,
           criado_por_approval_id: approvalId,
           nome_partes: p?.nome_partes ?? null,

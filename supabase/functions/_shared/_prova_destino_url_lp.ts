@@ -3,10 +3,12 @@
 import {
   aplicarLinkNoVideoData,
   aplicarLinkNoLinkData,
+  aplicarDestinoWebsiteNoVideoData,
   sanitizarVideoDataParaGraph,
   urlWhatsAppMe,
   ehUrlWhatsApp,
   ctaPadraoMensagensWhatsApp,
+  ctaPadraoTrafegoWebsite,
   ctaValueCtwa,
   digitosWhatsApp,
   LINK_CTWA_API_WHATSAPP,
@@ -61,5 +63,27 @@ const d = destinoDoPedidoCompat({
   },
 });
 assert(d.aplicavel === true && d.caso === "mensagens_whatsapp", "compat CTWA");
+
+assert(ctaPadraoTrafegoWebsite("WHATSAPP_MESSAGE") === "CONTACT_US", "cta web");
+assert(ctaPadraoTrafegoWebsite("LEARN_MORE") === "LEARN_MORE", "cta web keep");
+const vdWeb = aplicarDestinoWebsiteNoVideoData(
+  {
+    video_id: "3",
+    call_to_action: { type: "WHATSAPP_MESSAGE", value: { app_destination: "WHATSAPP", link: "https://api.whatsapp.com/send" } },
+  },
+  "https://wa.me/5571991088073",
+);
+assert((vdWeb.call_to_action as any).type === "CONTACT_US", "cta convertida");
+assert((vdWeb.call_to_action as any).value.link === "https://wa.me/5571991088073", "link web");
+assert((vdWeb.call_to_action as any).value.app_destination === undefined, "sem app_destination");
+const dWeb = destinoDoPedidoCompat({
+  destino_do_anuncio: {
+    caso: "trafego_website",
+    url_final: "https://wa.me/5571991088073",
+    corrigir: true,
+    aplicavel: true,
+  },
+});
+assert(dWeb.caso === "trafego_website" && dWeb.corrigiu === true, "compat website");
 
 console.log("ok: _prova_destino_url_lp");

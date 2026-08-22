@@ -184,11 +184,10 @@ export function ehPedidoTrafegoWebsite(params: {
   if (dest === "WHATSAPP" || dest === "MESSENGER" || dest === "INSTAGRAM_DIRECT") return false;
   if (opt === "CONVERSATIONS") return false;
   if (dest === "WEBSITE" || dest === "UNDEFINED") return true;
-  if (opt === "LANDING_PAGE_VIEWS") return true;
+  if (opt === "LANDING_PAGE_VIEWS" || opt === "LINK_CLICKS") return true;
   if (fam === "TRAFEGO" || fam === "TRAFFIC") return true;
-  if (normalizarObjetivoOdax(params.objetivo) === "OUTCOME_TRAFFIC" && (opt === "LINK_CLICKS" || dest === "WEBSITE")) {
-    return true;
-  }
+  // Campanha OUTCOME_TRAFFIC (espelho pode ainda nao ter destination_type).
+  if (normalizarObjetivoOdax(params.objetivo) === "OUTCOME_TRAFFIC") return true;
   return false;
 }
 

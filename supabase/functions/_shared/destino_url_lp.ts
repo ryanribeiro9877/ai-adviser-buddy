@@ -24,6 +24,7 @@ export type DestinoDoAnuncio = {
     | "clt"
     | "engajamento_social"
     | "mensagens_whatsapp"
+    | "trafego_website"
     | "outro"
     | "outro_sem_lp_decidida"
     | "indeterminado"
@@ -89,10 +90,13 @@ export function destinoDoPedidoCompat(p: any): DestinoCompat {
     };
   }
   return {
-    // CLT = LP; engajamento_social = Page/IG; mensagens_whatsapp = wa.me (CTWA).
+    // CLT = LP; engajamento_social = Page/IG; mensagens_whatsapp = CTWA;
+    // trafego_website = WEBSITE/LPV com link no criativo (ex. wa.me).
     aplicavel:
-      d.caso === "clt" || d.caso === "engajamento_social" || d.caso === "mensagens_whatsapp",
-    corrigiu: deveCorrigirParaCanonico(d),
+      d.caso === "clt" || d.caso === "engajamento_social" || d.caso === "mensagens_whatsapp" ||
+      d.caso === "trafego_website",
+    corrigiu: deveCorrigirParaCanonico(d) ||
+      (d.caso === "trafego_website" && typeof d.url_final === "string" && d.url_final.length > 0),
     url_final: d.url_final ?? null,
     url_original: d.url_do_molde ?? null,
     produto: d.produto ?? null,
@@ -159,6 +163,46 @@ export function ctaPadraoMensagensWhatsApp(ctaAtual?: unknown): string {
   }
   // CONTACT_US/LEARN_MORE com wa.me eram usados em LANDING_PAGE_VIEWS — nao em CTWA puro.
   return "WHATSAPP_MESSAGE";
+}
+
+/**
+ * CTA de conjunto WEBSITE / LANDING_PAGE_VIEWS (link wa.me no criativo, nao CTWA).
+ * WHATSAPP_MESSAGE + app_destination=WHATSAPP e recusado nesse destino.
+ * Medido na conta: pecas Juridico que entregam em LPV usam CONTACT_US + wa.me.
+ */
+export function ctaPadraoTrafegoWebsite(ctaAtual?: unknown): string {
+  const c = String(ctaAtual ?? "").trim().toUpperCase();
+  if (c === "WHATSAPP_MESSAGE" || c === "MESSAGE_PAGE" || c === "SEND_MESSAGE" || !c) {
+    return "CONTACT_US";
+  }
+  return c;
+}
+
+/**
+ * Converte criativo CTWA (WHATSAPP_MESSAGE + app_destination) em destino website:
+ * CTA CONTACT_US/LEARN_MORE, value.link = URL, SEM app_destination.
+ */
+export function aplicarDestinoWebsiteNoVideoData(
+  vd: Record<string, unknown>,
+  link: string,
+  ctaTipo?: unknown,
+): Record<string, unknown> {
+  const type = ctaPadraoTrafegoWebsite(ctaTipo ?? (vd.call_to_action as { type?: unknown } | undefined)?.type);
+  const novo: Record<string, unknown> = { ...vd };
+  delete novo.link;
+  novo.call_to_action = { type, value: { link } };
+  return novo;
+}
+
+export function aplicarDestinoWebsiteNoLinkData(
+  ld: Record<string, unknown>,
+  link: string,
+  ctaTipo?: unknown,
+): Record<string, unknown> {
+  const type = ctaPadraoTrafegoWebsite(ctaTipo ?? (ld.call_to_action as { type?: unknown } | undefined)?.type);
+  const novo: Record<string, unknown> = { ...ld, link };
+  novo.call_to_action = { type, value: { link } };
+  return novo;
 }
 
 /** CTA.value tipico de CTWA (video_data ou link_data). */
