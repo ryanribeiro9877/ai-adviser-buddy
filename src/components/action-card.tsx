@@ -17,6 +17,7 @@ import {
   RotateCcw,
   ShieldCheck,
   Pencil,
+  Plus,
 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAgora } from "@/hooks/use-agora";
@@ -24,6 +25,11 @@ import { expirado as jaExpirou, textoExpiracao } from "@/lib/notificacoes";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import {
+  ehCardDeCriacao,
+  linhasPreviaDoCard,
+  tituloDoCardAprovacao,
+} from "@/lib/approval-card-texto";
 
 /** ultima_falha: veredito da ÚLTIMA tentativa de execução que falhou. Escrita pela edge
  *  meta-actions (marcarFalhaNoCard). NULL = nenhuma tentativa falhou. Ortogonal a executed_at. */
@@ -61,18 +67,23 @@ export type Approval = {
 
 export type Decision = "approved" | "rejected";
 
-const ACTION_META: Record<string, { label: string; icon: typeof Pause }> = {
-  pausar_criativo: { label: "Pausar criativo", icon: Pause },
-  ativar_criativo: { label: "Ativar criativo", icon: Play },
-  escalar_criativo: { label: "Escalar criativo", icon: TrendingUp },
-  pausar_campanha: { label: "Pausar campanha", icon: PauseCircle },
-  ativar_campanha: { label: "Ativar campanha", icon: PlayCircle },
-  pausar_conjunto: { label: "Pausar conjunto", icon: PauseCircle },
-  ativar_conjunto: { label: "Ativar conjunto", icon: PlayCircle },
-  escalar_duplicar: { label: "Escalar (duplicar +20%)", icon: TrendingUp },
-  alterar_orcamento: { label: "Alterar orçamento", icon: DollarSign },
-  renomear_campanha: { label: "Renomear campanha", icon: Pencil },
-  registrar_veredito_peca: { label: "Veredito de compliance", icon: ShieldCheck },
+const ACTION_META: Record<string, { icon: typeof Pause }> = {
+  pausar_criativo: { icon: Pause },
+  ativar_criativo: { icon: Play },
+  escalar_criativo: { icon: TrendingUp },
+  pausar_campanha: { icon: PauseCircle },
+  ativar_campanha: { icon: PlayCircle },
+  pausar_conjunto: { icon: PauseCircle },
+  ativar_conjunto: { icon: PlayCircle },
+  escalar_duplicar: { icon: TrendingUp },
+  alterar_orcamento: { icon: DollarSign },
+  renomear_campanha: { icon: Pencil },
+  registrar_veredito_peca: { icon: ShieldCheck },
+  criar_campanha: { icon: Plus },
+  criar_conjunto_a_partir_de: { icon: Plus },
+  criar_anuncio_a_partir_de: { icon: Plus },
+  alterar_categoria_especial_campanha: { icon: Pencil },
+  ajustar_posicionamentos_do_conjunto: { icon: Pencil },
 };
 
 /** Card cuja aprovação se resolve dentro do banco, sem escrita no Meta — logo, nada a
@@ -173,7 +184,17 @@ export function ActionCard({
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
 
-  const meta = ACTION_META[approval.action] ?? { label: approval.action, icon: Clock };
+  const meta = ACTION_META[approval.action] ?? { icon: Clock };
+  const titulo = tituloDoCardAprovacao(approval.action, approval.summary);
+  const linhasPrevia = linhasPreviaDoCard(approval.action, approval.payload, approval.summary);
+  const summaryCurto =
+    !ehCardDeCriacao(approval.action) &&
+    !linhasPrevia.length &&
+    approval.summary &&
+    !/\n/.test(approval.summary) &&
+    approval.summary.length <= 160
+      ? approval.summary
+      : null;
   const statusBase = STATUS_META[approval.status] ?? {
     label: approval.status,
     className: "border-border bg-muted text-muted-foreground",
@@ -214,9 +235,7 @@ export function ActionCard({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              {meta.label}
-            </span>
+            <span className="text-sm font-semibold leading-snug text-foreground">{titulo}</span>
             <span
               className={cn(
                 "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium",
@@ -239,12 +258,24 @@ export function ActionCard({
               </span>
             )}
           </div>
-          <div className="mt-1 text-sm font-medium">{approval.summary}</div>
-          {just && <p className="mt-1 text-xs text-muted-foreground">{just}</p>}
+          {linhasPrevia.length > 0 ? (
+            <dl className="mt-2 space-y-0.5 text-sm">
+              {linhasPrevia.map((l) => (
+                <div key={l.rotulo} className="flex gap-2">
+                  <dt className="shrink-0 text-muted-foreground">{l.rotulo}:</dt>
+                  <dd className="min-w-0 font-medium break-words">{l.valor}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : summaryCurto ? (
+            <div className="mt-1 text-sm font-medium">{summaryCurto}</div>
+          ) : null}
+          {just && !ehCardDeCriacao(approval.action) && (
+            <p className="mt-1 text-xs text-muted-foreground">{just}</p>
+          )}
 
-          {/* Os parâmetros reais da ação — recolhidos, mas sempre disponíveis:
-              sem eles a decisão é no escuro. */}
-          {payloadJson && (
+          {/* Parâmetros técnicos — só fora de criação; criação mostra só a prévia de nomes. */}
+          {payloadJson && !ehCardDeCriacao(approval.action) && (
             <details className="mt-2">
               <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
                 Parâmetros da ação

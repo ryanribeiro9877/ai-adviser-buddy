@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.55)
+// supabase/functions/traffic-chat/index.ts (v28.56)
+// v28.56 (22/08/2026) - Card de criacao: summary so com nomes (campanha/conjunto/criativo).
+//   Ensaio de compliance/visao/ESP fica no payload; a UI mostra titulo curto + previa.
 // v28.55 (22/08/2026) - Roteador de catalogo OpenRouter: escolhe o modelo do turno
 //   (economia vs premium) sem hop extra. Ver _shared/llm_catalogo.ts + llm_roteador.ts.
 // v28.54 (22/08/2026) - Tool alterar_categoria_especial (card alterar_categoria_especial_campanha)
@@ -649,7 +651,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.55";
+const VERSAO = "chat-v28.56";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -1917,6 +1919,19 @@ async function t_alterar_categoria_especial(
 // de campanha, o nome do objeto que vai nascer).
 const ACOES_CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
+/** Summary visivel do card: so nomes. Ensaio (compliance, visao, ESP) vai no payload. */
+function summaryPreviaCriacao(nomes: {
+  campanha?: string | null;
+  conjunto?: string | null;
+  criativo?: string | null;
+}): string {
+  const linhas: string[] = [];
+  if (nomes.campanha) linhas.push(`Campanha: ${nomes.campanha}`);
+  if (nomes.conjunto) linhas.push(`Conjunto: ${nomes.conjunto}`);
+  if (nomes.criativo) linhas.push(`Criativo: ${nomes.criativo}`);
+  return linhas.join("\n");
+}
+
 async function t_propose_criacao(
   companyId: string,
   convId: string,
@@ -2013,21 +2028,13 @@ async function t_propose_criacao(
       null;
     const papel =
       String(params?.papel ?? resolvidoNome.partes?.papel ?? "").trim() || null;
-    const notaSocial = socialTopo
-      ? ` — familia ${familia}: destino Page/Instagram (nao LP). ODAX ${objetivo} (via ${resolvidoObj.origem}).`
-      : "";
     const ehCreditoCamp = empresaEhCredito(companyId);
     const catsEspeciais = ehCreditoCamp
       ? ["FINANCIAL_PRODUCTS_SERVICES"]
       : (Array.isArray(params?.special_ad_categories)
         ? (params.special_ad_categories as unknown[]).map((x) => String(x)).filter(Boolean)
         : []);
-    const notaCat = ehCreditoCamp
-      ? ", categoria especial de credito obrigatoria"
-      : (catsEspeciais.length
-        ? `, special_ad_categories=${catsEspeciais.join(",")}`
-        : ", SEM categoria especial financeira (empresa nao-credito)");
-    const summary = `Criar campanha "${nomeFinal}" (objetivo ${objetivo}${papel ? `, papel ${papel}` : ""})${notaCat} - nasce ACTIVE — nome ${resolvidoNome.origem}${notaSocial}`;
+    const summary = summaryPreviaCriacao({ campanha: nomeFinal });
     return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
       nome_novo: nomeFinal,
       nome_origem: resolvidoNome.origem,
@@ -2301,35 +2308,9 @@ async function t_propose_criacao(
       };
     }
 
-    // v28.9: o aviso entra NO SUMMARY, nao so no payload. O summary e o unico texto que o cartao
-    // mostra sem expandir nada, e o gestor decide lendo o cartao no sininho - aviso que fica so na
-    // conversa ja rolou para cima quando a decisao acontece.
-    // v28.15: summary declara plataformas + regras automaticas (FB+video sem Coluna; Threads off).
-    const redesTxt = plataformas.join(", ");
-    const notaPosicionamento = plataformas.includes("facebook") && formatoEfetivo === "video"
-      ? ` — Redes: ${redesTxt}. Facebook+VIDEO: posicionamentos manuais (8) sem Coluna da direita. Threads DESABILITADO (empresa sem cadastro).${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`
-      : ` — Redes: ${redesTxt}. Threads DESABILITADO (empresa sem cadastro).${formatoEfetivo === "imagem" && plataformas.includes("facebook") ? " Facebook+imagem: Coluna da direita permanece elegivel." : ""}${plataformas.includes("instagram") ? " Instagram: usar somente a identidade cadastrada desta empresa." : ""}${plataformasDefaultAplicado ? " (redes padrao da casa aplicadas automaticamente)" : ""}`;
-    const notaSocialConj = mensagensEfetivo
-      ? (semMoldeConj
-        ? ` — familia mensagens SEM MOLDE: CONVERSATIONS + destination_type=WHATSAPP + page_id (Click-to-WhatsApp).`
-        : ` — familia mensagens: molde so empresta targeting; executor grava CONVERSATIONS + WHATSAPP + page_id.`)
-      : socialEfetivo
-      ? (familiaEfetiva === "reconhecimento"
-        ? (semMoldeConj
-          ? ` — familia reconhecimento SEM MOLDE: REACH + page_id (targeting BR Advantage+ minimo).`
-          : ` — familia reconhecimento: molde so empresta targeting; executor sobrescreve por REACH + page_id.`)
-        : (semMoldeConj
-          ? ` — familia engajamento SEM MOLDE: POST_ENGAGEMENT + destination_type=ON_POST + page_id (targeting BR Advantage+ minimo).`
-          : ` — familia engajamento: molde so empresta targeting; executor sobrescreve OFFSITE/pixel por POST_ENGAGEMENT + ON_POST + page_id.`))
-      : "";
-    const notaGeo = geoEfetivo
-      ? ` — Geo: ${gateGeo.resumo ?? "preset"}${gateGeo.default_aplicado ? " [default preset Jurídico Salvador–BA]" : gateGeo.aplica_preset ? " [preset Jurídico validado]" : ""} (sobrescreve geo_locations do molde/sem_molde; idade/plataformas permanecem).`
-      : "";
-    const summary = semMoldeConj
-      ? `Criar conjunto "${nomeNovo}" SEM MOLDE na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce ACTIVE` +
-        (avisoOrcamento ? ` — ${avisoOrcamento}` : "") + notaPosicionamento + notaSocialConj + notaGeo
-      : `Criar conjunto "${nomeNovo}" replicando "${molde!.name}" na campanha "${dest.name}" - ${brl(orcamento)}/dia, nasce ACTIVE` +
-        (avisoOrcamento ? ` — ${avisoOrcamento}` : "") + notaPosicionamento + notaSocialConj + notaGeo;
+    // v28.56: o cartao mostra so nomes. Avisos de orcamento/redes/geo ficam no payload
+    // (e na resposta da tool, para o agente falar no chat se precisar).
+    const summary = summaryPreviaCriacao({ campanha: dest.name, conjunto: nomeNovo });
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde!.id, summary, {
       nome_novo: nomeNovo,
       nome_origem: resolvidoConj.origem,
@@ -2523,14 +2504,7 @@ async function t_propose_criacao(
 
     const nomeNovo = String(params?.nome_novo ?? "").trim()
       || `${molde.name} [ESC+20 ${orcamento}]`.slice(0, 180);
-    const summary =
-      `Escalar por duplicacao: criar "${nomeNovo}" a partir de "${molde.name}" na campanha "${camp.name}" — ${brl(orcamento)}/dia (+20%), nasce ACTIVE. Original continua entregando.` +
-      (avisoOrcamento ? ` — ${avisoOrcamento}` : "") +
-      (avisoPapel ? ` — ${avisoPapel}` : "") +
-      (camp.external_id !== campOrig.external_id
-        ? ` — ESP-39: copia vai para campanha ESCALA (origem era "${campOrig.name}").`
-        : ` — Escala (ESP-19/25): NAO edita o original.`) +
-      ` Anuncios do molde NAO sao copiados neste card — apos o conjunto nascer, proponha criar_anuncio_a_partir_de para cada peca ativa.`;
+    const summary = summaryPreviaCriacao({ campanha: camp.name, conjunto: nomeNovo });
 
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
       nome_novo: nomeNovo,
@@ -3108,12 +3082,9 @@ async function t_propose_criacao(
     // para fb/ig automaticamente - melhor que fixar um dos dois.
     const urlTags = `utm_source={{site_source_name}}&utm_medium=paid&utm_campaign=${slug(utmCampaign)}&utm_content=${slug(nomeNovo)}`;
 
-    // A mensagem da verificacao vai INTEIRA para o summary, inclusive a nota visual da peca e a
-    // linha DESTINO (que a RPC pedido_de_anuncio_completo ja anexa a mensagem_para_o_gestor). O
-    // destino e por PRODUTO: a RPC identifica a oferta (CLT/outro/indeterminado), o sinal usado e
-    // a URL escolhida. So corrige para /simulacao-clt quando o produto e CLT; produto diferente
-    // ou indeterminado preserva a URL do molde. O card carrega a decisao inteira em
-    // destino_do_anuncio; a executora HONRA essa decisao (nao reinfere por dominio).
+    // Destino por PRODUTO: a RPC identifica a oferta, o sinal e a URL. A executora HONRA
+    // destino_do_anuncio no payload (nao reinfere por dominio). v28.56: o ensaio da
+    // verificacao NAO vai no summary visivel — so nomes; o texto fica em mensagem_para_o_gestor.
     const destAnuncio = (semMolde ? pedido.destino_do_anuncio : null) ?? v.destino_do_anuncio ?? null;
     const destinoUrlCard = destAnuncio?.url_final ?? destAnuncio?.url_do_molde ?? destinoUrlPedido ?? null;
 
@@ -3125,18 +3096,11 @@ async function t_propose_criacao(
         ` DESTINO: engajamento/reconhecimento — Page/Instagram (${destinoUrlCard ?? "config"}). Sem LP de conversao.`).trim();
     }
 
-    const cabeca = temCarrossel
-      ? `Criar anuncio "${nomeNovo}" CARROSSEL (${(childAttachmentsRaw as any[]).length} slides) no conjunto "${dest.name}", SEM molde (ESP-35) - compliance ${comp?.veredito ?? "aprovado"}, nasce ACTIVE`
-      : semMolde
-      ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", SEM molde (ESP-35: page/CTA/destino da config) - compliance ${comp?.veredito ?? "aprovado"}, nasce ACTIVE`
-      : driveFileId
-      ? `Criar anuncio "${nomeNovo}" com PECA NOVA do acervo no conjunto "${dest.name}", usando "${molde.name}" como molde de configuracao - compliance ${comp?.veredito ?? "aprovado"}, nasce ACTIVE`
-      : `Criar anuncio "${nomeNovo}" replicando "${molde.name}" no conjunto "${dest.name}" - compliance ${comp?.veredito ?? "aprovado"}, nasce ACTIVE`;
-    const violResumo = Array.isArray(comp?.violacoes) && comp.violacoes.length
-      ? `\nCompliance (${comp.veredito}): ` +
-        comp.violacoes.map((v: any) => `${v.code}/${v.severidade}`).join(", ")
-      : "";
-    const summary = `${cabeca}${violResumo}\n\n${msgGestor}`.trim();
+    const summary = summaryPreviaCriacao({
+      campanha: nomeCampanhaDest,
+      conjunto: dest.name,
+      criativo: nomeNovo,
+    });
     return await gravarCard(companyId, convId, requestedBy, action, "ad", molde?.id ?? dest.id, summary, {
       nome_novo: nomeNovo,
       nome_origem: resolvidoAd.origem,
@@ -3148,7 +3112,11 @@ async function t_propose_criacao(
       page_id: pageIdPedido,
       call_to_action_type: ctaPedido,
       conjunto_destino_external_id: dest.external_id,
-      conjunto_destino_nome: dest.name, url_tags: urlTags, utm_campaign: slug(utmCampaign),
+      conjunto_destino_nome: dest.name,
+      campanha_destino_nome: nomeCampanhaDest,
+      objetivo_campanha_destino: objetivoCampanhaDest,
+      mensagem_para_o_gestor: msgGestor,
+      url_tags: urlTags, utm_campaign: slug(utmCampaign),
       conta_destino: contaDaEmpresa, status_inicial: "ACTIVE",  // v28.28: aprovar criar_anuncio = cria ACTIVE
       // v28.10 (GT-13): a executora le meta_video_id para trocar a midia no spec do molde.
       // Ausente = replicacao pura, e ela replica o criativo inteiro como sempre fez.

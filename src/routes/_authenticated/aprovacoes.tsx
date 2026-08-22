@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Check, X, ShieldCheck, Clock } from "lucide-react";
 import { toast } from "sonner";
 import { FalhaDaExecucao, type UltimaFalha } from "@/components/action-card";
+import { ehCardDeCriacao, linhasPreviaDoCard, tituloDoCardAprovacao } from "@/lib/approval-card-texto";
 
 export const Route = createFileRoute("/_authenticated/aprovacoes")({
   component: Aprovacoes,
@@ -51,12 +52,14 @@ function Aprovacoes() {
   const pending = items.filter((i) => i.status === "pending");
   const others = items.filter((i) => i.status !== "pending");
 
-  const Row = ({ r, reviewable }: { r: (typeof items)[number]; reviewable: boolean }) => (
+  const Row = ({ r, reviewable }: { r: (typeof items)[number]; reviewable: boolean }) => {
+    const linhas = linhasPreviaDoCard(r.action as string, r.payload, r.summary);
+    return (
     <Card className="p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
-            <span className="font-semibold">{r.summary}</span>
+            <span className="font-semibold">{tituloDoCardAprovacao(r.action as string, r.summary)}</span>
             <Badge variant="outline">{r.entity_type}</Badge>
             <Badge
               className={
@@ -78,7 +81,19 @@ function Aprovacoes() {
           <div className="text-xs text-muted-foreground mt-1 flex items-center gap-2">
             <Clock className="h-3 w-3" /> {new Date(r.created_at).toLocaleString("pt-BR")}
           </div>
-          {r.payload && Object.keys(r.payload as object).length > 0 && (
+          {linhas.length > 0 && (
+            <dl className="mt-2 space-y-0.5 text-sm">
+              {linhas.map((l) => (
+                <div key={l.rotulo} className="flex gap-2">
+                  <dt className="shrink-0 text-muted-foreground">{l.rotulo}:</dt>
+                  <dd className="min-w-0 font-medium break-words">{l.valor}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          {r.payload &&
+            Object.keys(r.payload as object).length > 0 &&
+            !ehCardDeCriacao(r.action as string) && (
             <pre className="mt-2 text-xs bg-muted rounded p-2 max-w-xl overflow-x-auto">
               {JSON.stringify(r.payload, null, 2)}
             </pre>
@@ -107,7 +122,8 @@ function Aprovacoes() {
         )}
       </div>
     </Card>
-  );
+    );
+  };
 
   return (
     <div className="space-y-6">

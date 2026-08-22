@@ -67,18 +67,40 @@ function montar(over: Partial<Approval> = {}, props: Record<string, unknown> = {
 describe("cabeçalho", () => {
   it("traduz a acao para linguagem de gestor", () => {
     montar({ action: "escalar_duplicar" });
-    expect(screen.getByText("Escalar (duplicar +20%)")).toBeInTheDocument();
+    expect(screen.getByText("Card de escala de conjunto")).toBeInTheDocument();
   });
 
   it("acao desconhecida aparece crua, em vez de sumir", () => {
-    // Preferivel ver "acao_nova_do_backend" a ver um cartao sem titulo.
-    montar({ action: "acao_nova_do_backend" });
+    montar({ action: "acao_nova_do_backend", summary: "x".repeat(200) });
     expect(screen.getByText("acao_nova_do_backend")).toBeInTheDocument();
   });
 
-  it("mostra o resumo do pedido", () => {
+  it("mostra o resumo curto do pedido quando nao ha nomes no payload", () => {
     montar();
+    expect(screen.getByText("Card de pausar campanha")).toBeInTheDocument();
     expect(screen.getByText("Pausar a campanha Leads Julho")).toBeInTheDocument();
+  });
+
+  it("criação de anúncio mostra título e só os nomes, sem o ensaio de compliance", () => {
+    const ensaio =
+      'Criar anuncio "JUR_CONV_AD02" com PECA NOVA do acervo — compliance atencao\nO QUE E AVALIADO E O QUE NAO E';
+    montar({
+      action: "criar_anuncio_a_partir_de",
+      summary: ensaio,
+      payload: {
+        campanha_destino_nome: "JURIDICO_CAMP",
+        conjunto_destino_nome: "JURIDICO_CONJ.01 - MATURACAO",
+        nome_novo: "JUR_CONV_AD02_Devolucao_Valores",
+        justificativa: ensaio,
+      },
+    });
+    expect(screen.getByText("Card de criação de anúncio")).toBeInTheDocument();
+    expect(screen.getByText("JURIDICO_CAMP")).toBeInTheDocument();
+    expect(screen.getByText("JURIDICO_CONJ.01 - MATURACAO")).toBeInTheDocument();
+    expect(screen.getByText("JUR_CONV_AD02_Devolucao_Valores")).toBeInTheDocument();
+    expect(screen.queryByText(/O QUE E AVALIADO/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/PECA NOVA/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Parâmetros da ação")).not.toBeInTheDocument();
   });
 
   it("pendente diz 'Aguardando aprovação'", () => {
