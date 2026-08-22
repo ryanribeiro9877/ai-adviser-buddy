@@ -191,7 +191,7 @@ export function aplicarDestinoWebsiteNoVideoData(
   const novo: Record<string, unknown> = { ...vd };
   delete novo.link;
   novo.call_to_action = { type, value: { link } };
-  return novo;
+  return sanitizarVideoDataParaGraph(novo);
 }
 
 export function aplicarDestinoWebsiteNoLinkData(
@@ -268,13 +268,22 @@ export function aplicarLinkNoLinkData(
   return novo;
 }
 
-/** Remove link de topo em video_data antes do POST /adcreatives (Meta 1443050). */
+/**
+ * video_data seguro para POST /adcreatives.
+ * - Remove link no topo (Meta 1443050).
+ * - Graph GET devolve image_url E image_hash; POST recusa os dois juntos
+ *   ("So um de image_url e image_hash devem ser especificados").
+ *   Com os dois, mantem image_hash (biblioteca da conta) e descarta image_url.
+ * Nao retorna cedo se nao houver link: a replica website ja remove o link antes.
+ */
 export function sanitizarVideoDataParaGraph(
   vd: Record<string, unknown>,
 ): Record<string, unknown> {
   if (!vd || typeof vd !== "object") return vd;
-  if (!("link" in vd)) return vd;
   const novo = { ...vd };
   delete novo.link;
+  const temUrl = String(novo.image_url ?? "").trim() !== "";
+  const temHash = String(novo.image_hash ?? "").trim() !== "";
+  if (temUrl && temHash) delete novo.image_url;
   return novo;
 }

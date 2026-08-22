@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.44)
+// supabase/functions/meta-actions/index.ts (v5.45)
+// v5.45 (22/08/2026) - video_data POST: nunca image_url + image_hash juntos (Graph recusa).
+//   GET do molde devolve os dois; sanitizarVideoDataParaGraph fica com o hash.
 // v5.44 (22/08/2026) - Replica CTWA → conjunto WEBSITE: reescreve CTA+link (CONTACT_US + wa.me),
 //   sem app_destination. Espelho do conjunto grava destination_type/optimization_goal.
 // v5.43 (22/08/2026) - Trafego WEBSITE (LANDING_PAGE_VIEWS + wa.me no criativo) nao e CTWA.
@@ -2771,7 +2773,9 @@ export async function montarCriacao(
       } else if (destinoRep.aplicavel && destinoRep.corrigiu && vdRep && destinoRep.url_final) {
         specFinal = {
           ...spec,
-          video_data: aplicarLinkNoVideoData(vdRep, destinoRep.url_final),
+          video_data: sanitizarVideoDataParaGraph(
+            aplicarLinkNoVideoData(vdRep, destinoRep.url_final),
+          ),
         };
       } else if (vdRep) {
         // v5.40: mesmo sem reescrita de LP, remova video_data.link se o molde trouxer.

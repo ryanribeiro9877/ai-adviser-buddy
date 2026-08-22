@@ -37,6 +37,18 @@ const herdado = sanitizarVideoDataParaGraph({
 });
 assert(!("link" in herdado), "sanitizar remove link");
 
+const conflito = sanitizarVideoDataParaGraph({
+  video_id: "9",
+  image_url: "https://cdn/thumb.jpg",
+  image_hash: "abc123",
+});
+assert(conflito.image_hash === "abc123", "mantem hash");
+assert(!("image_url" in conflito), "descarta url quando ha hash");
+assert(!("link" in conflito), "sanitiza mesmo sem link");
+
+const soUrl = sanitizarVideoDataParaGraph({ video_id: "9", image_url: "https://cdn/thumb.jpg" });
+assert(soUrl.image_url === "https://cdn/thumb.jpg", "url sozinha permanece");
+
 const ld = aplicarLinkNoLinkData(
   { image_hash: "abc", call_to_action: { type: "LEARN_MORE", value: {} } },
   "https://legaleviver.com.br/simulacao-clt",
@@ -69,6 +81,8 @@ assert(ctaPadraoTrafegoWebsite("LEARN_MORE") === "LEARN_MORE", "cta web keep");
 const vdWeb = aplicarDestinoWebsiteNoVideoData(
   {
     video_id: "3",
+    image_url: "https://cdn/thumb.jpg",
+    image_hash: "hashmolde",
     call_to_action: { type: "WHATSAPP_MESSAGE", value: { app_destination: "WHATSAPP", link: "https://api.whatsapp.com/send" } },
   },
   "https://wa.me/5571991088073",
@@ -76,6 +90,8 @@ const vdWeb = aplicarDestinoWebsiteNoVideoData(
 assert((vdWeb.call_to_action as any).type === "CONTACT_US", "cta convertida");
 assert((vdWeb.call_to_action as any).value.link === "https://wa.me/5571991088073", "link web");
 assert((vdWeb.call_to_action as any).value.app_destination === undefined, "sem app_destination");
+assert(vdWeb.image_hash === "hashmolde", "replica mantem hash");
+assert(!("image_url" in vdWeb), "replica nao envia url+hash");
 const dWeb = destinoDoPedidoCompat({
   destino_do_anuncio: {
     caso: "trafego_website",
