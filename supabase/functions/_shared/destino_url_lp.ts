@@ -127,21 +127,49 @@ export function urlWhatsAppMe(phoneOrUrl: unknown): string {
   return "";
 }
 
+/** Link canonico CTWA (Meta docs + anuncios LF CONV que entregam na mesma conta). */
+export const LINK_CTWA_API_WHATSAPP = "https://api.whatsapp.com/send";
+
 /**
- * CTA tipico de CTWA nos anuncios Juridico/LF ja publicados: CONTACT_US + wa.me.
- * LEARN_MORE/SEE_MORE com Page URL e incompativel com destination_type=WHATSAPP.
+ * Extrai digitos E.164-ish do pedido (wa.me / telefone) para promoted_object.whatsapp_phone_number.
+ * Conjunto CTWA exige o numero no ad set; o criativo usa api.whatsapp.com/send (nao wa.me).
+ */
+export function digitosWhatsApp(raw: unknown): string {
+  const s = String(raw ?? "").trim();
+  if (!s) return "";
+  if (/wa\.me/i.test(s)) {
+    const m = s.match(/wa\.me\/(\d+)/i);
+    if (m?.[1]) return m[1];
+  }
+  const digits = s.replace(/\D/g, "");
+  return digits.length >= 10 ? digits : "";
+}
+
+/**
+ * CTA de conjunto destination_type=WHATSAPP / CONVERSATIONS.
+ * Medido 22/08/2026: CONTACT_US + wa.me vira "criativo de site" e a Meta marca
+ * "Criativo invalido para o objetivo" sob CONVERSATIONS+WHATSAPP.
+ * Padrao que entrega na conta (LF CONV) e na doc Meta: WHATSAPP_MESSAGE + api.whatsapp.com/send
+ * (+ whatsapp_phone_number no promoted_object do conjunto).
  */
 export function ctaPadraoMensagensWhatsApp(ctaAtual?: unknown): string {
   const c = String(ctaAtual ?? "").trim().toUpperCase();
-  if (
-    c === "CONTACT_US" ||
-    c === "WHATSAPP_MESSAGE" ||
-    c === "MESSAGE_PAGE" ||
-    c === "SEND_MESSAGE"
-  ) {
+  if (c === "WHATSAPP_MESSAGE" || c === "MESSAGE_PAGE" || c === "SEND_MESSAGE") {
     return c;
   }
-  return "CONTACT_US";
+  // CONTACT_US/LEARN_MORE com wa.me eram usados em LANDING_PAGE_VIEWS — nao em CTWA puro.
+  return "WHATSAPP_MESSAGE";
+}
+
+/** CTA.value tipico de CTWA (video_data ou link_data). */
+export function ctaValueCtwa(ctaTipo?: unknown): {
+  type: string;
+  value: { app_destination: "WHATSAPP"; link: string };
+} {
+  return {
+    type: ctaPadraoMensagensWhatsApp(ctaTipo),
+    value: { app_destination: "WHATSAPP", link: LINK_CTWA_API_WHATSAPP },
+  };
 }
 
 /**

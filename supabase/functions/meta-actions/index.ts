@@ -1,4 +1,8 @@
 // supabase/functions/meta-actions/index.ts (v5.40)
+// v5.41 (22/08/2026) - CTWA: criativo WHATSAPP_MESSAGE + api.whatsapp.com/send; numero no
+//   promoted_object do conjunto (nao CONTACT_US + wa.me). Corrige "Criativo invalido para o
+//   objetivo" nos JUR_CONV ACTIVE sob CONVERSATIONS+WHATSAPP. Patch automatico do conjunto
+//   antes do adcreative; modo reparar_criativos_ctwa para anuncios ja criados.
 // v5.40 (22/08/2026) - CTWA video sem_molde: NAO envia video_data.link (Graph 1443050
 //   cards a703e076/934e1a2f). CTA+wa.me quando conjunto destination_type=WHATSAPP.
 //   sanitizarVideoDataParaGraph em todo POST de peca nova video.
@@ -340,7 +344,10 @@ import {
   destinoDoPedidoCompat,
   ehUrlWhatsApp,
   urlWhatsAppMe,
+  digitosWhatsApp,
   ctaPadraoMensagensWhatsApp,
+  ctaValueCtwa,
+  LINK_CTWA_API_WHATSAPP,
   sanitizarVideoDataParaGraph,
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
@@ -2073,9 +2080,11 @@ export async function montarCriacao(
           "",
       ).trim();
 
-      // v5.40: conjunto CTWA (CONVERSATIONS + WHATSAPP) exige wa.me + CTA de mensagem.
-      // Cards 22/08 nasceram com LEARN_MORE + URL da Page (engajamento_social) e a Meta
-      // recusaria o destino mesmo apos corrigir video_data.link.
+      // v5.41: conjunto CTWA (CONVERSATIONS + WHATSAPP) exige:
+      //   - promoted_object.whatsapp_phone_number no conjunto
+      //   - criativo WHATSAPP_MESSAGE + https://api.whatsapp.com/send (NAO CONTACT_US + wa.me)
+      // Medido 22/08/2026: CONTACT_US/wa.me → "Criativo invalido para o objetivo" nos JUR_CONV.
+      // LF CONV que entrega na mesma conta: LEARN_MORE/api.whatsapp.com/send + WA no conjunto.
       const { data: conjEsp } = await supa
         .from("ad_sets")
         .select("destination_type, optimization_goal, promoted_object, name")
@@ -2087,6 +2096,7 @@ export async function montarCriacao(
         optimization_goal: (conjEsp as any)?.optimization_goal,
         nome: (conjEsp as any)?.name ?? p?.conjunto_destino_nome,
       });
+      let waDigitsConjunto = "";
       if (conjuntoCtwa) {
         const po = (conjEsp as any)?.promoted_object ?? {};
         const waDaJustificativa = (() => {
@@ -2094,31 +2104,33 @@ export async function montarCriacao(
           const m =
             texto.match(/(?:whatsapp|wa\.me\/?)\s*[:=]?\s*(\+?\d[\d\s\-.]{9,}\d)/i) ||
             texto.match(/\b(55\d{10,13})\b/);
-          return m ? urlWhatsAppMe(m[1]) : "";
+          return m ? m[1] : "";
         })();
         const waCandidatos = [
           p?.whatsapp_phone_number,
           p?.whatsapp_number,
-          ehUrlWhatsApp(linkFinal) ? linkFinal : null,
-          ehUrlWhatsApp(p?.destino_url) ? p?.destino_url : null,
-          ehUrlWhatsApp(destinoPedido.url_final) ? destinoPedido.url_final : null,
+          digitosWhatsApp(linkFinal) || null,
+          digitosWhatsApp(p?.destino_url) || null,
+          digitosWhatsApp(destinoPedido.url_final) || null,
           po?.whatsapp_phone_number,
           waDaJustificativa || null,
         ];
-        let waLink = "";
         for (const c of waCandidatos) {
-          waLink = urlWhatsAppMe(c);
-          if (waLink) break;
+          waDigitsConjunto = digitosWhatsApp(c);
+          if (waDigitsConjunto) break;
         }
-        if (!waLink) {
+        if (!waDigitsConjunto) {
           return {
             erro: "destino_whatsapp_ausente_ctwa",
             detalhe:
-              "O conjunto de destino e Click-to-WhatsApp (CONVERSATIONS + WHATSAPP), mas o pedido nao traz numero/URL wa.me (whatsapp_phone_number ou destino_url). Sem isso a Meta nao cria o criativo de conversa. Informe o WhatsApp no pedido e reaprove.",
+              "O conjunto de destino e Click-to-WhatsApp (CONVERSATIONS + WHATSAPP), mas nao ha whatsapp_phone_number " +
+              "(nem no conjunto nem no pedido). Informe params.whatsapp_phone_number (DDI+DDD+numero). " +
+              "O telefone fica no conjunto; o criativo usa api.whatsapp.com/send + WHATSAPP_MESSAGE.",
           };
         }
-        linkFinal = waLink;
-        ctaTipo = ctaPadraoMensagensWhatsApp(ctaTipo || "CONTACT_US");
+        // Criativo CTWA: link canonico da API — numero NAO vai no wa.me do anuncio.
+        linkFinal = LINK_CTWA_API_WHATSAPP;
+        ctaTipo = ctaPadraoMensagensWhatsApp(ctaTipo || "WHATSAPP_MESSAGE");
       }
 
       if (!pageId) {
@@ -2213,12 +2225,16 @@ export async function montarCriacao(
         if (th.erro) {
           return { erro: "thumbnail_obrigatoria_nao_resolvida", detalhe: th.erro };
         }
-        // v5.40: video_data NAO aceita campo link no topo (Graph 1443050). So CTA.value.link.
+        // v5.41: CTWA → WHATSAPP_MESSAGE + api.whatsapp.com/send (+ app_destination).
+        // v5.40: video_data NAO aceita campo link no topo (Graph 1443050).
+        const ctaVideo = conjuntoCtwa
+          ? ctaValueCtwa(ctaTipo)
+          : { type: ctaTipo, value: { link: linkFinal } };
         let novoVd: any = sanitizarVideoDataParaGraph({
           video_id: videoNovo,
           image_url: th.url,
           message: legendaNova,
-          call_to_action: { type: ctaTipo, value: { link: linkFinal } },
+          call_to_action: ctaVideo,
         });
         let novoSpec: any = { page_id: pageId, video_data: novoVd };
         novoSpec = aplicarIdentidadeInstagramNoSpec(novoSpec, identidadeInstagram);
@@ -2228,7 +2244,7 @@ export async function montarCriacao(
         avisosVeiculacao.push(avisoIdentidadeInstagram(identidadeInstagram));
         if (conjuntoCtwa) {
           avisosVeiculacao.push(
-            `CTWA: destino WhatsApp ${linkFinal} com CTA ${ctaTipo} (conjunto destination_type=WHATSAPP).`,
+            `CTWA: criativo ${ctaVideo.type} + ${LINK_CTWA_API_WHATSAPP}; numero ${waDigitsConjunto} deve estar no promoted_object do conjunto.`,
           );
         }
         return {
@@ -2243,6 +2259,14 @@ export async function montarCriacao(
               ...(urlTags ? { url_tags: urlTags } : {}),
             } as Record<string, string>,
           },
+          // v5.41: se o conjunto ainda nao tem WA, a executora atualiza promoted_object antes do creative.
+          ctwa_promoted_patch: conjuntoCtwa && waDigitsConjunto
+            ? {
+              adset_id: adset,
+              page_id: pageId,
+              whatsapp_phone_number: waDigitsConjunto,
+            }
+            : null,
           peca_nova: {
             meta_video_id: videoNovo,
             link_publicado: linkFinal,
@@ -2260,17 +2284,21 @@ export async function montarCriacao(
             page_id: pageId,
             call_to_action_type: ctaTipo,
             ctwa: conjuntoCtwa,
+            whatsapp_phone_number: waDigitsConjunto || null,
           },
           avisos_de_veiculacao: avisosVeiculacao,
         };
       }
 
       // imagem sem molde
+      const ctaImg = conjuntoCtwa
+        ? ctaValueCtwa(ctaTipo)
+        : { type: ctaTipo, value: { link: linkFinal } };
       let novoLd: any = {
         image_hash: imagemNova,
         message: legendaNova,
         link: linkFinal,
-        call_to_action: { type: ctaTipo, value: { link: linkFinal } },
+        call_to_action: ctaImg,
       };
       let novoSpecImg: any = { page_id: pageId, link_data: novoLd };
       novoSpecImg = aplicarIdentidadeInstagramNoSpec(novoSpecImg, identidadeInstagram);
@@ -2280,7 +2308,7 @@ export async function montarCriacao(
       avisosImg.push(avisoIdentidadeInstagram(identidadeInstagram));
       if (conjuntoCtwa) {
         avisosImg.push(
-          `CTWA: destino WhatsApp ${linkFinal} com CTA ${ctaTipo} (conjunto destination_type=WHATSAPP).`,
+          `CTWA: criativo ${ctaImg.type} + ${LINK_CTWA_API_WHATSAPP}; numero ${waDigitsConjunto} no conjunto.`,
         );
       }
       return {
@@ -2295,6 +2323,9 @@ export async function montarCriacao(
             ...(urlTags ? { url_tags: urlTags } : {}),
           } as Record<string, string>,
         },
+        ctwa_promoted_patch: conjuntoCtwa && waDigitsConjunto
+          ? { adset_id: adset, page_id: pageId, whatsapp_phone_number: waDigitsConjunto }
+          : null,
         peca_nova: {
           meta_image_hash: imagemNova,
           link_publicado: linkFinal,
@@ -2312,6 +2343,7 @@ export async function montarCriacao(
           page_id: pageId,
           call_to_action_type: ctaTipo,
           ctwa: conjuntoCtwa,
+          whatsapp_phone_number: waDigitsConjunto || null,
         },
         avisos_de_veiculacao: avisosImg,
       };
@@ -2902,6 +2934,158 @@ Deno.serve(async (req) => {
     /* */
   }
   const onlyId: string | null = body?.approval_id ?? null;
+
+  // v5.41: repara anuncios CTWA ja criados com CONTACT_US+wa.me (erro de apresentacao).
+  // Atualiza promoted_object do conjunto + troca o creative_id de cada anuncio.
+  if (body?.modo === "reparar_criativos_ctwa") {
+    const companyId = String(body?.company_id ?? "57f755b9-c23d-4f58-a488-8173d697c010").trim();
+    const adsetId = String(body?.adset_external_id ?? "120249671521030182").trim();
+    const pageId = String(body?.page_id ?? "105656372312257").trim();
+    const conta = String(body?.ad_account ?? "act_1622612945584817").trim();
+    const waDigits = digitosWhatsApp(
+      body?.whatsapp_phone_number ?? "5571991088073",
+    );
+    const adsIn: Array<{ ad_id: string; video_id?: string; message?: string; name?: string }> =
+      Array.isArray(body?.ads) ? body.ads : [];
+    const ativ = ativarTokenEmpresa(companyId);
+    if (!ativ.ok) return json({ error: ativ.motivo }, 400);
+    if (!waDigits) return json({ error: "whatsapp_phone_number invalido" }, 400);
+
+    // Conjunto com anuncios ACTIVE: Meta costuma recusar PATCH de promoted_object
+    // (OAuthException #1). Nao e bloqueante — o erro de apresentacao e o CTA do criativo.
+    let adsetPatch: { ok: boolean; detalhe?: unknown } = { ok: true };
+    const pularAdset = body?.pular_update_adset === true;
+    if (!pularAdset) {
+      const po = JSON.stringify({ page_id: pageId, whatsapp_phone_number: waDigits });
+      const upSet = await g(`/${adsetId}`, "POST", { promoted_object: po });
+      if (upSet.status !== 200) {
+        adsetPatch = { ok: false, detalhe: upSet.body };
+      } else {
+        await supa
+          .from("ad_sets")
+          .update({ promoted_object: { page_id: pageId, whatsapp_phone_number: waDigits } })
+          .eq("company_id", companyId)
+          .eq("external_id", adsetId);
+      }
+    } else {
+      adsetPatch = { ok: false, detalhe: "pular_update_adset" };
+    }
+
+    const defaultsAds = [
+      {
+        ad_id: "120249679551570182",
+        video_id: "1381748604048455",
+        name: "JUR_CONV_AD01_Conta_de_Luz",
+      },
+      {
+        ad_id: "120249679554680182",
+        video_id: "28244288615228272",
+        name: "JUR_CONV_AD02_Devolucao_Valores",
+      },
+      {
+        ad_id: "120249679565490182",
+        video_id: "1057599636987596",
+        name: "JUR_CONV_AD03_Emprestimo_sobre_Emprestimo",
+      },
+    ];
+    const lista = adsIn.length ? adsIn : defaultsAds;
+    const resultados: any[] = [];
+
+    for (const item of lista) {
+      const adId = String(item.ad_id ?? "").trim();
+      if (!adId) continue;
+      // Le creative atual para message / video / thumbnail.
+      const adLido = await g(
+        `/${adId}?fields=id,name,creative{id,object_story_spec,body}`,
+      );
+      const creativeAtual = (adLido.body as any)?.creative ?? {};
+      const specAtual = creativeAtual?.object_story_spec ?? {};
+      const vdAtual = specAtual?.video_data ?? {};
+      const videoId = String(item.video_id ?? vdAtual?.video_id ?? "").trim();
+      const message = String(
+        item.message ?? vdAtual?.message ?? creativeAtual?.body ?? "",
+      ).trim();
+      const imageUrl = String(vdAtual?.image_url ?? vdAtual?.image_hash ?? "").trim();
+      if (!videoId) {
+        resultados.push({ ad_id: adId, ok: false, erro: "video_id_ausente" });
+        continue;
+      }
+      let thumb = imageUrl;
+      if (!thumb || !/^https?:/i.test(thumb)) {
+        const th = await escolherThumbnail(videoId, "");
+        if (th.erro || !th.url) {
+          resultados.push({ ad_id: adId, ok: false, erro: th.erro ?? "thumbnail_ausente" });
+          continue;
+        }
+        thumb = th.url;
+      }
+      const cta = ctaValueCtwa("WHATSAPP_MESSAGE");
+      const novoSpec = {
+        page_id: pageId,
+        video_data: sanitizarVideoDataParaGraph({
+          video_id: videoId,
+          image_url: thumb,
+          message: message || String((adLido.body as any)?.name ?? "CTWA"),
+          call_to_action: cta,
+        }),
+      };
+      const nomeAd = String(item.name ?? (adLido.body as any)?.name ?? adId);
+      const cc = await g(`/${conta}/adcreatives`, "POST", {
+        name: `${nomeAd} - creative CTWA fix`,
+        object_story_spec: JSON.stringify(novoSpec),
+      });
+      const creativeId = String((cc.body as any)?.id ?? "").trim();
+      if (cc.status !== 200 || !creativeId) {
+        resultados.push({ ad_id: adId, ok: false, etapa: "adcreative", detalhe: cc.body });
+        continue;
+      }
+      const upAd = await g(`/${adId}`, "POST", {
+        creative: JSON.stringify({ creative_id: creativeId }),
+      });
+      if (upAd.status !== 200) {
+        resultados.push({
+          ad_id: adId,
+          ok: false,
+          etapa: "update_ad",
+          creative_id: creativeId,
+          detalhe: upAd.body,
+        });
+        continue;
+      }
+      await supa
+        .from("ads")
+        .update({
+          creative_id: creativeId,
+          call_to_action_type: "WHATSAPP_MESSAGE",
+          destino_url: LINK_CTWA_API_WHATSAPP,
+          destination_url: LINK_CTWA_API_WHATSAPP,
+        })
+        .eq("company_id", companyId)
+        .eq("external_id", adId);
+      resultados.push({
+        ad_id: adId,
+        ok: true,
+        creative_id: creativeId,
+        name: nomeAd,
+        whatsapp_phone_number: waDigits,
+      });
+    }
+
+    const okTodos = resultados.length > 0 && resultados.every((x) => x.ok);
+    return json({
+      ok: okTodos,
+      modo: "reparar_criativos_ctwa",
+      adset_id: adsetId,
+      adset_patch: adsetPatch,
+      whatsapp_phone_number: waDigits,
+      resultados,
+      mcp_chamador: auth.chamador,
+      nota:
+        "Conjunto CTWA usa UM numero no promoted_object. Numeros distintos por peca exigem conjuntos separados. " +
+        "Se adset_patch.ok=false, o conjunto ficou como estava; os criativos novos usam WHATSAPP_MESSAGE + api.whatsapp.com/send. " +
+        "Aguarde alguns minutos e confira no Gerenciador se o erro de apresentacao sumiu.",
+    });
+  }
 
   // Sonda SOMENTE LEITURA: prova o schema que o driver Pipeboard realmente expoe antes de
   // declarar uma nova escrita suportada. tools/list nao chama update_adset nem toca a Meta.
@@ -3538,6 +3722,48 @@ Deno.serve(async (req) => {
       // Passo previo: criar adcreative novo (so no caso do anuncio com object_story_spec).
       const bodyFinal: Record<string, string> = { ...pl.body };
       let creativeCriado: any = null;
+
+      // v5.41: CTWA — garantir whatsapp_phone_number no conjunto ANTES do adcreative.
+      const patchCtwa = pl.ctwa_promoted_patch as
+        | { adset_id?: string; page_id?: string; whatsapp_phone_number?: string }
+        | null
+        | undefined;
+      if (patchCtwa?.adset_id && patchCtwa.whatsapp_phone_number && patchCtwa.page_id) {
+        const po = JSON.stringify({
+          page_id: String(patchCtwa.page_id),
+          whatsapp_phone_number: String(patchCtwa.whatsapp_phone_number),
+        });
+        const up = await g(`/${patchCtwa.adset_id}`, "POST", { promoted_object: po });
+        if (up.status !== 200) {
+          await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+            motivo: "falha ao gravar whatsapp_phone_number no conjunto CTWA",
+            etapa: "update_adset_promoted_object",
+            resposta: up,
+            acao,
+            driver_escrita: driver,
+          });
+          resultados.push({
+            id: r.id,
+            acao,
+            resultado: "falha_meta",
+            etapa: "adset_promoted_object",
+            driver_escrita: driver,
+            detalhe: up.body,
+          });
+          continue;
+        }
+        await supa
+          .from("ad_sets")
+          .update({
+            promoted_object: {
+              page_id: String(patchCtwa.page_id),
+              whatsapp_phone_number: String(patchCtwa.whatsapp_phone_number),
+            },
+          })
+          .eq("company_id", r.company_id)
+          .eq("external_id", String(patchCtwa.adset_id));
+      }
+
       // v4.4: cobre "novo_adcreative" (replicacao com UTM nova) e "novo_adcreative_peca_nova"
       // (spec do molde com a midia trocada). Os dois criam adcreative antes do anuncio.
       if (String(pl.criativo?.modo ?? "").startsWith("novo_adcreative")) {

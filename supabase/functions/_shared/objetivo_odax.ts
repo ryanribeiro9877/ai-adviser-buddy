@@ -360,9 +360,21 @@ export function defaultsConjuntoMensagens(
     };
   }
 
-  const wa = String(opts?.whatsapp_phone_number ?? "").trim();
+  const waRaw = String(opts?.whatsapp_phone_number ?? "").trim();
+  const waDigits = waRaw.replace(/\D/g, "");
+  // Medido 22/08/2026 (JUR_CONV): conjunto WHATSAPP sem whatsapp_phone_number + criativo
+  // CONTACT_US/wa.me → "Criativo invalido para o objetivo". LF CONV que entrega traz o numero.
+  if (dest === "WHATSAPP" && waDigits.length < 10) {
+    return {
+      erro: "whatsapp_phone_number_obrigatorio_para_mensagens",
+      detalhe:
+        "Conjunto Click-to-WhatsApp (destination_type=WHATSAPP) exige params.whatsapp_phone_number " +
+        "(digitos com DDI, ex.: 5571991088073). O numero fica no promoted_object do conjunto; " +
+        "o criativo usa api.whatsapp.com/send + WHATSAPP_MESSAGE — nao embuta o telefone em wa.me no anuncio.",
+    };
+  }
   const promoted: { page_id: string; whatsapp_phone_number?: string } = { page_id: page };
-  if (wa) promoted.whatsapp_phone_number = wa;
+  if (waDigits.length >= 10) promoted.whatsapp_phone_number = waDigits;
 
   return {
     optimization_goal: opt,

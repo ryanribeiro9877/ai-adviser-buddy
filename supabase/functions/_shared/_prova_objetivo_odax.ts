@@ -64,13 +64,17 @@ assert(!("erro" in reach) && reach.destination_type === null, "awareness sem des
 const semPage = defaultsConjuntoSocialTopo("engajamento", "");
 assert("erro" in semPage && semPage.erro === "page_id_obrigatorio_para_engajamento", "page obrig");
 
-const msg = defaultsConjuntoMensagens("1095196357012756");
+const msgSemWa = defaultsConjuntoMensagens("1095196357012756");
+assert("erro" in msgSemWa && msgSemWa.erro === "whatsapp_phone_number_obrigatorio_para_mensagens", "WA obrig");
+
+const msg = defaultsConjuntoMensagens("1095196357012756", { whatsapp_phone_number: "5571991088073" });
 assert(!("erro" in msg), "mensagens ok");
 if (!("erro" in msg)) {
   assert(msg.optimization_goal === "CONVERSATIONS", "opt conv");
   assert(msg.destination_type === "WHATSAPP", "dest WA");
   assert(msg.billing_event === "IMPRESSIONS", "billing msg");
   assert(msg.promoted_object.page_id === "1095196357012756", "page msg");
+  assert(msg.promoted_object.whatsapp_phone_number === "5571991088073", "WA no promoted");
 }
 
 assert(ehPedidoMensagens({ optimization_goal: "CONVERSATIONS" }) === true, "pedido conv");

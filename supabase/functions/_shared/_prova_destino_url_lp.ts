@@ -7,6 +7,9 @@ import {
   urlWhatsAppMe,
   ehUrlWhatsApp,
   ctaPadraoMensagensWhatsApp,
+  ctaValueCtwa,
+  digitosWhatsApp,
+  LINK_CTWA_API_WHATSAPP,
   destinoDoPedidoCompat,
 } from "./destino_url_lp.ts";
 
@@ -41,8 +44,14 @@ assert(ld.link === "https://legaleviver.com.br/simulacao-clt", "link_data.link o
 assert(urlWhatsAppMe("5571991088073") === "https://wa.me/5571991088073", "phone");
 assert(urlWhatsAppMe("https://wa.me/5571993058759") === "https://wa.me/5571993058759", "wa.me");
 assert(ehUrlWhatsApp("https://wa.me/1") === true, "eh wa");
-assert(ctaPadraoMensagensWhatsApp("LEARN_MORE") === "CONTACT_US", "cta CTWA");
-assert(ctaPadraoMensagensWhatsApp("CONTACT_US") === "CONTACT_US", "cta keep");
+assert(ctaPadraoMensagensWhatsApp("LEARN_MORE") === "WHATSAPP_MESSAGE", "cta CTWA");
+assert(ctaPadraoMensagensWhatsApp("CONTACT_US") === "WHATSAPP_MESSAGE", "cta map");
+assert(ctaPadraoMensagensWhatsApp("WHATSAPP_MESSAGE") === "WHATSAPP_MESSAGE", "cta keep");
+assert(digitosWhatsApp("https://wa.me/5571991088073") === "5571991088073", "digitos");
+const ctaCtwa = ctaValueCtwa();
+assert(ctaCtwa.type === "WHATSAPP_MESSAGE", "ctaValue type");
+assert(ctaCtwa.value.link === LINK_CTWA_API_WHATSAPP, "ctaValue link");
+assert(ctaCtwa.value.app_destination === "WHATSAPP", "ctaValue app");
 
 const d = destinoDoPedidoCompat({
   destino_do_anuncio: {

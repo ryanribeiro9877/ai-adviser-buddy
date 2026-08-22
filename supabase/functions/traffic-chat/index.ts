@@ -3,6 +3,8 @@
 //   Ensaio de compliance/visao/ESP fica no payload; a UI mostra titulo curto + previa.
 // v28.55 (22/08/2026) - Roteador de catalogo OpenRouter: escolhe o modelo do turno
 //   (economia vs premium) sem hop extra. Ver _shared/llm_catalogo.ts + llm_roteador.ts.
+// v28.55 (22/08/2026) - CTWA: WHATSAPP_MESSAGE + api.whatsapp.com/send; numero no
+//   conjunto (nao CONTACT_US+wa.me). Alinha com meta-actions v5.41 / erro de apresentacao.
 // v28.54 (22/08/2026) - Tool alterar_categoria_especial (card alterar_categoria_especial_campanha)
 //   para corrigir special_ad_categories em campanha existente; memoria institucional isolada
 //   por empresa (filtra universais contaminantes); prompt SUPER GESTOR sem hardcode cruzado.
@@ -566,7 +568,7 @@ import {
   mensagemObjetivoNaoSuportado,
   ODAX_OBJETIVOS,
 } from "../_shared/objetivo_odax.ts";
-import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, ctaPadraoMensagensWhatsApp } from "../_shared/destino_url_lp.ts";
+import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, digitosWhatsApp, ctaPadraoMensagensWhatsApp, LINK_CTWA_API_WHATSAPP } from "../_shared/destino_url_lp.ts";
 import { pipeboardToken } from "../_shared/pipeboard.ts";
 import {
   callReadTool,
@@ -2721,7 +2723,8 @@ async function t_propose_criacao(
 
     // ESP-35: config da empresa preenche page/CTA quando sem molde.
     // v28.45: engajamento/reconhecimento → destino Page/IG (nunca forcar LP CLT).
-    // v28.51: CTWA (CONVERSATIONS+WHATSAPP) → CONTACT_US + wa.me (nao Page/LEARN_MORE).
+    // v28.55: CTWA → WHATSAPP_MESSAGE + api.whatsapp.com/send; numero no conjunto
+    //   (CONTACT_US+wa.me causa "Criativo invalido para o objetivo" sob CONVERSATIONS+WHATSAPP).
     let pageIdPedido: string | null = String(params?.page_id ?? "").trim() || null;
     let ctaPedido: string | null = String(params?.call_to_action_type ?? params?.cta ?? "").trim() || null;
     let destinoUrlPedido: string | null = String(params?.destino_url ?? "").trim() || null;
@@ -2738,21 +2741,25 @@ async function t_propose_criacao(
       }
       if (anuncioMensagens) {
         const po = (dest as any)?.promoted_object ?? {};
-        const wa = urlWhatsAppMe(
+        const waDigits = digitosWhatsApp(
           params?.whatsapp_phone_number ??
             params?.whatsapp_number ??
             (ehUrlWhatsApp(destinoUrlPedido) ? destinoUrlPedido : null) ??
             po?.whatsapp_phone_number,
         );
-        if (!wa) {
+        if (!waDigits) {
           return {
             erro: "destino_whatsapp_obrigatorio_ctwa",
             detalhe:
-              "Conjunto destino e Click-to-WhatsApp (CONVERSATIONS + WHATSAPP). Informe params.whatsapp_phone_number (ou destino_url=https://wa.me/...). LEARN_MORE + URL da Page NAO serve neste conjunto.",
+              "Conjunto destino e Click-to-WhatsApp (CONVERSATIONS + WHATSAPP). Informe params.whatsapp_phone_number " +
+              "(digitos com DDI, ex.: 5571991088073). O numero fica no promoted_object do conjunto; " +
+              "o criativo usa api.whatsapp.com/send + WHATSAPP_MESSAGE (nao CONTACT_US + wa.me).",
           };
         }
-        destinoUrlPedido = wa;
-        ctaPedido = ctaPadraoMensagensWhatsApp(ctaPedido || "CONTACT_US");
+        // Card carrega o numero para a executora patchar o conjunto; link do criativo e o canonico CTWA.
+        params.whatsapp_phone_number = waDigits;
+        destinoUrlPedido = LINK_CTWA_API_WHATSAPP;
+        ctaPedido = ctaPadraoMensagensWhatsApp(ctaPedido || "WHATSAPP_MESSAGE");
         destinoMensagensResolvido = true;
       } else if (!ctaPedido) {
         ctaPedido = String(confEmp?.cta_padrao ?? "LEARN_MORE").trim() || null;
@@ -2785,7 +2792,7 @@ async function t_propose_criacao(
         return {
           erro: "peca_nova_sem_molde_incompleta",
           detalhe: anuncioMensagens
-            ? `Sem molde (CTWA/mensagens) faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "whatsapp_phone_number (wa.me)"].filter(Boolean).join(", ")}.`
+            ? `Sem molde (CTWA/mensagens) faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "whatsapp_phone_number"].filter(Boolean).join(", ")}.`
             : anuncioSocialTopo
             ? `Sem molde (engajamento/reconhecimento) faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "destino Page/IG"].filter(Boolean).join(", ")}. Configure meta_execution_config.page_id.`
             : `Sem molde faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "destino_url (ou produto CLT)"].filter(Boolean).join(", ")}. Configure meta_execution_config ou passe no params. So CLT tem LP canonica hoje.`,
@@ -2837,17 +2844,20 @@ async function t_propose_criacao(
       pedido.call_to_action_type = ctaPedido;
       pedido.destino_url = destinoUrlPedido;
       if (destinoMensagensResolvido || anuncioMensagens) {
-        const waDigits = String(destinoUrlPedido ?? "").replace(/\D/g, "");
+        const waDigits =
+          digitosWhatsApp(params?.whatsapp_phone_number) ||
+          digitosWhatsApp((dest as any)?.promoted_object?.whatsapp_phone_number) ||
+          "";
         if (waDigits) pedido.whatsapp_phone_number = waDigits;
         pedido.destino_do_anuncio = {
           caso: "mensagens_whatsapp",
           produto: null,
-          url_final: destinoUrlPedido,
-          url_canonica: destinoUrlPedido,
+          url_final: LINK_CTWA_API_WHATSAPP,
+          url_canonica: LINK_CTWA_API_WHATSAPP,
           corrigir: false,
           aplicavel: true,
           mensagem:
-            "ESP-35/v28.51: anuncio CTWA (CONVERSATIONS + WHATSAPP) — destino wa.me + CTA de mensagem (CONTACT_US).",
+            "ESP-35/v28.55: anuncio CTWA (CONVERSATIONS + WHATSAPP) — criativo WHATSAPP_MESSAGE + api.whatsapp.com/send; numero no promoted_object do conjunto.",
         };
       } else if (destinoSocialResolvido || anuncioSocialTopo) {
         pedido.destino_do_anuncio = {
@@ -3111,6 +3121,9 @@ async function t_propose_criacao(
       sem_molde: semMolde,
       page_id: pageIdPedido,
       call_to_action_type: ctaPedido,
+      ...(destinoMensagensResolvido || anuncioMensagens
+        ? { whatsapp_phone_number: digitosWhatsApp(params?.whatsapp_phone_number) || null }
+        : {}),
       conjunto_destino_external_id: dest.external_id,
       conjunto_destino_nome: dest.name,
       campanha_destino_nome: nomeCampanhaDest,
@@ -4153,7 +4166,7 @@ reconhecimento: REACH + page_id. NUNCA misture REACH como goal de campanha OUTCO
 EXCECAO CONJUNTO MENSAGENS / CTWA (21/08/2026 v28.50): conversas WhatsApp NAO sao impulsão de
 post. Campanha OUTCOME_ENGAGEMENT (ou tag CONV/MESSAGES/WHATSAPP) + conjunto com
 familia_objetivo=mensagens OU optimization_goal=CONVERSATIONS → destination_type=WHATSAPP +
-promoted_object={page_id} (+ whatsapp_phone_number opcional). Pode usar target_name=sem_molde.
+promoted_object={page_id, whatsapp_phone_number}. O criativo usa WHATSAPP_MESSAGE + api.whatsapp.com/send (nao CONTACT_US + wa.me). Pode usar target_name=sem_molde.
 PROIBIDO emitir CONVERSATIONS com destination_type=ON_POST ou tratar CTWA como familia
 engajamento social (isso gerou a falha do card JURIDICO_CONJ.01 em 21/08/2026).
 PROIBIDO dizer "nao ha molde POST_ENGAGEMENT", "so no Ads Manager", "aguardar Ryan" ou
