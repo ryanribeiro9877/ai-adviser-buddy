@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.53)
+// supabase/functions/traffic-chat/index.ts (v28.54)
+// v28.54 (22/08/2026) - Tool alterar_categoria_especial (card alterar_categoria_especial_campanha)
+//   para corrigir special_ad_categories em campanha existente; memoria institucional isolada
+//   por empresa (filtra universais contaminantes); prompt SUPER GESTOR sem hardcode cruzado.
 // v28.53 (21/08/2026) - Isolamento COHAPM/Legal na emissao:
 //   (1) compliance atencao = apto (so reprovado/bloqueia barra card); sem FIN-01 margem
 //       auto-append fora de credito; special_ad_categories financeira so Legal;
@@ -574,6 +577,7 @@ import {
 } from "../_shared/openrouter_auto.ts";
 import { tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
+import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import {
   buscarGeolocalizacoesMeta,
   normalizarGeoDoPedido,
@@ -637,7 +641,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.53";
+const VERSAO = "chat-v28.54";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -1647,6 +1651,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     "ativar_conjunto",
     "alterar_orcamento",
     "renomear_campanha",
+    "alterar_categoria_especial_campanha",
     "ajustar_posicionamentos_do_conjunto",
   ];
   if (!VALID.includes(action)) return { erro: `action_type invalido; use: ${VALID.join(", ")}` };
@@ -1660,6 +1665,11 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   if (!sucesso) return { erro: "metrica_sucesso obrigatoria: qual metrica e qual limiar dizem que deu certo, lida no funil COMPLETO (ate contrato pago), nao apenas no custo de midia." };
   if (action === "alterar_orcamento" && !(Number(params?.novo_orcamento_diario_reais) > 0)) return { erro: "informe params.novo_orcamento_diario_reais (> 0)" };
   if (action === "renomear_campanha" && !String(params?.novo_nome ?? "").trim()) return { erro: "informe params.novo_nome (nao vazio)" };
+  if (action === "alterar_categoria_especial_campanha") {
+    if (!Array.isArray(params?.special_ad_categories)) {
+      return { erro: "informe params.special_ad_categories como array (use [] para remover a categoria especial)" };
+    }
+  }
   if (
     action === "ajustar_posicionamentos_do_conjunto" &&
     !["video", "imagem"].includes(String(params?.formato_midia ?? "").trim().toLowerCase())
@@ -1767,6 +1777,14 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     ativar_conjunto: `Ativar o conjunto "${alvo.name}" (status ACTIVE)`,
     alterar_orcamento: `Alterar orcamento diario de "${alvo.name}" para ${brl(Number(params?.novo_orcamento_diario_reais ?? 0))}`,
     renomear_campanha: `Renomear a campanha "${alvo.name}" para "${String(params?.novo_nome ?? "").trim()}" via Pipeboard`,
+    alterar_categoria_especial_campanha: (() => {
+      const cats = Array.isArray(params?.special_ad_categories)
+        ? (params.special_ad_categories as unknown[]).map((x) => String(x).trim()).filter(Boolean)
+        : [];
+      return cats.length
+        ? `Alterar special_ad_categories de "${alvo.name}" para [${cats.join(", ")}]`
+        : `Remover special_ad_categories de "${alvo.name}" (array vazio)`;
+    })(),
     ajustar_posicionamentos_do_conjunto:
       `Ajustar posicionamentos de "${alvo.name}" para ${String(params?.formato_midia).toUpperCase()}: excluir Facebook Coluna da direita quando incompatível, preservar Instagram/Threads e demais posicionamentos compatíveis`,
   } as Record<string, string>)[action];
@@ -1840,6 +1858,49 @@ async function t_renomear_campanha(companyId: string, convId: string, requestedB
       novo_nome: novoNome,
       nome_origem: resolvido.origem,
       ...(resolvido.partes ? { nome_partes: resolvido.partes } : {}),
+    },
+  }, cards);
+}
+/** Tool dedicada: emite card para alterar/remover special_ad_categories de campanha existente. */
+async function t_alterar_categoria_especial(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+) {
+  const campanhaAtual = String(args?.campanha_atual ?? args?.target_name ?? "").trim();
+  if (!campanhaAtual) return { erro: "campanha_atual obrigatoria" };
+  if (!Array.isArray(args?.special_ad_categories)) {
+    return {
+      erro: "special_ad_categories_obrigatorio",
+      detalhe: "Passe special_ad_categories como array. Use [] para remover a categoria especial (ex.: FINANCIAL_PRODUCTS_SERVICES marcada por engano).",
+    };
+  }
+  const cats = (args.special_ad_categories as unknown[])
+    .map((x) => String(x).trim().toUpperCase())
+    .filter((x) => x && x !== "NONE" && x !== "NULL");
+  const catsAntes = Array.isArray(args?.categorias_atuais)
+    ? (args.categorias_atuais as unknown[]).map((x) => String(x))
+    : null;
+  const resumoCats = cats.length ? `[${cats.join(", ")}]` : "[] (sem categoria especial)";
+  return await t_propose_action(companyId, convId, requestedBy, {
+    action_type: "alterar_categoria_especial_campanha",
+    target_name: campanhaAtual,
+    justificativa: String(args?.justificativa ?? "").trim() ||
+      `Corrigir special_ad_categories da campanha para ${resumoCats} apos leitura confirmando o estado atual.`,
+    reversa: catsAntes != null
+      ? `Restaurar special_ad_categories para ${JSON.stringify(catsAntes)} com a mesma acao.`
+      : `Restaurar as categorias anteriores com alterar_categoria_especial (releia get_campaign_detail antes).`,
+    metrica_sucesso:
+      `A Graph devolver special_ad_categories exatamente igual a ${resumoCats} na reconciliacao pos-escrita; o espelho campaigns.special_ad_categories sincronizar.`,
+    risco:
+      "A Meta pode recusar troca de categoria em campanha com anuncios/entrega. Nesse caso o card falha na execucao e o caminho e campanha nova — nao invente sucesso.",
+    mecanismo:
+      "update_campaign (Graph ou Pipeboard) envia special_ad_categories no nivel CAMPANHA; anuncios herdam.",
+    params: {
+      special_ad_categories: cats,
+      categorias_atuais: catsAntes,
     },
   }, cards);
 }
@@ -3429,7 +3490,8 @@ const TOOLS = [
   { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
-  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto e renomear_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE permitido — use target_name / params.nome / params.nome_novo / params.novo_nome com a string que o gestor quiser. O padrao [MARCA][CANAL][OBJ][PROD?][PAPEL?][ROT?][PER] e SUGESTAO OPCIONAL (so monte pelas partes se o gestor pedir ou se nao houver nome livre). Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (so familia engajamento/reconhecimento). Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal para social. PROIBIDO recusar IMPULSAO por falta de molde POST_ENGAGEMENT. Tudo que e criado nasce ACTIVE.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "alterar_categoria_especial", description: "Emite CARD DE APROVACAO para alterar ou REMOVER special_ad_categories de uma campanha JA CRIADA. Passe special_ad_categories=[] para remover. NAO diga que falta ferramenta. Leia antes com get_campaign_detail ou auditar_compliance_financeira.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } }, categorias_atuais: { type: "array", items: { type: "string" } }, justificativa: { type: "string" } }, required: ["campanha_atual", "special_ad_categories"] } } },
+  { type: "function", function: { name: "propose_action", description: "Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha e alterar_categoria_especial_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE permitido — use target_name / params.nome / params.nome_novo / params.novo_nome com a string que o gestor quiser. O padrao [MARCA][CANAL][OBJ][PROD?][PAPEL?][ROT?][PER] e SUGESTAO OPCIONAL (so monte pelas partes se o gestor pedir ou se nao houver nome livre). Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (so familia engajamento/reconhecimento). Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal para social. PROIBIDO recusar IMPULSAO por falta de molde POST_ENGAGEMENT. Tudo que e criado nasce ACTIVE.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA (CET/FIN-04 so se a empresa for de credito). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. As variantes ficam GRAVADAS em conversation_legendas desta conversa. Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true (aprovado OU atencao) e passe em propose_action criar_anuncio_a_partir_de. VOCE preenche legenda_referencias — NUNCA peca ao gestor. Nao invente CLT/CET para COHAPM.", parameters: { type: "object", properties: { produto: { type: "string", description: "Obrigatorio se brand nao tiver linhas_produto. Ex.: consignado_clt (Legal) ou juridico_whatsapp (COHAPM). SEM default CLT." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, peca_chave: { type: "string", description: "Chave estavel no slate (ex.: carrossel_5, card_capa_1). Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "get_legendas_da_conversa", description: "MEMORIA DURAVEL de legendas desta conversa (conversation_legendas). Devolve texto INTEGRAL por peca_chave/drive_file_id. OBRIGATORIO chamar ANTES de dizer que legenda 'nao existe' / 'texto integral nao disponivel' ou de pedir ao gestor para colar copy. Se a peca esta aqui, use o texto — nunca invente amnesia.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, drive_file_id: { type: "string" } } } } },
   { type: "function", function: { name: "registrar_legenda_da_conversa", description: "Grava/atualiza UMA legenda no store duravel desta conversa. Use quando voce propuser copy no chat SEM passar por gerar_legendas (ex.: slate de impulsão com legenda editorial), ou para marcar a variante selecionada pelo gestor. peca_chave estavel (carrossel_2, card_capa_1, …) + legenda integral. Com drive_file_id quando houver.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, legenda: { type: "string" }, drive_file_id: { type: "string" }, variante_indice: { type: "number" }, selecionada: { type: "boolean" }, objetivo: { type: "string" } }, required: ["peca_chave", "legenda"] } } },
@@ -3767,6 +3829,7 @@ async function runTool(name: string, args: any, ctx: any) {
         return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       }
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "alterar_categoria_especial": return await t_alterar_categoria_especial(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "auditar_compliance_financeira":
         return await t_auditar_compliance_financeira(ctx.companyId, String(args?.name_like ?? ""));
       case "check_compliance":
@@ -3882,11 +3945,11 @@ async function runTool(name: string, args: any, ctx: any) {
   } catch (e) { return { erro: String((e as any)?.message ?? e) }; }
 }
 
-function systemPrompt(companyName: string, memoria: string, estilo: string, indiceConhecimento: string) {
-  const legal = norm(companyName).includes("legal");
+function systemPrompt(companyName: string, memoria: string, estilo: string, indiceConhecimento: string, companyId?: string) {
+  const legal = empresaEhCredito(companyId) || norm(companyName).includes("legal");
   const perfil = legal
-    ? "Empresa de credito consignado; aplique regras financeiras/Categoria Especial quando os dados da campanha confirmarem esse produto."
-    : "COHAPM e cooperativa habitacional, nao empresa de credito. Nao aplique consignado, benchmarks, identidades, produtos ou contas da Legal e Viver.";
+    ? "Empresa de credito consignado; aplique regras financeiras/Categoria Especial quando os dados da campanha confirmarem esse produto. Fatos de outras empresas do portfolio NAO se aplicam."
+    : "Empresa NAO e de credito consignado. Nao aplique consignado, CET, FIN-*, benchmarks, identidades, produtos ou contas de outra empresa. Use so brand_identity/config/memoria DESTA empresa.";
   return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()} (fuso de Brasilia). Responde ao gestor (Roberto) em portugues brasileiro.
 PERFIL EMPRESARIAL: ${perfil}
 HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar uma janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado.
@@ -3918,7 +3981,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 == DOUTRINA DE DECISAO ==
 - DIGA DE QUEM FALA: empresa e categoria regulatoria antes do nivel (conta/campanha/conjunto/anuncio). Doutrina de credito NAO se aplica a empresa que nao e de credito. NUNCA compare empresas de categorias distintas.
 - LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, get_waba_status, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
-- GEO/BAIRROS NO CRIAR_CONJUNTO (21/08/2026, rev. preset): HA campo. Use buscar_geolocalizacao (lotes <=40). No propose: params.bairros ou params.geo_locations. COHAPM JURIDICO: preset Salvador–BA automatico (geo_targeting_presets); geo diferente REJEITADA. La Felicita NAO herda. Legal NAO herda. NUNCA diga que falta campo de bairros.
+- GEO/BAIRROS NO CRIAR_CONJUNTO: HA campo. Use buscar_geolocalizacao (lotes <=40). No propose: params.bairros ou params.geo_locations. Presets em geo_targeting_presets sao POR empresa+meio; outra empresa/meio NAO herda. NUNCA diga que falta campo de bairros.
 - WHATSAPP / NUMEROS DE PE (21/08/2026): pergunta sobre numero operacional, de pe, qual WA linkar, WABA, qualidade/tier OU isolamento Juridico vs La Felicita OBRIGA get_waba_status (meio=juridico|la_felicita quando o pedido recortar). get_estrutura_conjuntos / get_criativos_conteudo so mostram destino wa.me do anuncio (Click-to-WA) — NAO substituem. Separe sempre: (1) WABA Cloud/ON_PREMISE — de_pe so CONNECTED; (2) CTWA — inventario; de_pe so IN_ACTIVE_ADS. NUNCA peca escolher so entre CTWA como se fossem os unicos. Conjunto ACTIVE sob campanha PAUSED = entregando=false (nao esta no ar). COHAPM: isole JUR vs LF.
 - DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations SO se quiser a fila INTERNA de custo). Cite SEMPRE o veredito interno — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta. get_recommendations NAO e o badge do Ads Manager. Se get_meta_dicas vier vazio apos sync e o gestor apontar badge na UI, diga a assimetria documentada pela Meta (API pode listar menos que Ads Manager) — nao invente o texto da dica.
 - Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.
@@ -4040,7 +4103,7 @@ entregue o que ja apurou com lacunas declaradas — nunca um "vou…" sozinho.
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
 R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os dois limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
-R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. Para categoria especial financeira: chame get_campaign_detail ou auditar_compliance_financeira (campo special_ad_categories da CAMPANHA) ou ler_pipeboard get_campaign_details — PROIBIDO dizer que "nao ha ferramenta" ou pedir ao gestor para abrir o Gerenciador so por isso. A Meta aplica a categoria na campanha; os anuncios herdam.
+R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. Para categoria especial: LEIA com get_campaign_detail / auditar_compliance_financeira / ler_pipeboard get_campaign_details; para ALTERAR ou REMOVER use alterar_categoria_especial (card alterar_categoria_especial_campanha). PROIBIDO dizer que "nao ha ferramenta" ou que "so na criacao". A Meta aplica a categoria na campanha; os anuncios herdam.
 R3. Distinga tres coisas diferentes: (a) o dado e ZERO, (b) o dado NAO EXISTE no sistema, (c) o dado NAO FOI COLETADO no periodo (sync/cobertura). Nunca trate (b) ou (c) como (a).
 R4. PROIBIDO misturar janelas temporais no mesmo raciocinio ou funil. Se as fontes tem janelas diferentes, ou iguale as janelas ou declare explicitamente que a comparacao nao e valida.
 R5. Amostra pequena nao vira conclusao. Poucos resultados = hipotese, e diga o volume.
@@ -4115,7 +4178,7 @@ ser reverificado na fonte oficial antes de virar decisao.
 
 == CONHECIMENTO DE PLATAFORMA (resumo para resposta rapida; o detalhe esta na base acima) ==
 ${legal ? `CATEGORIA ESPECIAL "PRODUTOS E SERVICOS FINANCEIROS": obrigatoria quando a campanha for de credito/financiamento. Confirme o produto antes de aplicar.
-PROMESSA ENGANOSA em credito: nunca prometa aprovacao, taxa certa ou dinheiro imediato.` : `COHAPM: categoria especial financeira e doutrina de credito NAO se aplicam por padrao. So use uma categoria especial se uma leitura atual da campanha e uma razao regulatoria da propria COHAPM a comprovarem.`}
+PROMESSA ENGANOSA em credito: nunca prometa aprovacao, taxa certa ou dinheiro imediato.` : `Categoria especial financeira e doutrina de credito NAO se aplicam por padrao nesta empresa. So marque categoria especial se leitura atual + razao regulatoria DESTA empresa comprovarem. Para corrigir marca errada: alterar_categoria_especial.`}
 CBO vs ABO: no CBO o orcamento fica na campanha e a Meta distribui entre conjuntos; no ABO cada conjunto tem seu proprio orcamento. CBO acelera aprendizado e concentra entrega no conjunto que responde melhor; ABO da controle por publico e evita que um conjunto absorva tudo. Estrutura hibrida na mesma conta e comum, mas dificulta comparacao justa entre conjuntos.
 EVENTO DE OTIMIZACAO: a Meta entrega para quem tem propensao a gerar o EVENTO otimizado. Otimizar para formulario ou clique entrega volume barato de quem preenche facil; otimizar para evento profundo (proposta, contrato) entrega menos volume e mais propensao a comprar. Alimentar a Meta com sinal raso e a causa mais comum de "lead barato que nao vira venda".
 FADIGA DE CRIATIVO: frequencia crescente com CTR caindo e custo por resultado subindo no mesmo publico. Antes de trocar criativo, verificar se a queda nao e de entrega, orcamento ou sazonalidade.
@@ -4123,7 +4186,7 @@ APRENDIZADO LIMITADO: conjunto que nao atinge o volume minimo de eventos na jane
 ATRIBUICAO: a janela padrao atual e 7 dias de clique e 1 dia de visualizacao. Janela maior credita mais conversoes a Meta e infla o resultado aparente; janela menor subestima. Comparar periodos com janelas diferentes invalida a comparacao.
 
 == GLOSSARIO ==
-${legal ? "Lead(LP) e nome historico da Legal para clique no link; reporte como custo por clique no link." : "Nao importe glossario, teto ou definicao historica de outra empresa."} Formulario = form preenchido. Conversa = WhatsApp iniciado (linha separada, nao etapa). Proposta/contrato: fora do escopo do sistema - nao cite.
+${legal ? "Lead(LP) e nome historico desta conta de credito para clique no link; reporte como custo por clique no link." : "Nao importe glossario, teto ou definicao historica de outra empresa."} Formulario = form preenchido. Conversa = WhatsApp iniciado (linha separada, nao etapa). Proposta/contrato: fora do escopo do sistema - nao cite.
 
 == FORMATO E APRESENTACAO (regras vigentes, vindas da configuracao do sistema) ==
 Siga TODAS as regras abaixo na montagem da resposta. Elas definem como o gestor le seu texto.
@@ -4540,11 +4603,9 @@ Deno.serve(async (req) => {
     }
   }
 
-  // v26: carrega fatos UNIVERSAIS (company_id null) + fatos DESTA empresa. Nunca de outra.
-  const { data: ctxRows } = await supa.from("agent_context")
-    .select("categoria,fato,desde,company_id").eq("vigente", true)
-    .or(`company_id.is.null,company_id.eq.${company.id}`)
-    .order("categoria");
+  // v28.54: memoria isolada — fatos da empresa + universais sem contaminacao de outra marca.
+  const memCarregada = await carregarMemoriaInstitucional(supa, company.id);
+  const ctxRows = memCarregada.rows;
   // v24: INDICE da base de conhecimento. Progressive disclosure: o indice (barato) vai no
   // prompt para o agente saber o que existe; o conteudo (caro) so e lido sob demanda.
   const { data: knRows } = await supa.from("agent_knowledge")
@@ -4563,9 +4624,7 @@ Deno.serve(async (req) => {
   const estilo = (styleRows ?? []).length
     ? (styleRows ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n")
     : "(sem regras cadastradas - use titulos markdown, tabela para numeros comparaveis e negrito so no numero que decide)";
-  const memoria = (ctxRows ?? []).length
-    ? (ctxRows ?? []).map((r: any) => `- [${String(r.categoria).toUpperCase()}${r.desde ? " " + String(r.desde) : ""}] ${r.fato}`).join("\n")
-    : "(sem fatos registrados)";
+    const memoria = memCarregada.texto;
 
   let requestedBy = userId;
   if (!requestedBy) {
@@ -4722,7 +4781,7 @@ Deno.serve(async (req) => {
   // e a pergunta atual sao identicos em todas as rodadas do turno. TTL ~5min, e as rodadas
   // ocorrem em segundos. Anthropic exige minimo ~1024 tokens por bloco: o system passa;
   // a pergunta so e marcada se for texto simples e suficientemente longa.
-  const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento),
+  const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento, company.id),
     cache_control: { type: "ephemeral" } }];
   const perguntaSimples = userContent.length === 1;
   const perguntaCacheavel = perguntaSimples && msgText.length >= 4000;

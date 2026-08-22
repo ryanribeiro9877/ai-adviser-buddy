@@ -523,6 +523,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
     case "pausar_campanha":
     case "ativar_campanha":
     case "renomear_campanha":
+    case "alterar_categoria_especial_campanha":
       return "campanha";
     case "criar_conjunto_a_partir_de":
     case "escalar_duplicar":
@@ -570,6 +571,7 @@ const CAMPOS_COMPARAVEIS = [
   "campaign_id",
   "adset_id",
   "targeting",
+  "special_ad_categories",
 ];
 
 function jsonCanonico(v: unknown): string {

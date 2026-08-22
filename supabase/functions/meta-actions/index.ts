@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.38)
+// supabase/functions/meta-actions/index.ts (v5.39)
+// v5.39 (22/08/2026) - alterar_categoria_especial_campanha: update_campaign com
+//   special_ad_categories (incl. [] para remover); espelho campaigns sincronizado.
 // v5.38 (21/08/2026) - Targeting create_adset: Advantage+ sem age_max; age_min<=25;
 //   familia mensagens NAO herda publico/idade do molde LF (base limpa + geo + placements).
 //   Meta 1870188 no card JURIDICO_CONJ.01.
@@ -388,6 +390,7 @@ const EXECUTAVEIS = [
   "ativar_conjunto",
   "alterar_orcamento",
   "renomear_campanha",
+  "alterar_categoria_especial_campanha",
   "ajustar_posicionamentos_do_conjunto",
 ];
 const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
@@ -645,7 +648,12 @@ async function escreverUpdate(
   }
 
   let tool = "update_ad";
-  if (acao === "pausar_campanha" || acao === "ativar_campanha" || acao === "renomear_campanha") {
+  if (
+    acao === "pausar_campanha" ||
+    acao === "ativar_campanha" ||
+    acao === "renomear_campanha" ||
+    acao === "alterar_categoria_especial_campanha"
+  ) {
     tool = "update_campaign";
   }
   if (
@@ -675,6 +683,14 @@ async function escreverUpdate(
   else if (tool === "update_adset") args.adset_id = alvoExt;
   else args.ad_id = alvoExt;
   if (post.daily_budget) args.daily_budget = Number(post.daily_budget);
+  // Pipeboard espera array tipado; Graph form manda JSON string.
+  if (post.special_ad_categories != null) {
+    try {
+      args.special_ad_categories = JSON.parse(post.special_ad_categories);
+    } catch {
+      args.special_ad_categories = post.special_ad_categories;
+    }
+  }
   if (opts?.dry_run) args.dry_run = true;
 
   const r = await pipeboardCall(tool, args, pbToken);
@@ -732,11 +748,21 @@ function pedidoDeReconciliacao(
 ): Record<string, unknown> {
   const nivel = nivelDaAcao(acao);
   if (nivel === "campanha") {
-    return {
+    const out: Record<string, unknown> = {
       name: body.name,
       status: body.status,
       objective: body.objective ?? payload?.objetivo,
     };
+    if (body.special_ad_categories != null) {
+      try {
+        out.special_ad_categories = JSON.parse(body.special_ad_categories);
+      } catch {
+        out.special_ad_categories = body.special_ad_categories;
+      }
+    } else if (Array.isArray(payload?.special_ad_categories)) {
+      out.special_ad_categories = payload.special_ad_categories;
+    }
+    return out;
   }
   if (nivel === "conjunto") {
     return {
@@ -3785,6 +3811,24 @@ Deno.serve(async (req) => {
       }
       post = { name: novoNome };
     }
+    if (acao === "alterar_categoria_especial_campanha") {
+      const rawCats = r.payload?.special_ad_categories;
+      if (!Array.isArray(rawCats)) {
+        resultados.push({
+          id: r.id, acao, resultado: "falha",
+          motivo: "special_ad_categories deve ser array (use [] para remover)",
+          driver_escrita: driver,
+        });
+        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+          motivo: "special_ad_categories ausente/invalido", payload: r.payload, driver_escrita: driver,
+        });
+        continue;
+      }
+      const cats = (rawCats as unknown[])
+        .map((x) => String(x).trim().toUpperCase())
+        .filter((x) => x && x !== "NONE" && x !== "NULL");
+      post = { special_ad_categories: JSON.stringify(cats) };
+    }
     if (acao === "alterar_orcamento") {
       const reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
       if (!(reais > 0)) {
@@ -3863,7 +3907,10 @@ Deno.serve(async (req) => {
       let ensaioPipeboard: ResultadoEscrita | null = null;
       if (
         driver === "pipeboard" &&
-        (acao === "pausar_campanha" || acao === "ativar_campanha" || acao === "renomear_campanha") &&
+        (acao === "pausar_campanha" ||
+          acao === "ativar_campanha" ||
+          acao === "renomear_campanha" ||
+          acao === "alterar_categoria_especial_campanha") &&
         post
       ) {
         ensaioPipeboard = await escreverUpdate(driver, acao, alvoExt, post, pbToken, {
@@ -3885,7 +3932,8 @@ Deno.serve(async (req) => {
           (driver === "pipeboard" &&
           acao !== "pausar_campanha" &&
           acao !== "ativar_campanha" &&
-          acao !== "renomear_campanha"
+          acao !== "renomear_campanha" &&
+          acao !== "alterar_categoria_especial_campanha"
             ? "dry_run nativo so em create_campaign/update_campaign; neste nivel a simulacao e local"
             : null),
         pipeboard_conexao: pipeboardMonitor,
@@ -4028,6 +4076,44 @@ Deno.serve(async (req) => {
               nota: erroEspelho
                 ? "FALHA ao espelhar campaigns.name - o nome na Meta mudou mas o espelho local segue defasado ate a proxima reconciliacao"
                 : "campaigns.name sincronizado com a Meta apos renomear_campanha bem-sucedido",
+            },
+          );
+        }
+      }
+      if (acao === "alterar_categoria_especial_campanha") {
+        const catsGraph = (depois.body as any)?.special_ad_categories;
+        let catsEspelho: string[] | null = null;
+        if (Array.isArray(catsGraph)) {
+          catsEspelho = catsGraph.map((x: unknown) => String(x));
+        } else if (post?.special_ad_categories != null) {
+          try {
+            const p = JSON.parse(post.special_ad_categories);
+            catsEspelho = Array.isArray(p) ? p.map((x: unknown) => String(x)) : [];
+          } catch {
+            catsEspelho = [];
+          }
+        }
+        if (catsEspelho != null) {
+          const { error: erroEspelho } = await supa
+            .from("campaigns")
+            .update({ special_ad_categories: catsEspelho })
+            .eq("provider", "meta_ads")
+            .eq("external_id", alvoExt);
+          await audit(
+            r.company_id,
+            sistema,
+            erroEspelho
+              ? "meta_action_espelho_categoria_falhou"
+              : "meta_action_espelho_categoria",
+            r.id,
+            {
+              acao,
+              alvo_external_id: alvoExt,
+              campo: "special_ad_categories",
+              valor_espelhado: catsEspelho,
+              fonte: Array.isArray(catsGraph) ? "graph (conferido)" : "pedido (graph nao relida)",
+              reconciliacao_estado: reconciliacao?.estado ?? null,
+              erro: erroEspelho?.message ?? null,
             },
           );
         }

@@ -221,6 +221,7 @@ import {
   type AutoCostTier,
 } from "../_shared/openrouter_auto.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
+import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -1723,11 +1724,11 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
 // ============================================================================
 // FASE 3 - SINTESE com continuacao INTERNA (contexto preservado, zero re-coleta)
 // ============================================================================
-function montarSysSintese(companyName: string, estilo: string, memoria: string, escopo?: EscopoPedido): string {
-  const isLegal = norm(companyName).includes("legal");
+function montarSysSintese(companyName: string, estilo: string, memoria: string, escopo?: EscopoPedido, companyId?: string): string {
+  const isLegal = empresaEhCredito(companyId) || norm(companyName).includes("legal");
   const perfil = isLegal
-    ? "empresa de credito consignado; regras financeiras so valem quando o produto estiver comprovado"
-    : "cooperativa habitacional; doutrina, benchmarks e identidades da Legal e Viver nao se aplicam";
+    ? "empresa de credito consignado; regras financeiras so valem quando o produto estiver comprovado; fatos de outras empresas nao se aplicam"
+    : "empresa nao-credito; doutrina/benchmarks/identidades de outra empresa do portfolio nao se aplicam — use so contexto desta marca";
   const contrato = escopo
     ? `\n${escopo.bloco_contrato}\nFIDELIDADE: responda EXCLUSIVAMENTE as perguntas obrigatorias do contrato, na ordem. Nao abra secao de historico SALT/conta inteira se o contrato proibir. Se um especialista trouxe dado fora do universo, ignore no corpo e no maximo cite em uma linha FORA DO PEDIDO. Distinga objective da campanha vs optimization_goal do conjunto.\n`
     : "";
@@ -1775,9 +1776,9 @@ async function sintetizarSegmentada(
   memoria: string,
   prazo: () => number,
   tel: any,
-  opts?: { timeoutMs?: number; escopo?: EscopoPedido },
+  opts?: { timeoutMs?: number; escopo?: EscopoPedido; companyId?: string },
 ): Promise<string> {
-  const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo);
+  const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo, opts?.companyId);
   const perCallTimeout = opts?.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
   const hardDeadline = Date.now() + Math.min(SINT_FASE_HARD_MS, Math.max(prazo(), 8_000));
   const meio = Math.ceil(relatorios.length / 2);
@@ -1847,9 +1848,9 @@ async function sintetizar(
   memoria: string,
   prazo: () => number,
   tel: any,
-  opts?: { timeoutMs?: number; escopo?: EscopoPedido },
+  opts?: { timeoutMs?: number; escopo?: EscopoPedido; companyId?: string },
 ) {
-  const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo);
+  const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo, opts?.companyId);
   const blocos = relatorios.map((r) => `=== RELATORIO ${r.nome} [${r.completo ? "COMPLETO" : "INCOMPLETO - cortado por limite de tamanho; ausencias aqui NAO significam que o dado nao existe"}] ===\n${r.relatorio}`).join("\n\n");
   // v3.8: pacote enorme → sintese segmentada (menos 429 numa unica chamada monstro).
   if (relatorios.length >= 4 && blocos.length >= SINT_CHARS_SEGMENTAR && prazo() > 60_000) {
@@ -1926,7 +1927,7 @@ async function sintetizarComResgate(args: {
   await pushProgresso(args.jobId, "sintese", "escrevendo a resposta final");
   const texto = await sintetizar(
     args.companyName, args.pergunta, args.relatorios, args.estilo, args.memoria,
-    args.prazo, args.tel, { timeoutMs: args.timeoutMs, escopo: args.escopo },
+    args.prazo, args.tel, { timeoutMs: args.timeoutMs, escopo: args.escopo, companyId: args.companyId },
   );
   if (String(texto ?? "").trim()) return texto;
 
@@ -2389,9 +2390,8 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       await pushProgresso(jobId, "segmento", `segmento ${segmento}: retomando do checkpoint`);
       const { data: styleRows0 } = await supa.from("agent_style").select("secao,regra").eq("vigente", true).order("ordem");
       const estilo0 = (styleRows0 ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n") || "(sem regras cadastradas)";
-      const { data: ctxRows0 } = await supa.from("agent_context").select("categoria,fato,desde").eq("vigente", true)
-        .or(`company_id.is.null,company_id.eq.${companyId}`).order("categoria");
-      const memoria0 = (ctxRows0 ?? []).map((r: any) => `- [${String(r.categoria).toUpperCase()}${r.desde ? " " + String(r.desde) : ""}] ${r.fato}`).join("\n") || "(sem fatos registrados)";
+      const mem0 = await carregarMemoriaInstitucional(supa, companyId);
+      const memoria0 = mem0.texto;
       let relatorios: { nome: string; relatorio: string; completo: boolean }[] = retomada.relatorios ?? [];
       const plano: { nome: string; foco: string }[] = retomada.plano ?? [];
       let rodada: number = Number(retomada.rodada ?? 0);
@@ -2473,13 +2473,10 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       return;
     }
 
-    // Contexto institucional (mesmas fontes do chat)
-    const { data: ctxRows } = await supa.from("agent_context")
-      .select("categoria,fato,desde").eq("vigente", true)
-      .or(`company_id.is.null,company_id.eq.${companyId}`).order("categoria");
-    const memoria = (ctxRows ?? []).length
-      ? (ctxRows ?? []).map((r: any) => `- [${String(r.categoria).toUpperCase()}${r.desde ? " " + String(r.desde) : ""}] ${r.fato}`).join("\n")
-      : "(sem fatos registrados)";
+    // Contexto institucional (mesmas fontes do chat) — isolado por company_id
+    const memCarregada = await carregarMemoriaInstitucional(supa, companyId);
+    const ctxRows = memCarregada.rows;
+    const memoria = memCarregada.texto;
     const { data: styleRows } = await supa.from("agent_style").select("secao,regra").eq("vigente", true).order("ordem");
     const estilo = (styleRows ?? []).length
       ? (styleRows ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n")

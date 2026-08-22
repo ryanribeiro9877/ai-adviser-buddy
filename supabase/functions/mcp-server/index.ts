@@ -81,6 +81,7 @@ const TOOLS = [
   { name: "avaliar_pacing", description: "Calcula capacidade diaria da estrutura e, se meta_leads_dia for informada, o PISO de verba diaria ao custo atual. Exige company_id; meta_leads_dia e opcional. Declara que nao existe meta registrada e que a projecao nao e estimativa: escalar tende a elevar o custo, portanto a verba real pode ser maior.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, meta_leads_dia: { type: "number" } }, required: ["company_id"] } },
   { name: "validar_pedido_contra_contrato", description: "Valida pedido jsonb contra contrato_de_execucao. Assinatura real: (acao text, pedido jsonb). contrato_desconhecido se nao houver linhas; recusa se faltar obrigatorio; extras nao invalidam (vao em nao_previstos_no_contrato). Lacunas: contrato de anuncio veio do codigo montarCriacao, nao de card executado; url_tags e opcional e vai no adcreative; NAO substitui pedido_de_anuncio_completo.", inputSchema: { type: "object", properties: { acao: { type: "string" }, pedido: { type: "object" } }, required: ["acao", "pedido"] } },
   { name: "renomear_campanha", description: "Emite card de aprovacao para renomear campanha existente via Pipeboard update_campaign. Nao executa antes da aprovacao humana. Exige driver Pipeboard e flag renomear_campanha; envia somente campaign_id + name e reconcilia pela Graph.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, campanha_atual: { type: "string" }, novo_nome: { type: "string" }, justificativa: { type: "string" } }, required: ["company_id", "campanha_atual", "novo_nome"] } },
+  { name: "alterar_categoria_especial", description: "Emite card de aprovacao para alterar ou remover special_ad_categories de campanha existente (Graph/Pipeboard update_campaign). special_ad_categories=[] remove a marca. Nao executa antes da aprovacao humana.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" }, description: "Array desejado; [] remove" }, justificativa: { type: "string" } }, required: ["company_id", "campanha_atual", "special_ad_categories"] } },
   { name: "create_approval_request", description: "PROPOE uma alteracao (campaign|budget|ad|audience|config). Entra na fila como pending. NADA e executado ate um humano aprovar no painel.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, entity_type: { type: "string", enum: ["campaign", "budget", "ad", "audience", "config"] }, action: { type: "string" }, summary: { type: "string" }, payload: { type: "object" } }, required: ["company_id", "entity_type", "action", "summary"] } },
   { name: "create_alert_rule", description: "Cria uma regra de alerta com threshold (ex.: CPL > 50 na janela de 7 dias).", inputSchema: { type: "object", properties: { company_id: { type: "string" }, name: { type: "string" }, metric: { type: "string" }, comparator: { type: "string", enum: [">", "<", ">=", "<=", "pct_change_up", "pct_change_down"] }, threshold: { type: "number" }, window_days: { type: "number" }, severity: { type: "string", enum: ["low", "medium", "high", "critical"] } }, required: ["company_id", "name", "metric", "comparator", "threshold"] } },
   { name: "resolve_alert", description: "Marca um alerta como resolvido.", inputSchema: { type: "object", properties: { alert_id: { type: "string" } }, required: ["alert_id"] } },
@@ -277,6 +278,89 @@ async function callTool(name: string, args: any, mcpKeyEncaminhada: string) {
           target_type: "approval_request", target_id: card.id,
           details: { acao: "renomear_campanha", alvo: alvo.name, novo_nome: novo, origem: "mcp-server" } });
         return toolText({ ok: true, card, aviso: "PENDENTE: nada foi renomeado. Um administrador precisa aprovar o card." });
+      }
+      case "alterar_categoria_especial": {
+        const atual = String(args.campanha_atual ?? "").trim();
+        if (!atual) return toolText("campanha_atual e obrigatoria.", true);
+        if (!Array.isArray(args.special_ad_categories)) {
+          return toolText("special_ad_categories deve ser array (use [] para remover).", true);
+        }
+        const cats = (args.special_ad_categories as unknown[])
+          .map((x) => String(x).trim().toUpperCase())
+          .filter((x) => x && x !== "NONE" && x !== "NULL");
+        const postura = await db.rpc("pode_executar_acao", {
+          p_company_id: args.company_id,
+          p_action: "alterar_categoria_especial_campanha",
+        });
+        if (postura.error) return toolText(`Falha ao verificar a postura: ${postura.error.message}`, true);
+        if (!postura.data?.permitido) {
+          return toolText(postura.data ?? { erro: "alterar_categoria_especial_nao_permitida" }, true);
+        }
+        const { data: campanhas, error: ce } = await db
+          .from("campaigns")
+          .select("id,name,external_id,special_ad_categories")
+          .eq("company_id", args.company_id)
+          .ilike("name", `%${atual}%`);
+        if (ce) return toolText(ce.message, true);
+        const candidatas = campanhas ?? [];
+        const exatas = candidatas.filter(
+          (c: any) => String(c.name).toLocaleLowerCase("pt-BR") === atual.toLocaleLowerCase("pt-BR"),
+        );
+        const alvo = exatas.length === 1 ? exatas[0] : candidatas.length === 1 ? candidatas[0] : null;
+        if (!alvo) {
+          return toolText(
+            candidatas.length
+              ? { ambiguo: true, opcoes: candidatas.slice(0, 10).map((c: any) => c.name) }
+              : { erro: "campanha_nao_encontrada", busca: atual },
+            true,
+          );
+        }
+        const { data: adm } = await db.from("user_roles").select("user_id").eq("role", "admin").limit(1).maybeSingle();
+        if (!adm?.user_id) return toolText("Nao ha administrador cadastrado para ser solicitante do card.", true);
+        const resumoCats = cats.length ? `[${cats.join(", ")}]` : "[] (sem categoria especial)";
+        const payload = {
+          target_name: alvo.name,
+          target_external_id: alvo.external_id,
+          special_ad_categories: cats,
+          categorias_atuais: Array.isArray(alvo.special_ad_categories) ? alvo.special_ad_categories : null,
+          justificativa: String(args.justificativa ?? "").trim() ||
+            `Corrigir special_ad_categories da campanha para ${resumoCats}.`,
+          reversa: "Restaurar as categorias anteriores com a mesma acao apos releitura.",
+          metrica_sucesso: `Graph devolver special_ad_categories igual a ${resumoCats}.`,
+          risco: "A Meta pode recusar troca em campanha com entrega; nesse caso o caminho e campanha nova.",
+          proposto_por: "mcp-server:alterar_categoria_especial",
+        };
+        const { data: card, error } = await db.from("approval_requests").insert({
+          company_id: args.company_id,
+          requested_by: adm.user_id,
+          entity_type: "campaign",
+          entity_id: alvo.id,
+          action: "alterar_categoria_especial_campanha",
+          summary: cats.length
+            ? `Alterar special_ad_categories de "${alvo.name}" para ${resumoCats}`
+            : `Remover special_ad_categories de "${alvo.name}"`,
+          payload,
+          status: "pending",
+        }).select("id,status,expires_at").single();
+        if (error) return toolText(error.message, true);
+        await db.from("audit_log").insert({
+          company_id: args.company_id,
+          user_id: adm.user_id,
+          action: "approval_created",
+          target_type: "approval_request",
+          target_id: card.id,
+          details: {
+            acao: "alterar_categoria_especial_campanha",
+            alvo: alvo.name,
+            special_ad_categories: cats,
+            origem: "mcp-server",
+          },
+        });
+        return toolText({
+          ok: true,
+          card,
+          aviso: "PENDENTE: nada foi alterado na Meta. Um administrador precisa aprovar o card.",
+        });
       }
       case "create_approval_request": {
         const { data, error } = await db.from("approval_requests").insert({

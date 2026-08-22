@@ -89,6 +89,24 @@ assert(
   "meta-actions cria campanha com cats por empresa",
 );
 assert(
+  metaActions.includes("alterar_categoria_especial_campanha") &&
+    chat.includes("alterar_categoria_especial") &&
+    chat.includes("t_alterar_categoria_especial"),
+  "acao/tool de alterar categoria especial deve existir no chat e no executor",
+);
+assert(
+  chat.includes("carregarMemoriaInstitucional") && job.includes("carregarMemoriaInstitucional"),
+  "memoria institucional deve passar pelo filtro de isolamento em chat e job",
+);
+assert(
+  !chat.includes("COHAPM e cooperativa habitacional, nao empresa de credito"),
+  "prompt do chat nao pode hardcodar COHAPM no ramo nao-credito",
+);
+assert(
+  !job.includes("cooperativa habitacional; doutrina, benchmarks e identidades da Legal e Viver"),
+  "sintese do job nao pode hardcodar cooperativa vs Legal no perfil",
+);
+assert(
   job.includes("promptVideoNaoCredito") && job.includes("promptImgNaoCredito"),
   "job visao deve ramificar COHAPM",
 );
