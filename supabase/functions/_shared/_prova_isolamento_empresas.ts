@@ -81,9 +81,11 @@ assert(
 );
 assert(
   chat.includes("pedidoLoteCriativo") &&
+    chat.includes("pareceNomeDePecaNaoMolde") &&
+    chat.includes("LINKS DE CONJUNTO DEFINIDOS NESTA CONVERSA") &&
     chat.includes("replyLoteComLegendas") &&
     chat.includes("LOTE DE 6 CRIATIVOS"),
-  "traffic-chat deve auto-continuar lote de criativos/legendas (anti-502)",
+  "traffic-chat deve lembrar conjunto N + link da conversa e auto-continuar lote",
 );
 assert(
   chat.includes("empresaEhCredito(companyId)") &&

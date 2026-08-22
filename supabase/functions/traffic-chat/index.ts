@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.59)
+// supabase/functions/traffic-chat/index.ts (v28.60)
+// v28.60 (22/08/2026) - EMISSAO CONJUNTO N NAO PERDE MEMORIA: peca nova (drive) vira
+//   sem_molde em vez de anuncio_molde_nao_encontrado; conjunto 2 != ultimo conjunto
+//   criado (03); destino_url = wa.me definido nesta conversa; legendas do store.
 // v28.59 (22/08/2026) - LOTE DE CRIATIVOS+LEGENDAS NAO 502: escolher 6 pecas distintas
 //   + gerar_legendas estourava o gateway (~150s) e a prosa longa ("legendas pendentes")
 //   era tratada como turno FECHADO. Agora: auto-continuar o lote; abortar gerar-legendas
@@ -582,6 +585,12 @@ import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, digitosWhatsApp, ct
 import { pipeboardToken } from "../_shared/pipeboard.ts";
 import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto } from "../_shared/lote_criativo.ts";
 import {
+  conjuntoNomeCasaComNumero,
+  extrairLinksWaMePorConjunto,
+  numeroConjuntoDaFala,
+  pareceNomeDePecaNaoMolde,
+} from "../_shared/memoria_conjunto.ts";
+import {
   callReadTool,
   companyMetaAccounts,
   isReadOnlyTool,
@@ -664,7 +673,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.59";
+const VERSAO = "chat-v28.60";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -789,14 +798,47 @@ async function resolverLegendaReferenciasAgente(opts: {
   if (out.length === 0 && opts.adsetExternalId) {
     const { data: ads } = await supa
       .from("ads")
-      .select("name,status,updated_at")
+      .select("name,status,last_synced_at")
       .eq("company_id", opts.companyId)
       .eq("adset_external_id", opts.adsetExternalId)
-      .order("updated_at", { ascending: false })
+      .order("last_synced_at", { ascending: false })
       .limit(5);
     const prefer = (ads ?? []).find((a: any) => /PAUSED/i.test(String(a.status ?? "")))
       ?? (ads ?? [])[0];
     if (prefer?.name) push(prefer.name, "anuncio_do_mesmo_conjunto");
+  }
+
+  if (out.length === 0 && opts.adsetExternalId) {
+    const { data: destSet } = await supa
+      .from("ad_sets")
+      .select("campaign_id")
+      .eq("company_id", opts.companyId)
+      .eq("external_id", opts.adsetExternalId)
+      .maybeSingle();
+    if ((destSet as any)?.campaign_id) {
+      const { data: siblings } = await supa
+        .from("ad_sets")
+        .select("external_id")
+        .eq("company_id", opts.companyId)
+        .eq("campaign_id", (destSet as any).campaign_id);
+      const ids = (siblings ?? []).map((s: any) => String(s.external_id ?? "")).filter(Boolean);
+      if (ids.length) {
+        const { data: adsCamp } = await supa
+          .from("ads")
+          .select("name,status")
+          .eq("company_id", opts.companyId)
+          .in("adset_external_id", ids)
+          .limit(8);
+        const prefer = (adsCamp ?? []).find((a: any) => /ACTIVE/i.test(String(a.status ?? "")))
+          ?? (adsCamp ?? [])[0];
+        if (prefer?.name) push(prefer.name, "anuncio_da_mesma_campanha");
+      }
+    }
+  }
+
+  if (out.length === 0) {
+    const drive = String(opts.params?.drive_file_id ?? "").trim();
+    if (drive) push(`drive:${drive}`, "drive_file_id");
   }
 
   return { refs: out, origem: out.length ? origem : "vazio" };
@@ -2602,10 +2644,31 @@ async function t_propose_criacao(
     // Nome do conjunto na fala do agente (ou id). O nome CANONICO no pedido/card/executor e
     // conjunto_destino_external_id — o que montarCriacao consome. Alias conjunto_destino so
     // resolve o objeto aqui; a RPC e o payload usam o external_id.
+    const falaConv = await carregarFalaConversa(convId);
     const conjuntoDestinoParam = String(
       params?.conjunto_destino ?? params?.conjunto_destino_external_id ?? "",
     ).trim();
     let conjuntoDestino = conjuntoDestinoParam;
+    const nConjuntoPedido =
+      numeroConjuntoDaFala(conjuntoDestinoParam) ||
+      numeroConjuntoDaFala(falaConv.ultimoUser) ||
+      numeroConjuntoDaFala(falaConv.blob);
+    const linksConversa = extrairLinksWaMePorConjunto(falaConv.blob);
+    if (!conjuntoDestino || nConjuntoPedido) {
+      const { data: setsAlias } = await supa
+        .from("ad_sets")
+        .select("external_id,name,campaign_id,created_at,destination_type")
+        .eq("company_id", companyId);
+      if (nConjuntoPedido) {
+        const hits = (setsAlias ?? []).filter((s: any) =>
+          conjuntoNomeCasaComNumero(String(s.name ?? ""), nConjuntoPedido),
+        );
+        const escolhido = [...hits].sort((a: any, b: any) =>
+          String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
+        )[0];
+        if (escolhido?.external_id) conjuntoDestino = String(escolhido.external_id);
+      }
+    }
     if (!conjuntoDestino) {
       // Ultimo conjunto criado NESTA conversa (aprovado com id_criado). Evita recusar
       // replica so porque o agente esqueceu o campo apos criar o conjunto no turno anterior.
@@ -2632,15 +2695,27 @@ async function t_propose_criacao(
         resolvidoAd.partes?.rotulo || resolvidoAd.partes?.periodo || nomeNovo,
       ).trim();
     }
-    const driveFileId = String(params?.drive_file_id ?? "").trim();   // v28.10 (GT-13): peca nova
+    const pecaMem = await completarPecaDaMemoria({
+      companyId,
+      convId,
+      driveFileId: String(params?.drive_file_id ?? "").trim(),
+      legenda: String(params?.legenda ?? "").trim(),
+      nomeAlvo,
+    });
+    let driveFileId = pecaMem.driveFileId;
+    if (pecaMem.legenda && !String(params?.legenda ?? "").trim()) {
+      params.legenda = pecaMem.legenda;
+    }
     // v28.31: carrossel real via child_attachments (2-10 slides com image_hash).
     const childAttachmentsRaw = Array.isArray(params?.child_attachments) ? params.child_attachments : null;
     const temCarrossel = !!(childAttachmentsRaw && childAttachmentsRaw.length >= 2);
     const metaImageHashEarly = String(params?.meta_image_hash ?? "").trim();
     // ESP-35: peca nova pode omitir molde (target_name vazio / "sem_molde" / params.sem_molde).
-    const semMolde = !!(driveFileId || temCarrossel || metaImageHashEarly) && (
+    // v28.60: video/chave do slate + drive_file_id NAO e molde — nao recusar anuncio_molde_nao_encontrado.
+    let semMolde = !!(driveFileId || temCarrossel || metaImageHashEarly) && (
       params?.sem_molde === true ||
       !nomeAlvo ||
+      pareceNomeDePecaNaoMolde(nomeAlvo) ||
       norm(nomeAlvo) === "sem_molde" ||
       norm(nomeAlvo) === "_sem_molde"
     );
@@ -2659,7 +2734,9 @@ async function t_propose_criacao(
         ?? (anuncios ?? []).find((x) => String(x.external_id ?? "") === String(nomeAlvo))
         ?? (anuncios ?? []).find((x) => String(x.creative_id ?? "") === String(nomeAlvo))
         ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
-      if (!molde) {
+      if (!molde && driveFileId) {
+        semMolde = true;
+      } else if (!molde) {
         const pareceIdMeta = /^\d{10,}$/.test(String(nomeAlvo));
         const pareceInventado = !pareceIdMeta && (String(nomeAlvo).includes("[") || /LEV|LP|LEADS|TESTE|ESCALA|AGO\d{2}/i.test(String(nomeAlvo)));
         const candidatos = (anuncios ?? [])
@@ -2681,7 +2758,7 @@ async function t_propose_criacao(
           instrucao: "Corrija target_name com um anuncio REAL listado em candidatos_no_conjunto, ou use sem_molde=true com drive_file_id. Nao peca ao gestor para inventar o molde — leia o espelho.",
         };
       }
-      if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
+      if (molde && !molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
     }
 
     const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,campaign_id,destination_type,optimization_goal,promoted_object,created_at").eq("company_id", companyId);
@@ -2744,6 +2821,17 @@ async function t_propose_criacao(
             }),
           };
         }
+      }
+    }
+    if (!dest && nConjuntoPedido) {
+      const byNum = (sets ?? []).filter((s: any) =>
+        conjuntoNomeCasaComNumero(String(s.name ?? ""), nConjuntoPedido),
+      );
+      if (byNum.length) {
+        const inCamp = campHintRow ? byNum.filter((s) => s.campaign_id === campHintRow.id) : byNum;
+        dest = [...(inCamp.length ? inCamp : byNum)].sort((a: any, b: any) =>
+          String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
+        )[0];
       }
     }
     if (!dest) return { erro: `conjunto de destino '${conjuntoDestino}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro.` };
@@ -2817,7 +2905,7 @@ async function t_propose_criacao(
         nomeAlvo,
         semMolde,
         adsetExternalId: dest.external_id,
-        params: (params ?? {}) as Record<string, unknown>,
+        params: { ...(params ?? {}), drive_file_id: driveFileId } as Record<string, unknown>,
       });
       legendaRefs = resolvido.refs;
       legendaRefsOrigem = resolvido.origem;
@@ -2838,6 +2926,13 @@ async function t_propose_criacao(
     let pageIdPedido: string | null = String(params?.page_id ?? "").trim() || null;
     let ctaPedido: string | null = String(params?.call_to_action_type ?? params?.cta ?? "").trim() || null;
     let destinoUrlPedido: string | null = String(params?.destino_url ?? "").trim() || null;
+    if (!destinoUrlPedido && nConjuntoPedido && linksConversa[nConjuntoPedido]) {
+      destinoUrlPedido = linksConversa[nConjuntoPedido];
+    }
+    if (!destinoUrlPedido && dest?.name) {
+      const nNome = numeroConjuntoDaFala(String(dest.name));
+      if (nNome && linksConversa[nNome]) destinoUrlPedido = linksConversa[nNome];
+    }
     let destinoSocialResolvido = false;
     let destinoMensagensResolvido = false;
     if (semMolde) {
@@ -3527,6 +3622,65 @@ async function carregarBlocoLegendasConversa(companyId: string, convId: string):
     "PROIBIDO dizer que nao existem ou pedir para colar de novo.]\n" +
     linhas.join("\n\n")
   );
+}
+
+async function carregarFalaConversa(convId: string): Promise<{ ultimoUser: string; blob: string }> {
+  if (!convId) return { ultimoUser: "", blob: "" };
+  const { data } = await supa
+    .from("chat_messages")
+    .select("role,content")
+    .eq("conversation_id", convId)
+    .in("role", ["user", "assistant"])
+    .order("created_at", { ascending: false })
+    .limit(50);
+  const rows = data ?? [];
+  const ultimoUser = String(rows.find((r: any) => r.role === "user")?.content ?? "");
+  const blob = rows.map((r: any) => String(r.content ?? "")).join("\n");
+  return { ultimoUser, blob };
+}
+
+async function carregarBlocoLinksConversa(convId: string): Promise<string> {
+  const { blob } = await carregarFalaConversa(convId);
+  const mapa = extrairLinksWaMePorConjunto(blob);
+  const ns = Object.keys(mapa).map(Number).sort((a, b) => a - b);
+  if (!ns.length) return "";
+  const linhas = ns.map((n) => `- Conjunto ${n}: ${mapa[n]}`);
+  return (
+    "[LINKS DE CONJUNTO DEFINIDOS NESTA CONVERSA — ao emitir anuncio use params.destino_url " +
+    "do conjunto pedido. NAO repergunte nem copie o link do conjunto 1.]\n" +
+    linhas.join("\n")
+  );
+}
+
+async function completarPecaDaMemoria(opts: {
+  companyId: string;
+  convId: string;
+  driveFileId: string;
+  legenda: string;
+  nomeAlvo: string;
+}): Promise<{ driveFileId: string; legenda: string; pecaChave: string | null }> {
+  let driveFileId = opts.driveFileId;
+  let legenda = opts.legenda;
+  let pecaChave: string | null = null;
+  if (!opts.convId) return { driveFileId, legenda, pecaChave };
+  if (driveFileId && legenda) return { driveFileId, legenda, pecaChave };
+  if (!driveFileId && !opts.nomeAlvo) return { driveFileId, legenda, pecaChave };
+  let q = supa
+    .from("conversation_legendas")
+    .select("peca_chave, drive_file_id, legenda")
+    .eq("company_id", opts.companyId)
+    .eq("conversation_id", opts.convId)
+    .order("updated_at", { ascending: false })
+    .limit(8);
+  if (driveFileId) q = q.eq("drive_file_id", driveFileId);
+  else q = q.eq("peca_chave", opts.nomeAlvo);
+  const { data: rows } = await q;
+  const row = (rows ?? [])[0] as any;
+  if (!row) return { driveFileId, legenda, pecaChave };
+  if (!driveFileId) driveFileId = String(row.drive_file_id ?? "").trim();
+  if (!legenda) legenda = String(row.legenda ?? "").trim();
+  pecaChave = String(row.peca_chave ?? "").trim() || null;
+  return { driveFileId, legenda, pecaChave };
 }
 
 // Sobe peca do Drive para a biblioteca Meta (adimages/advideos) via edge upload-midia.
@@ -4236,6 +4390,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   estao liberados no acervo). Inventario apto ≠ pedido. Se perder o slate no historico, peca
   confirmacao — nao invente.
 - LOTE DE 6 CRIATIVOS (anti-repeticao + anti-timeout, 22/08/2026 v28.59): se o gestor pedir N pecas DIFERENTES do conjunto ativo e entre si, + legendas: (1) leia get_criativos_conteudo do conjunto ativo e EXCLUA esses arquivos; (2) 6 pecas = 6 EIXOS de mensagem — PROIBIDO tres videos da mesma familia (ex. 3x "juros abusivos"/"contrato com taxa"); (3) 1 gerar_legendas por peca com drive_file_id + objetivo daquela peca (nao distribua 3 variantes de UMA chamada em 3 videos); (4) no maximo 3 gerar_legendas por janela HTTP — o sistema continua=true para o restante. NAO encerre com "legendas pendentes" / "nao cobertos por falta de tempo" como se o pedido tivesse acabado. NAO emita card a menos que pecam emissao.
+- EMITE CONJUNTO N (anti-amnesia, 22/08/2026 v28.60): "emita os 3 cards do conjunto 2" = pecas NOVAS do slate desta conversa. Chame get_legendas_da_conversa (conjunto_2_*). propose_action criar_anuncio_a_partir_de com sem_molde=true + drive_file_id + legenda do store + conjunto_destino = JURIDICO_CONJ.02 (NAO o ultimo conjunto criado — pode ser o 03) + destino_url = o wa.me definido para AQUELE conjunto nesta conversa (bloco LINKS DE CONJUNTO). PROIBIDO usar o nome do video como molde. PROIBIDO copiar os anuncios do conjunto 1 (conta de luz / devolucao / emprestimo sobre emprestimo).
 - EMITE OS N (anti-loop + anti-timeout, 21/08/2026 v28.53): se o gestor disser "emite os N" / "emite os cards" e o
   slate (drive_file_id / meta ids / legendas) JA estiver nesta conversa (mensagem atual,
   historico reinjetado OU conversation_legendas via get_legendas_da_conversa), EMITA agora.
@@ -4994,6 +5149,10 @@ Deno.serve(async (req) => {
   const blocoLegendas = await carregarBlocoLegendasConversa(company.id, convId!);
   if (blocoLegendas) {
     history.push({ role: "assistant", content: blocoLegendas });
+  }
+  const blocoLinks = await carregarBlocoLinksConversa(convId!);
+  if (blocoLinks) {
+    history.push({ role: "assistant", content: blocoLinks });
   }
 
   // Retomada: o prompt de checkpoint vai so ao LLM (abaixo), nao vira bolha de usuario.
