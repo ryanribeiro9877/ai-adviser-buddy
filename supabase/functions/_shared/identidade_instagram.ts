@@ -84,3 +84,66 @@ export function avisoIdentidadeInstagram(identidade: IdentidadeInstagramResolvid
       : " Id em formato de Instagram Business Account (1784...), entao entra no campo object_story_spec.instagram_user_id.";
   return `Com identidade Instagram${handle}, id ${identidade.instagram_actor_id}, ${origem}.${ressalva} Posicionamentos de Instagram passam a ser elegiveis. Threads permanece DESABILITADO (empresa sem cadastro nessa rede) — identidade Instagram nao habilita Threads.`;
 }
+
+/** Card/executor recusa por nome quando Instagram e plataforma e nao ha id. */
+export const ERRO_INSTAGRAM_NAO_VINCULADO = "instagram_nao_vinculado";
+export const ERRO_THREADS_NAO_VINCULADO = "threads_nao_vinculado";
+
+/** Default da casa e facebook+instagram: lista vazia/omitida CONTA como Instagram selecionado. */
+export function plataformasIncluemInstagram(plataformas?: unknown): boolean {
+  const list = normalizarPlataformas(plataformas);
+  if (!list.length) return true;
+  return list.includes("instagram");
+}
+
+export function plataformasIncluemThreads(plataformas?: unknown): boolean {
+  return normalizarPlataformas(plataformas).includes("threads");
+}
+
+function normalizarPlataformas(plataformas?: unknown): string[] {
+  if (!Array.isArray(plataformas)) return [];
+  return plataformas.map((p) => String(p ?? "").trim().toLowerCase()).filter(Boolean);
+}
+
+export function idInstagramDeParams(params?: Record<string, unknown> | null): string | null {
+  const id = String(
+    params?.instagram_user_id ?? params?.instagram_actor_id ?? "",
+  ).trim();
+  if (!id || identidadeInstagramProibida(id)) return null;
+  return id;
+}
+
+/**
+ * Fail-closed: se Instagram (ou default facebook+instagram) esta selecionado,
+ * exige identidade. Threads so exige se o gestor pediu Threads (off por padrao).
+ */
+export function exigirIdentidadeRedes(opts: {
+  plataformas?: unknown;
+  identidade?: IdentidadeInstagramResolvida | null;
+  idParams?: string | null;
+}): { ok: true; id: string } | { ok: false; erro: string; detalhe: string } {
+  const id =
+    String(opts.idParams ?? "").trim() ||
+    String(opts.identidade?.instagram_actor_id ?? "").trim() ||
+    "";
+  if (plataformasIncluemThreads(opts.plataformas)) {
+    return {
+      ok: false,
+      erro: ERRO_THREADS_NAO_VINCULADO,
+      detalhe:
+        "Threads foi pedido, mas esta desabilitado por padrao (empresa sem cadastro). Nao emita o card com Threads. Use facebook+instagram.",
+    };
+  }
+  if (!plataformasIncluemInstagram(opts.plataformas)) {
+    return { ok: true, id: id || "" };
+  }
+  if (!id || identidadeInstagramProibida(id)) {
+    return {
+      ok: false,
+      erro: ERRO_INSTAGRAM_NAO_VINCULADO,
+      detalhe:
+        "Instagram esta entre as plataformas (padrao facebook+instagram), mas nao ha identidade vinculada (instagram_user_id / instagram_actor_id). Auto-preencha da meta_execution_config da empresa ou configure o Instagram da Page. PROIBIDO emitir card que a Meta cria sem o perfil vinculated.",
+    };
+  }
+  return { ok: true, id };
+}

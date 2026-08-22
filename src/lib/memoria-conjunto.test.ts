@@ -1,7 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   conjuntoNomeCasaComNumero,
+  escolherNomeCriativoTravado,
+  ehNomeCompostoEstruturado,
   extrairLinksWaMePorConjunto,
+  extrairNomesCriativoDaFala,
+  nomeCompostoForaDeEscopoTrafego,
   numeroConjuntoDaFala,
   pareceNomeDePecaNaoMolde,
 } from "./memoria-conjunto";
@@ -49,5 +53,53 @@ describe("pareceNomeDePecaNaoMolde", () => {
     expect(pareceNomeDePecaNaoMolde("Contrato com taxa de juros abusiva (2)-VEED.mp4")).toBe(true);
     expect(pareceNomeDePecaNaoMolde("conjunto_2_criativo_1")).toBe(true);
     expect(pareceNomeDePecaNaoMolde("JUR_CONV_AD01_Conta_de_Luz")).toBe(false);
+  });
+});
+
+describe("trava de nome livre do contrato", () => {
+  const contrato = [
+    "JUR_CONV_CONJ03_AD01_Emprestimo_Pessoal_LEVA02",
+    "JUR_CONV_CONJ03_AD02_Emprestimo_Conta_Corrente_LEVA02",
+    "JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02",
+  ];
+
+  it("extrai os 3 nomes que o agente listou", () => {
+    expect(
+      extrairNomesCriativoDaFala(
+        "1. JUR_CONV_CONJ03_AD01_Emprestimo_Pessoal_LEVA02 (Empréstimo pessoal)\n" +
+          "2. JUR_CONV_CONJ03_AD02_Emprestimo_Conta_Corrente_LEVA02\n" +
+          "3. JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02 (Cartão Armadilha)",
+      ),
+    ).toEqual(contrato);
+  });
+
+  it("recusa [COHAPM][WA][LEADS] quando a conversa ja tem nomes", () => {
+    const r = escolherNomeCriativoTravado({
+      nomePedido: "[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]",
+      nomesContrato: contrato,
+      conjuntoNumero: 3,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.erro).toBe("nome_trocado_pelo_padrao_estruturado");
+  });
+
+  it("auto-preenche o AD03 livre quando AD01/AD02 ja foram usados", () => {
+    const r = escolherNomeCriativoTravado({
+      nomePedido: "",
+      nomesContrato: contrato,
+      nomesJaUsados: contrato.slice(0, 2),
+      conjuntoNumero: 3,
+    });
+    expect(r).toEqual({
+      ok: true,
+      nome: "JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02",
+      origem: "conversa",
+    });
+  });
+
+  it("marca [WA][LEADS] como fora do escopo de trafego", () => {
+    expect(ehNomeCompostoEstruturado("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(true);
+    expect(nomeCompostoForaDeEscopoTrafego("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(true);
+    expect(nomeCompostoForaDeEscopoTrafego("JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02")).toBe(false);
   });
 });

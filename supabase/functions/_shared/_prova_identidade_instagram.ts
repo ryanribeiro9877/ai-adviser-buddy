@@ -6,7 +6,10 @@ import {
   aplicarIdentidadeInstagramNoSpec,
   avisoIdentidadeInstagram,
   campoIdentidadeInstagramPorFormato,
+  ERRO_INSTAGRAM_NAO_VINCULADO,
+  exigirIdentidadeRedes,
   identidadeInstagramProibida,
+  plataformasIncluemInstagram,
   SEM_IDENTIDADE_INSTAGRAM,
   type IdentidadeInstagramResolvida,
 } from "./identidade_instagram.ts";
@@ -101,6 +104,17 @@ check("sem identidade: nao altera spec herdado", specSem.instagram_user_id === "
 const nota = avisoIdentidadeInstagram(OFICIAL);
 check("nota cita @legaleviver_", nota.includes("@legaleviver_"));
 check("nota cita o id IBA", nota.includes("17841428674060566"));
+
+console.log("\n== fail-closed Instagram nas plataformas ==");
+check("default (omitido) inclui instagram", plataformasIncluemInstagram(undefined) === true);
+check("facebook+instagram inclui", plataformasIncluemInstagram(["facebook", "instagram"]) === true);
+check("so facebook nao exige", plataformasIncluemInstagram(["facebook"]) === false);
+const recusa = exigirIdentidadeRedes({ plataformas: ["facebook", "instagram"], identidade: SEM_IDENTIDADE_INSTAGRAM });
+check("sem id recusa instagram_nao_vinculado", recusa.ok === false && recusa.erro === ERRO_INSTAGRAM_NAO_VINCULADO);
+const okId = exigirIdentidadeRedes({ plataformas: null, identidade: OFICIAL });
+check("com id da config aceita", okId.ok === true && okId.id === "17841428674060566");
+const soFb = exigirIdentidadeRedes({ plataformas: ["facebook"], identidade: SEM_IDENTIDADE_INSTAGRAM });
+check("facebook-only sem id passa", soFb.ok === true);
 
 if (falhas > 0) {
   console.error(`\n${falhas} falha(s)`);

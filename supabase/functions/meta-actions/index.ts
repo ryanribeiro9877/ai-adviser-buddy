@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.45)
+// supabase/functions/meta-actions/index.ts (v5.46)
+// v5.46 (22/08/2026) - Fail-closed Instagram: se publisher_platforms inclui instagram
+//   (ou default facebook+instagram), recusa instagram_nao_vinculado sem identidade.
+//   Nao sobrescreve nome_novo por composto [WA][LEADS] em campanha de trafego.
 // v5.45 (22/08/2026) - video_data POST: nunca image_url + image_hash juntos (Graph recusa).
 //   GET do molde devolve os dois; sanitizarVideoDataParaGraph fica com o hash.
 // v5.44 (22/08/2026) - Replica CTWA → conjunto WEBSITE: reescreve CTA+link (CONTACT_US + wa.me),
@@ -334,10 +337,17 @@ import {
   aplicarIdentidadeInstagramNoSpec,
   avisoIdentidadeInstagram,
   campoIdentidadeInstagramPorFormato,
+  ERRO_INSTAGRAM_NAO_VINCULADO,
+  exigirIdentidadeRedes,
+  idInstagramDeParams,
   identidadeInstagramProibida,
   SEM_IDENTIDADE_INSTAGRAM,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
+import {
+  ehNomeCompostoEstruturado,
+  nomeCompostoForaDeEscopoTrafego,
+} from "../_shared/memoria_conjunto.ts";
 import {
   aplicarPadraoPosicionamentoVideo,
   aplicarPosicionamentoPorPlataformas,
@@ -1360,7 +1370,20 @@ function specTemCarrossel(objectStorySpecJson: string | undefined): boolean {
 async function resolverIdentidadeInstagram(
   companyId: string | null,
   creativeMolde: string,
+  payload?: Record<string, unknown> | null,
 ): Promise<IdentidadeInstagramResolvida> {
+  const idParams = idInstagramDeParams(payload);
+  const handleParams = String(payload?.instagram_handle ?? "").trim() || null;
+  if (idParams) {
+    return {
+      encontrada: true,
+      instagram_actor_id: idParams,
+      instagram_handle: handleParams,
+      fonte: "config_empresa",
+      procedencia: "payload/config na emissao",
+      vinculo_pagina_confirmado: null,
+    };
+  }
   // ESP-35: creativeMolde pode ser vazio — a RPC ja prioriza meta_execution_config.
   if (!companyId) return SEM_IDENTIDADE_INSTAGRAM;
   const { data, error } = await supa.rpc("identidade_instagram_para_criacao", {
@@ -1369,7 +1392,7 @@ async function resolverIdentidadeInstagram(
   });
   if (error || !data || typeof data !== "object") return SEM_IDENTIDADE_INSTAGRAM;
   const id = String((data as any).instagram_actor_id ?? "").trim();
-  const handle = String((data as any).instagram_handle ?? "").trim() || null;
+  const handle = String((data as any).instagram_handle ?? "").trim() || handleParams;
   if (!id) return SEM_IDENTIDADE_INSTAGRAM;
   // Hard block: identidades banidas nunca entram no creative (mesmo se reaparecerem na config).
   if (identidadeInstagramProibida(id) || identidadeInstagramProibida(handle)) {
@@ -1390,6 +1413,19 @@ async function resolverIdentidadeInstagram(
         ? (data as any).vinculo_pagina_confirmado
         : null,
   };
+}
+
+function recusarSemIdentidadeNasPlataformas(
+  p: Record<string, unknown> | null | undefined,
+  identidade: IdentidadeInstagramResolvida,
+): { erro: string; detalhe: string } | null {
+  const check = exigirIdentidadeRedes({
+    plataformas: p?.plataformas_publicacao ?? p?.publisher_platforms,
+    identidade,
+    idParams: idInstagramDeParams(p),
+  });
+  if (check.ok) return null;
+  return { erro: check.erro || ERRO_INSTAGRAM_NAO_VINCULADO, detalhe: check.detalhe };
 }
 
 // v2: monta o corpo de criacao lendo o molde quando necessario. Retorna o path de colecao,
@@ -2034,6 +2070,26 @@ export async function montarCriacao(
     if (!creativeMolde && !pecaNovaSemMolde)
       return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
 
+    // v5.46: nome_novo do payload e a fonte da verdade — nunca sobrescrever por composto.
+    nome = String(p?.nome_novo ?? p?.nome ?? p?.name ?? nome).trim();
+    const casoDestino = String((p as any)?.destino_do_anuncio?.caso ?? "");
+    const ehTrafegoExec =
+      casoDestino === "trafego_website" ||
+      /TRAFFIC|WEBSITE|LANDING_PAGE/i.test(
+        `${p?.objetivo_campanha_destino ?? ""} ${p?.destination_type ?? ""} ${p?.optimization_goal ?? ""}`,
+      );
+    if (ehTrafegoExec && nomeCompostoForaDeEscopoTrafego(nome)) {
+      return {
+        erro: "nome_fora_do_escopo_trafego",
+        detalhe:
+          `O payload pede '${nome}', mas o conjunto/campanha e trafego WEBSITE/LPV. ` +
+          "Nao gravo [WA][LEADS] nesse objeto. Use o nome livre do contrato.",
+      };
+    }
+    if (ehNomeCompostoEstruturado(nome) && String(p?.nome_contrato ?? "").trim()) {
+      nome = String(p.nome_contrato).trim();
+    }
+
     // Nome livre e a fonte da verdade. nome_partes e metadado opcional (nao bloqueia).
     // Usa o nome_novo do payload sem exigir alinhamento ao composto.
 
@@ -2206,7 +2262,9 @@ export async function montarCriacao(
         };
       }
 
-      const identidadeInstagram = await resolverIdentidadeInstagram(companyId, "");
+      const identidadeInstagram = await resolverIdentidadeInstagram(companyId, "", p);
+      const igRecusa = recusarSemIdentidadeNasPlataformas(p, identidadeInstagram);
+      if (igRecusa) return igRecusa;
 
       // ============ v5.24: CARROSSEL sem molde ============
       if (temPedidoCarrossel) {
@@ -2401,10 +2459,11 @@ export async function montarCriacao(
     );
     const cb: any = c.body ?? {};
     const temStorySpec = c.status === 200 && cb.object_story_spec;
-    const identidadeInstagram =
-      videoNovo || imagemNova || temPedidoCarrossel
-        ? await resolverIdentidadeInstagram(companyId, creativeMolde)
-        : SEM_IDENTIDADE_INSTAGRAM;
+    const identidadeInstagram = await resolverIdentidadeInstagram(companyId, creativeMolde, p);
+    {
+      const igRecusaMolde = recusarSemIdentidadeNasPlataformas(p, identidadeInstagram);
+      if (igRecusaMolde) return igRecusaMolde;
+    }
 
     // ============ v4.4 / v5.7: PECA NOVA (video do Drive ja na biblioteca da conta) ============
     // FONTES DE CONFIG (ordem):
@@ -2781,6 +2840,7 @@ export async function montarCriacao(
         // v5.40: mesmo sem reescrita de LP, remova video_data.link se o molde trouxer.
         specFinal = { ...spec, video_data: sanitizarVideoDataParaGraph(vdRep) };
       }
+      specFinal = aplicarIdentidadeInstagramNoSpec(specFinal, identidadeInstagram);
       return {
         path: `/${conta}/ads`,
         body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)

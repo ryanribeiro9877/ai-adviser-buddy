@@ -91,8 +91,11 @@ assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&
     chat.includes("PERGUNTA") &&
-    chat.includes("chat-v28.61"),
-  "traffic-chat v28.61: pergunta de leitura nao emite card",
+    chat.includes("chat-v28.62") &&
+    chat.includes("instagram_nao_vinculado") &&
+    chat.includes("nome_trocado_pelo_padrao_estruturado") &&
+    /instagram vincul/i.test(chat),
+  "traffic-chat v28.62: Instagram vinculated + trava de nome livre",
 );
 assert(
   chat.includes("empresaEhCredito(companyId)") &&
@@ -102,6 +105,12 @@ assert(
 assert(
   metaActions.includes("empresaEhCredito") && metaActions.includes("catsEspeciais"),
   "meta-actions cria campanha com cats por empresa",
+);
+assert(
+  metaActions.includes("instagram_nao_vinculado") &&
+    metaActions.includes("nome_fora_do_escopo_trafego") &&
+    metaActions.includes("recusarSemIdentidadeNasPlataformas"),
+  "meta-actions v5.46: fail-closed Instagram + nao sobrescreve nome de trafego",
 );
 assert(
   metaActions.includes("alterar_categoria_especial_campanha") &&
