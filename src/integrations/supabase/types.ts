@@ -1186,6 +1186,10 @@ export type Database = {
         Args: { p_id: string; p_decision: string; p_reason: string | null };
         Returns: Json;
       };
+      reexecutar_aprovacao: {
+        Args: { p_id: string };
+        Returns: Json;
+      };
       evaluate_alerts: {
         Args: Record<PropertyKey, never>;
         Returns: number;

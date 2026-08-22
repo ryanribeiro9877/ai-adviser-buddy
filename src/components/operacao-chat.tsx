@@ -35,7 +35,7 @@ import {
 } from "@/lib/attachments";
 import { Markdown } from "@/components/markdown";
 import { JobProgressCard } from "@/components/job-progress-card";
-import { ActionCard, decideApproval, type Approval, type Decision } from "@/components/action-card";
+import { ActionCard, decideApproval, reexecutarApproval, type Approval, type Decision } from "@/components/action-card";
 import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -411,6 +411,20 @@ export function OperacaoChat() {
     }
     toast.success(decision === "approved" ? "Pedido aprovado" : "Pedido rejeitado");
     qc.invalidateQueries({ queryKey: ["approvals"] });
+  };
+
+  const onRetryApproval = async (id: string) => {
+    setDecidingId(id);
+    const { error } = await reexecutarApproval(id);
+    setDecidingId(null);
+    if (error) {
+      toast.error(error);
+      return;
+    }
+    toast.success("Nova tentativa disparada");
+    qc.invalidateQueries({ queryKey: ["approvals"] });
+    window.setTimeout(() => qc.invalidateQueries({ queryKey: ["approvals"] }), 4000);
+    window.setTimeout(() => qc.invalidateQueries({ queryKey: ["approvals"] }), 12000);
   };
 
   // Perguntas sem resposta por conversa (convId -> created_at da pergunta).
@@ -1138,6 +1152,7 @@ export function OperacaoChat() {
                   isAdmin={isAdmin}
                   decidingId={decidingId}
                   onDecide={onDecideApproval}
+                  onRetry={onRetryApproval}
                 />
               ))}
 
@@ -1481,12 +1496,14 @@ function MessageBubble({
   isAdmin,
   decidingId,
   onDecide,
+  onRetry,
 }: {
   message: Message;
   approvalsById: Record<string, Approval>;
   isAdmin: boolean;
   decidingId: string | null;
   onDecide: (id: string, decision: Decision, reason?: string) => void;
+  onRetry: (id: string) => void;
 }) {
   const isUser = message.role === "user";
   const tools = toolNames(message.tool_calls);
@@ -1528,6 +1545,7 @@ function MessageBubble({
                   isAdmin={isAdmin}
                   deciding={decidingId === id}
                   onDecide={onDecide}
+                  onRetry={onRetry}
                 />
               ) : null;
             })}

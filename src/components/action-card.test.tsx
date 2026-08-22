@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { decideApproval } from "./action-card";
+import { decideApproval, reexecutarApproval } from "./action-card";
 
 // decideApproval e o portao humano: e a unica porta do front para a RPC
 // decide_approval, que sanciona acao em conta de anuncio real. O contrato dos
@@ -65,5 +65,23 @@ describe("decideApproval", () => {
   it("erro sem message nao vira 'undefined' de texto", async () => {
     rpcMock.mockResolvedValue({ error: {} });
     expect(await decideApproval(ID, "approved")).toEqual({ error: null });
+  });
+});
+
+describe("reexecutarApproval", () => {
+  it("chama a RPC reexecutar_aprovacao com o id do card", async () => {
+    await reexecutarApproval(ID);
+    expect(rpcMock).toHaveBeenCalledWith("reexecutar_aprovacao", { p_id: ID });
+  });
+
+  it("devolve null quando deu certo", async () => {
+    expect(await reexecutarApproval(ID)).toEqual({ error: null });
+  });
+
+  it("devolve a mensagem do erro em vez de lancar", async () => {
+    rpcMock.mockResolvedValue({ error: { message: "não é possível re-executar (houve escrita parcial)" } });
+    expect(await reexecutarApproval(ID)).toEqual({
+      error: "não é possível re-executar (houve escrita parcial)",
+    });
   });
 });

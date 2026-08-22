@@ -113,8 +113,19 @@ const fmtWhen = (iso: string) =>
 /** Mostra a falha da última tentativa de execução: motivo em linguagem de gestor, quando
  *  aconteceu e se dá para tentar de novo. Só aparece quando o banco tem ultima_falha — nunca
  *  inventa estado. Compartilhada entre o ActionCard e a página de aprovações. */
-export function FalhaDaExecucao({ falha }: { falha: UltimaFalha }) {
+export function FalhaDaExecucao({
+  falha,
+  isAdmin,
+  retrying,
+  onRetry,
+}: {
+  falha: UltimaFalha;
+  isAdmin?: boolean;
+  retrying?: boolean;
+  onRetry?: () => void;
+}) {
   const motivo = falha.motivo_para_o_gestor?.trim();
+  const podeTentar = falha.re_executavel !== false;
   return (
     <div className="mt-2 space-y-1 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs">
       <div className="flex items-center gap-1.5 font-medium text-destructive">
@@ -124,17 +135,26 @@ export function FalhaDaExecucao({ falha }: { falha: UltimaFalha }) {
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
         {falha.em && <span>Quando: {fmtWhen(falha.em)}</span>}
         {typeof falha.tentativa === "number" && <span>Tentativa {falha.tentativa}</span>}
-        <span className="inline-flex items-center gap-1">
-          {falha.re_executavel !== false ? (
-            <>
-              <RotateCcw className="h-3 w-3" />
-              Pode tentar de novo
-            </>
-          ) : (
-            "Não é possível re-executar (houve escrita parcial)"
-          )}
-        </span>
+        {!podeTentar && <span>Não é possível re-executar (houve escrita parcial)</span>}
       </div>
+      {podeTentar && (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="mt-1 h-7"
+          disabled={!isAdmin || retrying || !onRetry}
+          title={!isAdmin ? "Apenas administradores podem tentar de novo" : undefined}
+          onClick={onRetry}
+        >
+          {retrying ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <RotateCcw className="h-3 w-3" />
+          )}
+          {retrying ? "Tentando de novo…" : "Pode tentar de novo"}
+        </Button>
+      )}
     </div>
   );
 }
@@ -153,6 +173,13 @@ export async function decideApproval(
   return { error: error?.message ?? null };
 }
 
+/** Dispara de novo a edge para um card já aprovado cuja última tentativa falhou
+ *  antes de escrita (executed_at nulo). O trigger só dispara na mudança para approved. */
+export async function reexecutarApproval(id: string): Promise<{ error: string | null }> {
+  const { error } = await supabase.rpc("reexecutar_aprovacao", { p_id: id });
+  return { error: error?.message ?? null };
+}
+
 function justificativa(payload: unknown): string | null {
   if (payload && typeof payload === "object") {
     const j = (payload as { justificativa?: unknown }).justificativa;
@@ -166,6 +193,7 @@ export function ActionCard({
   isAdmin,
   deciding,
   onDecide,
+  onRetry,
   requesterName,
   reviewerName,
   showMeta,
@@ -175,6 +203,7 @@ export function ActionCard({
   isAdmin: boolean;
   deciding: boolean;
   onDecide: (id: string, decision: Decision, reason?: string) => void;
+  onRetry?: (id: string) => void;
   requesterName?: string;
   reviewerName?: string;
   showMeta?: boolean;
@@ -321,7 +350,14 @@ export function ActionCard({
 
           {/* A falha mora no CARD (ultima_falha), não só no audit_log: é aqui que o gestor olha.
               Aparece só quando o banco tem a falha — card sem ela e sem executed_at segue "aguardando". */}
-          {approval.ultima_falha && <FalhaDaExecucao falha={approval.ultima_falha} />}
+          {approval.ultima_falha && (
+            <FalhaDaExecucao
+              falha={approval.ultima_falha}
+              isAdmin={isAdmin}
+              retrying={deciding}
+              onRetry={onRetry ? () => onRetry(approval.id) : undefined}
+            />
+          )}
 
           {approval.status === "approved" &&
             !approval.ultima_falha &&

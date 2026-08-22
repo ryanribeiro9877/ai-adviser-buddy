@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
@@ -8,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Check, X, ShieldCheck, Clock } from "lucide-react";
 import { toast } from "sonner";
-import { FalhaDaExecucao, type UltimaFalha } from "@/components/action-card";
+import { FalhaDaExecucao, reexecutarApproval, type UltimaFalha } from "@/components/action-card";
 import { ehCardDeCriacao, linhasPreviaDoCard, tituloDoCardAprovacao } from "@/lib/approval-card-texto";
 
 export const Route = createFileRoute("/_authenticated/aprovacoes")({
@@ -18,6 +19,7 @@ export const Route = createFileRoute("/_authenticated/aprovacoes")({
 
 function Aprovacoes() {
   const { selectedCompany, isAdmin, user } = useApp();
+  const [retryingId, setRetryingId] = useState<string | null>(null);
   const q = useQuery({
     queryKey: ["approvals", selectedCompany?.id],
     enabled: !!selectedCompany,
@@ -45,6 +47,20 @@ function Aprovacoes() {
     });
     toast.success(status === "approved" ? "Aprovado" : "Rejeitado");
     q.refetch();
+  };
+
+  const retry = async (id: string) => {
+    setRetryingId(id);
+    const { error } = await reexecutarApproval(id);
+    setRetryingId(null);
+    if (error) {
+      toast.error(error);
+      return;
+    }
+    toast.success("Nova tentativa disparada");
+    q.refetch();
+    window.setTimeout(() => q.refetch(), 4000);
+    window.setTimeout(() => q.refetch(), 12000);
   };
 
   if (!selectedCompany) return <EmptyCompany />;
@@ -99,7 +115,14 @@ function Aprovacoes() {
             </pre>
           )}
           {/* A falha da execução mora no card; sem ela e sem executed_at, segue "aguardando". */}
-          {r.ultima_falha && <FalhaDaExecucao falha={r.ultima_falha as unknown as UltimaFalha} />}
+          {r.ultima_falha && (
+            <FalhaDaExecucao
+              falha={r.ultima_falha as unknown as UltimaFalha}
+              isAdmin={isAdmin}
+              retrying={retryingId === r.id}
+              onRetry={() => retry(r.id)}
+            />
+          )}
           {r.status === "approved" && !r.ultima_falha && (
             <p className="mt-2 text-xs text-muted-foreground">
               {r.executed_at

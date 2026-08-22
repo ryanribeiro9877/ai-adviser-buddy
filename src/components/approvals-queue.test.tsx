@@ -17,6 +17,7 @@ import { ApprovalsQueue } from "./approvals-queue";
 // coberto em action-card.test.tsx.
 
 const decideApprovalMock = vi.fn();
+const reexecutarApprovalMock = vi.fn();
 const recarregarMock = vi.fn();
 const toastErrorMock = vi.fn();
 const toastSuccessMock = vi.fn();
@@ -25,6 +26,7 @@ let respostaDaBusca: { data: unknown; error: unknown } = { data: [], error: null
 
 vi.mock("./action-card", () => ({
   decideApproval: (...a: unknown[]) => decideApprovalMock(...a),
+  reexecutarApproval: (...a: unknown[]) => reexecutarApprovalMock(...a),
   // Dublê mínimo: expõe o status que a fila mandou (para provar o otimismo e o
   // rollback) e dois botões que chamam onDecide.
   ActionCard: ({
@@ -32,11 +34,13 @@ vi.mock("./action-card", () => ({
     isAdmin,
     deciding,
     onDecide,
+    onRetry,
   }: {
     approval: { id: string; summary: string; status: string };
     isAdmin: boolean;
     deciding: boolean;
     onDecide: (id: string, d: "approved" | "rejected", reason?: string) => void;
+    onRetry?: (id: string) => void;
   }) => (
     <div data-testid="card" data-id={approval.id} data-status={approval.status}>
       <span>{approval.summary}</span>
@@ -48,6 +52,12 @@ vi.mock("./action-card", () => ({
         disabled={!isAdmin || deciding}
         onClick={() => onDecide(approval.id, "rejected", "  nao passa  ")}
       >{`rejeitar ${approval.id}`}</button>
+      {onRetry && (
+        <button
+          disabled={!isAdmin || deciding}
+          onClick={() => onRetry(approval.id)}
+        >{`retry ${approval.id}`}</button>
+      )}
     </div>
   ),
 }));
@@ -108,6 +118,8 @@ function montar() {
 beforeEach(() => {
   decideApprovalMock.mockReset();
   decideApprovalMock.mockResolvedValue({ error: null });
+  reexecutarApprovalMock.mockReset();
+  reexecutarApprovalMock.mockResolvedValue({ error: null });
   recarregarMock.mockReset();
   toastErrorMock.mockReset();
   toastSuccessMock.mockReset();
@@ -261,5 +273,22 @@ describe("ApprovalsQueue — decisao", () => {
     montar();
     expect(await screen.findByText("aprovar a1")).toBeDisabled();
     expect(screen.getByText("rejeitar a1")).toBeDisabled();
+  });
+
+  it("tentar de novo chama reexecutarApproval", async () => {
+    montar();
+    await userEvent.click(await screen.findByText("retry a1"));
+    await waitFor(() => expect(reexecutarApprovalMock).toHaveBeenCalledWith("a1"));
+    expect(toastSuccessMock).toHaveBeenCalledWith("Nova tentativa disparada");
+  });
+
+  it("erro na reexecucao aparece no toast, sem sucesso", async () => {
+    reexecutarApprovalMock.mockResolvedValue({ error: "não é possível re-executar (houve escrita parcial)" });
+    montar();
+    await userEvent.click(await screen.findByText("retry a1"));
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith("não é possível re-executar (houve escrita parcial)"),
+    );
+    expect(toastSuccessMock).not.toHaveBeenCalled();
   });
 });

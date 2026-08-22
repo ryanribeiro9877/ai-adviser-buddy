@@ -375,9 +375,21 @@ describe("falha da execução", () => {
   });
 
   it("informa tentativa e que pode tentar de novo", () => {
-    render(<FalhaDaExecucao falha={falha} />);
+    render(<FalhaDaExecucao falha={falha} isAdmin onRetry={vi.fn()} />);
     expect(screen.getByText("Tentativa 2")).toBeInTheDocument();
-    expect(screen.getByText(/Pode tentar de novo/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Pode tentar de novo/ })).toBeEnabled();
+  });
+
+  it("o texto e um botao que dispara onRetry", async () => {
+    const onRetry = vi.fn();
+    montar({ status: "approved", ultima_falha: falha }, { onRetry });
+    await userEvent.click(screen.getByRole("button", { name: /Pode tentar de novo/ }));
+    expect(onRetry).toHaveBeenCalledWith("p1");
+  });
+
+  it("nao-admin ve o botao desabilitado", () => {
+    montar({ status: "approved", ultima_falha: falha }, { isAdmin: false, onRetry: vi.fn() });
+    expect(screen.getByRole("button", { name: /Pode tentar de novo/ })).toBeDisabled();
   });
 
   it("re_executavel=false avisa que NAO da para re-executar", () => {
@@ -388,8 +400,8 @@ describe("falha da execução", () => {
   });
 
   it("re_executavel ausente assume que pode tentar (nao trava por omissao)", () => {
-    render(<FalhaDaExecucao falha={{ motivo_para_o_gestor: "x" }} />);
-    expect(screen.getByText(/Pode tentar de novo/)).toBeInTheDocument();
+    render(<FalhaDaExecucao falha={{ motivo_para_o_gestor: "x" }} isAdmin onRetry={vi.fn()} />);
+    expect(screen.getByRole("button", { name: /Pode tentar de novo/ })).toBeEnabled();
   });
 
   it("falha sem motivo ainda anuncia a falha", () => {

@@ -41,6 +41,8 @@ vi.mock("sonner", () => ({
   },
 }));
 
+const rpcMock = vi.fn();
+
 vi.mock("@/integrations/supabase/client", () => ({
   supabase: {
     from: () => ({
@@ -52,6 +54,7 @@ vi.mock("@/integrations/supabase/client", () => ({
         },
       }),
     }),
+    rpc: (...a: unknown[]) => rpcMock(...a),
   },
 }));
 
@@ -86,6 +89,7 @@ beforeEach(() => {
   linhas = [];
   erroDoUpdate = null;
   updateMock.mockReset();
+  rpcMock.mockReset().mockResolvedValue({ error: null });
   logAuditMock.mockReset().mockResolvedValue(undefined);
   toastErrorMock.mockReset();
   toastSuccessMock.mockReset();
