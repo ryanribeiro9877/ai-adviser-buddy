@@ -35,6 +35,7 @@ import {
 } from "@/lib/attachments";
 import { Markdown } from "@/components/markdown";
 import { JobProgressCard } from "@/components/job-progress-card";
+import { replyLoteComLegendas, replyLoteCriativoIncompleto } from "@/lib/lote-criativo";
 import { ActionCard, decideApproval, reexecutarApproval, type Approval, type Decision } from "@/components/action-card";
 import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
@@ -134,9 +135,22 @@ function hasSubstantiveReplyAfterLastUser(msgs: Message[]): boolean {
 function looksLikeCompleteTurn(text: string): boolean {
   const raw = (text ?? "").trim();
   if (raw.length < 100 || isProgressOnlyReply(raw)) return false;
+  if (replyLoteCriativoIncompleto(raw) || replyLoteComLegendas(raw)) return false;
   const t = deaccFront(raw.toLowerCase());
   if (/\?/.test(raw)) return true;
   return /\b(preciso (da sua|que voce|confirmar|saber)|qual (o |a )?(objetivo|opcao|caminho|meta)|me (confirma|diga|escolha)|antes de (criar|emitir|propor)|contradic|aguardo (sua|a) (resposta|decisao)|escolha (uma|o|a)|decida)\b/.test(t);
+}
+
+/** Lote de criativos ainda em curso: nao cortar a continuacao na 2a bolha. */
+function loteAindaAberto(msgs: Message[]): boolean {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role === "user") break;
+    if (m.role !== "assistant") continue;
+    const c = m.content ?? "";
+    if (replyLoteCriativoIncompleto(c) || replyLoteComLegendas(c)) return true;
+  }
+  return false;
 }
 
 /** Conta assistants substantivos apos o ultimo user (protege contra 2a bolha). */
@@ -726,7 +740,10 @@ export function OperacaoChat() {
           for (let n = 1; n <= MAX_CONTINUATIONS && contFinish; n++) {
             try {
               const msgsNow = await fetchMessages(convIdAtSend);
-              if (countSubstantiveAssistantsSinceLastUser(msgsNow) >= 2) break;
+              if (
+              countSubstantiveAssistantsSinceLastUser(msgsNow) >= 2 &&
+              !loteAindaAberto(msgsNow)
+            ) break;
             } catch {
               /* rede — segue com a flag da edge */
             }
@@ -797,7 +814,10 @@ export function OperacaoChat() {
         if (autoCont) {
           try {
             const msgsNow = await fetchMessages(convId);
-            if (countSubstantiveAssistantsSinceLastUser(msgsNow) >= 2) break;
+            if (
+              countSubstantiveAssistantsSinceLastUser(msgsNow) >= 2 &&
+              !loteAindaAberto(msgsNow)
+            ) break;
           } catch {
             /* rede — segue com a flag da edge */
           }
@@ -918,7 +938,24 @@ export function OperacaoChat() {
   }, [search.reco, companyId]);
 
   // Reenvia a última pergunta que ficou sem resposta (turno estourado).
-  const reenviarOrfa = () => {
+  // Se o lote de criativos/legendas ficou pela metade, tenta o checkpoint antes de
+  // mandar a pergunta de novo (reenviar o texto inteiro voltava a estourar 150s).
+  const reenviarOrfa = async () => {
+    const ultima = msgs[msgs.length - 1];
+    if (
+      activeId &&
+      ultima?.role === "assistant" &&
+      replyLoteCriativoIncompleto(ultima.content ?? "")
+    ) {
+      setLive({ convId: activeId, text: "continuando a resposta…", continuing: 1 });
+      const { data, error } = await supabase.functions.invoke<ChatReply>("traffic-chat", {
+        body: { continuar: true, conversation_id: activeId, company: companyName },
+      });
+      await qc.invalidateQueries({ queryKey: ["chat-messages", activeId] });
+      qc.invalidateQueries({ queryKey: ["approvals"] });
+      setLive(null);
+      if (!error && data && data.aviso !== "sem_checkpoint") return;
+    }
     const ultimaUser = [...msgs].reverse().find((m) => m.role === "user");
     const texto = (ultimaUser?.content ?? "").trim();
     if (!texto) {

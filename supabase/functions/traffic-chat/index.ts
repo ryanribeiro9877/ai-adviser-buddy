@@ -1,4 +1,8 @@
-// supabase/functions/traffic-chat/index.ts (v28.58)
+// supabase/functions/traffic-chat/index.ts (v28.59)
+// v28.59 (22/08/2026) - LOTE DE CRIATIVOS+LEGENDAS NAO 502: escolher 6 pecas distintas
+//   + gerar_legendas estourava o gateway (~150s) e a prosa longa ("legendas pendentes")
+//   era tratada como turno FECHADO. Agora: auto-continuar o lote; abortar gerar-legendas
+//   no orcamento restante; 6 eixos distintos (nao 3x a mesma familia de juros).
 // v28.58 (22/08/2026) - criar_anuncio: auto-preenche conjunto_destino; desambigua nome
 //   homonimo pela campanha; molde por id Meta; replica CTWA→WEBSITE com destino_url;
 //   sanitiza claim "cards emitidos" sem approval_id (incidente LEVA02 22/08).
@@ -576,6 +580,7 @@ import {
 } from "../_shared/objetivo_odax.ts";
 import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, digitosWhatsApp, ctaPadraoMensagensWhatsApp, ctaPadraoTrafegoWebsite, LINK_CTWA_API_WHATSAPP } from "../_shared/destino_url_lp.ts";
 import { pipeboardToken } from "../_shared/pipeboard.ts";
+import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto } from "../_shared/lote_criativo.ts";
 import {
   callReadTool,
   companyMetaAccounts,
@@ -659,7 +664,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.58";
+const VERSAO = "chat-v28.59";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -3332,6 +3337,7 @@ async function t_gerar_legendas(
   mcpKey: string,
   args: { produto?: string; objetivo?: string; eixo?: string; drive_file_id?: string; referencias?: string[]; peca_chave?: string },
   convId?: string | null,
+  timeoutMs = 28_000,
 ) {
   const objetivo = String(args?.objetivo ?? args?.eixo ?? "").trim();
   if (!objetivo) {
@@ -3351,12 +3357,30 @@ async function t_gerar_legendas(
   if (Array.isArray(args?.referencias) && args.referencias.length) {
     body.referencias = args.referencias.map((r) => String(r)).filter(Boolean).slice(0, 5);
   }
-  const r = await fetch(`${SUPABASE_URL}/functions/v1/gerar-legendas`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
-    body: JSON.stringify(body),
-  });
-  const t = await r.text();
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), Math.max(5_000, timeoutMs));
+  let r: Response;
+  let t: string;
+  try {
+    r = await fetch(`${SUPABASE_URL}/functions/v1/gerar-legendas`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+    t = await r.text();
+  } catch (e) {
+    const nome = String((e as any)?.name ?? "");
+    if (nome === "AbortError" || /abort/i.test(String((e as any)?.message ?? e))) {
+      return {
+        erro: "consulta_nao_realizada_nesta_rodada",
+        aviso: "gerar_legendas abortada para nao estourar o gateway. O sistema continua no proximo segmento — NAO invente a legenda.",
+      };
+    }
+    return { ok: false, erro: `gerar-legendas falhou: ${String((e as any)?.message ?? e).slice(0, 200)}` };
+  } finally {
+    clearTimeout(timer);
+  }
   let j: any;
   try {
     j = JSON.parse(t);
@@ -3998,7 +4022,18 @@ async function runTool(name: string, args: any, ctx: any) {
         return await t_check_compliance(
           ctx.companyId, String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey, ctx.complianceCache,
         );
-      case "gerar_legendas": return await t_gerar_legendas(ctx.companyId, ctx.mcpKey, args, ctx.convId);
+      case "gerar_legendas": {
+        const restante = Number(ctx.restanteMs ?? 30_000);
+        if (restante < 18_000) {
+          return {
+            erro: "consulta_nao_realizada_nesta_rodada",
+            aviso: "O orcamento desta janela nao cabe mais uma gerar_legendas. O sistema continua no proximo segmento. NAO invente a legenda.",
+          };
+        }
+        return await t_gerar_legendas(
+          ctx.companyId, ctx.mcpKey, args, ctx.convId, Math.min(28_000, restante - 8_000),
+        );
+      }
       case "get_legendas_da_conversa": return await t_get_legendas_da_conversa(ctx.companyId, ctx.convId, args);
       case "registrar_legenda_da_conversa": return await t_registrar_legenda_da_conversa(ctx.companyId, ctx.convId, args);
       case "get_criativos_conteudo": {
@@ -4200,6 +4235,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   antes de auditar ou emitir. PROIBIDO trocar por outro conjunto (ex. "5 videos 22-27" so porque
   estao liberados no acervo). Inventario apto ≠ pedido. Se perder o slate no historico, peca
   confirmacao — nao invente.
+- LOTE DE 6 CRIATIVOS (anti-repeticao + anti-timeout, 22/08/2026 v28.59): se o gestor pedir N pecas DIFERENTES do conjunto ativo e entre si, + legendas: (1) leia get_criativos_conteudo do conjunto ativo e EXCLUA esses arquivos; (2) 6 pecas = 6 EIXOS de mensagem — PROIBIDO tres videos da mesma familia (ex. 3x "juros abusivos"/"contrato com taxa"); (3) 1 gerar_legendas por peca com drive_file_id + objetivo daquela peca (nao distribua 3 variantes de UMA chamada em 3 videos); (4) no maximo 3 gerar_legendas por janela HTTP — o sistema continua=true para o restante. NAO encerre com "legendas pendentes" / "nao cobertos por falta de tempo" como se o pedido tivesse acabado. NAO emita card a menos que pecam emissao.
 - EMITE OS N (anti-loop + anti-timeout, 21/08/2026 v28.53): se o gestor disser "emite os N" / "emite os cards" e o
   slate (drive_file_id / meta ids / legendas) JA estiver nesta conversa (mensagem atual,
   historico reinjetado OU conversation_legendas via get_legendas_da_conversa), EMITA agora.
@@ -4523,6 +4559,22 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
     ? cp.cards.map((c) => `- ${c.summary} (${c.status}, id ${c.approval_id})`).join("\n")
     : "- (nenhum ActionCard emitido ainda)";
   const parcial = (cp.reply_parcial || "").trim();
+  const lote = pedidoLoteCriativo(cp.objetivo);
+  const instrucao = lote
+    ? "INSTRUCOES OBRIGATORIAS:\n" +
+      "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir.\n" +
+      "2. Retome SOMENTE o que falta: gerar_legendas das pecas ainda sem legenda (no maximo 3 nesta janela). " +
+      "Uma chamada por peca, com drive_file_id + objetivo DAQUELA peca. Nao atribua 3 variantes de uma chamada a 3 videos.\n" +
+      "3. 6 pecas = 6 EIXOS diferentes. PROIBIDO tres videos da mesma familia (ex. 3x juros/contrato abusivo). " +
+      "EXCLUA pecas ja usadas no conjunto ativo (leia nomes em get_criativos_conteudo se ainda nao listou).\n" +
+      "4. NAO emita card a menos que o objetivo original peca emissao. Entregue tabela: arquivo, drive_file_id, motivo, legenda escolhida.\n" +
+      "5. Use ferramentas so do que falta; nao releia acervo inteiro se ja consta acima."
+    : "INSTRUCOES OBRIGATORIAS:\n" +
+      "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir ou focar.\n" +
+      "2. Retome do ponto em que parou. Se o objetivo era criar campanha/conjunto/anuncio (ou emitir card), " +
+      "chame propose_action AGORA com os dados reais ja coletados — NAO invente IDs nem parametros.\n" +
+      "3. Se os cards necessarios ja existem, confirme em 2-4 linhas o que ficou pendente de aprovacao humana.\n" +
+      "4. Use ferramentas so do que ainda falta; nao releia o que ja consta acima como concluido.";
   return (
     `[CONTINUACAO AUTOMATICA DO SISTEMA — segmento ${cp.segmento}]\n` +
     `Objetivo original do gestor (NAO peca para reformular nem "focar" o pedido):\n"""\n${cp.objetivo}\n"""\n\n` +
@@ -4530,13 +4582,17 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
     (parcial
       ? `Texto ja entregue ao gestor (NAO repita; retome depois):\n"""\n${parcial.slice(-3500)}\n"""\n\n`
       : "") +
-    "INSTRUCOES OBRIGATORIAS:\n" +
-    "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir ou focar.\n" +
-    "2. Retome do ponto em que parou. Se o objetivo era criar campanha/conjunto/anuncio (ou emitir card), " +
-    "chame propose_action AGORA com os dados reais ja coletados — NAO invente IDs nem parametros.\n" +
-    "3. Se os cards necessarios ja existem, confirme em 2-4 linhas o que ficou pendente de aprovacao humana.\n" +
-    "4. Use ferramentas so do que ainda falta; nao releia o que ja consta acima como concluido."
+    instrucao
   );
+}
+
+function nGerarLegendasOk(
+  cp: TurnCheckpoint | null | undefined,
+  results: { tool: string; erro?: string }[],
+): number {
+  const doCp = (cp?.tools_resumo ?? []).filter((t) => t.tool === "gerar_legendas" && !t.erro).length;
+  const agora = results.filter((t) => t.tool === "gerar_legendas" && !t.erro).length;
+  return doCp + agora;
 }
 
 function resumirToolsParaCheckpoint(toolsUsed: any[], toolResults: { tool: string; erro?: string; args?: any }[]): TurnCheckpoint["tools_resumo"] {
@@ -4618,6 +4674,7 @@ function targetNameCriacaoUtil(raw: string): string {
 function replyFechaTurno(texto: string): boolean {
   const raw = String(texto ?? "").trim();
   if (raw.length < 100) return false;
+  if (replyLoteCriativoIncompleto(raw) || replyLoteComLegendas(raw)) return false;
   const t = deacc(raw.toLowerCase());
   if (RE_INTENCAO.test(raw)) return false;
   if (RE_CONTINUAR_AUTO.test(t) || /continuando automaticamente/.test(t)) return false;
@@ -4977,7 +5034,8 @@ Deno.serve(async (req) => {
     tipo: "chat_loop",
     pergunta: msgText,
     temImagem: imgAtts.length > 0,
-    pedidoAto: RE_PEDIDO_DE_ATO.test(deacc(objetivoOriginal.toLowerCase())),
+    pedidoAto: RE_PEDIDO_DE_ATO.test(deacc(objetivoOriginal.toLowerCase())) ||
+      pedidoLoteCriativo(objetivoOriginal),
     sessionId: convId,
   });
   let modeloRoteado = rotaLlm.model;
@@ -4986,6 +5044,8 @@ Deno.serve(async (req) => {
   // v19: orcamento dinamico de geracao (tInicio declarado no topo do handler).
   const decorrido = () => Date.now() - tInicio;
   let deadlineTools = false;
+  const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
+  const toolsDeadlineMs = pedidoLoteTurno ? 90_000 : TOOLS_DEADLINE_MS;
   // v20: telemetria de custo. Capturamos os dois formatos possiveis - anthropic
   // (cache_creation_input_tokens / cache_read_input_tokens) e openai
   // (prompt_tokens_details.cached_tokens) - porque nao esta confirmado qual o OpenRouter
@@ -5181,7 +5241,7 @@ Deno.serve(async (req) => {
   if (!atalhoMetaDicas) for (let iter = 0; iter < MAX_ITER; iter++) {
     // v19/v28.32: orcamento de tempo. Checa ANTES de cada geracao (incluindo a 1a apos
     // tools): sem isso o loop consumia os 150s coletando e o gateway devolvia 504.
-    if (decorrido() > TOOLS_DEADLINE_MS && (iter > 0 || toolsUsed.length > 0)) {
+    if (decorrido() > toolsDeadlineMs && (iter > 0 || toolsUsed.length > 0)) {
       deadlineTools = true;
       break;
     }
@@ -5218,7 +5278,7 @@ Deno.serve(async (req) => {
         prioridadeTool(String(b.function?.name ?? ""), msgText));
       for (const tc of loteOrdenado) {
         // v28.32: deadline POR ferramenta — o lote inteiro nao pode segurar o HTTP.
-        if (decorrido() > TOOLS_DEADLINE_MS) {
+        if (decorrido() > toolsDeadlineMs) {
           deadlineTools = true;
           const nomeSkip = String(tc.function?.name ?? "");
           let argsSkip: any = {}; try { argsSkip = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
@@ -5274,6 +5334,7 @@ Deno.serve(async (req) => {
             erro: "teto de ferramentas do turno - o dado NAO foi lido, nao e zero nem inexistente" });
           continue;
         }
+        (ctx as { restanteMs?: number }).restanteMs = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
         const result = await runTool(tc.function?.name, args, ctx);
         toolsUsed.push({ tool: tc.function?.name, args });
         // v28.11: um unico corte, usado nos dois destinos - o que o modelo le e o que fica
@@ -5331,8 +5392,10 @@ Deno.serve(async (req) => {
 
   // v28.38: CONTINUACAO AUTOMATICA — so quando o turno esta realmente incompleto.
   // Nao continuar apos resposta completa (clarificacao / decisao humana / analise fechada).
+  const pedidoLote = pedidoLoteTurno;
   const pedidoAto = RE_PEDIDO_DE_ATO.test(deacc(objetivoOriginal.toLowerCase())) ||
     (turnCheckpoint?.pedido_ato === true) ||
+    pedidoLote ||
     // v28.40: se propose_action de criacao rodou (ou tentou) sem card, trata como ato.
     (actionCards.length === 0 && toolsIncluemPropose(toolsUsed));
   const cardsNesteSegmento = actionCards.length;
@@ -5380,10 +5443,12 @@ Deno.serve(async (req) => {
       String(t.tool ?? "") === "propose_action" &&
       /deadline|orcamento|consulta_nao_realizada|nao foi lido/i.test(String(t.erro ?? "")));
 
-  const turnoIncompletoPorTempo = deadlineTools && !turnoJaFechado && (
-    !replyTrim ||
-    atoEmAndamentoSemCard
-  ) && !soFalhaDuraSemCard;
+  const nLegendasOk = nGerarLegendasOk(turnCheckpoint, toolResults);
+  const loteFaltamLegendas = pedidoLote && nLegendasOk < 6;
+  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && (
+    (deadlineTools && (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas)) ||
+    (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas))
+  );
   const podeContinuarSegmento = segmentoAtual < MAX_TURN_SEGMENTS;
   let continuarTurno = false;
   let usouFallback = false;

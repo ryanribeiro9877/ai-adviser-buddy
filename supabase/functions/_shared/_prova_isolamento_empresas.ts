@@ -80,6 +80,12 @@ assert(
   "traffic-chat: atencao apto + limite propose por segmento",
 );
 assert(
+  chat.includes("pedidoLoteCriativo") &&
+    chat.includes("replyLoteComLegendas") &&
+    chat.includes("LOTE DE 6 CRIATIVOS"),
+  "traffic-chat deve auto-continuar lote de criativos/legendas (anti-502)",
+);
+assert(
   chat.includes("empresaEhCredito(companyId)") &&
     !chat.includes('special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"]'),
   "criar_campanha nao forca FINANCIAL para todas as empresas",
