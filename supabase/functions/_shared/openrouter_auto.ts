@@ -3,6 +3,9 @@
 // Slug: openrouter/auto — plugin id: auto-router
 // (auto-beta fica disponivel se o secret apontar para openrouter/auto-beta)
 // Sem surcharge: paga-se a taxa do modelo roteado (campo `model` da resposta).
+// 22/08/2026: o padrao da casa passou a ser o catalogo em llm_catalogo.ts +
+// llm_roteador.ts (escolha de MODELO por tarefa). Auto Router fica como
+// fallback se LLM_ROTEADOR=legado.
 
 export const OPENROUTER_AUTO_SLUG = "openrouter/auto";
 export const OPENROUTER_AUTO_PLUGIN_ID = "auto-router";

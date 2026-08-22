@@ -151,9 +151,9 @@
 //       (relatorios validados congelados + fila de devolucoes) e reinvoca a PROPRIA edge;
 //       o novo worker retoma do ponto exato com orcamento zerado. Ate MAX_SEGMENTOS=3
 //       (~14 min de parede). Relatorio validado NUNCA e refeito.
-//   (D) SPLIT DE MODELO: planejador e subagentes leem OPENROUTER_MODEL_SUB (fallback p/ o
-//       principal); coordenacao e sintese leem OPENROUTER_MODEL. Permite Opus na sintese
-//       mantendo a extracao paralela no modelo mais barato.
+//   (D) SPLIT DE MODELO (v4.3): llm_roteador escolhe o slug por BLOCO — planner/subagentes/
+//       visao na faixa economia; sintese lite/standard ainda economia (Luna Pro); sintese
+//       deep e coordenacao na faixa premium (Sonnet 5). LLM_ROTEADOR=legado volta ao auto.
 //
 // SUBAGENTES + JOB ASSINCRONO (EdgeRuntime.waitUntil) - remove o teto de 150s em vez de
 // negociar com ele, como declarado no v27 do traffic-chat.
@@ -213,13 +213,16 @@ import {
   truncatePipeboardPayload,
 } from "../_shared/pipeboard_read.ts";
 import {
-  costTierOpenRouter,
-  extrasAutoRouter,
   modeloEfetivoDaResposta,
   modeloOpenRouterPadrao,
   modeloOpenRouterSubPadrao,
-  type AutoCostTier,
 } from "../_shared/openrouter_auto.ts";
+import {
+  bodyOpenRouter,
+  resolverChamadaLlm,
+  type FaixaLlm,
+  type TipoTarefaLlm,
+} from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 
@@ -233,6 +236,8 @@ const MODEL_SUB = modeloOpenRouterSubPadrao();
 /** Sticky session do Auto Router para o job atual (conversation_id). */
 let JOB_SESSION_ID: string | null = null;
 let JOB_MODELO_ROTEADO = MODEL;
+let JOB_FAIXA_SINTESE: FaixaLlm = "economia";
+const JOB_LLM_ROTAS: { tipo: string; model: string; faixa: string; motivo: string }[] = [];
 // v2: credencial do Drive (service account) + pasta raiz dos criativos.
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
 const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? "").trim();
@@ -1458,20 +1463,20 @@ function ehSinteseResgatavel(finish: string): boolean {
 
 async function chamarLLM(messages: any[], opts: {
   tools?: any[]; maxTokens: number; reasoning?: any; model?: string; timeoutMs?: number;
-  retries?: number; retryCapMs?: number; sessionId?: string | null; costTier?: AutoCostTier;
+  retries?: number; retryCapMs?: number; sessionId?: string | null;
+  tipo?: TipoTarefaLlm; faixaForcada?: FaixaLlm; especialista?: string;
 }): Promise<any> {
-  const model = opts.model ?? MODEL;
-  const tier = opts.costTier ?? (model === MODEL_SUB ? costTierOpenRouter("medium") : costTierOpenRouter("high"));
-  const payload: any = {
-    model,
+  const rota = resolverChamadaLlm({
+    tipo: opts.tipo ?? (opts.model === MODEL_SUB ? "subagente" : "sintese"),
+    faixaForcada: opts.faixaForcada,
+    especialista: opts.especialista,
+    sessionId: opts.sessionId ?? JOB_SESSION_ID,
+  });
+  JOB_LLM_ROTAS.push({ tipo: rota.tipo, model: rota.model, faixa: rota.faixa, motivo: rota.motivo });
+  const payload: any = bodyOpenRouter(rota, {
     messages,
     max_tokens: opts.maxTokens,
-    ...extrasAutoRouter({
-      model,
-      sessionId: opts.sessionId ?? JOB_SESSION_ID,
-      costTier: tier,
-    }),
-  };
+  });
   if (opts.tools?.length) { payload.tools = opts.tools; payload.tool_choice = "auto"; }
   if (opts.reasoning) payload.reasoning = opts.reasoning;
   const timeoutMs = opts.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
@@ -1600,12 +1605,13 @@ Especialistas disponiveis (use exatamente estes nomes):
 - criativos_drive: pasta de criativos NOVOS no Google Drive (inventario, formatos, eixos, comparacao com vencedores)\n- analise_visual_drive: analise VISUAL arquivo a arquivo das pecas do Drive (produto, texto visivel, riscos, veredito aproveitavel) - so quando pedirem CLASSIFICAR/ANALISAR CONTEUDO das pecas
 - conhecimento: fundamento tecnico puro (so quando a pergunta exige conceito alem do operacional)
 REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio + ranking alcance/conversas de peca -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive; dica/recomendacao/boost/musica/Opportunity Score da Meta -> SOMENTE alertas_recomendacoes (NAO acrescente criativos so porque a dica menciona musica). NAO inclua especialista cujo dominio a pergunta nao toca.${hintCap}${hintEscopo}
+SPLIT DE CUSTO: voce so escolhe especialistas. O backend manda coleta (tools) em modelo barato e a sintese final em modelo mais forte quando o pedido e profundo.
 Responda APENAS com JSON valido, sem markdown, no formato:
 {"subagentes":[{"nome":"...","foco":"instrucao curta e especifica do que ELE deve levantar, citando janela e universo"}]}
 Para overview amplo, 3 especialistas bastam — nao dispare a equipe inteira.`;
   const r = await chamarLLM(
     [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 12000) }],
-    { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB, timeoutMs: cap?.openRouterTimeoutMs ?? OPENROUTER_TIMEOUT_MS },
+    { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "planner", timeoutMs: cap?.openRouterTimeoutMs ?? OPENROUTER_TIMEOUT_MS },
   );
   if (r.erro) {
     return { plano: planoFallbackSeguro(nomes, cap, pergunta), degradado: true };
@@ -1630,7 +1636,7 @@ Para overview amplo, 3 especialistas bastam — nao dispare a equipe inteira.`;
     tel.planner_capado = true;
   }
   if (escopo) {
-    final = final.map((p) => ({ ...p, foco: `${p.foco}\n\n${escopo.bloco_contrato}` }));
+    final = final.map((p: { nome: string; foco: string }) => ({ ...p, foco: `${p.foco}\n\n${escopo.bloco_contrato}` }));
   }
   return { plano: final, degradado: false };
 }
@@ -1661,7 +1667,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     // Reserva da sintese: para de coletar e escreve com o que tem.
     if (prazo() < SINT_RESERVA_MS) { finish = finish || "reserva_sintese"; break; }
     if (prazo() <= 0) { finish = "prazo_do_job"; break; }
-    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, model: MODEL_SUB });
+    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome });
     if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; break; }
     const u = usoDe(r.parsed); tin += u.tin; tout += u.tout; reas += u.reas;
     finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
@@ -1692,7 +1698,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   if (!relatorio) {
     // Estourou iteracoes/prazo coletando: forca o relatorio com o que ha.
     messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
-    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, model: MODEL_SUB });
+    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome });
     if (!rf.erro) {
       const u = usoDe(rf.parsed); tin += u.tin; tout += u.tout;
       relatorio = String(rf.parsed?.choices?.[0]?.message?.content ?? "");
@@ -1707,7 +1713,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     messages.push({ role: "assistant", content: relatorio });
     messages.push({ role: "user", content: "Seu relatorio foi cortado por limite de tamanho. Continue EXATAMENTE do ponto onde parou, na proxima palavra. Nao repita nada, nao reescreva secoes; ao concluir, termine com a linha LACUNAS:." });
     const maxTok = Math.max(1500, Math.min(SUB_MAX_TOKENS, Math.floor((prazo() / 1000) * TOKENS_POR_SEGUNDO)));
-    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, model: MODEL_SUB });
+    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome });
     if (rc.erro) break;
     const u = usoDe(rc.parsed); tin += u.tin; tout += u.tout;
     const pedaco = String(rc.parsed?.choices?.[0]?.message?.content ?? "");
@@ -1755,6 +1761,8 @@ async function chamarSinteseParte(
     timeoutMs: callTimeout,
     retries: OPENROUTER_RETRY_MAX_SINTESE,
     retryCapMs: OPENROUTER_RETRY_CAP_SINTESE_MS,
+    tipo: "sintese",
+    faixaForcada: JOB_FAIXA_SINTESE,
   });
   if (r.erro) return { erro: r.erro, tin: 0, tout: 0 };
   const u = usoDe(r.parsed);
@@ -2144,7 +2152,7 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
         `${ehCreditoVisao ? promptVideoCredito : promptVideoNaoCredito} Devolve UM objeto JSON para o video inteiro. Campos: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : "juridico, conta_de_luz, cobranca_indevida, emprestimo_abusivo, habitacional, indeterminado"}); confianca ("alta"|"media"|"baixa"); quadro_que_sustenta (o numero do quadro, de 1 a ${imagens.length}, que sustenta a conclusao); texto_visivel (transcreva o texto legivel somando os quadros, sem repetir); menciona_taxa_prazo_ou_valor (true/false) e qual_valor (o trecho, ou vazio); quadros_divergem (true/false) e o_que_diverge (uma frase, ou vazio); riscos_compliance (promessa enganosa, urgencia falsa, ausencia de identificacao — so o que estiver VISIVEL); aproveitavel: "sim" se alinhado ao universo da marca e sem risco visivel, "nao" se produto claramente fora do universo ou risco claro, "incerto" se os quadros nao permitem afirmar; motivo (uma frase). LIMITE REAL: voce ve ${imagens.length} quadros, NAO o video - nao ha audio. "indeterminado" e "incerto" sao legitimos. Responda APENAS JSON: {"produto_detectado":"...","confianca":"...","quadro_que_sustenta":1,"texto_visivel":"...","menciona_taxa_prazo_ou_valor":false,"qual_valor":"","quadros_divergem":false,"o_que_diverge":"","riscos_compliance":"","aproveitavel":"sim|nao|incerto","motivo":"..."}` +
         `\nArquivo: ${arq.nome} (pasta: ${arq.caminho})` }];
       for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
-      const r = await chamarLLM([{ role: "user", content }], { maxTokens: 1500, reasoning: REASONING_OFF, model: MODEL_SUB });
+      const r = await chamarLLM([{ role: "user", content }], { maxTokens: 1500, reasoning: REASONING_OFF, tipo: "visao" });
       if (r.erro) continue;
       const it = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? "")) ?? {};
       const aprov = ["sim", "nao", "incerto"].includes(String(it?.aproveitavel)) ? String(it.aproveitavel) : "incerto";
@@ -2185,7 +2193,7 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
     const content: any[] = [{ type: "text", text:
       `${ehCreditoVisao ? promptImgCredito : promptImgNaoCredito} Para CADA imagem, na ordem, devolva um item JSON. Criterios: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : "juridico, conta_de_luz, cobranca_indevida, emprestimo_abusivo, habitacional, indeterminado"}); texto_visivel; riscos_compliance (so o VISIVEL); aproveitavel: "sim"|"nao"|"incerto"; motivo. Voce ve UM FRAME — na duvida, "incerto". Responda APENAS JSON: {"itens":[{"nome":"...","produto_detectado":"...","texto_visivel":"...","riscos_compliance":"...","aproveitavel":"sim|nao|incerto","motivo":"..."}]}` + `\nArquivos nesta ordem: ${imagens.map((x) => `${x.arq.nome} (pasta: ${x.arq.caminho})`).join(" | ")}` }];
     for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
-    const r = await chamarLLM([{ role: "user", content }], { maxTokens: 2500, reasoning: REASONING_OFF, model: MODEL_SUB });
+    const r = await chamarLLM([{ role: "user", content }], { maxTokens: 2500, reasoning: REASONING_OFF, tipo: "visao" });
     if (r.erro) continue;
     const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
     const itens = Array.isArray(bruto?.itens) ? bruto.itens : [];
@@ -2261,7 +2269,7 @@ Responda APENAS JSON valido: {"avaliacoes":[{"nome":"...","veredito":"ok"|"devol
   const r = await chamarLLM(
     [{ role: "system", content: sys },
      { role: "user", content: `PERGUNTA DO GESTOR:\n${pergunta.slice(0, 4000)}\n\nRELATORIOS:\n${resumo}` }],
-    { maxTokens: 1500, reasoning: REASONING_OFF },
+    { maxTokens: 1500, reasoning: REASONING_OFF, tipo: "coordenacao" },
   );
   if (r.erro) { tel.validacao = { erro: r.erro, aviso: "validacao indisponivel - relatorios seguem sem devolucao" }; return []; }
   const u = usoDe(r.parsed);
@@ -2362,15 +2370,19 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const segmento: number = Number(retomada?.segmento ?? 1);
   JOB_SESSION_ID = convId || null;
   JOB_MODELO_ROTEADO = MODEL;
+  JOB_LLM_ROTAS.length = 0;
   const cap = classificarCapacidade(pergunta);
+  JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.2";
+  tel.versao = "job-v4.3";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
     devolucoes_max: cap.devolucoesMax, parede_ms: GLOBAL_WALL_MS,
   };
+  tel.faixa_sintese = JOB_FAIXA_SINTESE;
+  tel.llm_rotas = JOB_LLM_ROTAS;
   tel.escopo = {
     resumo: escopo.resumo, date_from: escopo.date_from, date_to: escopo.date_to,
     universo: escopo.universo, perguntas: escopo.perguntas_obrigatorias,

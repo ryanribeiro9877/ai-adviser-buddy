@@ -73,6 +73,16 @@ verify_jwt = false
 [functions.gerar-legendas]
 verify_jwt = false
 
+# 22/08/2026 — chat/job chamam com x-mcp-key; a propria edge autentica.
+[functions.compliance-check]
+verify_jwt = false
+
+[functions.waba-template-create]
+verify_jwt = false
+
+[functions.waba-template-replicate]
+verify_jwt = false
+
 # ESP-30: monitor de expiracao/escopo dos tokens Meta. Cron chama com x-mcp-key; a propria
 # edge autentica via mcp_key_valida. Mesmo padrao de bm-monitor/meta-identity-probe.
 [functions.meta-token-monitor]

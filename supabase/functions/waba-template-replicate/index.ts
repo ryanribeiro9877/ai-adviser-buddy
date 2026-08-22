@@ -18,13 +18,12 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import { extrasAutoRouter } from "../_shared/openrouter_auto.ts";
+import { bodyOpenRouter, resolverChamadaLlm } from "../_shared/llm_roteador.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const TOKEN = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const OR_MODEL = (Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/auto").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
 const VERSAO = "create-v1";
 
@@ -189,13 +188,14 @@ Escreva UM template da categoria UTILITY seguindo as regras da Meta À RISCA:
 - Máx. 1024 caracteres, tom sóbrio, no máximo 1 emoji, português do Brasil.
 - Responda APENAS um JSON válido, sem markdown: {"body_text": "...", "exemplos": ["exemplo p/ {{1}}", "..."], "footer_text": "opcional, curto ou null"}
 ${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"` : ""}`;
+  const rota = resolverChamadaLlm({ tipo: "waba" });
   const rl = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${OR_KEY}` },
-    body: JSON.stringify({ model: OR_MODEL, max_tokens: 900, reasoning: { enabled: false },
+    body: JSON.stringify(bodyOpenRouter(rota, {
+      max_tokens: 900, reasoning: { enabled: false },
       messages: [{ role: "system", content: sys }, { role: "user", content: `Objetivo do template: ${objetivo}` }],
-      ...extrasAutoRouter({ model: OR_MODEL, costTier: "medium" }),
-    }),
+    })),
   });
   const rj = await rl.json().catch(() => null);
   const bruto = String(rj?.choices?.[0]?.message?.content ?? "").trim().replace(/^```json|```$/g, "").trim();
@@ -235,7 +235,7 @@ ${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"`
     const { data: ins } = await supa.from("waba_template_creations").insert({
       company_id: comp.id, target_waba_id: alvo, template_name: nome, language, category: categoria,
       objetivo, components: componentes,
-      redator_meta: { model: OR_MODEL, tokens: rj?.usage ?? null },
+      redator_meta: { model: rota.model, tokens: rj?.usage ?? null, faixa: rota.faixa },
       guardiao: { deterministico: errosA, compliance: compl, aprovado: !reprovado },
       status: reprovado ? "reprovado_guardiao" : "rascunho",
       dry_run: true, requested_by: actor,

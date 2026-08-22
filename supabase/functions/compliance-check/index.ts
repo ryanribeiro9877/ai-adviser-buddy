@@ -10,7 +10,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import { extrasAutoRouter, modeloOpenRouterPadrao } from "../_shared/openrouter_auto.ts";
+import { bodyOpenRouter, resolverChamadaLlm } from "../_shared/llm_roteador.ts";
 import {
   empresaEhCredito,
   filtrarRegrasPorEmpresa,
@@ -19,7 +19,6 @@ import {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = modeloOpenRouterPadrao();
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 const CORS = {
@@ -168,18 +167,17 @@ Deno.serve(async (req) => {
   if (imgB64)
     content.push({ type: "image_url", image_url: { url: `data:${mime};base64,${imgB64}` } });
 
+  const rota = resolverChamadaLlm({ tipo: "compliance", temImagem: !!imgB64 });
   const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${OPENROUTER_KEY}`,
     },
-    body: JSON.stringify({
-      model: MODEL,
+    body: JSON.stringify(bodyOpenRouter(rota, {
       max_tokens: 2000,
       messages: [{ role: "user", content }],
-      ...extrasAutoRouter({ model: MODEL, costTier: "medium" }),
-    }),
+    })),
   });
   const raw = await resp.text();
   if (!resp.ok)

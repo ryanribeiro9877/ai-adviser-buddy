@@ -5,12 +5,11 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import { extrasAutoRouter } from "../_shared/openrouter_auto.ts";
+import { bodyOpenRouter, resolverChamadaLlm } from "../_shared/llm_roteador.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const MODEL = (Deno.env.get("OPENROUTER_MODEL_SUB") ?? Deno.env.get("OPENROUTER_MODEL") ?? "openrouter/auto").trim();
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
@@ -102,6 +101,7 @@ REGRAS INEGOCIAVEIS:
   });
 
   try {
+    const rota = resolverChamadaLlm({ tipo: "reco" });
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -110,16 +110,14 @@ REGRAS INEGOCIAVEIS:
         "http-referer": "https://ai-adviser-buddy.local",
         "x-title": "traffic-reco-job",
       },
-      body: JSON.stringify({
-        model: MODEL,
+      body: JSON.stringify(bodyOpenRouter(rota, {
         temperature: 0.2,
         messages: [
           { role: "system", content: sys },
           { role: "user", content: user },
         ],
         response_format: { type: "json_object" },
-        ...extrasAutoRouter({ model: MODEL, costTier: "low" }),
-      }),
+      })),
     });
     const body = await res.json();
     const raw = String(body?.choices?.[0]?.message?.content ?? "");

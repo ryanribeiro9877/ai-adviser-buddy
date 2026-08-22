@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.54)
+// supabase/functions/traffic-chat/index.ts (v28.55)
+// v28.55 (22/08/2026) - Roteador de catalogo OpenRouter: escolhe o modelo do turno
+//   (economia vs premium) sem hop extra. Ver _shared/llm_catalogo.ts + llm_roteador.ts.
 // v28.54 (22/08/2026) - Tool alterar_categoria_especial (card alterar_categoria_especial_campanha)
 //   para corrigir special_ad_categories em campanha existente; memoria institucional isolada
 //   por empresa (filtra universais contaminantes); prompt SUPER GESTOR sem hardcode cruzado.
@@ -571,10 +573,14 @@ import {
   truncatePipeboardPayload,
 } from "../_shared/pipeboard_read.ts";
 import {
-  extrasAutoRouter,
   modeloEfetivoDaResposta,
   modeloOpenRouterPadrao,
 } from "../_shared/openrouter_auto.ts";
+import {
+  bodyOpenRouter,
+  diagnosticoRota,
+  resolverChamadaLlm,
+} from "../_shared/llm_roteador.ts";
 import { tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
@@ -641,7 +647,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.54";
+const VERSAO = "chat-v28.55";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -4804,7 +4810,14 @@ Deno.serve(async (req) => {
     complianceCache: new Map<string, any>(),
   };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
-  let modeloRoteado = MODEL;
+  const rotaLlm = resolverChamadaLlm({
+    tipo: "chat_loop",
+    pergunta: msgText,
+    temImagem: imgAtts.length > 0,
+    pedidoAto: RE_PEDIDO_DE_ATO.test(deacc(objetivoOriginal.toLowerCase())),
+    sessionId: convId,
+  });
+  let modeloRoteado = rotaLlm.model;
   // v19: buffer do texto emitido JUNTO com tool_calls, que antes era descartado.
   const preambulos: string[] = [];
   // v19: orcamento dinamico de geracao (tInicio declarado no topo do handler).
@@ -4857,12 +4870,10 @@ Deno.serve(async (req) => {
       return { erro: "orcamento_tempo_esgotado", detalhe: `restam ${restanteMs}ms — sem tempo util para nova geracao` };
     }
     const usarCache = !cacheDesativado;
-    const payload: any = {
-      model: MODEL,
+    const payload: any = bodyOpenRouter(rotaLlm, {
       messages: usarCache ? messages : semCache(messages),
       max_tokens: maxTokens,
-      ...extrasAutoRouter({ model: MODEL, sessionId: convId, costTier: "medium" }),
-    };
+    });
     if (comTools) { payload.tools = TOOLS; payload.tool_choice = "auto"; }
     // v21: na sintese o raciocinio e excluido para que TODO o orcamento va para o texto.
     if (!reasoningDesativado) payload.reasoning = semRaciocinio ? REASONING_SINTESE : REASONING_LOOP;
@@ -5316,7 +5327,8 @@ Deno.serve(async (req) => {
     toolres_ferramentas_reinjetadas: toolresFerramentas, toolres_chars_reinjetados: toolresChars,
     rota_familias: rota.familias, rota_falhou: rotaFalhou || null,
     tokens_in: tokensIn, tokens_out: tokensOut, versao: VERSAO,
-    modelo_roteado: modeloRoteado, modelo_pedido: MODEL,
+    modelo_roteado: modeloRoteado, modelo_pedido: rotaLlm.model,
+    llm_rota: diagnosticoRota(rotaLlm),
     continuar_turno: continuarTurno, segmento_turno: segmentoAtual,
     retomada: ehRetomada, pedido_ato: pedidoAto };
 
@@ -5340,7 +5352,8 @@ Deno.serve(async (req) => {
     tokens_in: tokensIn, tokens_out: tokensOut, attachments_processed: attMeta, attachment_warnings: attNotas,
     action_cards: actionCards,
     model: modeloRoteado,
-    modelo_pedido: MODEL,
+    modelo_pedido: rotaLlm.model,
+    llm_rota: diagnosticoRota(rotaLlm),
     continuar: continuarTurno,
     segmento: segmentoAtual,
   });

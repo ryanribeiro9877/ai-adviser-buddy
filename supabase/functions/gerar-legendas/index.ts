@@ -8,13 +8,12 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import { extrasAutoRouter, modeloOpenRouterPadrao } from "../_shared/openrouter_auto.ts";
+import { bodyOpenRouter, resolverChamadaLlm } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const OR_MODEL = modeloOpenRouterPadrao();
 const VERSAO = "gerar-legendas-v3";
 const N = 3;
 
@@ -207,19 +206,18 @@ ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.sl
 
   const userMsg = `Objetivo da legenda: ${objetivo}\nGere exatamente ${N} variantes.`;
 
+  const rota = resolverChamadaLlm({ tipo: "legendas" });
   const rl = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${OR_KEY}` },
-    body: JSON.stringify({
-      model: OR_MODEL,
+    body: JSON.stringify(bodyOpenRouter(rota, {
       max_tokens: 2200,
       reasoning: { enabled: false },
       messages: [
         { role: "system", content: sys },
         { role: "user", content: userMsg },
       ],
-      ...extrasAutoRouter({ model: OR_MODEL, costTier: "medium" }),
-    }),
+    })),
   });
   if (!rl.ok) {
     const t = await rl.text().catch(() => "");
@@ -347,6 +345,6 @@ ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.sl
     aptas,
     instrucao:
       "ESP-37: escolha UMA variante com apto_para_card=true e use em propose_action criar_anuncio_a_partir_de com params.legenda, legenda_fonte=agente e legenda_referencias. Variantes reprovadas NAO entram no card. Nada foi publicado na Meta.",
-    redator_meta: { model: OR_MODEL, tokens: rj?.usage ?? null },
+    redator_meta: { model: rota.model, tokens: rj?.usage ?? null, faixa: rota.faixa },
   });
 });
