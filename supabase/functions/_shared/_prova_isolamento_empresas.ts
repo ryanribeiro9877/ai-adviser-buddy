@@ -88,6 +88,13 @@ assert(
   "traffic-chat deve lembrar conjunto N + link da conversa e auto-continuar lote",
 );
 assert(
+  chat.includes("pergunta_nao_e_ato") &&
+    chat.includes("ehPerguntaDeLeitura") &&
+    chat.includes("PERGUNTA") &&
+    chat.includes("chat-v28.61"),
+  "traffic-chat v28.61: pergunta de leitura nao emite card",
+);
+assert(
   chat.includes("empresaEhCredito(companyId)") &&
     !chat.includes('special_ad_categories: ["FINANCIAL_PRODUCTS_SERVICES"]'),
   "criar_campanha nao forca FINANCIAL para todas as empresas",
