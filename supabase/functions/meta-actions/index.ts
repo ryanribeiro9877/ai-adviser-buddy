@@ -1,4 +1,6 @@
 // supabase/functions/meta-actions/index.ts (v5.40)
+// v5.42 (22/08/2026) - definir_whatsapp_conjunto: PATCH promoted_object.whatsapp_phone_number
+//   (Gerenciador trava o campo). Tenta formatos + pausa temporaria se o PATCH direto falhar.
 // v5.41 (22/08/2026) - CTWA: criativo WHATSAPP_MESSAGE + api.whatsapp.com/send; numero no
 //   promoted_object do conjunto (nao CONTACT_US + wa.me). Corrige "Criativo invalido para o
 //   objetivo" nos JUR_CONV ACTIVE sob CONVERSATIONS+WHATSAPP. Patch automatico do conjunto
@@ -2934,6 +2936,182 @@ Deno.serve(async (req) => {
     /* */
   }
   const onlyId: string | null = body?.approval_id ?? null;
+
+  // v5.42: troca o WhatsApp do conjunto CTWA (Gerenciador trava o campo apos criar ads).
+  // Tenta formatos Graph + pausa temporaria do conjunto se o PATCH direto falhar.
+  if (body?.modo === "definir_whatsapp_conjunto") {
+    const companyId = String(body?.company_id ?? "57f755b9-c23d-4f58-a488-8173d697c010").trim();
+    const adsetId = String(body?.adset_external_id ?? "120249671521030182").trim();
+    const pageId = String(body?.page_id ?? "105656372312257").trim();
+    let wa = digitosWhatsApp(body?.whatsapp_phone_number ?? "71991088073");
+    if (wa && wa.length === 11 && wa.startsWith("71")) wa = `55${wa}`;
+    if (wa && wa.length === 10 && wa.startsWith("71")) wa = `55${wa}`;
+    const ativ = ativarTokenEmpresa(companyId);
+    if (!ativ.ok) return json({ error: ativ.motivo }, 400);
+    if (!wa) return json({ error: "whatsapp_phone_number invalido" }, 400);
+
+    const antes = await g(
+      `/${adsetId}?fields=id,name,status,effective_status,destination_type,optimization_goal,promoted_object`,
+    );
+    const pageWa = await g(
+      `/${pageId}?fields=id,name,whatsapp_number,whatsapp_business_account`,
+    );
+
+    const candidatos = Array.from(
+      new Set([
+        wa,
+        wa.startsWith("55") ? `+${wa}` : `+55${wa}`,
+        wa.startsWith("55") ? wa.slice(2) : wa,
+      ]),
+    );
+    const tentativas: any[] = [];
+    let ok = false;
+    let promovido: Record<string, unknown> | null = null;
+    const statusAntes = String((antes.body as any)?.status ?? "ACTIVE").toUpperCase();
+
+    const tentarPatch = async (digits: string, extra?: Record<string, string>) => {
+      const po = JSON.stringify({ page_id: pageId, whatsapp_phone_number: digits });
+      const r = await g(`/${adsetId}`, "POST", { promoted_object: po, ...(extra ?? {}) });
+      tentativas.push({ digits, extra: extra ?? null, status: r.status, body: r.body });
+      return r;
+    };
+
+    for (const digits of candidatos) {
+      const r = await tentarPatch(digits);
+      if (r.status === 200) {
+        ok = true;
+        promovido = { page_id: pageId, whatsapp_phone_number: digits };
+        break;
+      }
+    }
+
+    let pausou = false;
+    if (!ok && statusAntes === "ACTIVE") {
+      const pause = await g(`/${adsetId}`, "POST", { status: "PAUSED" });
+      tentativas.push({ etapa: "pausar_conjunto", status: pause.status, body: pause.body });
+      if (pause.status === 200) {
+        pausou = true;
+        for (const digits of candidatos) {
+          const r = await tentarPatch(digits);
+          if (r.status === 200) {
+            ok = true;
+            promovido = { page_id: pageId, whatsapp_phone_number: digits };
+            break;
+          }
+        }
+        const reativa = await g(`/${adsetId}`, "POST", { status: "ACTIVE" });
+        tentativas.push({ etapa: "reativar_conjunto", status: reativa.status, body: reativa.body });
+      }
+    }
+
+    if (!ok) {
+      const adsPause = ["120249679551570182", "120249679554680182", "120249679565490182"];
+      for (const adId of adsPause) {
+        const pAd = await g(`/${adId}`, "POST", { status: "PAUSED" });
+        tentativas.push({ etapa: "pausar_anuncio", ad_id: adId, status: pAd.status, body: pAd.body });
+      }
+      for (const digits of candidatos) {
+        const r = await tentarPatch(digits);
+        if (r.status === 200) {
+          ok = true;
+          promovido = { page_id: pageId, whatsapp_phone_number: digits };
+          break;
+        }
+      }
+      for (const adId of adsPause) {
+        const rAd = await g(`/${adId}`, "POST", { status: "ACTIVE" });
+        tentativas.push({ etapa: "reativar_anuncio", ad_id: adId, status: rAd.status, body: rAd.body });
+      }
+    }
+
+    let clone: any = null;
+    if (!ok) {
+      const conta = String(body?.ad_account ?? "act_1622612945584817").trim();
+      const origem = await g(
+        `/${adsetId}?fields=id,name,campaign_id,daily_budget,lifetime_budget,billing_event,optimization_goal,bid_strategy,targeting,destination_type,is_dynamic_creative,start_time,dsa_beneficiary,dsa_payor`,
+      );
+      const o = origem.body as any;
+      const nomeClone = `${String(o?.name ?? "JURIDICO_CONJ.01")} - WA 99108`;
+      const po = JSON.stringify({ page_id: pageId, whatsapp_phone_number: wa });
+      const createBody: Record<string, string> = {
+        name: nomeClone,
+        campaign_id: String(o?.campaign_id ?? ""),
+        billing_event: String(o?.billing_event ?? "IMPRESSIONS"),
+        optimization_goal: String(o?.optimization_goal ?? "CONVERSATIONS"),
+        bid_strategy: String(o?.bid_strategy ?? "LOWEST_COST_WITHOUT_CAP"),
+        destination_type: "WHATSAPP",
+        promoted_object: po,
+        status: "ACTIVE",
+      };
+      if (o?.daily_budget) createBody.daily_budget = String(o.daily_budget);
+      if (o?.targeting) createBody.targeting = JSON.stringify(o.targeting);
+      if (o?.is_dynamic_creative === false) createBody.is_dynamic_creative = "false";
+      const criado = await g(`/${conta}/adsets`, "POST", createBody);
+      tentativas.push({ etapa: "clonar_conjunto", status: criado.status, body: criado.body });
+      const novoId = String((criado.body as any)?.id ?? "").trim();
+      clone = { create: criado.body, novo_id: novoId || null, ads: [] as any[] };
+      if (criado.status === 200 && novoId) {
+        ok = true;
+        promovido = { page_id: pageId, whatsapp_phone_number: wa };
+        const { data: adsOrig } = await supa
+          .from("ads")
+          .select("external_id,name,creative_id,status")
+          .eq("company_id", companyId)
+          .eq("adset_external_id", adsetId);
+        for (const ad of adsOrig ?? []) {
+          const cr = String((ad as any).creative_id ?? "").trim();
+          const nm = String((ad as any).name ?? "").trim();
+          if (!cr) {
+            clone.ads.push({ name: nm, ok: false, erro: "sem_creative_id" });
+            continue;
+          }
+          const novoAd = await g(`/${conta}/ads`, "POST", {
+            name: nm,
+            adset_id: novoId,
+            status: "ACTIVE",
+            creative: JSON.stringify({ creative_id: cr }),
+          });
+          clone.ads.push({ name: nm, status: novoAd.status, body: novoAd.body });
+        }
+        const pauseOld = await g(`/${adsetId}`, "POST", { status: "PAUSED" });
+        tentativas.push({ etapa: "pausar_conjunto_antigo", status: pauseOld.status, body: pauseOld.body });
+        await supa.from("ad_sets").update({ status: "PAUSED" }).eq("company_id", companyId).eq("external_id", adsetId);
+      }
+    }
+
+    if (ok && promovido && !clone?.novo_id) {
+      await supa
+        .from("ad_sets")
+        .update({ promoted_object: promovido })
+        .eq("company_id", companyId)
+        .eq("external_id", adsetId);
+    }
+
+    const depois = await g(
+      `/${adsetId}?fields=id,name,status,effective_status,destination_type,promoted_object`,
+    );
+    const cloneLido = clone?.novo_id
+      ? await g(`/${clone.novo_id}?fields=id,name,status,destination_type,promoted_object,daily_budget`)
+      : null;
+    return json({
+      ok,
+      modo: "definir_whatsapp_conjunto",
+      whatsapp_pedido: wa,
+      pausou_temporariamente: pausou,
+      promovido,
+      clone,
+      clone_lido: cloneLido?.body ?? null,
+      antes: antes.body,
+      depois: depois.body,
+      page_whatsapp: pageWa.body,
+      tentativas,
+      nota: ok
+        ? (clone?.novo_id
+          ? `Conjunto original nao aceita troca de WhatsApp. Clone ativo ${clone.novo_id} com ${wa}; original pausado.`
+          : "Numero gravado no promoted_object do conjunto. Atualize o Gerenciador.")
+        : "Meta recusou PATCH e tambem a criacao do clone com esse WhatsApp.",
+    }, ok ? 200 : 502);
+  }
 
   // v5.41: repara anuncios CTWA ja criados com CONTACT_US+wa.me (erro de apresentacao).
   // Atualiza promoted_object do conjunto + troca o creative_id de cada anuncio.
