@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.39)
+// supabase/functions/meta-actions/index.ts (v5.40)
+// v5.40 (22/08/2026) - CTWA video sem_molde: NAO envia video_data.link (Graph 1443050
+//   cards a703e076/934e1a2f). CTA+wa.me quando conjunto destination_type=WHATSAPP.
+//   sanitizarVideoDataParaGraph em todo POST de peca nova video.
 // v5.39 (22/08/2026) - alterar_categoria_especial_campanha: update_campaign com
 //   special_ad_categories (incl. [] para remover); espelho campaigns sincronizado.
 // v5.38 (21/08/2026) - Targeting create_adset: Advantage+ sem age_max; age_min<=25;
@@ -335,6 +338,10 @@ import {
   aplicarLinkNoVideoData,
   aplicarLinkNoLinkData,
   destinoDoPedidoCompat,
+  ehUrlWhatsApp,
+  urlWhatsAppMe,
+  ctaPadraoMensagensWhatsApp,
+  sanitizarVideoDataParaGraph,
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
@@ -2055,9 +2062,9 @@ export async function montarCriacao(
       const pageId = String(
         p?.page_id ?? confEmp?.page_id ?? confEmp?.instagram_identity_page_id ?? "",
       ).trim();
-      const ctaTipo = String(p?.call_to_action_type ?? confEmp?.cta_padrao ?? "").trim();
+      let ctaTipo = String(p?.call_to_action_type ?? confEmp?.cta_padrao ?? "").trim();
       const destinoPedido = destinoDoPedidoCompat(p);
-      const linkFinal = String(
+      let linkFinal = String(
         (destinoPedido.aplicavel && destinoPedido.url_final
           ? destinoPedido.url_final
           : null) ??
@@ -2065,6 +2072,55 @@ export async function montarCriacao(
           destinoPedido.url_final ??
           "",
       ).trim();
+
+      // v5.40: conjunto CTWA (CONVERSATIONS + WHATSAPP) exige wa.me + CTA de mensagem.
+      // Cards 22/08 nasceram com LEARN_MORE + URL da Page (engajamento_social) e a Meta
+      // recusaria o destino mesmo apos corrigir video_data.link.
+      const { data: conjEsp } = await supa
+        .from("ad_sets")
+        .select("destination_type, optimization_goal, promoted_object, name")
+        .eq("company_id", companyId)
+        .eq("external_id", adset)
+        .maybeSingle();
+      const conjuntoCtwa = ehPedidoMensagens({
+        destination_type: (conjEsp as any)?.destination_type,
+        optimization_goal: (conjEsp as any)?.optimization_goal,
+        nome: (conjEsp as any)?.name ?? p?.conjunto_destino_nome,
+      });
+      if (conjuntoCtwa) {
+        const po = (conjEsp as any)?.promoted_object ?? {};
+        const waDaJustificativa = (() => {
+          const texto = `${String(p?.justificativa ?? "")} ${String(p?.metrica_sucesso ?? "")}`;
+          const m =
+            texto.match(/(?:whatsapp|wa\.me\/?)\s*[:=]?\s*(\+?\d[\d\s\-.]{9,}\d)/i) ||
+            texto.match(/\b(55\d{10,13})\b/);
+          return m ? urlWhatsAppMe(m[1]) : "";
+        })();
+        const waCandidatos = [
+          p?.whatsapp_phone_number,
+          p?.whatsapp_number,
+          ehUrlWhatsApp(linkFinal) ? linkFinal : null,
+          ehUrlWhatsApp(p?.destino_url) ? p?.destino_url : null,
+          ehUrlWhatsApp(destinoPedido.url_final) ? destinoPedido.url_final : null,
+          po?.whatsapp_phone_number,
+          waDaJustificativa || null,
+        ];
+        let waLink = "";
+        for (const c of waCandidatos) {
+          waLink = urlWhatsAppMe(c);
+          if (waLink) break;
+        }
+        if (!waLink) {
+          return {
+            erro: "destino_whatsapp_ausente_ctwa",
+            detalhe:
+              "O conjunto de destino e Click-to-WhatsApp (CONVERSATIONS + WHATSAPP), mas o pedido nao traz numero/URL wa.me (whatsapp_phone_number ou destino_url). Sem isso a Meta nao cria o criativo de conversa. Informe o WhatsApp no pedido e reaprove.",
+          };
+        }
+        linkFinal = waLink;
+        ctaTipo = ctaPadraoMensagensWhatsApp(ctaTipo || "CONTACT_US");
+      }
+
       if (!pageId) {
         return {
           erro: "page_id_ausente_sem_molde",
@@ -2076,14 +2132,14 @@ export async function montarCriacao(
         return {
           erro: "cta_ausente_sem_molde",
           detalhe:
-            "Peca nova sem molde exige call_to_action_type (ex.: LEARN_MORE). Configure meta_execution_config.cta_padrao ou envie no payload.",
+            "Peca nova sem molde exige call_to_action_type (ex.: LEARN_MORE ou CONTACT_US no CTWA). Configure meta_execution_config.cta_padrao ou envie no payload.",
         };
       }
       if (!linkFinal) {
         return {
           erro: "destino_url_ausente_sem_molde",
           detalhe:
-            "Peca nova sem molde nao tem URL para herdar. Informe destino_url no pedido (LP de conversao OU, em engajamento/reconhecimento, URL da Page/Instagram) ou emita com destino_do_anuncio resolvido.",
+            "Peca nova sem molde nao tem URL para herdar. Informe destino_url no pedido (LP, Page/IG ou wa.me no CTWA) ou emita com destino_do_anuncio resolvido.",
         };
       }
       if (!legendaNova) {
@@ -2112,6 +2168,11 @@ export async function montarCriacao(
           `Anuncio CARROSSEL sem molde (v5.24): ${norm.cards.length} slides em link_data.child_attachments. Escrita via Graph (Pipeboard nao monta carrossel completo).`,
         ];
         avisosCarr.push(avisoIdentidadeInstagram(identidadeInstagram));
+        if (conjuntoCtwa) {
+          avisosCarr.push(
+            `CTWA: destino WhatsApp ${linkFinal} com CTA ${ctaTipo} (conjunto destination_type=WHATSAPP).`,
+          );
+        }
         return {
           path: `/${conta}/ads`,
           body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>,
@@ -2141,6 +2202,7 @@ export async function montarCriacao(
             formato: "carrossel",
             page_id: pageId,
             call_to_action_type: ctaTipo,
+            ctwa: conjuntoCtwa,
           },
           avisos_de_veiculacao: avisosCarr,
         };
@@ -2151,19 +2213,24 @@ export async function montarCriacao(
         if (th.erro) {
           return { erro: "thumbnail_obrigatoria_nao_resolvida", detalhe: th.erro };
         }
-        let novoVd: any = {
+        // v5.40: video_data NAO aceita campo link no topo (Graph 1443050). So CTA.value.link.
+        let novoVd: any = sanitizarVideoDataParaGraph({
           video_id: videoNovo,
           image_url: th.url,
           message: legendaNova,
-          link: linkFinal,
           call_to_action: { type: ctaTipo, value: { link: linkFinal } },
-        };
+        });
         let novoSpec: any = { page_id: pageId, video_data: novoVd };
         novoSpec = aplicarIdentidadeInstagramNoSpec(novoSpec, identidadeInstagram);
         const avisosVeiculacao: string[] = [
           "Anuncio de VIDEO sem molde (ESP-35): object_story_spec montado da config/pedido (page_id + CTA + destino). A Coluna da direita do Facebook nao veicula video.",
         ];
         avisosVeiculacao.push(avisoIdentidadeInstagram(identidadeInstagram));
+        if (conjuntoCtwa) {
+          avisosVeiculacao.push(
+            `CTWA: destino WhatsApp ${linkFinal} com CTA ${ctaTipo} (conjunto destination_type=WHATSAPP).`,
+          );
+        }
         return {
           path: `/${conta}/ads`,
           body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)
@@ -2192,6 +2259,7 @@ export async function montarCriacao(
             formato: "video",
             page_id: pageId,
             call_to_action_type: ctaTipo,
+            ctwa: conjuntoCtwa,
           },
           avisos_de_veiculacao: avisosVeiculacao,
         };
@@ -2210,6 +2278,11 @@ export async function montarCriacao(
         "Anuncio de IMAGEM sem molde (ESP-35): object_story_spec montado da config/pedido. A Coluna da direita do Facebook ACEITA imagem.",
       ];
       avisosImg.push(avisoIdentidadeInstagram(identidadeInstagram));
+      if (conjuntoCtwa) {
+        avisosImg.push(
+          `CTWA: destino WhatsApp ${linkFinal} com CTA ${ctaTipo} (conjunto destination_type=WHATSAPP).`,
+        );
+      }
       return {
         path: `/${conta}/ads`,
         body: { name: nome, adset_id: adset, status: "ACTIVE" } as Record<string, string>, // v4.4: aprovar criar_anuncio = cria ACTIVE (entrega sob responsabilidade do card)
@@ -2238,6 +2311,7 @@ export async function montarCriacao(
           formato: "imagem",
           page_id: pageId,
           call_to_action_type: ctaTipo,
+          ctwa: conjuntoCtwa,
         },
         avisos_de_veiculacao: avisosImg,
       };
@@ -2348,6 +2422,8 @@ export async function montarCriacao(
       // image_hash do molde e o quadro do video ANTIGO: mantido, a Meta publicaria a capa errada.
       let novoVd: any = { ...vd, video_id: videoNovo, image_url: th.url };
       delete novoVd.image_hash;
+      // v5.40: Meta 1443050 — link no topo de video_data e recusado no POST.
+      novoVd = sanitizarVideoDataParaGraph(novoVd);
       if (legendaNova) novoVd.message = legendaNova;
       if (destino.aplicavel && destino.corrigiu) {
         novoVd = aplicarLinkNoVideoData(novoVd, linkFinal);
@@ -2357,8 +2433,8 @@ export async function montarCriacao(
       // Dinamico (asset_feed): monta story_spec minimo — o feed nao e object_story_spec.
       let novoSpec: any =
         fonteConfig === "video_data"
-          ? { ...cb.object_story_spec, video_data: novoVd }
-          : { page_id: pageId, video_data: novoVd };
+          ? { ...cb.object_story_spec, video_data: sanitizarVideoDataParaGraph(novoVd) }
+          : { page_id: pageId, video_data: sanitizarVideoDataParaGraph(novoVd) };
       novoSpec = aplicarIdentidadeInstagramNoSpec(novoSpec, identidadeInstagram);
 
       // Avisos de veiculacao, derivados do que a peca REALMENTE e (video) e do que o molde
@@ -2602,6 +2678,9 @@ export async function montarCriacao(
           ...spec,
           video_data: aplicarLinkNoVideoData(vdRep, destinoRep.url_final),
         };
+      } else if (vdRep) {
+        // v5.40: mesmo sem reescrita de LP, remova video_data.link se o molde trouxer.
+        specFinal = { ...spec, video_data: sanitizarVideoDataParaGraph(vdRep) };
       }
       return {
         path: `/${conta}/ads`,

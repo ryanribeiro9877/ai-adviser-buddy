@@ -33,6 +33,8 @@
 // v28.45 (20/08/2026) - EMISSAO ENGAJAMENTO (lote 5 cards IMPULSAO):
 //   (1) sem_molde em conjunto OUTCOME_ENGAGEMENT/AWARENESS auto-preenche destino
 //   Page/IG (nao exige LP/produto CLT) — fecha peca_nova_sem_molde_incompleta;
+// v28.51 (22/08/2026) - CTWA anuncio sem_molde: conjunto CONVERSATIONS+WHATSAPP
+//   exige wa.me + CONTACT_US (nao LEARN_MORE/Page). Cards a703e076/934e1a2f.
 //   (2) FIN-01 em impulsão educativa: se so falta "Consulte sua margem…", anexa
 //   a frase uma vez e revalida (nao recusa hard o card autorizado pelo gestor);
 //   (3) auto-continue NAO loopa quando propose_action ja falhou com erro duro
@@ -562,7 +564,7 @@ import {
   mensagemObjetivoNaoSuportado,
   ODAX_OBJETIVOS,
 } from "../_shared/objetivo_odax.ts";
-import { urlDestinoSocialTopo } from "../_shared/destino_url_lp.ts";
+import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, ctaPadraoMensagensWhatsApp } from "../_shared/destino_url_lp.ts";
 import { pipeboardToken } from "../_shared/pipeboard.ts";
 import {
   callReadTool,
@@ -2662,7 +2664,7 @@ async function t_propose_criacao(
       if (!molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
     }
 
-    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,campaign_id").eq("company_id", companyId);
+    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,campaign_id,destination_type,optimization_goal,promoted_object").eq("company_id", companyId);
     const dest = (sets ?? []).find((x) => x.external_id === conjuntoDestino)
       ?? (sets ?? []).find((x) => norm(x.name) === norm(conjuntoDestino))
       ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(conjuntoDestino)))[0];
@@ -2670,7 +2672,9 @@ async function t_propose_criacao(
 
     // v28.45: familia do conjunto destino (campanha ODAX) — engajamento/reconhecimento
     // nao usam LP de conversao; destino do criativo e Page/IG.
+    // v28.51: CONVERSATIONS+WHATSAPP = familia mensagens (CTWA), NAO engajamento social.
     let objetivoCampanhaDest: string | null = null;
+    let nomeCampanhaDest: string | null = null;
     if ((dest as any).campaign_id) {
       const { data: campDest } = await supa
         .from("campaigns")
@@ -2678,12 +2682,20 @@ async function t_propose_criacao(
         .eq("id", (dest as any).campaign_id)
         .maybeSingle();
       objetivoCampanhaDest = String((campDest as any)?.objective ?? "").trim() || null;
+      nomeCampanhaDest = String((campDest as any)?.name ?? "").trim() || null;
     }
+    const anuncioMensagens = ehPedidoMensagens({
+      destination_type: (dest as any).destination_type,
+      optimization_goal: (dest as any).optimization_goal,
+      objetivo_tag: params?.objetivo_tag,
+      nome: `${dest.name ?? ""} ${nomeCampanhaDest ?? ""}`,
+    });
     const familiaPorTag = ehFamiliaSocialTopo(params?.objetivo_tag) || ehFamiliaSocialTopo(params?.objetivo);
     const familiaPorCampanha = ehFamiliaSocialTopo(objetivoCampanhaDest);
     const familiaPorNomeConjunto = /ENGAJAMENTO|RECONHECIMENTO|IMPULSAO|SOCIAL/i.test(String(dest.name ?? ""));
-    const anuncioSocialTopo = familiaPorTag || familiaPorCampanha ||
-      (familiaPorNomeConjunto && String(params?.canal ?? "").toUpperCase() === "SOCIAL");
+    // CTWA prevalece: campanha OUTCOME_ENGAGEMENT + conjunto WHATSAPP nao e boost de post.
+    const anuncioSocialTopo = !anuncioMensagens && (familiaPorTag || familiaPorCampanha ||
+      (familiaPorNomeConjunto && String(params?.canal ?? "").toUpperCase() === "SOCIAL"));
 
     // v28.10 (GT-13) - DOIS PEDIDOS, UMA FONTE. Existem dois anuncios diferentes com o mesmo nome
     // de acao: REPLICAR um que ja roda (escalar o que funciona) e PUBLICAR PECA NOVA do acervo.
@@ -2735,10 +2747,12 @@ async function t_propose_criacao(
 
     // ESP-35: config da empresa preenche page/CTA quando sem molde.
     // v28.45: engajamento/reconhecimento → destino Page/IG (nunca forcar LP CLT).
+    // v28.51: CTWA (CONVERSATIONS+WHATSAPP) → CONTACT_US + wa.me (nao Page/LEARN_MORE).
     let pageIdPedido: string | null = String(params?.page_id ?? "").trim() || null;
     let ctaPedido: string | null = String(params?.call_to_action_type ?? params?.cta ?? "").trim() || null;
     let destinoUrlPedido: string | null = String(params?.destino_url ?? "").trim() || null;
     let destinoSocialResolvido = false;
+    let destinoMensagensResolvido = false;
     if (semMolde) {
       const { data: confEmp } = await supa
         .from("meta_execution_config")
@@ -2748,7 +2762,25 @@ async function t_propose_criacao(
       if (!pageIdPedido) {
         pageIdPedido = String(confEmp?.page_id ?? confEmp?.instagram_identity_page_id ?? "").trim() || null;
       }
-      if (!ctaPedido) {
+      if (anuncioMensagens) {
+        const po = (dest as any)?.promoted_object ?? {};
+        const wa = urlWhatsAppMe(
+          params?.whatsapp_phone_number ??
+            params?.whatsapp_number ??
+            (ehUrlWhatsApp(destinoUrlPedido) ? destinoUrlPedido : null) ??
+            po?.whatsapp_phone_number,
+        );
+        if (!wa) {
+          return {
+            erro: "destino_whatsapp_obrigatorio_ctwa",
+            detalhe:
+              "Conjunto destino e Click-to-WhatsApp (CONVERSATIONS + WHATSAPP). Informe params.whatsapp_phone_number (ou destino_url=https://wa.me/...). LEARN_MORE + URL da Page NAO serve neste conjunto.",
+          };
+        }
+        destinoUrlPedido = wa;
+        ctaPedido = ctaPadraoMensagensWhatsApp(ctaPedido || "CONTACT_US");
+        destinoMensagensResolvido = true;
+      } else if (!ctaPedido) {
         ctaPedido = String(confEmp?.cta_padrao ?? "LEARN_MORE").trim() || null;
       }
       if (anuncioSocialTopo) {
@@ -2761,7 +2793,7 @@ async function t_propose_criacao(
         }
         destinoSocialResolvido = true;
         // CTA tipico de boost social: LEARN_MORE / SEE_MORE — LEARN_MORE ja e o padrao.
-      } else if (!destinoUrlPedido) {
+      } else if (!anuncioMensagens && !destinoUrlPedido) {
         // Destino conversao: so CLT tem LP canonica.
         const produtoHint = String(params?.produto ?? "").trim().toLowerCase();
         if (produtoHint.includes("clt") || produtoHint.includes("consignado")) {
@@ -2778,7 +2810,9 @@ async function t_propose_criacao(
       if (!pageIdPedido || !ctaPedido || !destinoUrlPedido) {
         return {
           erro: "peca_nova_sem_molde_incompleta",
-          detalhe: anuncioSocialTopo
+          detalhe: anuncioMensagens
+            ? `Sem molde (CTWA/mensagens) faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "whatsapp_phone_number (wa.me)"].filter(Boolean).join(", ")}.`
+            : anuncioSocialTopo
             ? `Sem molde (engajamento/reconhecimento) faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "destino Page/IG"].filter(Boolean).join(", ")}. Configure meta_execution_config.page_id.`
             : `Sem molde faltam: ${[!pageIdPedido && "page_id", !ctaPedido && "call_to_action_type", !destinoUrlPedido && "destino_url (ou produto CLT)"].filter(Boolean).join(", ")}. Configure meta_execution_config ou passe no params. So CLT tem LP canonica hoje.`,
         };
@@ -2828,7 +2862,20 @@ async function t_propose_criacao(
       pedido.page_id = pageIdPedido;
       pedido.call_to_action_type = ctaPedido;
       pedido.destino_url = destinoUrlPedido;
-      if (destinoSocialResolvido || anuncioSocialTopo) {
+      if (destinoMensagensResolvido || anuncioMensagens) {
+        const waDigits = String(destinoUrlPedido ?? "").replace(/\D/g, "");
+        if (waDigits) pedido.whatsapp_phone_number = waDigits;
+        pedido.destino_do_anuncio = {
+          caso: "mensagens_whatsapp",
+          produto: null,
+          url_final: destinoUrlPedido,
+          url_canonica: destinoUrlPedido,
+          corrigir: false,
+          aplicavel: true,
+          mensagem:
+            "ESP-35/v28.51: anuncio CTWA (CONVERSATIONS + WHATSAPP) — destino wa.me + CTA de mensagem (CONTACT_US).",
+        };
+      } else if (destinoSocialResolvido || anuncioSocialTopo) {
         pedido.destino_do_anuncio = {
           caso: "engajamento_social",
           produto: null,

@@ -259,26 +259,68 @@ const ASSINATURAS: {
     frase:
       "com publico Advantage+ a Meta so aceita idade minima entre 18 e 25 e nao aceita age_max no pedido (o teto fica em 65). O sistema agora sanitiza isso automaticamente — reemitir ou tentar de novo.",
   },
+  {
+    // Medido 22/08/2026 cards a703e076 / 934e1a2f: video_data.link no POST /adcreatives.
+    recusa: "video_data_link_nao_suportado",
+    quando:
+      /1443050|campo link n[aã]o [eé] suportado.*video_data|link.*not supported.*video_data/i,
+    frase:
+      "a Meta recusou o criativo porque o campo link nao e permitido dentro de video_data (so no call_to_action). O sistema ja corrige isso — pode tentar de novo neste card.",
+  },
 ];
+
+/** Extrai error_user_msg / message do envelope Graph quando presente. */
+function mensagemGraphDoBruto(bruto: unknown): string | null {
+  try {
+    const o = typeof bruto === "string" ? JSON.parse(bruto) : bruto;
+    const err = (o as any)?.body?.error ?? (o as any)?.error ?? null;
+    if (!err || typeof err !== "object") return null;
+    const user = String((err as any).error_user_msg ?? "").trim();
+    if (user) return user;
+    const title = String((err as any).error_user_title ?? "").trim();
+    const msg = String((err as any).message ?? "").trim();
+    if (title && msg) return `${title}: ${msg}`;
+    return title || msg || null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Traduz uma falha de execucao para uma frase que o gestor entende.
  * `recusaConhecida` vem de uma recusa NOMEADA pelo proprio sistema (montarCriacao), e quando
  * existe ela manda - o sistema sabe mais sobre o proprio "nao" do que qualquer regex.
+ * Excecao: wrappers genericos ("falha ao criar adcreative") cedem a assinatura Graph / error_user_msg.
  */
 export function traduzirFalha(
   bruto: unknown,
   recusaConhecida?: string | null,
   mensagemConhecida?: string | null,
 ): FalhaTraduzida {
-  if (recusaConhecida && mensagemConhecida) {
+  const wrapperGenerico =
+    !!recusaConhecida &&
+    /^(falha ao criar adcreative|falha_meta|falha|erro)$/i.test(String(recusaConhecida).trim());
+
+  if (recusaConhecida && mensagemConhecida && !wrapperGenerico) {
     return { recusa: recusaConhecida, motivo_para_o_gestor: mensagemConhecida };
   }
   const texto = typeof bruto === "string" ? bruto : safeJson(bruto);
   for (const a of ASSINATURAS) {
     if (a.quando.test(texto)) {
-      return { recusa: recusaConhecida ?? a.recusa, motivo_para_o_gestor: a.frase };
+      return { recusa: a.recusa, motivo_para_o_gestor: a.frase };
     }
+  }
+  const msgGraph = mensagemGraphDoBruto(bruto);
+  if (msgGraph) {
+    return {
+      recusa: wrapperGenerico
+        ? "meta_recusou_adcreative"
+        : (recusaConhecida ?? "meta_recusou"),
+      motivo_para_o_gestor: `a Meta recusou a operacao: ${msgGraph}`,
+    };
+  }
+  if (recusaConhecida && mensagemConhecida) {
+    return { recusa: recusaConhecida, motivo_para_o_gestor: mensagemConhecida };
   }
   if (recusaConhecida) {
     return {

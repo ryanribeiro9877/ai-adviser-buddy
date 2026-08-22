@@ -20,7 +20,15 @@ export type DestinoDoAnuncio = {
   produto?: string | null;
   sinal?: string | null;
   confianca?: string | null;
-  caso?: "clt" | "engajamento_social" | "outro" | "outro_sem_lp_decidida" | "indeterminado" | string | null;
+  caso?:
+    | "clt"
+    | "engajamento_social"
+    | "mensagens_whatsapp"
+    | "outro"
+    | "outro_sem_lp_decidida"
+    | "indeterminado"
+    | string
+    | null;
   url_do_molde?: string | null;
   url_canonica?: string | null;
   url_final?: string | null;
@@ -81,8 +89,9 @@ export function destinoDoPedidoCompat(p: any): DestinoCompat {
     };
   }
   return {
-    // CLT = LP de conversao; engajamento_social = Page/IG (link do criativo, sem LP).
-    aplicavel: d.caso === "clt" || d.caso === "engajamento_social",
+    // CLT = LP; engajamento_social = Page/IG; mensagens_whatsapp = wa.me (CTWA).
+    aplicavel:
+      d.caso === "clt" || d.caso === "engajamento_social" || d.caso === "mensagens_whatsapp",
     corrigiu: deveCorrigirParaCanonico(d),
     url_final: d.url_final ?? null,
     url_original: d.url_do_molde ?? null,
@@ -93,20 +102,85 @@ export function destinoDoPedidoCompat(p: any): DestinoCompat {
   };
 }
 
-/** Grava o link em video_data.link e call_to_action.value.link, se existirem. */
-export function aplicarLinkNoVideoData(vd: Record<string, unknown>, link: string): Record<string, unknown> {
-  return aplicarLinkNoBloco(vd, link);
+/** True se a URL e destino Click-to-WhatsApp (wa.me / api.whatsapp.com). */
+export function ehUrlWhatsApp(url: unknown): boolean {
+  return /wa\.me|api\.whatsapp\.com/i.test(String(url ?? ""));
 }
 
-/** Grava o link em link_data.link e call_to_action.value.link, se existirem (anúncio de imagem). */
-export function aplicarLinkNoLinkData(ld: Record<string, unknown>, link: string): Record<string, unknown> {
-  return aplicarLinkNoBloco(ld, link);
+/**
+ * Normaliza telefone ou URL para https://wa.me/<digits>.
+ * Aceita +55…, 5571…, wa.me/…, api.whatsapp.com/send?phone=…
+ */
+export function urlWhatsAppMe(phoneOrUrl: unknown): string {
+  const raw = String(phoneOrUrl ?? "").trim();
+  if (!raw) return "";
+  if (/api\.whatsapp\.com/i.test(raw)) {
+    const m = raw.match(/[?&]phone=(\d+)/i);
+    if (m?.[1]) return `https://wa.me/${m[1]}`;
+  }
+  if (/wa\.me/i.test(raw)) {
+    const m = raw.match(/wa\.me\/(\d+)/i);
+    if (m?.[1]) return `https://wa.me/${m[1]}`;
+  }
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length >= 10) return `https://wa.me/${digits}`;
+  return "";
 }
 
-// video_data e link_data compartilham o formato { link, call_to_action: { value: { link } } }.
-function aplicarLinkNoBloco(bloco: Record<string, unknown>, link: string): Record<string, unknown> {
-  const novo: Record<string, unknown> = { ...bloco, link };
-  const cta = bloco.call_to_action;
+/**
+ * CTA tipico de CTWA nos anuncios Juridico/LF ja publicados: CONTACT_US + wa.me.
+ * LEARN_MORE/SEE_MORE com Page URL e incompativel com destination_type=WHATSAPP.
+ */
+export function ctaPadraoMensagensWhatsApp(ctaAtual?: unknown): string {
+  const c = String(ctaAtual ?? "").trim().toUpperCase();
+  if (
+    c === "CONTACT_US" ||
+    c === "WHATSAPP_MESSAGE" ||
+    c === "MESSAGE_PAGE" ||
+    c === "SEND_MESSAGE"
+  ) {
+    return c;
+  }
+  return "CONTACT_US";
+}
+
+/**
+ * Grava o destino SO em call_to_action.value.link.
+ * Medido 22/08/2026 (cards a703e076 / 934e1a2f): Graph #100 subcode 1443050 —
+ * "O campo link não é suportado no campo video_data de object_story_spec."
+ * Remove video_data.link se existir (herdado de molde ou bug antigo).
+ */
+export function aplicarLinkNoVideoData(
+  vd: Record<string, unknown>,
+  link: string,
+): Record<string, unknown> {
+  const novo: Record<string, unknown> = { ...vd };
+  delete novo.link;
+  const cta = vd.call_to_action;
+  if (cta && typeof cta === "object") {
+    const ctaObj = cta as Record<string, unknown>;
+    const value = ctaObj.value;
+    if (value && typeof value === "object") {
+      novo.call_to_action = {
+        ...ctaObj,
+        value: { ...(value as Record<string, unknown>), link },
+      };
+    } else {
+      novo.call_to_action = { ...ctaObj, value: { link } };
+    }
+  } else {
+    novo.call_to_action = { type: "LEARN_MORE", value: { link } };
+  }
+  return novo;
+}
+
+/** Grava o link em link_data.link e call_to_action.value.link (anúncio de imagem). */
+export function aplicarLinkNoLinkData(
+  ld: Record<string, unknown>,
+  link: string,
+): Record<string, unknown> {
+  const novo: Record<string, unknown> = { ...ld, link };
+  const cta = ld.call_to_action;
   if (cta && typeof cta === "object") {
     const ctaObj = cta as Record<string, unknown>;
     const value = ctaObj.value;
@@ -119,5 +193,16 @@ function aplicarLinkNoBloco(bloco: Record<string, unknown>, link: string): Recor
       novo.call_to_action = { ...ctaObj, value: { link } };
     }
   }
+  return novo;
+}
+
+/** Remove link de topo em video_data antes do POST /adcreatives (Meta 1443050). */
+export function sanitizarVideoDataParaGraph(
+  vd: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!vd || typeof vd !== "object") return vd;
+  if (!("link" in vd)) return vd;
+  const novo = { ...vd };
+  delete novo.link;
   return novo;
 }
