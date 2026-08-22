@@ -5,8 +5,10 @@ import {
   ehFamiliaSocialTopo,
   ehFamiliaSemMoldePermitida,
   ehPedidoMensagens,
+  ehPedidoTrafegoWebsite,
   defaultsConjuntoSocialTopo,
   defaultsConjuntoMensagens,
+  defaultsConjuntoTrafegoWebsite,
   targetingPadraoSocialTopo,
   mensagemObjetivoNaoSuportado,
   normalizarObjetivoOdax,
@@ -79,6 +81,25 @@ if (!("erro" in msg)) {
 
 assert(ehPedidoMensagens({ optimization_goal: "CONVERSATIONS" }) === true, "pedido conv");
 assert(ehPedidoMensagens({ nome: "COHAPM_JURIDICO_CONV_LEVA01" }) === true, "nome conv");
+assert(
+  ehPedidoMensagens({
+    nome: "COHAPM_JURIDICO_CONV_LEVA02",
+    destination_type: "WEBSITE",
+    optimization_goal: "LANDING_PAGE_VIEWS",
+  }) === false,
+  "CONV+WEBSITE nao e CTWA",
+);
+assert(
+  ehPedidoTrafegoWebsite({
+    destination_type: "WEBSITE",
+    optimization_goal: "LANDING_PAGE_VIEWS",
+    familia_objetivo: "mensagens",
+  }) === true,
+  "WEBSITE vence familia mensagens",
+);
+const traf = defaultsConjuntoTrafegoWebsite({ optimization_goal: "LANDING_PAGE_VIEWS" });
+assert(traf.destination_type === "WEBSITE", "traf dest");
+assert(traf.optimization_goal === "LANDING_PAGE_VIEWS", "traf opt");
 assert(ehPedidoMensagens({ nome: "IMPULSAO SOCIAL ENGAJAMENTO" }) === false, "nome social");
 assert(ehFamiliaSemMoldePermitida("mensagens") === true, "sem molde mensagens");
 assert(normalizarObjetivoOdax("CONV") === "OUTCOME_ENGAGEMENT", "CONV odax");

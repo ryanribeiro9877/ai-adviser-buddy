@@ -167,13 +167,41 @@ export function familiaDeObjetivo(objetivo: unknown): FamiliaObjetivo {
  * optimization_goal=CONVERSATIONS + destination_type=WHATSAPP.
  * Distinto de "engajamento" social (POST_ENGAGEMENT + ON_POST).
  */
+/**
+ * Trafego com destino SITE (wa.me como URL, LANDING_PAGE_VIEWS).
+ * Distinto de CTWA: destination_type=WEBSITE, nao WHATSAPP no conjunto.
+ * Medido 22/08/2026: card 5b9fd669 recusou WEBSITE porque o nome CONV forcou familia mensagens.
+ */
+export function ehPedidoTrafegoWebsite(params: {
+  optimization_goal?: unknown;
+  destination_type?: unknown;
+  familia_objetivo?: unknown;
+  objetivo?: unknown;
+}): boolean {
+  const dest = normalizarChave(params.destination_type);
+  const opt = normalizarChave(params.optimization_goal);
+  const fam = normalizarChave(params.familia_objetivo);
+  if (dest === "WHATSAPP" || dest === "MESSENGER" || dest === "INSTAGRAM_DIRECT") return false;
+  if (opt === "CONVERSATIONS") return false;
+  if (dest === "WEBSITE" || dest === "UNDEFINED") return true;
+  if (opt === "LANDING_PAGE_VIEWS") return true;
+  if (fam === "TRAFEGO" || fam === "TRAFFIC") return true;
+  if (normalizarObjetivoOdax(params.objetivo) === "OUTCOME_TRAFFIC" && (opt === "LINK_CLICKS" || dest === "WEBSITE")) {
+    return true;
+  }
+  return false;
+}
+
 export function ehPedidoMensagens(params: {
   optimization_goal?: unknown;
   destination_type?: unknown;
   familia_objetivo?: unknown;
   objetivo_tag?: unknown;
   nome?: unknown;
+  objetivo?: unknown;
 }): boolean {
+  // URL/site (wa.me no criativo) prevalece sobre nome CONV / familia mensagens.
+  if (ehPedidoTrafegoWebsite(params)) return false;
   const fam = normalizarChave(params.familia_objetivo);
   if (
     fam === "MENSAGENS" || fam === "MENSAGEM" || fam === "MESSAGES" ||
@@ -381,6 +409,26 @@ export function defaultsConjuntoMensagens(
     billing_event: "IMPRESSIONS",
     destination_type: dest,
     promoted_object: promoted,
+  };
+}
+
+/**
+ * Conjunto de trafego (OUTCOME_TRAFFIC) com destino website.
+ * O link (ex. wa.me) vive no criativo, nao em promoted_object.whatsapp_phone_number.
+ */
+export function defaultsConjuntoTrafegoWebsite(opts?: {
+  optimization_goal?: unknown;
+  destination_type?: unknown;
+}): AdsetEngajamentoDefaults {
+  const optPedida = normalizarChave(opts?.optimization_goal);
+  const opt = optPedida === "LINK_CLICKS" ? "LINK_CLICKS" : "LANDING_PAGE_VIEWS";
+  const destPedida = normalizarChave(opts?.destination_type);
+  const dest = destPedida === "UNDEFINED" ? "UNDEFINED" : "WEBSITE";
+  return {
+    optimization_goal: opt,
+    billing_event: "IMPRESSIONS",
+    destination_type: dest,
+    promoted_object: { page_id: "" },
   };
 }
 

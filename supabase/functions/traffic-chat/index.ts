@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.56)
+// supabase/functions/traffic-chat/index.ts (v28.57)
+// v28.57 (22/08/2026) - WEBSITE + LANDING_PAGE_VIEWS (link wa.me) e familia trafego, nao CTWA,
+//   mesmo se o nome da campanha tiver CONV.
 // v28.56 (22/08/2026) - Card de criacao: summary so com nomes (campanha/conjunto/criativo).
 //   Ensaio de compliance/visao/ESP fica no payload; a UI mostra titulo curto + previa.
 // v28.55 (22/08/2026) - Roteador de catalogo OpenRouter: escolhe o modelo do turno
@@ -565,6 +567,7 @@ import {
   ehFamiliaSocialTopo,
   ehFamiliaSemMoldePermitida,
   ehPedidoMensagens,
+  ehPedidoTrafegoWebsite,
   mensagemObjetivoNaoSuportado,
   ODAX_OBJETIVOS,
 } from "../_shared/objetivo_odax.ts";
@@ -2094,11 +2097,18 @@ async function t_propose_criacao(
       defaultLeadsSeVazio: true,
     });
     const objetivoConj = resolvidoObjConj.ok ? resolvidoObjConj.objetivo : "OUTCOME_LEADS";
+    const pedidoTrafegoWeb = ehPedidoTrafegoWebsite({
+      optimization_goal: params?.optimization_goal,
+      destination_type: params?.destination_type,
+      familia_objetivo: params?.familia_objetivo,
+      objetivo: params?.objetivo,
+    });
     const pedidoMensagens = ehPedidoMensagens({
       optimization_goal: params?.optimization_goal,
       destination_type: params?.destination_type,
       familia_objetivo: params?.familia_objetivo,
       objetivo_tag: params?.objetivo_tag ?? resolvidoConj.partes?.objetivo_tag,
+      objetivo: params?.objetivo,
       nome: `${campanhaDestino} ${nomeNovo}`,
     });
     const familiaRaw = String(params?.familia_objetivo ?? "").trim().toLowerCase();
@@ -2107,8 +2117,8 @@ async function t_propose_criacao(
       || familiaRaw === "trafego" || familiaRaw === "app" || familiaRaw === "mensagens"
         ? familiaRaw
         : familiaDeObjetivo(objetivoConj ?? resolvidoConj.partes?.objetivo_tag);
-    // CTWA/conversas prevalece sobre o mapeamento generico OUTCOME_ENGAGEMENT → engajamento social.
-    if (pedidoMensagens) familiaConj = "mensagens";
+    if (pedidoTrafegoWeb) familiaConj = "trafego";
+    else if (pedidoMensagens) familiaConj = "mensagens";
     const socialTopoConj = familiaConj === "engajamento" || familiaConj === "reconhecimento";
     const mensagensConj = familiaConj === "mensagens";
     const pageIdConj =
@@ -2274,8 +2284,9 @@ async function t_propose_criacao(
     let mensagensEfetivo = mensagensConj;
     let pageIdEfetivo = pageIdConj;
     let objetivoEfetivo = objetivoConj;
-    if (!socialEfetivo && !mensagensEfetivo && ehFamiliaSocialTopo((dest as any).objective)) {
+    if (!socialEfetivo && !mensagensEfetivo && familiaEfetiva !== "trafego" && ehFamiliaSocialTopo((dest as any).objective)) {
       // OUTCOME_ENGAGEMENT: CTWA (mensagens) se pedido CONVERSATIONS/WHATSAPP; senao impulsão social.
+      // WEBSITE/LPV nao entra aqui — ja e trafego.
       if (
         pedidoMensagens ||
         ehPedidoMensagens({
@@ -2283,6 +2294,7 @@ async function t_propose_criacao(
           destination_type: params?.destination_type,
           familia_objetivo: params?.familia_objetivo,
           objetivo_tag: params?.objetivo_tag,
+          objetivo: params?.objetivo,
           nome: `${dest.name} ${nomeNovo}`,
         })
       ) {
@@ -4167,6 +4179,10 @@ EXCECAO CONJUNTO MENSAGENS / CTWA (21/08/2026 v28.50): conversas WhatsApp NAO sa
 post. Campanha OUTCOME_ENGAGEMENT (ou tag CONV/MESSAGES/WHATSAPP) + conjunto com
 familia_objetivo=mensagens OU optimization_goal=CONVERSATIONS → destination_type=WHATSAPP +
 promoted_object={page_id, whatsapp_phone_number}. O criativo usa WHATSAPP_MESSAGE + api.whatsapp.com/send (nao CONTACT_US + wa.me). Pode usar target_name=sem_molde.
+EXCECAO TRAFEGO + LINK wa.me (22/08/2026): se o gestor pedir destino WEBSITE / LANDING_PAGE_VIEWS
+com URL wa.me, isso NAO e CTWA. familia_objetivo=trafego, destination_type=WEBSITE,
+optimization_goal=LANDING_PAGE_VIEWS. O numero fica no LINK do criativo. Nao recuse WEBSITE
+so porque o nome da campanha tem CONV. Nao chame defaults de mensagens nesse caso.
 PROIBIDO emitir CONVERSATIONS com destination_type=ON_POST ou tratar CTWA como familia
 engajamento social (isso gerou a falha do card JURIDICO_CONJ.01 em 21/08/2026).
 PROIBIDO dizer "nao ha molde POST_ENGAGEMENT", "so no Ads Manager", "aguardar Ryan" ou

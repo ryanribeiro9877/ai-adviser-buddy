@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.40)
+// supabase/functions/meta-actions/index.ts (v5.43)
+// v5.43 (22/08/2026) - Trafego WEBSITE (LANDING_PAGE_VIEWS + wa.me no criativo) nao e CTWA.
+//   Nome CONV / familia mensagens nao recusa destination_type=WEBSITE (card 5b9fd669).
 // v5.42 (22/08/2026) - definir_whatsapp_conjunto: PATCH promoted_object.whatsapp_phone_number
 //   (Gerenciador trava o campo). Tenta formatos + pausa temporaria se o PATCH direto falhar.
 // v5.41 (22/08/2026) - CTWA: criativo WHATSAPP_MESSAGE + api.whatsapp.com/send; numero no
@@ -365,8 +367,10 @@ import {
   ehFamiliaSocialTopo,
   ehFamiliaSemMoldePermitida,
   ehPedidoMensagens,
+  ehPedidoTrafegoWebsite,
   defaultsConjuntoSocialTopo,
   defaultsConjuntoMensagens,
+  defaultsConjuntoTrafegoWebsite,
   targetingPadraoSocialTopo,
   mensagemObjetivoNaoSuportado,
 } from "../_shared/objetivo_odax.ts";
@@ -1601,14 +1605,23 @@ export async function montarCriacao(
     // v5.35: mensagens (CTWA) distinta de engajamento social.
     let familiaPayload = String(p?.familia_objetivo ?? "").trim().toLowerCase();
     const tagPartes = String((p?.nome_partes as any)?.objetivo_tag ?? p?.objetivo_tag ?? "").trim();
+    const pedidoTrafegoWeb = ehPedidoTrafegoWebsite({
+      optimization_goal: p?.optimization_goal,
+      destination_type: p?.destination_type,
+      familia_objetivo: p?.familia_objetivo,
+      objetivo: p?.objetivo,
+    });
     const pedidoMensagensExec = ehPedidoMensagens({
       optimization_goal: p?.optimization_goal,
       destination_type: p?.destination_type,
       familia_objetivo: p?.familia_objetivo,
       objetivo_tag: tagPartes,
+      objetivo: p?.objetivo,
       nome: `${p?.campanha_destino_nome ?? ""} ${p?.nome_novo ?? ""} ${nomeFinal}`,
     });
-    if (pedidoMensagensExec) {
+    if (pedidoTrafegoWeb) {
+      familiaPayload = "trafego";
+    } else if (pedidoMensagensExec) {
       familiaPayload = "mensagens";
     } else if (!familiaPayload || familiaPayload === "conversao") {
       if (ehFamiliaSocialTopo(tagPartes) || ehFamiliaSocialTopo(p?.objetivo)) {
@@ -1620,12 +1633,20 @@ export async function montarCriacao(
       if (campObj.status === 200) {
         const objCamp = String((campObj.body as any)?.objective ?? "");
         const nomeCamp = String((campObj.body as any)?.name ?? "");
-        if (
+        if (ehPedidoTrafegoWebsite({
+          optimization_goal: p?.optimization_goal,
+          destination_type: p?.destination_type,
+          familia_objetivo: p?.familia_objetivo,
+          objetivo: p?.objetivo,
+        })) {
+          familiaPayload = "trafego";
+        } else if (
           ehPedidoMensagens({
             optimization_goal: p?.optimization_goal,
             destination_type: p?.destination_type,
             familia_objetivo: p?.familia_objetivo,
             objetivo_tag: tagPartes,
+            objetivo: p?.objetivo,
             nome: `${nomeCamp} ${p?.nome_novo ?? ""}`,
           })
         ) {
@@ -1638,6 +1659,7 @@ export async function montarCriacao(
     const socialTopo =
       familiaPayload === "engajamento" || familiaPayload === "reconhecimento";
     const mensagensTopo = familiaPayload === "mensagens";
+    const trafegoTopo = familiaPayload === "trafego";
 
     if (semMoldeConj && !ehFamiliaSemMoldePermitida(familiaPayload)) {
       return {
@@ -1785,9 +1807,10 @@ export async function montarCriacao(
     }
     } // fim else criar_conjunto (plataformas)
 
+    // v5.43: trafego WEBSITE (wa.me no criativo) distinto de CTWA/mensagens.
     // v5.28/v5.29/v5.35: familia engajamento/reconhecimento/mensagens — molde so empresta targeting.
     // Campanha OUTCOME_ENGAGEMENT + mensagens → CONVERSATIONS+WHATSAPP (CTWA), NAO POST+ON_POST.
-    if (mensagensTopo || socialTopo) {
+    if (mensagensTopo || socialTopo || trafegoTopo) {
       let pageId = String(p?.page_id ?? "").trim();
       if (!pageId && companyId) {
         const { data: cfgPage } = await supa
@@ -1797,7 +1820,12 @@ export async function montarCriacao(
           .maybeSingle();
         pageId = String((cfgPage as any)?.page_id ?? "").trim();
       }
-      const defs = mensagensTopo
+      const defs = trafegoTopo
+        ? defaultsConjuntoTrafegoWebsite({
+          destination_type: p?.destination_type,
+          optimization_goal: p?.optimization_goal,
+        })
+        : mensagensTopo
         ? defaultsConjuntoMensagens(pageId, {
           whatsapp_phone_number: p?.whatsapp_phone_number,
           destination_type: p?.destination_type,
@@ -1813,8 +1841,13 @@ export async function montarCriacao(
       }
       body.optimization_goal = defs.optimization_goal;
       body.billing_event = defs.billing_event;
-      body.promoted_object = JSON.stringify(defs.promoted_object);
-      delete body.attribution_spec;
+      if (trafegoTopo) {
+        delete body.promoted_object;
+        delete body.attribution_spec;
+      } else {
+        body.promoted_object = JSON.stringify(defs.promoted_object);
+        delete body.attribution_spec;
+      }
       if (defs.destination_type) {
         body.destination_type = defs.destination_type;
       } else {
@@ -1843,13 +1876,16 @@ export async function montarCriacao(
         familia_objetivo: familiaPayload,
         override_social_topo: socialTopo,
         override_mensagens: mensagensTopo,
+        override_trafego_website: trafegoTopo,
         sem_molde: semMoldeConj,
         optimization_goal: defs.optimization_goal,
         billing_event: defs.billing_event,
         destination_type: defs.destination_type,
         bid_strategy: body.bid_strategy,
         page_id: pageId,
-        declaracao_social: mensagensTopo
+        declaracao_social: trafegoTopo
+          ? `Conjunto trafego WEBSITE: optimization_goal=${defs.optimization_goal}; destination_type=${defs.destination_type}; bid=${body.bid_strategy}. Link (wa.me) vai no criativo, nao no conjunto.`
+          : mensagensTopo
           ? (semMoldeConj
             ? `Conjunto mensagens SEM MOLDE: CONVERSATIONS + WHATSAPP + page_id=${pageId}; bid=${body.bid_strategy}.`
             : `Conjunto mensagens: molde so emprestou targeting; CONVERSATIONS + WHATSAPP + page_id=${pageId}; bid=${body.bid_strategy} (teto do molde descartado se sem valor).`)
