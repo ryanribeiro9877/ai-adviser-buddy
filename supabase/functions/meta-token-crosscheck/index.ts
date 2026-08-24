@@ -8,30 +8,16 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import {
+  tokenAdsPorCompanyId,
+  tokenWabaPorCompanyId,
+} from "../_shared/meta_company_tokens.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const T_ADS_GLOBAL = (Deno.env.get("META_ADS_TOKEN") ?? "").trim();
-const T_WABA_GLOBAL = (Deno.env.get("WHATSAPP_ACCESS_TOKEN") ?? "").trim();
-// Tokens por empresa (Edge Secrets): META_ADS_TOKEN_COHAPM, WHATSAPP_ACCESS_TOKEN_COHAPM
-// Aceita também o typo WHATSAPP_ACESS_TOKEN_COHAPM (1 S) se alguém cadastrou assim.
-function tokenAdsEmpresa(slug: string) {
-  const s = slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-  return (
-    (Deno.env.get(`META_ADS_TOKEN_${s}`) ?? "").trim() ||
-    T_ADS_GLOBAL
-  );
-}
-function tokenWabaEmpresa(slug: string) {
-  const s = slug.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-  return (
-    (Deno.env.get(`WHATSAPP_ACCESS_TOKEN_${s}`) ?? "").trim() ||
-    (Deno.env.get(`WHATSAPP_ACESS_TOKEN_${s}`) ?? "").trim() || // typo comum
-    T_WABA_GLOBAL
-  );
-}
 const GRAPH = "https://graph.facebook.com/v21.0";
-const VERSAO = "meta-token-crosscheck-v3";
+const VERSAO = "meta-token-crosscheck-v4";
 
 const COHAPM = "57f755b9-c23d-4f58-a488-8173d697c010";
 const LEGAL = "ded20b38-f42e-4c71-800c-31b97ea48bcf";
@@ -330,20 +316,13 @@ Deno.serve(async (req) => {
   }
   const companyId = String(body?.company_id ?? COHAPM);
   const { data: emp } = await supa.from("companies").select("id,name").eq("id", companyId).maybeSingle();
-  const adsSlug = companyId === COHAPM ? "COHAPM" : companyId === LEGAL ? "LEGAL" : "COHAPM";
-  const T_ADS_EMP = tokenAdsEmpresa(adsSlug);
-  const T_WABA_EMP = tokenWabaEmpresa(adsSlug);
-  const tokensRedact = [T_ADS_GLOBAL, T_WABA_GLOBAL, T_ADS_EMP, T_WABA_EMP].filter(Boolean);
-
-  const adsRef =
-    (Deno.env.get(`META_ADS_TOKEN_${adsSlug}`) ?? "").trim()
-      ? `META_ADS_TOKEN_${adsSlug}`
-      : "META_ADS_TOKEN";
-  const wabaRef = (Deno.env.get(`WHATSAPP_ACCESS_TOKEN_${adsSlug}`) ?? "").trim()
-    ? `WHATSAPP_ACCESS_TOKEN_${adsSlug}`
-    : (Deno.env.get(`WHATSAPP_ACESS_TOKEN_${adsSlug}`) ?? "").trim()
-      ? `WHATSAPP_ACESS_TOKEN_${adsSlug}`
-      : "WHATSAPP_ACCESS_TOKEN";
+  const adsTok = tokenAdsPorCompanyId(companyId);
+  const wabaTok = tokenWabaPorCompanyId(companyId);
+  const T_ADS_EMP = adsTok?.token ?? "";
+  const T_WABA_EMP = wabaTok?.token ?? "";
+  const adsRef = adsTok?.ref ?? (companyId === LEGAL ? "META_ADS_TOKEN" : "META_ADS_TOKEN_COHAPM");
+  const wabaRef = wabaTok?.ref ?? (companyId === LEGAL ? "WHATSAPP_ACCESS_TOKEN" : "WHATSAPP_ACCESS_TOKEN_COHAPM");
+  const tokensRedact = [T_ADS_GLOBAL, T_ADS_EMP, T_WABA_EMP].filter(Boolean);
   const adsMeta = await inspecionarToken("ads", T_ADS_EMP, adsRef);
   const wabaMeta = await inspecionarToken("waba", T_WABA_EMP, wabaRef);
 
@@ -398,7 +377,8 @@ Deno.serve(async (req) => {
     );
 
   const metaDbTemCohapm = (dbTokens ?? []).some((t) => t.company_id === companyId);
-  const usouSecretEmpresa = adsRef.endsWith("_COHAPM") || adsRef.endsWith(`_${adsSlug}`);
+  const usouSecretEmpresa =
+    companyId === COHAPM ? adsRef === "META_ADS_TOKEN_COHAPM" : adsRef === "META_ADS_TOKEN";
 
   return json(
     {
@@ -410,7 +390,6 @@ Deno.serve(async (req) => {
         waba_ref: wabaRef,
         ads_presente: !!T_ADS_EMP,
         waba_presente: !!T_WABA_EMP,
-        tipagem_typo_acess: wabaRef.includes("ACESS") && !wabaRef.includes("ACCESS"),
         usou_secret_por_empresa: usouSecretEmpresa,
       },
       veredito: {
@@ -451,7 +430,7 @@ Deno.serve(async (req) => {
       cruzamento_pipeboard: cruz,
       waba_assigned: waba,
       nota:
-        "v2: resolve META_ADS_TOKEN_<EMPRESA> e WHATSAPP_ACCESS_TOKEN_<EMPRESA> (aceita typo ACESS). Edge Secrets nao sao a tabela integration_secrets. meta_tokens no SQL continua so metadado.",
+        "v4: COHAPM le so META_ADS_TOKEN_COHAPM e WHATSAPP_ACCESS_TOKEN_COHAPM (sem alias, sem fallback para o token da Legal). Edge Secrets nao sao a tabela integration_secrets.",
     },
     tokensRedact,
   );

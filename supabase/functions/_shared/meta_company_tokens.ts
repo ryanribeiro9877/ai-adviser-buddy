@@ -2,10 +2,9 @@
 //
 // Tokens Meta POR EMPRESA — nunca misturar COHAPM e Legal no mesmo request Graph.
 //
-// Edge Secrets:
-//   Legal (default legado): META_ADS_TOKEN / WHATSAPP_ACCESS_TOKEN
+// Edge Secrets — nomes literais, sem alias e sem fallback cruzado:
+//   Legal:  META_ADS_TOKEN / WHATSAPP_ACCESS_TOKEN
 //   COHAPM: META_ADS_TOKEN_COHAPM / WHATSAPP_ACCESS_TOKEN_COHAPM
-//           (aceita typo WHATSAPP_ACESS_TOKEN_COHAPM)
 //
 // REGRA: escolha o token pelo company_id do card/job/sync. Se o secret da empresa
 // estiver ausente, FALHE de forma honesta — NÃO faça fallback para o token da outra
@@ -48,10 +47,7 @@ export const EMPRESAS_META: EmpresaMetaCfg[] = [
     // BM "Cohapm" (visto em act_1622612945584817.business)
     business_id: "870473609113498",
     ads_secret_names: ["META_ADS_TOKEN_COHAPM"],
-    waba_secret_names: [
-      "WHATSAPP_ACCESS_TOKEN_COHAPM",
-      "WHATSAPP_ACESS_TOKEN_COHAPM", // typo já cadastrado no painel
-    ],
+    waba_secret_names: ["WHATSAPP_ACCESS_TOKEN_COHAPM"],
   },
 ];
 

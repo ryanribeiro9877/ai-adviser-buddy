@@ -20,7 +20,7 @@
 //
 // Segredos (Edge Function Secrets):
 //   WHATSAPP_ACCESS_TOKEN          Legal (via meta_company_tokens)
-//   WHATSAPP_ACCESS_TOKEN_COHAPM   COHAPM (aceita typo WHATSAPP_ACESS_TOKEN_COHAPM)
+//   WHATSAPP_ACCESS_TOKEN_COHAPM   COHAPM (nome literal; sem alias)
 //   META_BUSINESS_ID               opcional; BM Legal (COHAPM usa business_id no shared)
 //
 // Auth: Authorization: Bearer <mcp_config.api_key> (ou x-mcp-key). verify_jwt=false.

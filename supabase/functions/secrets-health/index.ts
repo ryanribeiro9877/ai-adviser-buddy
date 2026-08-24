@@ -1,5 +1,6 @@
-// supabase/functions/secrets-health/index.ts (v4)
+// supabase/functions/secrets-health/index.ts (v5)
 // Verifica a PRESENÇA de segredos de runtime (env) SEM expor valores sensíveis.
+// v5: COHAPM só nos nomes literais META_ADS_TOKEN_COHAPM e WHATSAPP_ACCESS_TOKEN_COHAPM.
 // v4: reporta presença (não valores) dos tokens Ads/WABA por empresa (Legal + COHAPM).
 // v3: adiciona OPENROUTER_MODEL — o slug do modelo NÃO é sensivel, então o VALOR é
 // reportado (permite conferir typo). Auth: Bearer <mcp_config.api_key>.
@@ -49,7 +50,6 @@ Deno.serve(async (req) => {
     meta_ads_token: presenca("META_ADS_TOKEN"),
     meta_ads_token_cohapm: presenca("META_ADS_TOKEN_COHAPM"),
     whatsapp_access_token_cohapm: presenca("WHATSAPP_ACCESS_TOKEN_COHAPM"),
-    whatsapp_acess_token_cohapm: presenca("WHATSAPP_ACESS_TOKEN_COHAPM"),
     meta_business_id: {
       configured: biz.length > 0,
       looks_valid: /^\d{5,}$/.test(biz),
