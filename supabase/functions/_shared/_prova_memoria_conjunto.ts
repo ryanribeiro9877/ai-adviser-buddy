@@ -1,7 +1,9 @@
 // deno run supabase/functions/_shared/_prova_memoria_conjunto.ts
 import {
   escolherNomeCriativoTravado,
+  ehFlagSemMolde,
   ehNomeCompostoEstruturado,
+  ehSentinelaSemMolde,
   extrairNomesCriativoDaFala,
   nomeCompostoForaDeEscopoTrafego,
 } from "./memoria_conjunto.ts";
@@ -39,5 +41,14 @@ assert(ad03.ok && ad03.nome === contrato[2], "autofill AD03");
 assert(ehNomeCompostoEstruturado("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]"), "composto");
 assert(nomeCompostoForaDeEscopoTrafego("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]"), "fora escopo");
 assert(!nomeCompostoForaDeEscopoTrafego(contrato[2]), "livre ok");
+
+const normChat = (s: string) =>
+  s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[-_\s]+/g, "");
+assert(normChat("sem_molde") === "semmolde", "norm do chat remove underscore");
+assert(normChat("sem_molde") !== "sem_molde", "comparar norm===sem_molde e sempre falso");
+assert(ehSentinelaSemMolde("sem_molde"), "sentinela crua");
+assert(ehSentinelaSemMolde("sem molde"), "sentinela com espaco");
+assert(ehFlagSemMolde("true"), "flag string");
+assert(!ehSentinelaSemMolde("JURIDICO_CONJ.01"), "nome real nao e sentinela");
 
 console.log("ok: _prova_memoria_conjunto");

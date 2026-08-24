@@ -50,11 +50,34 @@ export function extrairLinksWaMePorConjunto(texto: string): Record<number, strin
   return out;
 }
 
+/**
+ * Conjunto/anuncio do zero. Nao comparar com a `norm()` do traffic-chat:
+ * ela remove `_` e transforma "sem_molde" em "semmolde" (lookup falha).
+ */
+export function ehSentinelaSemMolde(nome: unknown): boolean {
+  const s = String(nome ?? "").trim();
+  if (!s) return false;
+  if (/^_?sem[_-]?molde$/i.test(s)) return true;
+  const compact = s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[-_\s]+/g, "");
+  return compact === "semmolde";
+}
+
+/** params.sem_molde — o LLM as vezes manda string "true". */
+export function ehFlagSemMolde(v: unknown): boolean {
+  if (v === true || v === 1) return true;
+  const s = String(v ?? "").trim().toLowerCase();
+  return s === "true" || s === "1";
+}
+
 /** target_name e peca do Drive / chave do slate — nao e anuncio molde do espelho. */
 export function pareceNomeDePecaNaoMolde(nome: string): boolean {
   const s = String(nome ?? "").trim();
   if (!s) return true;
-  if (/^_?sem_molde$/i.test(s)) return true;
+  if (ehSentinelaSemMolde(s)) return true;
   if (/\.(mp4|mov|webm|jpg|jpeg|png|webp)$/i.test(s)) return true;
   if (/veed|conjunto_\d+_criativo|criativo_\d+|drive_file/i.test(s)) return true;
   return false;

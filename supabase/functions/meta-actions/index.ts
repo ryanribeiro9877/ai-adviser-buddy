@@ -1,4 +1,5 @@
-// supabase/functions/meta-actions/index.ts (v5.47)
+// supabase/functions/meta-actions/index.ts (v5.48)
+// v5.48 (24/08/2026) - sentinela sem_molde compartilhada (ehSentinelaSemMolde / ehFlagSemMolde).
 // v5.47 (24/08/2026) - criar_conjunto sem_molde tambem para trafego/website (defaults WEBSITE+LPV).
 // v5.46 (22/08/2026) - Fail-closed Instagram: se publisher_platforms inclui instagram
 //   (ou default facebook+instagram), recusa instagram_nao_vinculado sem identidade.
@@ -346,7 +347,9 @@ import {
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
 import {
+  ehFlagSemMolde,
   ehNomeCompostoEstruturado,
+  ehSentinelaSemMolde,
   nomeCompostoForaDeEscopoTrafego,
 } from "../_shared/memoria_conjunto.ts";
 import {
@@ -1506,8 +1509,7 @@ export async function montarCriacao(
     const moldeRaw = String(p?.molde_external_id ?? "").trim();
     const semMoldeConj =
       acao === "criar_conjunto_a_partir_de" &&
-      (p?.sem_molde === true ||
-        /^_?sem_molde$/i.test(moldeRaw));
+      (ehFlagSemMolde(p?.sem_molde) || ehSentinelaSemMolde(moldeRaw));
     const molde = semMoldeConj ? "" : moldeRaw;
     const campanha = String(p?.campanha_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();

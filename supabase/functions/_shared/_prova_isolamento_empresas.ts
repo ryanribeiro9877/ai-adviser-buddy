@@ -80,8 +80,14 @@ assert(
   "traffic-chat: atencao apto + limite propose por segmento",
 );
 assert(
+  !chat.includes('norm(nomeAlvo) === "sem_molde"') &&
+    !chat.includes("norm(nomeAlvo) === '_sem_molde'"),
+  "traffic-chat nao pode comparar sem_molde via norm() (ela remove o underscore)",
+);
+assert(
   chat.includes("pedidoLoteCriativo") &&
     chat.includes("pareceNomeDePecaNaoMolde") &&
+    chat.includes("ehSentinelaSemMolde") &&
     chat.includes("LINKS DE CONJUNTO DEFINIDOS NESTA CONVERSA") &&
     chat.includes("replyLoteComLegendas") &&
     chat.includes("LOTE DE 6 CRIATIVOS"),
@@ -91,11 +97,11 @@ assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&
     chat.includes("PERGUNTA") &&
-    chat.includes("chat-v28.62") &&
+    chat.includes("chat-v28.64") &&
     chat.includes("instagram_nao_vinculado") &&
     chat.includes("nome_trocado_pelo_padrao_estruturado") &&
     /instagram vincul/i.test(chat),
-  "traffic-chat v28.62: Instagram vinculated + trava de nome livre",
+  "traffic-chat v28.64: Instagram vinculado + trava de nome livre + sentinela sem_molde",
 );
 assert(
   chat.includes("empresaEhCredito(companyId)") &&

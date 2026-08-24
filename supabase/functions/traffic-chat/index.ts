@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.63)
+// supabase/functions/traffic-chat/index.ts (v28.64)
+// v28.64 (24/08/2026) - sentinela sem_molde: a `norm()` do chat remove `_` e
+//   transformava "sem_molde" em "semmolde", logo o lookup procurava um conjunto
+//   com esse nome e recusava OUTCOME_TRAFFIC. Agora usa ehSentinelaSemMolde (string crua).
 // v28.63 (24/08/2026) - criar_conjunto SEM MOLDE em qualquer familia (trafego/website incluso).
 //   O agente nao pode mais recusar OUTCOME_TRAFFIC+WEBSITE pedindo molde de outra conta.
 // v28.62 (22/08/2026) - IDENTIDADE IG + TRAVA DE NOME:
@@ -596,7 +599,9 @@ import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto }
 import {
   conjuntoNomeCasaComNumero,
   escolherNomeCriativoTravado,
+  ehFlagSemMolde,
   ehNomeCompostoEstruturado,
+  ehSentinelaSemMolde,
   extrairLinksWaMePorConjunto,
   extrairNomesCriativoDaFala,
   nomeCompostoForaDeEscopoTrafego,
@@ -692,7 +697,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.63";
+const VERSAO = "chat-v28.64";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -2234,9 +2239,10 @@ async function t_propose_criacao(
       };
     }
     const semMoldeConj =
-      params?.sem_molde === true ||
-      norm(nomeAlvo) === "sem_molde" ||
-      norm(nomeAlvo) === "_sem_molde";
+      ehFlagSemMolde(params?.sem_molde) ||
+      ehSentinelaSemMolde(nomeAlvo) ||
+      ehSentinelaSemMolde(params?.molde_external_id) ||
+      ehSentinelaSemMolde(params?.target_name);
     if (!semMoldeConj && !nomeAlvo) {
       return {
         erro: "target_name deve ser o nome do CONJUNTO MOLDE a replicar OU 'sem_molde' para criar do zero",
@@ -2689,11 +2695,10 @@ async function t_propose_criacao(
     // ESP-35: peca nova pode omitir molde (target_name vazio / "sem_molde" / params.sem_molde).
     // v28.60: video/chave do slate + drive_file_id NAO e molde — nao recusar anuncio_molde_nao_encontrado.
     let semMolde = !!(driveFileId || temCarrossel || metaImageHashEarly) && (
-      params?.sem_molde === true ||
+      ehFlagSemMolde(params?.sem_molde) ||
       !nomeAlvo ||
       pareceNomeDePecaNaoMolde(nomeAlvo) ||
-      norm(nomeAlvo) === "sem_molde" ||
-      norm(nomeAlvo) === "_sem_molde"
+      ehSentinelaSemMolde(nomeAlvo)
     );
     if (!semMolde && !nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar (ou 'sem_molde' + drive_file_id / child_attachments / meta_image_hash para peca nova sem herdar molde)" };
     if (!conjuntoDestino) {

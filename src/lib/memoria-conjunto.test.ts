@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   conjuntoNomeCasaComNumero,
   escolherNomeCriativoTravado,
+  ehFlagSemMolde,
   ehNomeCompostoEstruturado,
+  ehSentinelaSemMolde,
   extrairLinksWaMePorConjunto,
   extrairNomesCriativoDaFala,
   nomeCompostoForaDeEscopoTrafego,
@@ -53,6 +55,23 @@ describe("pareceNomeDePecaNaoMolde", () => {
     expect(pareceNomeDePecaNaoMolde("Contrato com taxa de juros abusiva (2)-VEED.mp4")).toBe(true);
     expect(pareceNomeDePecaNaoMolde("conjunto_2_criativo_1")).toBe(true);
     expect(pareceNomeDePecaNaoMolde("JUR_CONV_AD01_Conta_de_Luz")).toBe(false);
+  });
+});
+
+describe("ehSentinelaSemMolde", () => {
+  it("reconhece sem_molde mesmo depois da norm() do chat (que remove _)", () => {
+    const norm = (s: string) =>
+      s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[-_\s]+/g, "");
+    expect(norm("sem_molde")).toBe("semmolde");
+    expect(norm("sem_molde") === "sem_molde").toBe(false);
+    expect(ehSentinelaSemMolde("sem_molde")).toBe(true);
+    expect(ehSentinelaSemMolde("_sem_molde")).toBe(true);
+    expect(ehSentinelaSemMolde("sem-molde")).toBe(true);
+    expect(ehSentinelaSemMolde("sem molde")).toBe(true);
+    expect(ehSentinelaSemMolde("JURIDICO_CONJ.01")).toBe(false);
+    expect(ehFlagSemMolde(true)).toBe(true);
+    expect(ehFlagSemMolde("true")).toBe(true);
+    expect(ehFlagSemMolde(false)).toBe(false);
   });
 });
 
