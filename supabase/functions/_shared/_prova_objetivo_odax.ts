@@ -109,6 +109,9 @@ assert(traf.destination_type === "WEBSITE", "traf dest");
 assert(traf.optimization_goal === "LANDING_PAGE_VIEWS", "traf opt");
 assert(ehPedidoMensagens({ nome: "IMPULSAO SOCIAL ENGAJAMENTO" }) === false, "nome social");
 assert(ehFamiliaSemMoldePermitida("mensagens") === true, "sem molde mensagens");
+assert(ehFamiliaSemMoldePermitida("trafego") === true, "sem molde trafego");
+assert(ehFamiliaSemMoldePermitida("conversao") === true, "sem molde conversao");
+assert(ehFamiliaSemMoldePermitida("engajamento") === true, "sem molde engajamento");
 assert(normalizarObjetivoOdax("CONV") === "OUTCOME_ENGAGEMENT", "CONV odax");
 assert(normalizarObjetivoOdax("CONVERSATIONS") === "OUTCOME_ENGAGEMENT", "CONVERSATIONS odax");
 

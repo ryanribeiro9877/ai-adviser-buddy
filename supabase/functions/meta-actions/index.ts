@@ -1,4 +1,5 @@
-// supabase/functions/meta-actions/index.ts (v5.46)
+// supabase/functions/meta-actions/index.ts (v5.47)
+// v5.47 (24/08/2026) - criar_conjunto sem_molde tambem para trafego/website (defaults WEBSITE+LPV).
 // v5.46 (22/08/2026) - Fail-closed Instagram: se publisher_platforms inclui instagram
 //   (ou default facebook+instagram), recusa instagram_nao_vinculado sem identidade.
 //   Nao sobrescreve nome_novo por composto [WA][LEADS] em campanha de trafego.
@@ -382,7 +383,6 @@ import {
   resolverObjetivoOdax,
   familiaDeObjetivo,
   ehFamiliaSocialTopo,
-  ehFamiliaSemMoldePermitida,
   ehPedidoMensagens,
   ehPedidoTrafegoWebsite,
   defaultsConjuntoSocialTopo,
@@ -1520,7 +1520,7 @@ export async function montarCriacao(
       return {
         erro: "payload incompleto (molde_external_id, campanha_destino_external_id, nome_novo)",
         detalhe:
-          "Informe o conjunto molde (qualquer um da conta — so empresta targeting) OU sem_molde=true / molde_external_id=sem_molde quando familia engajamento/reconhecimento.",
+          "Informe o conjunto molde (empresta targeting) OU sem_molde=true / molde_external_id=sem_molde para criar do zero.",
       };
     if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
 
@@ -1703,14 +1703,6 @@ export async function montarCriacao(
       familiaPayload === "engajamento" || familiaPayload === "reconhecimento";
     const mensagensTopo = familiaPayload === "mensagens";
     const trafegoTopo = familiaPayload === "trafego";
-
-    if (semMoldeConj && !ehFamiliaSemMoldePermitida(familiaPayload)) {
-      return {
-        erro: "sem_molde_so_para_familia_social",
-        detalhe:
-          "sem_molde em criar_conjunto so vale para engajamento/reconhecimento/mensagens (campanha OUTCOME_ENGAGEMENT/AWARENESS ou CTWA). Para LEADS/conversao continue com um conjunto molde real.",
-      };
-    }
 
     let mb: any = {};
     if (!semMoldeConj) {

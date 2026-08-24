@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.62)
+// supabase/functions/traffic-chat/index.ts (v28.63)
+// v28.63 (24/08/2026) - criar_conjunto SEM MOLDE em qualquer familia (trafego/website incluso).
+//   O agente nao pode mais recusar OUTCOME_TRAFFIC+WEBSITE pedindo molde de outra conta.
 // v28.62 (22/08/2026) - IDENTIDADE IG + TRAVA DE NOME:
 //   (1) todo card de anuncio com Instagram (padrao facebook+instagram) auto-preenche
 //       instagram_user_id da config e RECUSA instagram_nao_vinculado se faltar;
@@ -583,7 +585,6 @@ import {
   resolverObjetivoOdax,
   familiaDeObjetivo,
   ehFamiliaSocialTopo,
-  ehFamiliaSemMoldePermitida,
   ehPedidoMensagens,
   ehPedidoTrafegoWebsite,
   mensagemObjetivoNaoSuportado,
@@ -691,7 +692,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.62";
+const VERSAO = "chat-v28.63";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -2236,18 +2237,11 @@ async function t_propose_criacao(
       params?.sem_molde === true ||
       norm(nomeAlvo) === "sem_molde" ||
       norm(nomeAlvo) === "_sem_molde";
-    if (semMoldeConj && !ehFamiliaSemMoldePermitida(familiaConj)) {
-      return {
-        erro: "sem_molde_so_para_familia_social",
-        detalhe:
-          "sem_molde em criar_conjunto so vale para engajamento/reconhecimento/mensagens. Use objetivo_tag=ENGAJAMENTO|CONV (ou RECONHECIMENTO) e campanha compativel, OU informe um conjunto molde real.",
-      };
-    }
     if (!semMoldeConj && !nomeAlvo) {
       return {
-        erro: "target_name deve ser o nome do CONJUNTO MOLDE a replicar (um que ja funciona) OU 'sem_molde' quando familia engajamento/reconhecimento",
+        erro: "target_name deve ser o nome do CONJUNTO MOLDE a replicar OU 'sem_molde' para criar do zero",
         detalhe:
-          "Nao e preciso molde POST_ENGAGEMENT: qualquer conjunto da conta empresta so o targeting; optimization/pixel viram POST_ENGAGEMENT + page_id. Alternativa: target_name=sem_molde.",
+          "Molde e opcional. Para conjunto novo use target_name=sem_molde (vale trafego/website, engajamento, mensagens e as demais familias). Se quiser copiar targeting de um conjunto que ja funciona, passe o nome EXATO.",
       };
     }
     if (!campanhaDestino) return { erro: "params.campanha_destino obrigatorio (nome da campanha que vai receber o conjunto)" };
@@ -2265,7 +2259,7 @@ async function t_propose_criacao(
     let molde: { id: string | null; name: string; external_id: string | null; account_id?: string | null } | null = null;
     if (!semMoldeConj) {
       molde = (sets ?? []).find((x) => norm(x.name) === norm(nomeAlvo)) ?? (sets ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0] ?? null;
-      if (!molde) return { erro: `conjunto molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato ao gestor. Em engajamento voce pode usar target_name=sem_molde.` };
+      if (!molde) return { erro: `conjunto molde '${nomeAlvo}' nao encontrado. NAO invente: peca o nome exato ao gestor. Para criar do zero use target_name=sem_molde.` };
       const contaMolde = molde.account_id ? (String(molde.account_id).startsWith("act_") ? String(molde.account_id) : `act_${molde.account_id}`) : null;
       if (contaMolde && contaMolde !== contaDaEmpresa) {
         return { erro: `o conjunto molde pertence a conta ${contaMolde}, diferente da conta desta empresa (${contaDaEmpresa}). Replicar entre contas nao e permitido - peca um molde da propria conta.` };
@@ -2383,11 +2377,8 @@ async function t_propose_criacao(
         };
       }
     }
-    if (semMoldeConj && !ehFamiliaSemMoldePermitida(familiaEfetiva)) {
-      return {
-        erro: "sem_molde_so_para_familia_social",
-        detalhe: "A campanha destino nao e OUTCOME_ENGAGEMENT/AWARENESS nem pedido de mensagens — sem_molde recusado.",
-      };
+    if (familiaDeObjetivo((dest as any).objective) === "trafego") {
+      familiaEfetiva = "trafego";
     }
 
     // v28.56: o cartao mostra so nomes. Avisos de orcamento/redes/geo ficam no payload
@@ -3967,7 +3958,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
   { type: "function", function: { name: "alterar_categoria_especial", description: "Emite CARD DE APROVACAO para alterar ou REMOVER special_ad_categories de uma campanha JA CRIADA. Passe special_ad_categories=[] para remover. NAO diga que falta ferramenta. Leia antes com get_campaign_detail ou auditar_compliance_financeira.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } }, categorias_atuais: { type: "array", items: { type: "string" } }, justificativa: { type: "string" } }, required: ["campanha_atual", "special_ad_categories"] } } },
-  { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha e alterar_categoria_especial_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (so familia engajamento/reconhecimento). Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal para social. PROIBIDO recusar IMPULSAO por falta de molde POST_ENGAGEMENT. Tudo que e criado nasce ACTIVE.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha e alterar_categoria_especial_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (qualquer familia, inclusive trafego/website). Molde NAO e obrigatorio para criar do zero. Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal. PROIBIDO recusar criar_conjunto por falta de molde (trafego, social ou mensagens). Tudo que e criado nasce ACTIVE.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA (CET/FIN-04 so se a empresa for de credito). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. As variantes ficam GRAVADAS em conversation_legendas desta conversa. Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true (aprovado OU atencao) e passe em propose_action criar_anuncio_a_partir_de. VOCE preenche legenda_referencias — NUNCA peca ao gestor. Nao invente CLT/CET para COHAPM.", parameters: { type: "object", properties: { produto: { type: "string", description: "Obrigatorio se brand nao tiver linhas_produto. Ex.: consignado_clt (Legal) ou juridico_whatsapp (COHAPM). SEM default CLT." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, peca_chave: { type: "string", description: "Chave estavel no slate (ex.: carrossel_5, card_capa_1). Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "get_legendas_da_conversa", description: "MEMORIA DURAVEL de legendas desta conversa (conversation_legendas). Devolve texto INTEGRAL por peca_chave/drive_file_id. OBRIGATORIO chamar ANTES de dizer que legenda 'nao existe' / 'texto integral nao disponivel' ou de pedir ao gestor para colar copy. Se a peca esta aqui, use o texto — nunca invente amnesia.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, drive_file_id: { type: "string" } } } } },
   { type: "function", function: { name: "registrar_legenda_da_conversa", description: "Grava/atualiza UMA legenda no store duravel desta conversa. Use quando voce propuser copy no chat SEM passar por gerar_legendas (ex.: slate de impulsão com legenda editorial), ou para marcar a variante selecionada pelo gestor. peca_chave estavel (carrossel_2, card_capa_1, …) + legenda integral. Com drive_file_id quando houver.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, legenda: { type: "string" }, drive_file_id: { type: "string" }, variante_indice: { type: "number" }, selecionada: { type: "boolean" }, objetivo: { type: "string" } }, required: ["peca_chave", "legenda"] } } },
@@ -4628,22 +4619,27 @@ R10. Ao repassar dados de uma tool que traz campo 'avisos' ou 'nota', incorpore 
 
 == CRIAR CAMPANHA, CONJUNTO E ANUNCIO ==
 Voce pode PROPOR criacao, nunca executar. A ordem e uma escada e cada degrau exige o anterior
-aprovado: campanha -> conjunto -> anuncio. Conjunto e anuncio sao REPLICADOS de um molde que
-ja funciona (voce informa o nome EXATO do molde no espelho), porque configuracao de conjunto nao
-pode ser inventada — ou, em peca nova de ANUNCIO, sem_molde=true + drive_file_id do acervo.
-EXCECAO CONJUNTO SOCIAL (engajamento/reconhecimento, 20/08/2026 v28.42): (A) target_name=sem_molde
+aprovado: campanha -> conjunto -> anuncio. Molde e OPCIONAL. Conjunto NOVO do zero: target_name=sem_molde
+(ou params.sem_molde=true) em QUALQUER familia — inclusive trafego/website (OUTCOME_TRAFFIC +
+WEBSITE + LANDING_PAGE_VIEWS). NAO recuse sem_molde pedindo molde de La Felicita/COHAPM. NAO
+ofereca desvio para OUTCOME_ENGAGEMENT so para burlar molde. Se o gestor quiser replicar targeting
+de um conjunto que ja existe, ai sim use o nome EXATO do molde. Peca nova de ANUNCIO: sem_molde=true
++ drive_file_id do acervo.
+EXCECAO CONJUNTO SOCIAL (engajamento/reconhecimento): (A) target_name=sem_molde
 + objetivo_tag=ENGAJAMENTO|RECONHECIMENTO + page_id da config; OU (B) qualquer molde de conjunto
 da conta (mesmo OFFSITE_CONVERSIONS/pixel LEAD) — o executor DESCARTA conversion fields e grava
 engajamento: POST_ENGAGEMENT + destination_type=ON_POST + promoted_object={page_id};
 reconhecimento: REACH + page_id. NUNCA misture REACH como goal de campanha OUTCOME_ENGAGEMENT.
-EXCECAO CONJUNTO MENSAGENS / CTWA (21/08/2026 v28.50): conversas WhatsApp NAO sao impulsão de
+EXCECAO CONJUNTO MENSAGENS / CTWA: conversas WhatsApp NAO sao impulsão de
 post. Campanha OUTCOME_ENGAGEMENT (ou tag CONV/MESSAGES/WHATSAPP) + conjunto com
 familia_objetivo=mensagens OU optimization_goal=CONVERSATIONS → destination_type=WHATSAPP +
 promoted_object={page_id, whatsapp_phone_number}. O criativo usa WHATSAPP_MESSAGE + api.whatsapp.com/send (nao CONTACT_US + wa.me). Pode usar target_name=sem_molde.
-EXCECAO TRAFEGO + LINK wa.me (22/08/2026): se o gestor pedir destino WEBSITE / LANDING_PAGE_VIEWS
+EXCECAO TRAFEGO + LINK wa.me: se o gestor pedir destino WEBSITE / LANDING_PAGE_VIEWS
 com URL wa.me, isso NAO e CTWA. familia_objetivo=trafego, destination_type=WEBSITE,
 optimization_goal=LANDING_PAGE_VIEWS. O numero fica no LINK do criativo. Nao recuse WEBSITE
 so porque o nome da campanha tem CONV. Nao chame defaults de mensagens nesse caso.
+Conjunto de trafego NOVO: emita criar_conjunto_a_partir_de com target_name=sem_molde —
+PROIBIDO dizer que o sistema "exige molde" ou "nao aceita sem_molde" para trafego/website.
 Replica CTWA → conjunto WEBSITE: target_name = nome EXATO do anuncio (ou id Meta); params.conjunto_destino
 = nome ou id (se dois conjuntos tiverem o mesmo nome, passe campanha_destino); params.destino_url=https://wa.me/....
 CTA vira CONTACT_US. Sem approval_id no retorno de propose_action o card NAO existe.

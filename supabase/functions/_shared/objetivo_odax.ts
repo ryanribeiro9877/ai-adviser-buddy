@@ -240,10 +240,14 @@ export function ehFamiliaSocialTopo(objetivoOuTag: unknown): boolean {
   return f === "engajamento" || f === "reconhecimento";
 }
 
-/** Familias que permitem criar_conjunto com target_name=sem_molde. */
-export function ehFamiliaSemMoldePermitida(familia: unknown): boolean {
-  const f = String(familia ?? "").trim().toLowerCase();
-  return f === "engajamento" || f === "reconhecimento" || f === "mensagens";
+/**
+ * Conjunto do zero (target_name=sem_molde): molde e opcional em qualquer familia.
+ * Trafego/website usa defaults WEBSITE + LANDING_PAGE_VIEWS; social/mensagens
+ * seguem os defaults ja existentes. Conversao sem molde ainda pode falhar na Graph
+ * se faltar pixel — isso e erro de payload, nao exigencia de molde.
+ */
+export function ehFamiliaSemMoldePermitida(_familia: unknown): boolean {
+  return true;
 }
 
 export type AdsetEngajamentoDefaults = {
