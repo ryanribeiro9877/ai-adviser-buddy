@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.65)
+// supabase/functions/traffic-chat/index.ts (v28.66)
+// v28.66 (24/08/2026) - orcamento_diario_reais e REAIS. Trava o valor falado pelo gestor
+//   (30,00 nos 4) e recusa 3000-como-centavos. Incidente CONJ.1/2 LAF nasceram R$ 3000/dia.
 // v28.65 (24/08/2026) - recusa falsa de molde de trafego NAO fecha o turno.
 //   Historico com "conjunto molde sem_molde nao encontrado" fazia o modelo pedir
 //   molde ou ENGAGEMENT; o sistema intercepta e reemite com sem_molde.
@@ -586,6 +588,11 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { situacaoDoCard } from "../_shared/aprovacoes.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
+import {
+  conferirOrcamentoReais,
+  ehFlagOrcamentoConfirmadoReais,
+  extrairOrcamentoDiarioDaFala,
+} from "../_shared/orcamento_reais.ts";
 import { resolverNomeFinal, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import {
   resolverObjetivoOdax,
@@ -700,7 +707,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.65";
+const VERSAO = "chat-v28.66";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -774,6 +781,17 @@ function json(obj: unknown, status = 200) {
 const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
 const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const deacc = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+async function contratoOrcamentoDaConversa(convId: string | null | undefined): Promise<number | null> {
+  if (!convId) return null;
+  const { data } = await supa.from("chat_messages")
+    .select("content")
+    .eq("conversation_id", convId)
+    .eq("role", "user")
+    .order("created_at", { ascending: true })
+    .limit(80);
+  return extrairOrcamentoDiarioDaFala((data ?? []).map((m: { content?: string }) => String(m.content ?? "")).join("\n\n"));
+}
 const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
 // v25: slug para UTM. Gerado no CODIGO - a cobertura de UTM e KPI e nao pode depender de o
 // modelo lembrar de montar a string certa.
@@ -1849,7 +1867,16 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   // ESP-26: alterar_orcamento julga o valor NA PROPOSTA com a mesma RPC da execucao.
   let avisoOrcamentoAlteracao: string | null = null;
   if (action === "alterar_orcamento") {
-    const reais = Number(params?.novo_orcamento_diario_reais ?? 0);
+    const reaisPedido = Number(params?.novo_orcamento_diario_reais ?? 0);
+    const contratoOrc = await contratoOrcamentoDaConversa(convId);
+    const checkOrc = conferirOrcamentoReais({
+      reais: reaisPedido,
+      contrato: contratoOrc,
+      confirmadoReais: ehFlagOrcamentoConfirmadoReais(params?.orcamento_confirmado_reais),
+    });
+    if (!checkOrc.ok) return { erro: checkOrc.erro, detalhe: checkOrc.detalhe };
+    params.novo_orcamento_diario_reais = checkOrc.reais;
+    const reais = checkOrc.reais;
     const julgado = await julgarOrcamentoDiario(supa, companyId, reais, 1);
     if (!julgado.ok) {
       return {
@@ -2264,8 +2291,17 @@ async function t_propose_criacao(
     if (!campanhaDestino) return { erro: "params.campanha_destino obrigatorio (nome da campanha que vai receber o conjunto)" };
     if (!(orcamento > 0)) return { erro: "params.orcamento_diario_reais obrigatorio. NAO existe valor padrao: PERGUNTE ao gestor qual orcamento diario ele quer para este conjunto antes de propor." };
 
+    const contratoOrc = await contratoOrcamentoDaConversa(convId);
+    const checkOrc = conferirOrcamentoReais({
+      reais: orcamento,
+      contrato: contratoOrc,
+      confirmadoReais: ehFlagOrcamentoConfirmadoReais(params?.orcamento_confirmado_reais),
+    });
+    if (!checkOrc.ok) return { erro: checkOrc.erro, detalhe: checkOrc.detalhe };
+    const orcamentoEfetivo = checkOrc.reais;
+
     // v28.9 / ESP-26: quem decide se o orcamento cabe e a RPC (helper compartilhado).
-    const julgadoConj = await julgarOrcamentoDiario(supa, companyId, orcamento, 1);
+    const julgadoConj = await julgarOrcamentoDiario(supa, companyId, orcamentoEfetivo, 1);
     if (!julgadoConj.ok) {
       return { erro: julgadoConj.motivo, detalhe: julgadoConj.detalhe, avaliacao_orcamento: julgadoConj.avaliacao };
     }
@@ -2409,7 +2445,7 @@ async function t_propose_criacao(
       molde_nome: molde!.name,
       sem_molde: semMoldeConj,
       campanha_destino_external_id: dest.external_id, campanha_destino_nome: dest.name,
-      orcamento_diario_reais: orcamento, conta_destino: contaDaEmpresa, status_inicial: "ACTIVE",  // v28.29: aprovar CRIA ativo
+      orcamento_diario_reais: orcamentoEfetivo, conta_destino: contaDaEmpresa, status_inicial: "ACTIVE",  // v28.29: aprovar CRIA ativo
       formato_midia_previsto: formatoEfetivo || null,
       plataformas_publicacao: plataformas,
       plataformas_default_aplicado: plataformasDefaultAplicado,
@@ -4656,6 +4692,9 @@ optimization_goal=LANDING_PAGE_VIEWS. O numero fica no LINK do criativo. Nao rec
 so porque o nome da campanha tem CONV. Nao chame defaults de mensagens nesse caso.
 Conjunto de trafego NOVO: emita criar_conjunto_a_partir_de com target_name=sem_molde —
 PROIBIDO dizer que o sistema "exige molde" ou "nao aceita sem_molde" para trafego/website.
+ORCAMENTO E REAIS POR DIA (incidente 24/08/2026): params.orcamento_diario_reais=30 quando o
+gestor disse 30,00 — NUNCA 3000 (isso e centavos da Meta = R$ 30 e nasceria R$ 3.000/dia).
+Se o gestor definiu um valor nesta conversa, esse valor E o contrato de TODOS os conjuntos.
 Se o historico tiver "conjunto molde 'sem_molde' nao encontrado" OU um A/B pedindo molde vs
 ENGAGEMENT, IGNORE: era bug ja corrigido. EMITA com sem_molde. NAO peca ao gestor.
 Replica CTWA → conjunto WEBSITE: target_name = nome EXATO do anuncio (ou id Meta); params.conjunto_destino
@@ -5811,7 +5850,7 @@ Deno.serve(async (req) => {
     if (r && typeof r === "object" && (r as any).erro) {
       const e = String((r as any).erro);
       if (/conjunto molde ['"]?sem_molde/i.test(e)) return false;
-      return /peca_nova_sem_molde|compliance_bloqueou|pedido_incompleto|verificacao_do_pedido|molde_|legenda_|destino_|pergunta_nao_e_ato/i.test(e);
+      return /peca_nova_sem_molde|compliance_bloqueou|pedido_incompleto|verificacao_do_pedido|molde_|legenda_|destino_|pergunta_nao_e_ato|orcamento_parece_centavos|orcamento_diferente_do_contrato/i.test(e);
     }
     return false;
   });

@@ -97,12 +97,13 @@ assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&
     chat.includes("PERGUNTA") &&
-    chat.includes("chat-v28.65") &&
+    chat.includes("chat-v28.66") &&
     chat.includes("instagram_nao_vinculado") &&
     chat.includes("nome_trocado_pelo_padrao_estruturado") &&
     chat.includes("recusaFalsaMoldeTrafego") &&
+    chat.includes("orcamento_parece_centavos") &&
     /instagram vincul/i.test(chat),
-  "traffic-chat v28.65: Instagram vinculado + trava de nome + recusa falsa de molde",
+  "traffic-chat v28.66: Instagram + molde + orcamento em reais",
 );
 assert(
   chat.includes("empresaEhCredito(companyId)") &&
@@ -118,6 +119,12 @@ assert(
     metaActions.includes("nome_fora_do_escopo_trafego") &&
     metaActions.includes("recusarSemIdentidadeNasPlataformas"),
   "meta-actions v5.46: fail-closed Instagram + nao sobrescreve nome de trafego",
+);
+assert(
+  metaActions.includes("conferirOrcamentoReais") &&
+    metaActions.includes("corrigir_orcamento_adsets") &&
+    chat.includes("orcamentoEfetivo"),
+  "meta-actions v5.49 + chat: orcamento em reais, nao centavos",
 );
 assert(
   metaActions.includes("alterar_categoria_especial_campanha") &&

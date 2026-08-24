@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.48)
+// supabase/functions/meta-actions/index.ts (v5.49)
+// v5.49 (24/08/2026) - recusa orcamento em centavos-como-reais; modo corrigir_orcamento_adsets
+//   para o incidente CONJ.1/2 LAF (R$ 3000 gravado, gestor pediu R$ 30).
 // v5.48 (24/08/2026) - sentinela sem_molde compartilhada (ehSentinelaSemMolde / ehFlagSemMolde).
 // v5.47 (24/08/2026) - criar_conjunto sem_molde tambem para trafego/website (defaults WEBSITE+LPV).
 // v5.46 (22/08/2026) - Fail-closed Instagram: se publisher_platforms inclui instagram
@@ -376,6 +378,10 @@ import {
   aplicarDestinoWebsiteNoLinkData,
 } from "../_shared/destino_url_lp.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
+import {
+  conferirOrcamentoReais,
+  ehFlagOrcamentoConfirmadoReais,
+} from "../_shared/orcamento_reais.ts";
 import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import {
   aplicarGeoNoTargeting,
@@ -1513,7 +1519,7 @@ export async function montarCriacao(
     const molde = semMoldeConj ? "" : moldeRaw;
     const campanha = String(p?.campanha_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
-    const reais = Number(p?.orcamento_diario_reais ?? 0);
+    let reais = Number(p?.orcamento_diario_reais ?? 0);
     if (!campanha || !nome)
       return {
         erro: "payload incompleto (campanha_destino_external_id, nome_novo)",
@@ -1525,6 +1531,12 @@ export async function montarCriacao(
           "Informe o conjunto molde (empresta targeting) OU sem_molde=true / molde_external_id=sem_molde para criar do zero.",
       };
     if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
+    const checkOrc = conferirOrcamentoReais({
+      reais,
+      confirmadoReais: ehFlagOrcamentoConfirmadoReais(p?.orcamento_confirmado_reais),
+    });
+    if (!checkOrc.ok) return { erro: checkOrc.erro, detalhe: checkOrc.detalhe };
+    reais = checkOrc.reais;
 
     // Nome livre e a fonte da verdade. nome_partes e metadado opcional.
     let nomeFinal = nome;
@@ -3058,6 +3070,66 @@ Deno.serve(async (req) => {
   }
   const onlyId: string | null = body?.approval_id ?? null;
 
+  // v5.49: corrige daily_budget 100x (centavos enviados como reais). So altera se o valor
+  // atual na Graph for exatamente alvo*100 (ex.: pediu R$ 30, gravou 300000 centavos).
+  if (body?.modo === "corrigir_orcamento_adsets") {
+    const companyId = String(body?.company_id ?? "").trim();
+    const reais = Number(body?.reais ?? 0);
+    const ids = (Array.isArray(body?.adset_external_ids) ? body.adset_external_ids : [])
+      .map((x: unknown) => String(x ?? "").trim())
+      .filter(Boolean);
+    if (!companyId) return json({ error: "company_id obrigatorio" }, 400);
+    if (!(reais > 0) || reais > 500) return json({ error: "reais invalido (teto 500 neste modo)" }, 400);
+    if (!ids.length) return json({ error: "adset_external_ids vazio" }, 400);
+    const ativ = ativarTokenEmpresa(companyId);
+    if (!ativ.ok) return json({ error: ativ.motivo }, 400);
+    const centavosAlvo = Math.round(reais * 100);
+    const centavosErrados100x = centavosAlvo * 100;
+    const resultados: Record<string, unknown>[] = [];
+    for (const adsetId of ids) {
+      const antes = await g(`/${adsetId}?fields=id,name,daily_budget,status,effective_status`);
+      const atual = Number((antes.body as { daily_budget?: string | number })?.daily_budget ?? NaN);
+      const nome = String((antes.body as { name?: string })?.name ?? "");
+      if (antes.status !== 200) {
+        resultados.push({ adset_id: adsetId, ok: false, motivo: "leitura_graph_falhou", graph: antes });
+        continue;
+      }
+      if (atual === centavosAlvo) {
+        await supa.from("ad_sets").update({ daily_budget: centavosAlvo })
+          .eq("company_id", companyId).eq("external_id", adsetId);
+        resultados.push({ adset_id: adsetId, nome, ok: true, acao: "ja_estava_certo", daily_budget: atual });
+        continue;
+      }
+      if (atual !== centavosErrados100x) {
+        resultados.push({
+          adset_id: adsetId,
+          nome,
+          ok: false,
+          motivo: "orcamento_atual_nao_e_100x_do_alvo",
+          daily_budget_atual: atual,
+          esperado_errado: centavosErrados100x,
+          alvo: centavosAlvo,
+        });
+        continue;
+      }
+      const patch = await g(`/${adsetId}`, "POST", { daily_budget: String(centavosAlvo) });
+      if (patch.status !== 200) {
+        resultados.push({ adset_id: adsetId, nome, ok: false, motivo: "patch_falhou", graph: patch });
+        continue;
+      }
+      await supa.from("ad_sets").update({ daily_budget: centavosAlvo })
+        .eq("company_id", companyId).eq("external_id", adsetId);
+      resultados.push({ adset_id: adsetId, nome, ok: true, acao: "corrigido", de: atual, para: centavosAlvo });
+    }
+    return json({
+      ok: resultados.every((r) => r.ok === true),
+      modo: "corrigir_orcamento_adsets",
+      reais,
+      centavos_alvo: centavosAlvo,
+      resultados,
+    });
+  }
+
   // v5.42: troca o WhatsApp do conjunto CTWA (Gerenciador trava o campo apos criar ads).
   // Tenta formatos Graph + pausa temporaria do conjunto se o PATCH direto falhar.
   if (body?.modo === "definir_whatsapp_conjunto") {
@@ -4434,7 +4506,7 @@ Deno.serve(async (req) => {
       post = { special_ad_categories: JSON.stringify(cats) };
     }
     if (acao === "alterar_orcamento") {
-      const reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
+      let reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
       if (!(reais > 0)) {
         resultados.push({
           id: r.id,
@@ -4450,6 +4522,28 @@ Deno.serve(async (req) => {
         });
         continue;
       }
+      const checkOrc = conferirOrcamentoReais({
+        reais,
+        confirmadoReais: ehFlagOrcamentoConfirmadoReais(r.payload?.orcamento_confirmado_reais),
+      });
+      if (!checkOrc.ok) {
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "falha",
+          motivo: checkOrc.erro,
+          detalhe: checkOrc.detalhe,
+          driver_escrita: driver,
+        });
+        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+          motivo: checkOrc.erro,
+          detalhe: checkOrc.detalhe,
+          payload: r.payload,
+          driver_escrita: driver,
+        });
+        continue;
+      }
+      reais = checkOrc.reais;
       // ESP-26: mesmo juiz da proposta (avaliar_orcamento_diario). Comparacao local SAIU.
       const julgado = await julgarOrcamentoDiario(supa, String(r.company_id), reais, 1);
       if (!julgado.ok) {
