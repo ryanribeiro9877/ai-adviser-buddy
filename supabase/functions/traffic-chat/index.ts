@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.64)
+// supabase/functions/traffic-chat/index.ts (v28.65)
+// v28.65 (24/08/2026) - recusa falsa de molde de trafego NAO fecha o turno.
+//   Historico com "conjunto molde sem_molde nao encontrado" fazia o modelo pedir
+//   molde ou ENGAGEMENT; o sistema intercepta e reemite com sem_molde.
 // v28.64 (24/08/2026) - sentinela sem_molde: a `norm()` do chat remove `_` e
 //   transformava "sem_molde" em "semmolde", logo o lookup procurava um conjunto
 //   com esse nome e recusava OUTCOME_TRAFFIC. Agora usa ehSentinelaSemMolde (string crua).
@@ -613,7 +616,7 @@ import {
   exigirIdentidadeRedes,
   idInstagramDeParams,
 } from "../_shared/identidade_instagram.ts";
-import { ehPedidoDeAto, ehPerguntaDeLeitura } from "../_shared/intencao_turno.ts";
+import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego } from "../_shared/intencao_turno.ts";
 import {
   callReadTool,
   companyMetaAccounts,
@@ -697,13 +700,21 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.64";
+const VERSAO = "chat-v28.65";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
   "Continuando automaticamente a partir do ponto em que o orçamento desta janela esgotou.";
 const REPLY_CONTINUANDO_ATO =
   "Montando os pedidos de aprovação — continuando automaticamente a partir do ponto em que o orçamento desta janela esgotou.";
+const MSG_NUDGE_SEM_MOLDE =
+  "[CORRECAO DO SISTEMA — nao e o gestor] Recusar conjunto de TRAFEGO por falta de molde e INVALIDO. " +
+  "target_name=sem_molde + params.sem_molde=true e ACEITO para OUTCOME_TRAFFIC + WEBSITE + LANDING_PAGE_VIEWS. " +
+  "O erro antigo \"conjunto molde 'sem_molde' nao encontrado\" e um bug JA CORRIGIDO — ignore-o no historico. " +
+  "PROIBIDO pedir nome de molde. PROIBIDO oferecer OUTCOME_ENGAGEMENT / impulsão de pagina. " +
+  "Chame propose_action AGORA: action_type=criar_conjunto_a_partir_de, target_name=sem_molde, " +
+  "params.sem_molde=true, destination_type=WEBSITE, optimization_goal=LANDING_PAGE_VIEWS, familia_objetivo=trafego. " +
+  "Use nomes, orcamento e campanha destino ja definidos nesta conversa. Um card por conjunto pedido.";
 const RE_CONTINUAR_AUTO =
   /^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/i;
 // Narracao mid-loop ("vou consultar…") — nao conta como resposta que fecha o turno.
@@ -4645,6 +4656,8 @@ optimization_goal=LANDING_PAGE_VIEWS. O numero fica no LINK do criativo. Nao rec
 so porque o nome da campanha tem CONV. Nao chame defaults de mensagens nesse caso.
 Conjunto de trafego NOVO: emita criar_conjunto_a_partir_de com target_name=sem_molde —
 PROIBIDO dizer que o sistema "exige molde" ou "nao aceita sem_molde" para trafego/website.
+Se o historico tiver "conjunto molde 'sem_molde' nao encontrado" OU um A/B pedindo molde vs
+ENGAGEMENT, IGNORE: era bug ja corrigido. EMITA com sem_molde. NAO peca ao gestor.
 Replica CTWA → conjunto WEBSITE: target_name = nome EXATO do anuncio (ou id Meta); params.conjunto_destino
 = nome ou id (se dois conjuntos tiverem o mesmo nome, passe campanha_destino); params.destino_url=https://wa.me/....
 CTA vira CONTACT_US. Sem approval_id no retorno de propose_action o card NAO existe.
@@ -4992,6 +5005,7 @@ function replyFechaTurno(texto: string): boolean {
   if (replyLoteCriativoIncompleto(raw) || replyLoteComLegendas(raw)) return false;
   const t = deacc(raw.toLowerCase());
   if (RE_INTENCAO.test(raw)) return false;
+  if (recusaFalsaMoldeTrafego(raw)) return false;
   if (RE_CONTINUAR_AUTO.test(t) || /continuando automaticamente/.test(t)) return false;
   const perguntaOuDecisao =
     /\?/.test(raw) ||
@@ -5332,11 +5346,23 @@ Deno.serve(async (req) => {
   // a pergunta so e marcada se for texto simples e suficientemente longa.
   const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento, company.id),
     cache_control: { type: "ephemeral" } }];
+  const ultimoAssistantTxt = ultimoAssistantIdx >= 0
+    ? String((cronologico[ultimoAssistantIdx] as any)?.content ?? "")
+    : "";
+  const histRetornos = [...blocosDeRetorno.values()].join("\n");
+  const precisaNudgeSemMolde =
+    ehPedidoEmitirConjunto(msgText) &&
+    (recusaFalsaMoldeTrafego(ultimoAssistantTxt) ||
+      /conjunto molde ['"]?sem_molde/i.test(ultimoAssistantTxt + "\n" + histRetornos));
+  const textoLlm = precisaNudgeSemMolde ? `${msgText}\n\n${MSG_NUDGE_SEM_MOLDE}` : msgText;
+  if (precisaNudgeSemMolde && Array.isArray(userContent) && userContent[0]?.type === "text") {
+    userContent[0] = { ...userContent[0], text: String(userContent[0].text ?? "") + "\n\n" + MSG_NUDGE_SEM_MOLDE };
+  }
   const perguntaSimples = userContent.length === 1;
-  const perguntaCacheavel = perguntaSimples && msgText.length >= 4000;
+  const perguntaCacheavel = perguntaSimples && textoLlm.length >= 4000;
   const userMsgContent: any = perguntaCacheavel
-    ? [{ type: "text", text: msgText, cache_control: { type: "ephemeral" } }]
-    : (perguntaSimples ? msgText : userContent);
+    ? [{ type: "text", text: textoLlm, cache_control: { type: "ephemeral" } }]
+    : (perguntaSimples ? textoLlm : userContent);
   const messages: any[] = [{ role: "system", content: cacheSystem }, ...history,
     { role: "user", content: userMsgContent }];
   const toolsUsed: any[] = [];
@@ -5369,6 +5395,7 @@ Deno.serve(async (req) => {
   // v19: orcamento dinamico de geracao (tInicio declarado no topo do handler).
   const decorrido = () => Date.now() - tInicio;
   let deadlineTools = false;
+  let nudgesSemMolde = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
   const toolsDeadlineMs = pedidoLoteTurno ? 90_000 : TOOLS_DEADLINE_MS;
   // v20: telemetria de custo. Capturamos os dois formatos possiveis - anthropic
@@ -5673,6 +5700,17 @@ Deno.serve(async (req) => {
       continue;
     }
     reply = msg.content ?? "";
+    if (
+      ehPedidoEmitirConjunto(objetivoOriginal) &&
+      recusaFalsaMoldeTrafego(String(reply)) &&
+      nudgesSemMolde < 1
+    ) {
+      nudgesSemMolde++;
+      messages.push({ role: "assistant", content: reply });
+      messages.push({ role: "user", content: MSG_NUDGE_SEM_MOLDE });
+      finishReason = String(finishReason || "stop") + "+nudge_sem_molde";
+      continue;
+    }
     break;
   }
 
@@ -5715,6 +5753,17 @@ Deno.serve(async (req) => {
   if (claimSan.reescreveu) {
     reply = claimSan.reply;
     finishReason = String(finishReason || "stop") + "+claim_emit_sem_card";
+  }
+
+  if (
+    ehPedidoEmitirConjunto(objetivoOriginal) &&
+    recusaFalsaMoldeTrafego(String(reply ?? "")) &&
+    actionCards.length === 0
+  ) {
+    reply =
+      "Conjunto de tráfego/website nasce com sem_molde — não preciso do nome de um conjunto existente nem criar em engajamento social. " +
+      "Vou emitir os cards com target_name=sem_molde. Se não aparecerem abaixo, envie de novo o mesmo pedido.";
+    finishReason = String(finishReason || "stop") + "+recusa_molde_suprimida";
   }
 
   // v28.38: CONTINUACAO AUTOMATICA — so quando o turno esta realmente incompleto.
@@ -5761,6 +5810,7 @@ Deno.serve(async (req) => {
     const r = t.retorno;
     if (r && typeof r === "object" && (r as any).erro) {
       const e = String((r as any).erro);
+      if (/conjunto molde ['"]?sem_molde/i.test(e)) return false;
       return /peca_nova_sem_molde|compliance_bloqueou|pedido_incompleto|verificacao_do_pedido|molde_|legenda_|destino_|pergunta_nao_e_ato/i.test(e);
     }
     return false;

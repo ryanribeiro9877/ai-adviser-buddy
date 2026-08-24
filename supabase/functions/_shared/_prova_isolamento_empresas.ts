@@ -97,11 +97,12 @@ assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&
     chat.includes("PERGUNTA") &&
-    chat.includes("chat-v28.64") &&
+    chat.includes("chat-v28.65") &&
     chat.includes("instagram_nao_vinculado") &&
     chat.includes("nome_trocado_pelo_padrao_estruturado") &&
+    chat.includes("recusaFalsaMoldeTrafego") &&
     /instagram vincul/i.test(chat),
-  "traffic-chat v28.64: Instagram vinculado + trava de nome livre + sentinela sem_molde",
+  "traffic-chat v28.65: Instagram vinculado + trava de nome + recusa falsa de molde",
 );
 assert(
   chat.includes("empresaEhCredito(companyId)") &&

@@ -23,3 +23,37 @@ export function ehPerguntaDeLeitura(pedido: string): boolean {
     p,
   );
 }
+
+/** "emita os cards dos 2 primeiros conjuntos" — nao e anuncio avulso. */
+export function ehPedidoEmitirConjunto(pedido: string): boolean {
+  const t = deacc(String(pedido ?? "").toLowerCase());
+  return ehPedidoDeAto(pedido) && /\bconjuntos?\b/.test(t);
+}
+
+/**
+ * Recusa inventada: pede molde de trafego ou desvio para ENGAGEMENT.
+ * Nao e clarificacao legitima — sem_molde vale para OUTCOME_TRAFFIC.
+ */
+export function recusaFalsaMoldeTrafego(texto: string): boolean {
+  const t = deacc(String(texto ?? "").toLowerCase());
+  if (!t) return false;
+  const recusa =
+    /nao (consigo|posso|vou) (emitir|criar|propor)/.test(t) ||
+    /cards? nao (foram|foi) emitid/.test(t) ||
+    /bloqueio tecnico/.test(t) ||
+    /sem dado obrigat/.test(t) ||
+    /nao invente um molde/.test(t) ||
+    /nao (posso|consigo) inventar/.test(t);
+  const pedeMolde =
+    /molde de trafego/.test(t) ||
+    (/conjunto (de )?trafego/.test(t) && /nome exato/.test(t)) ||
+    /nome exato.*(molde|conjunto)/.test(t) ||
+    /forne(ca|cer|cendo) (o )?nome/.test(t);
+  const desvioEng =
+    /outcome_engagement/.test(t) ||
+    /engajamento social/.test(t) ||
+    /impulsao de pagina/.test(t) ||
+    /crie em engajamento/.test(t) ||
+    /alter(ar|em) manualmente no gerenciador/.test(t);
+  return recusa && (pedeMolde || desvioEng);
+}

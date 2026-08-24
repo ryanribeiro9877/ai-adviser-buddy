@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { ehPedidoDeAto, ehPerguntaDeLeitura } from "./intencao-turno";
+import {
+  ehPedidoDeAto,
+  ehPedidoEmitirConjunto,
+  ehPerguntaDeLeitura,
+  recusaFalsaMoldeTrafego,
+} from "./intencao-turno";
 
 describe("ehPerguntaDeLeitura", () => {
   it("reconhece pergunta sobre link do anuncio vs conjunto", () => {
@@ -24,5 +29,17 @@ describe("ehPerguntaDeLeitura", () => {
 
   it("reconhece checagem de link sem interrogacao", () => {
     expect(ehPerguntaDeLeitura("o anúncio está com o mesmo link de destino do conjunto")).toBe(true);
+  });
+});
+
+describe("recusaFalsaMoldeTrafego", () => {
+  it("pega o A vs B de molde vs engajamento", () => {
+    const prosa =
+      "Não consigo emitir sem dado obrigatório. Não invento um molde de tráfego que não existe. " +
+      "Opção A: nome exato de um conjunto de tráfego/website. " +
+      "Opção B: crie em engajamento social (OUTCOME_ENGAGEMENT) e alterem manualmente no Gerenciador. Qual é?";
+    expect(recusaFalsaMoldeTrafego(prosa)).toBe(true);
+    expect(ehPedidoEmitirConjunto("emita os cards dos 2 primeiros conjuntos")).toBe(true);
+    expect(recusaFalsaMoldeTrafego("Qual o orçamento diário deste conjunto?")).toBe(false);
   });
 });
