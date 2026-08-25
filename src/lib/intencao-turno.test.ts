@@ -4,6 +4,7 @@ import {
   ehPedidoEmitirConjunto,
   ehPerguntaDeLeitura,
   recusaFalsaMoldeTrafego,
+  ehPedidoUploadLote,
 } from "./intencao-turno";
 
 describe("ehPerguntaDeLeitura", () => {
@@ -41,5 +42,16 @@ describe("recusaFalsaMoldeTrafego", () => {
     expect(recusaFalsaMoldeTrafego(prosa)).toBe(true);
     expect(ehPedidoEmitirConjunto("emita os cards dos 2 primeiros conjuntos")).toBe(true);
     expect(recusaFalsaMoldeTrafego("Qual o orçamento diário deste conjunto?")).toBe(false);
+  });
+});
+
+describe("ehPedidoUploadLote", () => {
+  it("reconhece subir videos restantes", () => {
+    expect(ehPedidoUploadLote("suba os vídeos restantes")).toBe(true);
+    expect(ehPedidoUploadLote("carregue as peças na biblioteca")).toBe(true);
+    expect(ehPedidoUploadLote(
+      "termine de subir os vídeos e me informe quais dos 34 já estão na meta e quais ficaram de fora",
+    )).toBe(true);
+    expect(ehPedidoUploadLote("qual o gasto de ontem?")).toBe(false);
   });
 });

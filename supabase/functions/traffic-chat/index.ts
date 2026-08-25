@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.69)
+// supabase/functions/traffic-chat/index.ts (v28.70)
+// v28.70 (25/08/2026) - LOTE DE UPLOAD: o agente subia 1-2 pecas, dizia "primeiros 5"
+//   (teto de 5/hora na descricao da tool, teto real=2/turno) e pedia eco. Agora: lista
+//   nome+status, continua ate zerar faltantes, nao corta na 2a bolha.
 // v28.69 (25/08/2026) - VIDEO ATE 4 GB: o carregador envia em partes. Teto operacional
 //   = teto da Meta (4 GB). Nao recusar 50 MB–4 GB. Se em_andamento, chamar de novo.
 // v28.68 (25/08/2026) - TETO DE UPLOAD: o agente citava 4 GB (Ads Guide) como se fosse o
@@ -632,7 +635,8 @@ import {
   exigirIdentidadeRedes,
   idInstagramDeParams,
 } from "../_shared/identidade_instagram.ts";
-import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego } from "../_shared/intencao_turno.ts";
+import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote } from "../_shared/intencao_turno.ts";
+import { anexarRelatorioUpload, apurarUploadLote } from "../_shared/upload_lote.ts";
 import {
   aplicarRecorteAcervo,
   aplicarRecorteAnalisesDrive,
@@ -708,6 +712,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   propose_action: 10,
   get_acervo_para_anuncio: 3,
   nota_visual_da_peca: 6,
+  upload_midia: 16,
 };
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
 // propose_action de criacao nao consome o teto global do turno (so o teto por ferramenta).
@@ -726,9 +731,10 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.69";
+const VERSAO = "chat-v28.70";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
+const MAX_TURN_SEGMENTS_UPLOAD = 8;
 const REPLY_CONTINUANDO =
   "Continuando automaticamente a partir do ponto em que o orçamento desta janela esgotou.";
 const REPLY_CONTINUANDO_ATO =
@@ -748,6 +754,11 @@ const MSG_NUDGE_DRIVE =
   "PROIBIDO substituir por get_criativos_conteudo (anuncios ja no ar, LF_A_AD01…). " +
   "Historico e bloco [RETORNOS...] NAO valem como inventario de arquivos — a pasta pode ter mudado. " +
   "Liste nome + pasta + drive_file_id. Nao invente arquivo. Nao peca o gestor para colar o inventario.";
+const MSG_NUDGE_UPLOAD_BASE =
+  "[CORRECAO DO SISTEMA — nao e o gestor] Pedido: subir TODOS os faltantes para a biblioteca. " +
+  "NAO pare no meio. NAO invente teto de 5 acoes/hora. NAO peca o gestor para repetir " +
+  "'suba os restantes'. Chame upload_midia para CADA drive_file_id ainda fora da biblioteca, " +
+  "varios na mesma rodada. Cite o NOME de cada peca (vem no retorno).";
 const RE_CONTINUAR_AUTO =
   /^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/i;
 // Narracao mid-loop ("vou consultar…") — nao conta como resposta que fecha o turno.
@@ -3888,15 +3899,18 @@ async function completarPecaDaMemoria(opts: {
 
 // Sobe peca do Drive para a biblioteca Meta (adimages/advideos) via edge upload-midia.
 // Respeita flag upload_midia e teto por hora DENTRO da edge. Idempotente.
-async function t_upload_midia(companyId: string, driveFileId: string, mcpKey: string, accountId?: string) {
+async function t_upload_midia(companyId: string, driveFileId: string, mcpKey: string, accountId?: string, restanteMs?: number) {
+  const wallMs = Math.max(18_000, Math.min(40_000, (restanteMs ?? 80_000) - 20_000));
   const body: Record<string, unknown> = {
     acao: "executar",
     company: companyId,
     drive_file_id: driveFileId,
+    wall_ms: wallMs,
   };
   if (accountId) body.account_id = accountId;
   let last: any = null;
-  for (let i = 0; i < 4; i++) {
+  const tentativas = (restanteMs ?? 80_000) < 40_000 ? 1 : 2;
+  for (let i = 0; i < tentativas; i++) {
     const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
@@ -4039,7 +4053,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido. Pode vir recortado por meio/formatos do pedido. USE quando o gestor pedir para classificar pecas da pasta. Se total_analisados < inventario, ha pecas novas sem analise.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, data — SEM thumbnail. Recorte com meio=la_felicita|juridico e formatos Reels/Videos. Use para LISTAR o que existe na pasta. NAO substitui por get_criativos_conteudo (anuncios ja no ar). LIMITES: nao le conteudo interno de video.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA do acervo do Drive. Com recorte (meio/formatos ou pedido Reels+Videos), inventario_global e o RECORTE; o total da empresa fica em inventario_global_empresa. NAO cite o total da empresa como videos La Felicita. Em lote/mix: chame SEM produto primeiro. Quando o slate JA tem drive_file_ids, passe-os.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional. Em lote/mix deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true." }, drive_file_ids: { type: "array", items: { type: "string" }, description: "Opcional. Recorte: so estes arquivos (slate conhecido)." }, meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
-  { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. TETO = biblioteca Meta: video <= 4 GB (4294967296 bytes), imagem <= 8 MB. Este carregador envia video em partes e NAO recusa arquivo abaixo de 4 GB. Se o retorno vier em_andamento=true, chame upload_midia de novo com o MESMO drive_file_id. Se o gestor perguntar o tamanho maximo PARA CARREGAR AQUI, a resposta e 4 GB. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
+  { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id. USE quando na_biblioteca_da_meta=false. NAO cria anuncio. LOTE: se o gestor pedir subir restantes/faltantes/os 34, chame upload_midia para CADA peca ainda fora, varios na mesma rodada. NAO invente teto de 5 acoes/hora e NAO pare no 5 por conta propria — so pare se a ferramenta recusar teto horario de verdade. Idempotente: ja enviado devolve o id sem reenviar. TETO de arquivo = Meta (video <= 4 GB, imagem <= 8 MB). Envio em partes; se em_andamento, chame de novo o MESMO drive_file_id. O retorno traz nome — cite o nome ao gestor. Off-brand: so se o gestor pedir essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
   { type: "function", function: { name: "alterar_categoria_especial", description: "Emite CARD DE APROVACAO para alterar ou REMOVER special_ad_categories de uma campanha JA CRIADA. Passe special_ad_categories=[] para remover. NAO diga que falta ferramenta. Leia antes com get_campaign_detail ou auditar_compliance_financeira.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } }, categorias_atuais: { type: "array", items: { type: "string" } }, justificativa: { type: "string" } }, required: ["campanha_atual", "special_ad_categories"] } } },
@@ -4187,6 +4201,7 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeTeto && nome === "teto_vigente") return 0;
   if (pedeConhecimento && nome === "get_conhecimento") return 0;
   if (pedeComplianceFin && (nome === "auditar_compliance_financeira" || nome === "get_campaign_detail" || nome === "check_compliance")) return 0;
+  if (ehPedidoUploadLote(pedido) && (nome === "upload_midia" || nome === "get_acervo_para_anuncio")) return 0;
   if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "upload_midia" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "gerar_legendas" || nome === "get_legendas_da_conversa" || nome === "registrar_legenda_da_conversa" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
@@ -4487,7 +4502,8 @@ async function runTool(name: string, args: any, ctx: any) {
         const dfid = String(args?.drive_file_id ?? "").trim();
         if (!dfid) return { erro: "drive_file_id obrigatorio" };
         const accountId = String(args?.account_id ?? "").trim() || undefined;
-        const out = await t_upload_midia(ctx.companyId, dfid, ctx.mcpKey, accountId);
+        const out = await t_upload_midia(ctx.companyId, dfid, ctx.mcpKey, accountId, ctx.restanteMs);
+        const nomePeca = String(out?.nome ?? out?.arquivo?.nome ?? "").trim() || null;
         // Traduz para o agente: o que fazer a seguir, sem jargao de edge.
         if (out?.recusado) {
           const motivo = String(out.motivo ?? "");
@@ -4495,6 +4511,8 @@ async function runTool(name: string, args: any, ctx: any) {
             ok: false,
             recusado: true,
             motivo,
+            nome: nomePeca,
+            drive_file_id: dfid,
             limites_v1: out.limites_v1 ?? null,
             teto_video_bytes: 4294967296,
             teto_video_gb: 4,
@@ -4502,13 +4520,14 @@ async function runTool(name: string, args: any, ctx: any) {
           };
         }
         if (out?.error || out?.erro) {
-          return { ok: false, erro: out.error ?? out.erro, mensagem: "Upload falhou. Relate o erro exato ao gestor." };
+          return { ok: false, erro: out.error ?? out.erro, nome: nomePeca, drive_file_id: dfid, mensagem: "Upload falhou. Relate o erro exato ao gestor." };
         }
         if (out?.em_andamento) {
           return {
             ok: true,
             em_andamento: true,
             enviado: false,
+            nome: nomePeca,
             drive_file_id: dfid,
             bytes_enviados: out.bytes_enviados ?? null,
             tamanho_bytes: out.tamanho_bytes ?? null,
@@ -4519,6 +4538,7 @@ async function runTool(name: string, args: any, ctx: any) {
           ok: true,
           dedup: !!out?.dedup,
           enviado: !!out?.enviado,
+          nome: nomePeca,
           drive_file_id: dfid,
           meta_video_id: out?.video_id ?? null,
           meta_image_hash: out?.image_hash ?? null,
@@ -4651,6 +4671,10 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   TETO DE UPLOAD = biblioteca Meta: video ate 4 GB, imagem ate 8 MB. Envio em partes.
   NAO recuse video de 50 MB–4 GB. Se em_andamento, chame upload_midia de novo (mesmo id).
   Se o gestor perguntar o tamanho maximo para carregar aqui, a resposta e 4 GB.
+- SUBIR VIDEOS / BIBLIOTECA / QUAIS DOS N JA ESTAO NA META: leia get_acervo_para_anuncio e
+  chame upload_midia em TODOS os na_biblioteca_da_meta=false. NAO invente teto de 5/hora.
+  NAO peca o gestor para repetir "suba os restantes". Liste NOME de cada peca enviada,
+  em andamento e ainda fora. O sistema emenda blocos sozinho antes do timeout de 2 min.
 - SLATE DO GESTOR (anti-alucinacao, 20/08/2026): quando o gestor definir um lote (ex. "3 videos
   + 1 carrossel + 1 card"), ESSE e o unico conjunto valido nesta conversa. Repita tipos+nomes
   antes de auditar ou emitir. PROIBIDO trocar por outro conjunto (ex. "5 videos 22-27" so porque
@@ -4981,6 +5005,8 @@ type TurnCheckpoint = {
   cards: { approval_id: string; summary: string; status: string }[];
   reply_parcial: string;
   created_at: string;
+  pendentes_upload?: { drive_file_id: string; nome: string }[];
+  ja_na_meta?: { drive_file_id: string; nome: string }[];
 };
 
 function montarPromptRetomada(cp: TurnCheckpoint): string {
@@ -4993,7 +5019,17 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
     : "- (nenhum ActionCard emitido ainda)";
   const parcial = (cp.reply_parcial || "").trim();
   const lote = pedidoLoteCriativo(cp.objetivo);
-  const instrucao = lote
+  const uploadLote = ehPedidoUploadLote(cp.objetivo);
+  const faltamUp = (cp.pendentes_upload ?? [])
+    .map((p) => `- ${p.nome} (${p.drive_file_id})`).join("\n");
+  const instrucao = uploadLote
+    ? "INSTRUCOES OBRIGATORIAS (LOTE DE UPLOAD):\n" +
+      "1. NAO cumprimente. NAO peca o gestor para repetir. NAO invente teto de 5 acoes/hora.\n" +
+      "2. Retome SOMENTE os drive_file_id ainda fora da Meta (lista abaixo). Pule os ja enviados/dedup.\n" +
+      "3. Sessao enviando: chame upload_midia de novo no MESMO id (a edge retoma; nao recomece do zero).\n" +
+      "4. Varios upload_midia nesta janela. Depois o sistema entrega o inventario (ja na Meta vs fora).\n" +
+      (faltamUp ? `Ainda fora:\n${faltamUp}\n` : "Se a lista abaixo estiver vazia, chame get_acervo_para_anuncio e suba os na_biblioteca_da_meta=false.\n")
+    : lote
     ? "INSTRUCOES OBRIGATORIAS:\n" +
       "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir.\n" +
       "2. Retome SOMENTE o que falta: gerar_legendas das pecas ainda sem legenda (no maximo 3 nesta janela). " +
@@ -5515,8 +5551,11 @@ Deno.serve(async (req) => {
   let deadlineTools = false;
   let nudgesSemMolde = 0;
   let nudgesDrive = 0;
+  let nudgesUpload = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
-  const toolsDeadlineMs = pedidoLoteTurno ? 90_000 : TOOLS_DEADLINE_MS;
+  const pedidoUploadTurno = ehPedidoUploadLote(objetivoOriginal);
+  const toolsDeadlineMs = pedidoUploadTurno ? 70_000 : (pedidoLoteTurno ? 90_000 : TOOLS_DEADLINE_MS);
+  const maxIterTurno = pedidoUploadTurno ? 16 : MAX_ITER;
   // v20: telemetria de custo. Capturamos os dois formatos possiveis - anthropic
   // (cache_creation_input_tokens / cache_read_input_tokens) e openai
   // (prompt_tokens_details.cached_tokens) - porque nao esta confirmado qual o OpenRouter
@@ -5709,7 +5748,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (!atalhoMetaDicas) for (let iter = 0; iter < MAX_ITER; iter++) {
+  if (!atalhoMetaDicas) for (let iter = 0; iter < maxIterTurno; iter++) {
     // v19/v28.32: orcamento de tempo. Checa ANTES de cada geracao (incluindo a 1a apos
     // tools): sem isso o loop consumia os 150s coletando e o gateway devolvia 504.
     if (decorrido() > toolsDeadlineMs && (iter > 0 || toolsUsed.length > 0)) {
@@ -5749,15 +5788,22 @@ Deno.serve(async (req) => {
         prioridadeTool(String(b.function?.name ?? ""), msgText));
       for (const tc of loteOrdenado) {
         // v28.32: deadline POR ferramenta — o lote inteiro nao pode segurar o HTTP.
-        if (decorrido() > toolsDeadlineMs) {
+        // v28.70: lote de upload devolve bloco visivel ANTES do timeout de 2 min da UI.
+        const restanteAgora = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
+        const flushUpload = pedidoUploadTurno && (
+          decorrido() > toolsDeadlineMs || restanteAgora < 25_000
+        ) && toolsUsed.some((t) => t.tool === "upload_midia" || t.tool === "get_acervo_para_anuncio");
+        if (decorrido() > toolsDeadlineMs || flushUpload) {
           deadlineTools = true;
           const nomeSkip = String(tc.function?.name ?? "");
           let argsSkip: any = {}; try { argsSkip = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
             erro: "consulta_nao_realizada_nesta_rodada",
-            aviso: "O orcamento de tempo de coleta acabou antes desta consulta. O dado NAO foi lido — nao o trate como zero nem como inexistente. Responda com o que ja tem." }) });
+            aviso: flushUpload
+              ? "Bloco encerrado para entregar o progresso ao gestor. O sistema continua no proximo bloco os ids que faltam. NAO peca para repetir."
+              : "O orcamento de tempo de coleta acabou antes desta consulta. O dado NAO foi lido — nao o trate como zero nem como inexistente. Responda com o que ja tem." }) });
           toolResults.push({ tool: nomeSkip, args: argsSkip, chars: 0, cortado: false, retorno: null,
-            erro: "deadline de coleta — o dado NAO foi lido" });
+            erro: flushUpload ? "flush_upload_bloco" : "deadline de coleta — o dado NAO foi lido" });
           continue;
         }
         // v20: teto de ferramentas. A API exige resposta para CADA tool_call_id, entao nao
@@ -5774,6 +5820,27 @@ Deno.serve(async (req) => {
         const eCriarAnuncio =
           nomeTc === "propose_action" &&
           String(args?.action_type ?? "") === "criar_anuncio_a_partir_de";
+        const eUpload = nomeTc === "upload_midia";
+        if (eUpload) {
+          const idUp = String(args?.drive_file_id ?? "").trim();
+          const jaOk = toolResults.find((tr) => {
+            if (String(tr.tool ?? "") !== "upload_midia") return false;
+            const r = tr.retorno && typeof tr.retorno === "object" ? tr.retorno as Record<string, unknown> : null;
+            const id = String(r?.drive_file_id ?? (tr.args as any)?.drive_file_id ?? "");
+            if (id !== idUp) return false;
+            return !!(r?.enviado || r?.dedup) && !r?.recusado && !tr.erro;
+          });
+          if (jaOk) {
+            messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
+              ok: true, dedup: true, drive_file_id: idUp,
+              mensagem: "Ja enviado neste pedido — nao reprocessar.",
+            }) });
+            toolResults.push({ tool: nomeTc, args, chars: 0, cortado: false, retorno: {
+              ok: true, dedup: true, drive_file_id: idUp, nome: (jaOk.retorno as any)?.nome,
+            } });
+            continue;
+          }
+        }
         const jaCriouAnuncioNesteSegmento = toolsUsed.filter((t) =>
           t.tool === "propose_action" &&
           String((t.args as any)?.action_type ?? "") === "criar_anuncio_a_partir_de"
@@ -5789,7 +5856,7 @@ Deno.serve(async (req) => {
           });
           continue;
         }
-        const tetoGlobal = !eCriacao && toolsUsed.filter((t) => {
+        const tetoGlobal = !eCriacao && !eUpload && toolsUsed.filter((t) => {
           if (t.tool !== "propose_action") return true;
           const at = String((t.args as any)?.action_type ?? "");
           return !ACOES_CRIACAO_NO_TETO.includes(at);
@@ -5798,7 +5865,9 @@ Deno.serve(async (req) => {
           tetoTools = true;
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
             erro: "consulta_nao_realizada_nesta_rodada",
-            aviso: "Esta consulta nao foi executada nesta rodada. O dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao gestor, em UMA linha e em linguagem natural, que este item ficou para a proxima. NAO cite nome de ferramenta, numero de limite nem detalhe de implementacao. Se o pedido era EMITIR cards e o slate/legendas ja estavam no chat, NAO peca para repetir 'emite' — emita o que couber agora e declare o que falta sem pedir eco." }) });
+            aviso: eUpload
+              ? "Limite desta janela HTTP. O sistema continua no proximo bloco os ids que faltam. NAO peca ao gestor para repetir. NAO invente teto de 5 acoes/hora."
+              : "Esta consulta nao foi executada nesta rodada. O dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao gestor, em UMA linha e em linguagem natural, que este item ficou para a proxima. NAO cite nome de ferramenta, numero de limite nem detalhe de implementacao. Se o pedido era EMITIR cards e o slate/legendas ja estavam no chat, NAO peca para repetir 'emite' — emita o que couber agora e declare o que falta sem pedir eco." }) });
           // v28.11: a consulta NAO feita tambem se registra. Sem isto a continuacao veria a
           // ausencia do dado e nao saberia distinguir "nao foi lido" de "nao existe" (R3).
           toolResults.push({ tool: nomeTc, args, chars: 0, cortado: false, retorno: null,
@@ -5839,6 +5908,24 @@ Deno.serve(async (req) => {
       messages.push({ role: "user", content: MSG_NUDGE_DRIVE });
       finishReason = String(finishReason || "stop") + "+nudge_drive";
       continue;
+    }
+    if (pedidoUploadTurno && nudgesUpload < 1) {
+      const relNudge = apurarUploadLote(toolResults, turnCheckpoint?.pendentes_upload, turnCheckpoint?.ja_na_meta);
+      const semAcervo = !relNudge.teveAcervo && !toolsUsed.some((t) => t.tool === "get_acervo_para_anuncio");
+      if (semAcervo || relNudge.incompleto) {
+        nudgesUpload++;
+        const ids = relNudge.faltam.slice(0, 20).map((p) => `- ${p.nome} (${p.drive_file_id})`).join("\n");
+        messages.push({ role: "assistant", content: reply });
+        messages.push({
+          role: "user",
+          content: MSG_NUDGE_UPLOAD_BASE +
+            (semAcervo
+              ? " Primeiro chame get_acervo_para_anuncio (meio=la_felicita, formatos Reels/Videos se for o caso)."
+              : (ids ? `\nAinda fora:\n${ids}` : "")),
+        });
+        finishReason = String(finishReason || "stop") + "+nudge_upload";
+        continue;
+      }
     }
     break;
   }
@@ -5910,9 +5997,14 @@ Deno.serve(async (req) => {
   const cardsJaNoPedido = (turnCheckpoint?.cards?.length ?? 0) + cardsNesteSegmento;
   const toolsNesteSegmento = toolsUsed.length;
   const replyTrim = String(reply ?? "").trim();
-  // Claim falso ja sanitizado: nao conta como "turno fechado" se ainda falta o card.
+  const relUpload = apurarUploadLote(toolResults, turnCheckpoint?.pendentes_upload, turnCheckpoint?.ja_na_meta);
+  const uploadIncompleto = pedidoUploadTurno && relUpload.incompleto && !relUpload.tetoHora;
+  // Claim falso ja sanitizado: nao conta como "turno fechado" se ainda falta o card
+  // OU se o lote de upload ainda tem pecas fora da Meta.
   const turnoJaFechado = replyFechaTurno(replyTrim) && !(
-    claimSan.reescreveu || (pedidoAto && cardsJaNoPedido === 0 && toolsIncluemPropose(toolsUsed))
+    claimSan.reescreveu ||
+    (pedidoAto && cardsJaNoPedido === 0 && toolsIncluemPropose(toolsUsed)) ||
+    uploadIncompleto
   );
   const tentouEmitir =
     toolsIncluemPropose(toolsUsed) ||
@@ -5955,10 +6047,12 @@ Deno.serve(async (req) => {
   const nLegendasOk = nGerarLegendasOk(turnCheckpoint, toolResults);
   const loteFaltamLegendas = pedidoLote && nLegendasOk < 6;
   const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && (
-    (deadlineTools && (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas)) ||
-    (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas))
+    (deadlineTools && (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas || uploadIncompleto)) ||
+    (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas)) ||
+    uploadIncompleto
   );
-  const podeContinuarSegmento = segmentoAtual < MAX_TURN_SEGMENTS;
+  const maxSeg = pedidoUploadTurno ? MAX_TURN_SEGMENTS_UPLOAD : MAX_TURN_SEGMENTS;
+  const podeContinuarSegmento = segmentoAtual < maxSeg;
   let continuarTurno = false;
   let usouFallback = false;
 
@@ -6005,12 +6099,16 @@ Deno.serve(async (req) => {
         cards: cardsMerged,
         reply_parcial: replyParcial.slice(-8000),
         created_at: new Date().toISOString(),
+        pendentes_upload: relUpload.faltam,
+        ja_na_meta: relUpload.jaNaMeta,
       };
       await supa.from("chat_conversations")
         .update({ turn_checkpoint: novoCp, updated_at: new Date().toISOString() })
         .eq("id", convId);
 
-      if (!replyTrim) {
+      if (pedidoUploadTurno && relUpload.markdown) {
+        reply = anexarRelatorioUpload(replyTrim, relUpload);
+      } else if (!replyTrim) {
         if (cardsNesteSegmento > 0) {
           reply = `Emiti ${cardsNesteSegmento} pedido(s) de aprovação. Continuando o restante automaticamente…`;
         } else if (pedidoAto && (tentouEmitir || toolsNesteSegmento > 0)) {
@@ -6044,6 +6142,10 @@ Deno.serve(async (req) => {
       }
       usouFallback = true;
     }
+  }
+
+  if (pedidoUploadTurno && (relUpload.teveAcervo || relUpload.linhas.length)) {
+    reply = anexarRelatorioUpload(String(reply ?? ""), relUpload);
   }
 
   // Turno completo: garante checkpoint limpo.

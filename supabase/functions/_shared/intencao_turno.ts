@@ -53,3 +53,20 @@ export function recusaFalsaMoldeTrafego(texto: string): boolean {
     /alter(ar|em) manualmente no gerenciador/.test(t);
   return recusa && (pedeMolde || desvioEng);
 }
+
+/**
+ * "suba os videos restantes" / "carregue as pecas na biblioteca".
+ * Nao e clarificacao: o turno so fecha quando todos os faltantes subiram
+ * (ou a ferramenta recusou teto horario de verdade).
+ */
+export function ehPedidoUploadLote(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  const verbo =
+    /\b(suba|subir|envie|enviar|carregue|carregar|uploade?|faca upload|fazer upload|termine de subir|terminar de subir)\b/.test(p);
+  const alvo =
+    /\b(video|midia|pecas?|arquivos?|restantes?|faltantes?|biblioteca|drive|acervo|na meta|ficaram de fora)\b/.test(p);
+  const inventario =
+    /\b(ja estao na meta|ficaram de fora|quais dos \d+)\b/.test(p) &&
+    /\b(video|peca|arquivo|biblioteca|meta)\b/.test(p);
+  return (verbo && alvo) || inventario;
+}

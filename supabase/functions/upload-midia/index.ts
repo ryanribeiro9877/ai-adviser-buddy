@@ -373,6 +373,10 @@ Deno.serve(async (req) => {
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
   const acao = String(body?.acao ?? "plan");
+  const wallMsReq = Number(body?.wall_ms);
+  const wallMs = Number.isFinite(wallMsReq) && wallMsReq >= 10_000
+    ? Math.min(90_000, wallMsReq)
+    : undefined;
   if (!["plan", "executar", "thumbnails", "creative", "escoar_imagens", "escoar_videos", "status_video"].includes(acao)) {
     return json({ error: "acao deve ser plan, executar, thumbnails, creative, escoar_imagens, escoar_videos ou status_video" }, 400);
   }
@@ -1032,6 +1036,7 @@ Deno.serve(async (req) => {
       }
     }
     return json({ ok: true, acao: "executar", dedup: true,
+      nome: meta.name, drive_file_id: fileId,
       image_hash: existente.meta_image_hash, video_id: existente.meta_video_id,
       status_processamento, pronto,
       nota: "arquivo ja estava na biblioteca desta conta - identificador reutilizado, nada reenviado" });
@@ -1054,11 +1059,13 @@ Deno.serve(async (req) => {
       const ret = await enviarVideoEmPartes({
         account, fileId, nome: meta.name, mime, tamanho, companyId: comp.id,
         sessaoExistente: existente?.status === "enviando" ? sessaoDeLinha(existente) : null,
+        wallMs,
       });
-      if (!ret.ok) return json({ ok: false, error: ret.erro }, 502);
+      if (!ret.ok) return json({ ok: false, error: ret.erro, nome: meta.name, drive_file_id: fileId }, 502);
       if (!ret.feito) {
         return json({
           ok: true, acao: "executar", enviado: false, em_andamento: true,
+          nome: meta.name, drive_file_id: fileId,
           video_id: ret.sessao.video_id || null,
           bytes_enviados: ret.bytes_enviados, tamanho_bytes: tamanho,
           upload_session_id: ret.sessao.session_id,
@@ -1079,6 +1086,7 @@ Deno.serve(async (req) => {
       } catch { /* status e informativo */ }
       return json({
         ok: true, acao: "executar", enviado: true, image_hash: null, video_id: ret.video_id,
+        nome: meta.name, drive_file_id: fileId,
         status_processamento, pronto,
         nota: pronto === true
           ? "video na biblioteca e pronto para uso em anuncio"
@@ -1096,6 +1104,7 @@ Deno.serve(async (req) => {
     }, { onConflict: "drive_file_id,account_external_id" });
     return json({
       ok: true, acao: "executar", enviado: true, image_hash, video_id: null,
+      nome: meta.name, drive_file_id: fileId,
       status_processamento: null, pronto: true,
       nota: "midia na biblioteca da conta - use image_hash ao criar o anuncio",
     });
@@ -1106,6 +1115,6 @@ Deno.serve(async (req) => {
       nome: meta.name, mime, tamanho_bytes: tamanho, tipo, status: "erro", dry_run: false, erro: msg,
       criado_por: "upload-midia v6",
     }, { onConflict: "drive_file_id,account_external_id" });
-    return json({ ok: false, error: msg }, 502);
+    return json({ ok: false, error: msg, nome: meta.name, drive_file_id: fileId }, 502);
   }
 });

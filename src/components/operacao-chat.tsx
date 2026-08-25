@@ -36,6 +36,7 @@ import {
 import { Markdown } from "@/components/markdown";
 import { JobProgressCard } from "@/components/job-progress-card";
 import { replyLoteComLegendas, replyLoteCriativoIncompleto } from "@/lib/lote-criativo";
+import { ehPedidoUploadLote } from "@/lib/intencao-turno";
 import { ActionCard, decideApproval, reexecutarApproval, type Approval, type Decision } from "@/components/action-card";
 import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
@@ -88,6 +89,7 @@ const CONTINUE_PROMPT =
   "Sua resposta anterior foi cortada pelo limite de tamanho. Continue EXATAMENTE do ponto onde parou, na próxima palavra ou linha. Não repita nada do que já escreveu, não reintroduza o assunto, não reescreva títulos já entregues, não cumprimente. Apenas continue até concluir.";
 // Segmentos extras alem da costura por tamanho (checkpoint de orçamento / ato).
 const MAX_CONTINUATIONS = 5;
+const MAX_CONTINUATIONS_UPLOAD = 8;
 const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 const needsAutoContinue = (data?: ChatReply | null) =>
   !!data && data.continuar === true && !!data.finish_reason && data.finish_reason.startsWith("continuar_turno");
@@ -100,6 +102,7 @@ function deaccFront(s: string) {
 function isProgressOnlyReply(text: string): boolean {
   const raw = (text ?? "").trim();
   if (!raw) return true;
+  if (/##\s*status do upload/i.test(raw)) return false;
   const t = deaccFront(raw.toLowerCase());
   if (raw.length < 80 && /continuando|montando os pedidos/.test(t)) return true;
   return (
@@ -136,9 +139,26 @@ function looksLikeCompleteTurn(text: string): boolean {
   const raw = (text ?? "").trim();
   if (raw.length < 100 || isProgressOnlyReply(raw)) return false;
   if (replyLoteCriativoIncompleto(raw) || replyLoteComLegendas(raw)) return false;
+  if (/##\s*status do upload/i.test(raw) && /ainda fora da meta/i.test(raw)) return false;
   const t = deaccFront(raw.toLowerCase());
   if (/\?/.test(raw)) return true;
   return /\b(preciso (da sua|que voce|confirmar|saber)|qual (o |a )?(objetivo|opcao|caminho|meta)|me (confirma|diga|escolha)|antes de (criar|emitir|propor)|contradic|aguardo (sua|a) (resposta|decisao)|escolha (uma|o|a)|decida)\b/.test(t);
+}
+
+function lastUserContent(msgs: Message[]): string {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === "user") return msgs[i].content ?? "";
+  }
+  return "";
+}
+
+function uploadLoteAberto(msgs: Message[]): boolean {
+  return ehPedidoUploadLote(lastUserContent(msgs));
+}
+
+function devePararContinuacao(msgs: Message[]): boolean {
+  if (uploadLoteAberto(msgs)) return false;
+  return countSubstantiveAssistantsSinceLastUser(msgs) >= 2 && !loteAindaAberto(msgs);
 }
 
 /** Lote de criativos ainda em curso: nao cortar a continuacao na 2a bolha. */
@@ -638,6 +658,7 @@ export function OperacaoChat() {
   const send = async (textoOverride?: string) => {
     const reenvio = typeof textoOverride === "string";
     const text = (reenvio ? textoOverride : input).trim();
+    const capCont = ehPedidoUploadLote(text) ? MAX_CONTINUATIONS_UPLOAD : MAX_CONTINUATIONS;
     if (sending || transcribing || !companyId) return;
     if (!reenvio && !canSend) return;
     if (reenvio && !text) return;
@@ -737,13 +758,10 @@ export function OperacaoChat() {
           // v28.38: so se continuar=true de verdade; para se ja houver 2 assistants substantivos.
           setLive({ convId: convIdAtSend, text: "continuando a resposta…", continuing: 1 });
           let contFinish = true;
-          for (let n = 1; n <= MAX_CONTINUATIONS && contFinish; n++) {
+          for (let n = 1; n <= capCont && contFinish; n++) {
             try {
               const msgsNow = await fetchMessages(convIdAtSend);
-              if (
-              countSubstantiveAssistantsSinceLastUser(msgsNow) >= 2 &&
-              !loteAindaAberto(msgsNow)
-            ) break;
+              if (devePararContinuacao(msgsNow)) break;
             } catch {
               /* rede — segue com a flag da edge */
             }
@@ -810,14 +828,11 @@ export function OperacaoChat() {
       let autoCont = needsAutoContinue(data) && !looksLikeCompleteTurn(acc);
       if (isTruncated(finish) || autoCont) setLive({ convId, text: acc || "continuando a resposta…", continuing: 0 });
 
-      for (let n = 1; n <= MAX_CONTINUATIONS && (isTruncated(finish) || autoCont); n++) {
+      for (let n = 1; n <= capCont && (isTruncated(finish) || autoCont); n++) {
         if (autoCont) {
           try {
             const msgsNow = await fetchMessages(convId);
-            if (
-              countSubstantiveAssistantsSinceLastUser(msgsNow) >= 2 &&
-              !loteAindaAberto(msgsNow)
-            ) break;
+            if (devePararContinuacao(msgsNow)) break;
           } catch {
             /* rede — segue com a flag da edge */
           }
@@ -1229,7 +1244,7 @@ export function OperacaoChat() {
                     {live.continuing > 0 && (
                       <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
                         <Loader2 className="h-3 w-3 animate-spin" />
-                        continuando a resposta… ({live.continuing}/{MAX_CONTINUATIONS})
+                        continuando a resposta… ({live.continuing}/{MAX_CONTINUATIONS_UPLOAD})
                       </div>
                     )}
                   </div>
