@@ -191,9 +191,26 @@ export function apurarUploadLote(
   };
 }
 
+/** Stub de emissao de card — nunca deve ir para o gestor num lote de upload. */
+const RE_STUB_APROVACAO =
+  /^Montando os pedidos de aprova[^\n]*$/gim;
+const RE_STUB_ORCAMENTO =
+  /^Continuando automaticamente a partir do ponto[^\n]*$/gim;
+
+export function prosaContinuandoUpload(rel: RelatorioUpload): string {
+  if (!rel.faltam.length) return "";
+  const nomes = rel.faltam.slice(0, 8).map((p) => p.nome).join(", ");
+  const n = rel.faltam.length;
+  return n === 1
+    ? `Continuando o que falta: ${nomes}.`
+    : `Continuando os ${n} que faltam: ${nomes}.`;
+}
+
 export function anexarRelatorioUpload(reply: string, rel: RelatorioUpload): string {
   const base = String(reply ?? "")
     .replace(/\n*_Continuando automaticamente[^\n]*_/gi, "")
+    .replace(RE_STUB_APROVACAO, "")
+    .replace(RE_STUB_ORCAMENTO, "")
     .trim();
   if (!rel.markdown) return base;
   if (/##\s*status do upload/i.test(base)) return base;

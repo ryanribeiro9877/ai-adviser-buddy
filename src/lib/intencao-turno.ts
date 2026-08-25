@@ -67,9 +67,17 @@ export function ehPedidoUploadLote(pedido: string): boolean {
   const verbo =
     /\b(suba|subir|envie|enviar|carregue|carregar|uploade?|faca upload|fazer upload|termine de subir|terminar de subir)\b/.test(p);
   const alvo =
-    /\b(video|midia|pecas?|arquivos?|restantes?|faltantes?|biblioteca|drive|acervo|na meta|ficaram de fora)\b/.test(p);
+    /\b(videos?|midia|pecas?|arquivos?|restantes?|faltantes?|pendentes?|biblioteca|drive|acervo|na meta|ficaram de fora)\b/.test(p);
   const inventario =
     /\b(ja estao na meta|ficaram de fora|quais dos \d+)\b/.test(p) &&
     /\b(video|peca|arquivo|biblioteca|meta)\b/.test(p);
   return (verbo && alvo) || inventario;
+}
+
+/** 1–3 pecas restantes: um bloco HTTP deve tentar fecha-las, sem teatro de 8 segmentos. */
+export function ehUploadLoteCurto(pedido: string, nPendentes?: number): boolean {
+  if (typeof nPendentes === "number" && nPendentes > 0 && nPendentes <= 3) return true;
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  return /\b([123]|um|dois|tres)\b/.test(p) &&
+    /\b(ultimos?|pendentes?|faltantes?|restantes?)\b/.test(p);
 }

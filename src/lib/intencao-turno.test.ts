@@ -5,6 +5,7 @@ import {
   ehPerguntaDeLeitura,
   recusaFalsaMoldeTrafego,
   ehPedidoUploadLote,
+  ehUploadLoteCurto,
 } from "./intencao-turno";
 
 describe("ehPerguntaDeLeitura", () => {
@@ -47,11 +48,17 @@ describe("recusaFalsaMoldeTrafego", () => {
 
 describe("ehPedidoUploadLote", () => {
   it("reconhece subir videos restantes", () => {
-    expect(ehPedidoUploadLote("suba os vídeos restantes")).toBe(true);
+    expect(ehPedidoUploadLote("suba os 2 últimos vídeos que ficaram pendentes")).toBe(true);
     expect(ehPedidoUploadLote("carregue as peças na biblioteca")).toBe(true);
     expect(ehPedidoUploadLote(
       "termine de subir os vídeos e me informe quais dos 34 já estão na meta e quais ficaram de fora",
     )).toBe(true);
     expect(ehPedidoUploadLote("qual o gasto de ontem?")).toBe(false);
+  });
+
+  it("reconhece recorte curto (2 pendentes) sem teatro de 8 blocos", () => {
+    expect(ehUploadLoteCurto("suba os 2 últimos vídeos que ficaram pendentes")).toBe(true);
+    expect(ehUploadLoteCurto("suba os restantes", 2)).toBe(true);
+    expect(ehUploadLoteCurto("suba os restantes", 20)).toBe(false);
   });
 });

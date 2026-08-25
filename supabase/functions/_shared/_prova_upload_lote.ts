@@ -1,11 +1,11 @@
-import { apurarUploadLote, anexarRelatorioUpload, itensPendentesDoAcervo } from "./upload_lote.ts";
+import { apurarUploadLote, anexarRelatorioUpload, itensPendentesDoAcervo, prosaContinuandoUpload } from "./upload_lote.ts";
 import { ehPedidoUploadLote } from "./intencao_turno.ts";
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg);
 }
 
-assert(ehPedidoUploadLote("suba os vídeos restantes"), "pedido subir restantes");
+assert(ehPedidoUploadLote("suba os 2 últimos vídeos que ficaram pendentes"), "pedido 2 pendentes");
 assert(ehPedidoUploadLote("carregue as pecas na biblioteca"), "pedido carregar biblioteca");
 assert(ehPedidoUploadLote("termine de subir os vídeos e me informe quais dos 34 já estão na meta e quais ficaram de fora"), "pedido 34 na meta");
 assert(!ehPedidoUploadLote("qual o gasto de ontem?"), "pergunta nao e upload");
@@ -49,5 +49,11 @@ assert(teto.tetoHora && teto.faltam.length === 2, "teto nao esconde faltantes");
 const md = anexarRelatorioUpload("Vou subir os primeiros 5.\n\n_Continuando automaticamente…_", rel);
 assert(/Status do upload/.test(md), "anexa relatorio");
 assert(!/_Continuando automaticamente/.test(md), "remove prosa de progresso vazia");
+
+const ato = "Montando os pedidos de aprovação — continuando automaticamente a partir do ponto em que o orçamento desta janela esgotou.";
+const mdAto = anexarRelatorioUpload(ato, rel);
+assert(!/pedidos de aprovação/i.test(mdAto), "nao anexa stub de card em upload");
+assert(/Status do upload/.test(mdAto), "relatorio fica no lugar do stub");
+assert(/Piscina/.test(prosaContinuandoUpload(rel)), "prosa cita o que falta");
 
 console.log("ok upload_lote");

@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.70)
+// supabase/functions/traffic-chat/index.ts (v28.71)
+// v28.71 (25/08/2026) - SUBIR VIDEOS (plural) e lote de upload: "videos/pendentes"
+//   nao caia no detector (so "video") e o stub REPLY_CONTINUANDO_ATO ("pedidos de
+//   aprovacao") saia duas vezes. Lote de upload so devolve Status do upload.
 // v28.70 (25/08/2026) - LOTE DE UPLOAD: o agente subia 1-2 pecas, dizia "primeiros 5"
 //   (teto de 5/hora na descricao da tool, teto real=2/turno) e pedia eco. Agora: lista
 //   nome+status, continua ate zerar faltantes, nao corta na 2a bolha.
@@ -635,8 +638,8 @@ import {
   exigirIdentidadeRedes,
   idInstagramDeParams,
 } from "../_shared/identidade_instagram.ts";
-import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote } from "../_shared/intencao_turno.ts";
-import { anexarRelatorioUpload, apurarUploadLote } from "../_shared/upload_lote.ts";
+import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto } from "../_shared/intencao_turno.ts";
+import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
 import {
   aplicarRecorteAcervo,
   aplicarRecorteAnalisesDrive,
@@ -731,7 +734,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.70";
+const VERSAO = "chat-v28.71";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_UPLOAD = 8;
@@ -761,6 +764,12 @@ const MSG_NUDGE_UPLOAD_BASE =
   "varios na mesma rodada. Cite o NOME de cada peca (vem no retorno).";
 const RE_CONTINUAR_AUTO =
   /^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/i;
+function ehStubProgressoChat(s: string): boolean {
+  const t = String(s ?? "").trim();
+  if (!t) return true;
+  if (/##\s*status do upload/i.test(t)) return false;
+  return RE_CONTINUAR_AUTO.test(t) || t === REPLY_CONTINUANDO_ATO || t === REPLY_CONTINUANDO;
+}
 // Narracao mid-loop ("vou consultar…") — nao conta como resposta que fecha o turno.
 const RE_INTENCAO =
   /\b(vou|deixe-?me|deixa eu|irei|vou apenas)\b.{0,80}\b(cruzar|ler|consultar|verificar|checar|buscar|abrir|olhar|coletar|apurar|rodar|chamar|emitir|criar|propor)\b/i;
@@ -5554,7 +5563,12 @@ Deno.serve(async (req) => {
   let nudgesUpload = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
   const pedidoUploadTurno = ehPedidoUploadLote(objetivoOriginal);
-  const toolsDeadlineMs = pedidoUploadTurno ? 70_000 : (pedidoLoteTurno ? 90_000 : TOOLS_DEADLINE_MS);
+  const nPendentesCp = (turnCheckpoint?.pendentes_upload ?? []).length;
+  const uploadCurto = pedidoUploadTurno && ehUploadLoteCurto(objetivoOriginal, nPendentesCp);
+  // Lote curto (1–3 pecas): um bloco deve tentar fecha-las. Ainda da flush antes dos 2 min da UI.
+  const toolsDeadlineMs = pedidoUploadTurno
+    ? (uploadCurto ? 95_000 : 70_000)
+    : (pedidoLoteTurno ? 90_000 : TOOLS_DEADLINE_MS);
   const maxIterTurno = pedidoUploadTurno ? 16 : MAX_ITER;
   // v20: telemetria de custo. Capturamos os dois formatos possiveis - anthropic
   // (cache_creation_input_tokens / cache_read_input_tokens) e openai
@@ -5993,6 +6007,8 @@ Deno.serve(async (req) => {
     // v28.40: se propose_action de criacao rodou (ou tentou) sem card, trata como ato.
     (actionCards.length === 0 && toolsIncluemPropose(toolsUsed))
   );
+  // "suba os videos" e pedido de ato pelo verbo, mas NAO e emissao de card.
+  const pedidoAtoCards = pedidoAto && !pedidoUploadTurno;
   const cardsNesteSegmento = actionCards.length;
   const cardsJaNoPedido = (turnCheckpoint?.cards?.length ?? 0) + cardsNesteSegmento;
   const toolsNesteSegmento = toolsUsed.length;
@@ -6003,7 +6019,7 @@ Deno.serve(async (req) => {
   // OU se o lote de upload ainda tem pecas fora da Meta.
   const turnoJaFechado = replyFechaTurno(replyTrim) && !(
     claimSan.reescreveu ||
-    (pedidoAto && cardsJaNoPedido === 0 && toolsIncluemPropose(toolsUsed)) ||
+    (pedidoAtoCards && cardsJaNoPedido === 0 && toolsIncluemPropose(toolsUsed)) ||
     uploadIncompleto
   );
   const tentouEmitir =
@@ -6016,7 +6032,7 @@ Deno.serve(async (req) => {
   // Ato incompleto: card ainda nao saiu E havia trabalho de emissao em curso
   // (propose tentado, ou mid-loop sem prosa util). Clarificacao com zero cards NAO entra.
   const atoEmAndamentoSemCard =
-    pedidoAto &&
+    pedidoAtoCards &&
     cardsJaNoPedido === 0 &&
     !turnoJaFechado &&
     (tentouEmitir || (toolsNesteSegmento > 0 && midLoopFraco));
@@ -6037,7 +6053,7 @@ Deno.serve(async (req) => {
     return false;
   });
   const soFalhaDuraSemCard =
-    pedidoAto &&
+    pedidoAtoCards &&
     cardsJaNoPedido === 0 &&
     proposesDuros.length > 0 &&
     !toolResults.some((t) =>
@@ -6046,12 +6062,19 @@ Deno.serve(async (req) => {
 
   const nLegendasOk = nGerarLegendasOk(turnCheckpoint, toolResults);
   const loteFaltamLegendas = pedidoLote && nLegendasOk < 6;
+  const deadlineSemConteudo = deadlineTools && (
+    pedidoUploadTurno
+      ? uploadIncompleto
+      : (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas)
+  );
   const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && (
-    (deadlineTools && (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas || uploadIncompleto)) ||
+    deadlineSemConteudo ||
     (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas)) ||
     uploadIncompleto
   );
-  const maxSeg = pedidoUploadTurno ? MAX_TURN_SEGMENTS_UPLOAD : MAX_TURN_SEGMENTS;
+  const maxSeg = pedidoUploadTurno
+    ? (uploadCurto ? 3 : MAX_TURN_SEGMENTS_UPLOAD)
+    : MAX_TURN_SEGMENTS;
   const podeContinuarSegmento = segmentoAtual < maxSeg;
   let continuarTurno = false;
   let usouFallback = false;
@@ -6094,7 +6117,7 @@ Deno.serve(async (req) => {
         v: 1,
         segmento: segmentoAtual + 1,
         objetivo: objetivoOriginal,
-        pedido_ato: pedidoAto,
+        pedido_ato: pedidoAtoCards,
         tools_resumo: toolsMerged,
         cards: cardsMerged,
         reply_parcial: replyParcial.slice(-8000),
@@ -6106,17 +6129,21 @@ Deno.serve(async (req) => {
         .update({ turn_checkpoint: novoCp, updated_at: new Date().toISOString() })
         .eq("id", convId);
 
-      if (pedidoUploadTurno && relUpload.markdown) {
-        reply = anexarRelatorioUpload(replyTrim, relUpload);
+      if (pedidoUploadTurno) {
+        const prosaUp = prosaContinuandoUpload(relUpload);
+        reply = anexarRelatorioUpload(prosaUp || replyTrim, relUpload);
+        if (!String(reply).trim()) {
+          reply = "Continuando o upload dos vídeos pendentes.";
+        }
       } else if (!replyTrim) {
         if (cardsNesteSegmento > 0) {
           reply = `Emiti ${cardsNesteSegmento} pedido(s) de aprovação. Continuando o restante automaticamente…`;
-        } else if (pedidoAto && (tentouEmitir || toolsNesteSegmento > 0)) {
+        } else if (pedidoAtoCards && (tentouEmitir || toolsNesteSegmento > 0)) {
           reply = REPLY_CONTINUANDO_ATO;
         } else {
           reply = REPLY_CONTINUANDO;
         }
-      } else if (pedidoAto && cardsNesteSegmento === 0 && tentouEmitir) {
+      } else if (pedidoAtoCards && cardsNesteSegmento === 0 && tentouEmitir) {
         // propose_action em curso sem card — progress de emissao e honesto.
         reply = replyTrim + "\n\n_Continuando automaticamente para emitir o(s) pedido(s) de aprovação…_";
       } else if (replyTrim) {
@@ -6124,11 +6151,29 @@ Deno.serve(async (req) => {
         reply = replyTrim + "\n\n_Continuando automaticamente…_";
       }
       continuarTurno = true;
-      finishReason = `continuar_turno+seg${segmentoAtual}`;
+      // Sem progresso de ferramenta neste bloco: nao abrir teatro de segmentos vazios.
+      if (
+        pedidoUploadTurno &&
+        toolsNesteSegmento === 0 &&
+        !relUpload.linhas.length &&
+        segmentoAtual > 1
+      ) {
+        continuarTurno = false;
+      }
+      finishReason = continuarTurno
+        ? `continuar_turno+seg${segmentoAtual}`
+        : (finishReason || "stop");
     } else if (!replyTrim) {
       // Ultimo segmento ou sem trabalho retomavel: ainda assim NAO use o texto antigo
       // de "Peça de novo…" em pedido de ato — diga o que falta com o que ja tem.
-      if (pedidoAto) {
+      if (pedidoUploadTurno) {
+        const prosaUp = prosaContinuandoUpload(relUpload);
+        reply = anexarRelatorioUpload(prosaUp, relUpload);
+        if (!String(reply).trim()) {
+          reply = "Nao concluí o upload neste bloco. O sistema retoma os ids que faltam — não peça de novo.";
+        }
+        finishReason = deadlineTools ? "orcamento_upload_incompleto" : "erro_upload_sem_conteudo";
+      } else if (pedidoAtoCards) {
         const nCards = cardsJaNoPedido;
         reply = nCards > 0
           ? `Consegui emitir ${nCards} pedido(s) de aprovação neste fio. Se ainda faltar algum card do pedido original, peça só o que falta (ex.: o conjunto) — o que já saiu está na fila de aprovação.`
@@ -6169,12 +6214,22 @@ Deno.serve(async (req) => {
     modelo_roteado: modeloRoteado, modelo_pedido: rotaLlm.model,
     llm_rota: diagnosticoRota(rotaLlm),
     continuar_turno: continuarTurno, segmento_turno: segmentoAtual,
-    retomada: ehRetomada, pedido_ato: pedidoAto };
+    retomada: ehRetomada, pedido_ato: pedidoAtoCards };
 
-  await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
-    tool_calls: toolsUsed.length ? toolsUsed : null, model: modeloRoteado, tokens_in: tokensIn, tokens_out: tokensOut,
-    diagnostico, tool_results: toolResults.length ? toolResults : null,
-    attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
+  const lastAsstHist = [...history].reverse().find((m: { role?: string }) => m.role === "assistant");
+  const lastAsstText = String((lastAsstHist as { content?: string } | undefined)?.content ?? "").trim();
+  const replyNorm = String(reply ?? "").trim();
+  const duplicaStub =
+    ehStubProgressoChat(replyNorm) &&
+    !!lastAsstText &&
+    toolsUsed.length === 0 &&
+    (replyNorm === lastAsstText || ehStubProgressoChat(lastAsstText));
+  if (!duplicaStub) {
+    await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
+      tool_calls: toolsUsed.length ? toolsUsed : null, model: modeloRoteado, tokens_in: tokensIn, tokens_out: tokensOut,
+      diagnostico, tool_results: toolResults.length ? toolResults : null,
+      attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
+  }
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
 
   return json({ ok: true, versao: VERSAO, conversation_id: convId, reply, tools_used: toolsUsed.map((t) => t.tool),

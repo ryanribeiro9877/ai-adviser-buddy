@@ -36,7 +36,7 @@ import {
 import { Markdown } from "@/components/markdown";
 import { JobProgressCard } from "@/components/job-progress-card";
 import { replyLoteComLegendas, replyLoteCriativoIncompleto } from "@/lib/lote-criativo";
-import { ehPedidoUploadLote } from "@/lib/intencao-turno";
+import { ehPedidoUploadLote, ehUploadLoteCurto } from "@/lib/intencao-turno";
 import { ActionCard, decideApproval, reexecutarApproval, type Approval, type Decision } from "@/components/action-card";
 import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
@@ -111,6 +111,40 @@ function isProgressOnlyReply(text: string): boolean {
     /continuando automaticamente para emitir/.test(t) ||
     /^\[continuacao automatica do sistema/.test(t)
   );
+}
+
+function mesmaProsa(a: string, b: string): boolean {
+  return deaccFront((a ?? "").trim().toLowerCase()) === deaccFront((b ?? "").trim().toLowerCase());
+}
+
+/** Junta bolhas consecutivas sem duplicar stub de progresso. */
+function mergeAssistantContent(prev: string, next: string): string {
+  const p = (prev ?? "").trim();
+  const n = (next ?? "").trim();
+  if (!n) return prev ?? "";
+  if (!p) return next ?? "";
+  if (mesmaProsa(p, n)) return prev;
+  if (isProgressOnlyReply(p) && isProgressOnlyReply(n)) return prev;
+  if (isProgressOnlyReply(p) && !isProgressOnlyReply(n)) return next;
+  if (!isProgressOnlyReply(p) && isProgressOnlyReply(n)) return prev;
+  return `${prev ?? ""}\n${next ?? ""}`;
+}
+
+function mergeLivePiece(acc: string, piece: string): string {
+  const a = (acc ?? "").trim();
+  const p = (piece ?? "").trim();
+  if (!p) return acc;
+  if (mesmaProsa(a, p) || (isProgressOnlyReply(p) && isProgressOnlyReply(a))) return acc;
+  if (/##\s*status do upload/i.test(p)) return p;
+  if (isProgressOnlyReply(p)) return a && !isProgressOnlyReply(a) ? acc : "";
+  if (!a || isProgressOnlyReply(a)) return p;
+  return `${acc}\n\n${p}`;
+}
+
+function liveOverlayText(acc: string): string {
+  const t = (acc ?? "").trim();
+  if (!t || isProgressOnlyReply(t)) return "continuando a resposta…";
+  return acc;
 }
 
 /** Stub gravado pelo traffic-agent-job no catch — nao conta como resposta real. */
@@ -237,12 +271,18 @@ const fmtDuration = (ms: number) => {
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 };
 
-// Normaliza as tools para chips: histórico grava tool_calls = [{ tool, args }].
+// Normaliza as tools para chips: uma ocorrencia por nome (1a aparicao).
 function toolNames(toolCalls: unknown): string[] {
   if (!Array.isArray(toolCalls)) return [];
-  return toolCalls
-    .map((t) => (t && typeof t === "object" ? (t as { tool?: string }).tool : undefined))
-    .filter((t): t is string => typeof t === "string");
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of toolCalls) {
+    const t = raw && typeof raw === "object" ? (raw as { tool?: string }).tool : undefined;
+    if (typeof t !== "string" || !t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+  }
+  return out;
 }
 
 function storedAttachments(att: unknown): AttachmentMeta[] {
@@ -658,7 +698,9 @@ export function OperacaoChat() {
   const send = async (textoOverride?: string) => {
     const reenvio = typeof textoOverride === "string";
     const text = (reenvio ? textoOverride : input).trim();
-    const capCont = ehPedidoUploadLote(text) ? MAX_CONTINUATIONS_UPLOAD : MAX_CONTINUATIONS;
+    const capCont = ehPedidoUploadLote(text)
+      ? (ehUploadLoteCurto(text) ? 3 : MAX_CONTINUATIONS_UPLOAD)
+      : MAX_CONTINUATIONS;
     if (sending || transcribing || !companyId) return;
     if (!reenvio && !canSend) return;
     if (reenvio && !text) return;
@@ -826,7 +868,7 @@ export function OperacaoChat() {
       let acc = data!.reply ?? "";
       let finish = data!.finish_reason;
       let autoCont = needsAutoContinue(data) && !looksLikeCompleteTurn(acc);
-      if (isTruncated(finish) || autoCont) setLive({ convId, text: acc || "continuando a resposta…", continuing: 0 });
+      if (isTruncated(finish) || autoCont) setLive({ convId, text: liveOverlayText(acc), continuing: 0 });
 
       for (let n = 1; n <= capCont && (isTruncated(finish) || autoCont); n++) {
         if (autoCont) {
@@ -837,7 +879,7 @@ export function OperacaoChat() {
             /* rede — segue com a flag da edge */
           }
         }
-        setLive({ convId, text: acc || "continuando a resposta…", continuing: n });
+        setLive({ convId, text: liveOverlayText(acc), continuing: n });
         const bodyCont = autoCont
           ? { continuar: true, conversation_id: convId, company: companyName }
           : { message: CONTINUE_PROMPT, conversation_id: convId, company: companyName };
@@ -854,14 +896,14 @@ export function OperacaoChat() {
         const piece = (more.reply ?? "").trim();
         if (piece && autoCont) {
           // Segmentos de checkpoint: cada um já é mensagem assistant no banco;
-          // na bolha live só mostramos progresso + último trecho.
-          acc = acc ? `${acc}\n\n${piece}` : piece;
+          // na bolha live só o último trecho útil — nunca o mesmo stub duas vezes.
+          acc = mergeLivePiece(acc, piece);
         } else if (piece) {
           acc = `${acc}\n${piece}`;
         }
         finish = more.finish_reason;
         autoCont = needsAutoContinue(more) && !looksLikeCompleteTurn(more.reply ?? "");
-        setLive({ convId, text: acc || "continuando a resposta…", continuing: n });
+        setLive({ convId, text: liveOverlayText(acc), continuing: n });
         // Cards podem ter saído no segmento — atualiza a fila sem esperar o fim.
         if (autoCont || (more.tools_used?.length ?? 0) > 0) {
           qc.invalidateQueries({ queryKey: ["approvals"] });
@@ -1005,7 +1047,7 @@ export function OperacaoChat() {
       if (near) {
         out[out.length - 1] = {
           ...prev,
-          content: `${prev.content ?? ""}\n${m.content ?? ""}`,
+          content: mergeAssistantContent(prev.content ?? "", m.content ?? ""),
           tool_calls: [
             ...(Array.isArray(prev.tool_calls) ? prev.tool_calls : []),
             ...(Array.isArray(m.tool_calls) ? m.tool_calls : []),
@@ -1023,6 +1065,21 @@ export function OperacaoChat() {
     }
     return out;
   }, [messages.data]);
+
+  const lastAsstBubble = [...msgs].reverse().find((m) => m.role === "assistant");
+  const liveCopiaUltima = !!(
+    live && lastAsstBubble && mesmaProsa(live.text, lastAsstBubble.content ?? "")
+  );
+  const liveMostraMarkdown = !!(
+    live &&
+    live.text &&
+    live.text !== "continuando a resposta…" &&
+    !isProgressOnlyReply(live.text) &&
+    !liveCopiaUltima
+  );
+  const capLiveOverlay = ehPedidoUploadLote(lastUserContent(msgs))
+    ? (ehUploadLoteCurto(lastUserContent(msgs)) ? 3 : MAX_CONTINUATIONS_UPLOAD)
+    : MAX_CONTINUATIONS;
 
   // Estado da conversa ABERTA: derivado das mensagens carregadas (não do recorte
   // de 30 min da lista) — assim uma conversa órfã antiga também é reconhecida ao
@@ -1238,13 +1295,15 @@ export function OperacaoChat() {
                     <Bot className="h-4 w-4" />
                   </div>
                   <div className="min-w-0 flex-1 overflow-hidden">
-                    <div className="max-w-full break-words rounded-lg bg-muted px-3 py-2 [overflow-wrap:anywhere]">
-                      <Markdown>{live.text}</Markdown>
-                    </div>
-                    {live.continuing > 0 && (
+                    {liveMostraMarkdown && (
+                      <div className="max-w-full break-words rounded-lg bg-muted px-3 py-2 [overflow-wrap:anywhere]">
+                        <Markdown>{live.text}</Markdown>
+                      </div>
+                    )}
+                    {(live.continuing > 0 || !liveMostraMarkdown) && (
                       <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
                         <Loader2 className="h-3 w-3 animate-spin" />
-                        continuando a resposta… ({live.continuing}/{MAX_CONTINUATIONS_UPLOAD})
+                        continuando a resposta… ({Math.max(live.continuing, 1)}/{capLiveOverlay})
                       </div>
                     )}
                   </div>
@@ -1605,9 +1664,9 @@ function MessageBubble({
         )}
         {(tools.length > 0 || message.model) && (
           <div className="mt-1 flex max-w-full flex-wrap items-center gap-1">
-            {tools.map((t, i) => (
+            {tools.map((t) => (
               <Badge
-                key={`${t}-${i}`}
+                key={t}
                 variant="outline"
                 className="h-5 max-w-full px-1.5 text-[11px] font-normal"
               >
