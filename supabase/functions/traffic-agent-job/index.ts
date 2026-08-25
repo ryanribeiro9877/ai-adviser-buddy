@@ -1,4 +1,8 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.2)
+// supabase/functions/traffic-agent-job/index.ts (v4.4)
+// v4.4 (25/08/2026) - DRIVE NAO E OVERVIEW: "analise completa de criativos" das pastas
+//   Reels/Videos (La Felicita) caia no plano magro desempenho+criativos+alertas. O
+//   especialista `criativos` lia anuncios JA NO AR e o job pedia o inventario ao gestor.
+//   Mensagem nova = coleta nova. forcarPlano Drive = criativos_drive + estrutura_conta.
 // v4.2 (21/08/2026) - WHATSAPP DE PE vs CTWA: get_waba_status via get_waba_phones
 //   (Cloud+ON_PREMISE, nao so CLOUD_API); filtro meio; doutrina JUR/LF COHAPM.
 // v4.1 (21/08/2026) - FIDELIDADE AO PEDIDO (auditoria COHAPM): o agente misturou serie
@@ -225,6 +229,20 @@ import {
 } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
+import {
+  FOCO_CRIATIVOS_DRIVE,
+  FOCO_ESTRUTURA_CONJUNTOS_DRIVE,
+  aplicarRecorteAcervo,
+  aplicarRecorteAnalisesDrive,
+  compactarInventarioDriveParaAgente,
+  conjuntoNomeDoMeioLaFelicita,
+  inferirMeioDrive,
+  injetarArgsDrive,
+  pastaFormatoDoPedido,
+  pedidoExigeInventarioDrive,
+  raizDriveDoMeio,
+  recorteDriveDoPedido,
+} from "../_shared/pedido_drive_criativos.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -377,7 +395,12 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
   if (/\bnumeros?\b/.test(p) && /\bconversas?\b/.test(p) && (/\bjuridico\b|\bfelicita\b|\blafelicita\b|\bwa\b|\bwhatsapp\b/.test(p))) {
     perguntas_obrigatorias.push("Dos numeros cadastrados (juridico e La Felicita), quais receberam mais conversas?");
   }
-  if (/\bavaliacao completa\b|\bsupergestor\b|\banalise completa\b|\brelatorio completo\b/.test(p)) {
+  const pedeDrive = pedidoExigeInventarioDrive(raw);
+  if (pedeDrive) {
+    perguntas_obrigatorias.push("Inventario do Drive NESTA rodada: nome + pasta + drive_file_id (Reels/Videos se o pedido restringir).");
+    perguntas_obrigatorias.push("Distribuicao CONJ.1/2/3 a partir de Junho+Julho sem repetir arquivo; Agosto so no CONJ.4 se o pedido reservar.");
+    perguntas_obrigatorias.push("Configuracao de cada conjunto citado (publico/geo, idade, optimization_goal, orcamento, destination_type).");
+  } else if (/\bavaliacao completa\b|\bsupergestor\b|\banalise completa\b|\brelatorio completo\b/.test(p)) {
     perguntas_obrigatorias.push("Visao geral das campanhas do universo do pedido (status, gasto, objetivo + optimization_goal).");
     perguntas_obrigatorias.push("Funil/metricas NA JANELA do pedido (nao fora dela).");
   }
@@ -484,6 +507,22 @@ function classificarCapacidade(pergunta: string): Capacidade {
     || len >= 1400
     || (len >= 900 && (perguntas >= 3 || linhas >= 8))
     || (perguntas >= 4 && len >= 500);
+  // Pedido de pasta Drive NUNCA e overview de campanha, mesmo se o texto disser
+  // "analise completa de criativos das pastas".
+  if (pedidoExigeInventarioDrive(raw)) {
+    return {
+      tier: deepHit ? "deep" : "standard",
+      motivo: "inventario Drive (nao overview de campanha)",
+      maxEspecialistas: 2,
+      devolucoesMax: deepHit ? DEVOLUCOES_MAX : STANDARD_DEVOLUCOES_MAX,
+      permitirCheckpoint: deepHit,
+      openRouterTimeoutMs: deepHit ? OPENROUTER_TIMEOUT_MS : STANDARD_OPENROUTER_TIMEOUT_MS,
+      forcarPlano: [
+        { nome: "criativos_drive", foco: FOCO_CRIATIVOS_DRIVE },
+        { nome: "estrutura_conta", foco: FOCO_ESTRUTURA_CONJUNTOS_DRIVE },
+      ],
+    };
+  }
   // Overview/supergestor: leitura de numeros — plano magro, sem compliance/waba/estrutura
   // a menos que o texto peca auditoria/WhatsApp/CBO explicitamente.
   const overviewLean = /\b(supergestor|avaliacao completa|analise completa|relatorio completo|visao geral|panorama|desde.{0,50}ativac)\b/.test(p)
@@ -948,7 +987,7 @@ async function t_ler_pipeboard(companyId: string, ferramenta: string, argumentos
   return cut.data;
 }
 
-async function t_estrutura_conjuntos(companyId: string) {
+async function t_estrutura_conjuntos(companyId: string, pedido?: string) {
   const { data, error } = await supa.rpc("get_estrutura_conjuntos", {
     p_company_id: companyId,
     p_offset: 0,
@@ -956,7 +995,16 @@ async function t_estrutura_conjuntos(companyId: string) {
   });
   if (error) return { erro: `falha ao ler estrutura dos conjuntos: ${error.message}` };
   if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
-  return cortarLista(data as Record<string, unknown>, "conjuntos");
+  const obj = data as Record<string, unknown>;
+  if (pedido && inferirMeioDrive(pedido) === "la_felicita" && Array.isArray(obj.conjuntos)) {
+    const filtrados = (obj.conjuntos as Record<string, unknown>[]).filter((c) =>
+      conjuntoNomeDoMeioLaFelicita(String(c.nome ?? c.name ?? "")),
+    );
+    if (filtrados.length) {
+      return { ...obj, conjuntos: filtrados, recorte: "la_felicita", exibidos: filtrados.length };
+    }
+  }
+  return cortarLista(obj, "conjuntos");
 }
 async function t_check_compliance(companyId: string, legenda: string, mcpKey: string) {
   if (!legenda) return { erro: "forneca a legenda" };
@@ -1062,7 +1110,7 @@ async function t_waba_template_insights(companyId: string, days = 30) {
   }, "templates");
 }
 
-async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey: string }) {
+async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey: string; pedido?: string }) {
   try {
     switch (name) {
       case "get_overview": return await t_overview(ctx.companyId);
@@ -1126,7 +1174,7 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
         const somenteAtivas = informouAtivas ? args.somente_ativas === true : !buscaNome;
         return await t_criativos_conteudo(somenteAtivas, ctx.companyId, Number(args?.pagina ?? 1), buscaNome);
       }
-      case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId);
+      case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId, ctx.pedido);
       case "listar_ferramentas_pipeboard": return await t_listar_ferramentas_pipeboard();
       case "ler_pipeboard":
         return await t_ler_pipeboard(
@@ -1138,19 +1186,27 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
               ? args.args as Record<string, unknown>
               : {}),
         );
-      case "get_drive_criativos": return await t_drive_criativos(ctx.companyId);
+      case "get_drive_criativos": {
+        const pedido = String(ctx.pedido ?? "");
+        const argsDrive = injetarArgsDrive(args, pedido);
+        return await t_drive_criativos(ctx.companyId, { pedido, args: argsDrive, enxuto: true });
+      }
       case "get_analise_visual_drive": {
         const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
-        return error ? { erro: error.message } : data;
+        if (error) return { erro: error.message };
+        return aplicarRecorteAnalisesDrive(data, recorteDriveDoPedido(String(ctx.pedido ?? ""), args));
       }
       case "get_acervo_para_anuncio": {
-        const produto = String(args?.produto ?? "").trim();
+        const pedido = String(ctx.pedido ?? "");
+        const argsDrive = injetarArgsDrive(args, pedido);
+        const produto = String(argsDrive?.produto ?? "").trim();
         const { data, error } = await supa.rpc("get_acervo_para_anuncio", {
           p_company_id: ctx.companyId,
           p_produto: produto || null,
-          p_incluir_inaptas: args?.incluir_inaptas === false ? false : true,
+          p_incluir_inaptas: argsDrive?.incluir_inaptas === false ? false : true,
         });
-        return error ? { erro: error.message } : data;
+        if (error) return { erro: error.message };
+        return aplicarRecorteAcervo(data, recorteDriveDoPedido(pedido, argsDrive));
       }
       case "upload_midia": {
         const dfid = String(args?.drive_file_id ?? "").trim();
@@ -1192,8 +1248,8 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
 // Schemas (subset do v27.1)
 const DEF: Record<string, any> = {
   get_analise_visual_drive: { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Leitura instantanea - nao repete a visao. Se total_analisados < inventario, pecas novas ainda nao passaram pela visao: declare, nao invente.", parameters: { type: "object", properties: {} } } },
-  get_drive_criativos: { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, tamanho, data e thumbnail (um frame/preview) de cada arquivo, com resumo por formato e por eixo. Pode vir truncado: leia aviso_corte e nunca trate item omitido como inexistente. LIMITE: video e analisado por thumbnail+nome+caminho, nao pelo conteudo interno.", parameters: { type: "object", properties: {} } } },
-  get_acervo_para_anuncio: { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA TOTAL do acervo Drive. Devolve inventario_global SEMPRE (videos/imagens/slides carrossel). Em lote/mix chame SEM produto primeiro. apta=true so = pronta pra publicar agora; NAO use para afirmar escassez. Slides Carrossel = imagem estatica usavel. Bloqueadas = legiveis e proponiveis via veredito. NAO use get_criativos_conteudo.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional; em lote deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true (leitura total)." } } } } },
+  get_drive_criativos: { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, tamanho, data de cada arquivo, com resumo por formato e por eixo. SEM thumbnail (estoura o teto). Pode vir recortado por meio=la_felicita|juridico e formatos Reels/Videos. Pode vir truncado: leia aviso_corte e nunca trate item omitido como inexistente. LIMITE: video e analisado por nome+caminho, nao pelo conteudo interno.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"], description: "Recorte de marca/pasta monitorada." }, formatos: { type: "array", items: { type: "string" }, description: "Ex.: Reels, Videos. Ignora Adesivo/Brutos/Cards." } } } } },
+  get_acervo_para_anuncio: { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA do acervo Drive. Devolve inventario_global do RECORTE quando meio/formatos (ou o pedido) restringem. inventario_global_empresa e o total da empresa - NAO cite como videos La Felicita. Em lote/mix chame SEM produto primeiro. apta=true so = pronta pra publicar agora; NAO use para afirmar escassez. NAO use get_criativos_conteudo.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional; em lote deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true (leitura total)." }, meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   upload_midia: { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive para a biblioteca Meta (adimages/advideos) e grava meta_image_hash ou meta_video_id. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false. NAO cria anuncio. Respeita flag e teto 5/hora. Idempotente. Video: so considere pronta se pronto=true.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, account_id: { type: "string" } }, required: ["drive_file_id"] } } },
   get_overview: { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real), gasto/resultados 7d, dias_com_dado.", parameters: { type: "object", properties: {} } } },
   get_alerts: { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema.", parameters: { type: "object", properties: {} } } },
@@ -1271,9 +1327,9 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive (pixels da miniatura em alta resolucao): produto detectado, texto visivel, riscos de compliance visiveis e veredito aproveitavel/nao/incerto por peca, persistido em banco. Use quando o gestor pedir para CLASSIFICAR/ANALISAR O CONTEUDO das pecas (nao apenas inventariar). Limite declarado: de video se ve UM FRAME.",
   },
   criativos_drive: {
-    tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "ler_brand_identity", "get_criativos_conteudo", "get_conhecimento"],
-    maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 2, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 3, ler_brand_identity: 1, get_criativos_conteudo: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
-    missao: "CRIATIVOS NOVOS NO DRIVE: leitura total. Slate do gestor prevalece sobre inventario liberado (nao troque 3v+1carr+1card por 5 videos). CET: 'consulte o CET na sua simulacao' basta (FIN-04 v4). Carrossel via child_attachments. Cite taxonomia_drive antes de filtrar. Nunca get_criativos_conteudo para peca nova.",
+    tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "ler_brand_identity", "get_conhecimento"],
+    maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 2, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 3, ler_brand_identity: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
+    missao: "CRIATIVOS NOVOS NO DRIVE: leitura NESTA rodada. Historico nao substitui inventario. Se La Felicita, meio=la_felicita e so Reels/Videos. inventario_global da empresa NAO e videos La Felicita. PROIBIDO get_criativos_conteudo (anuncios ja no ar). Cite nome+pasta+drive_file_id. Nunca invente arquivo. Agosto reservado ao CONJ.4 nao entra em CONJ.1-3.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],
@@ -1327,7 +1383,8 @@ async function driveToken(): Promise<string> {
 // vem de drive_pastas_monitoradas via drive_plano_de_varredura, e acrescentar pasta e um INSERT.
 // O segredo fica como FALLBACK DECLARADO: se a RPC nao devolver pasta ativa, ele e usado E o
 // retorno avisa - falha de leitura da tabela nao pode deixar o sistema cego em silencio.
-async function t_drive_criativos(companyId: string) {
+async function t_drive_criativos(companyId: string, opts?: { pedido?: string; args?: Record<string, unknown>; enxuto?: boolean }) {
+  const recorte = recorteDriveDoPedido(opts?.pedido ?? "", opts?.args);
   const { data: plano, error: ePlano } = await supa.rpc("drive_plano_de_varredura", {
     p_company_id: companyId,
     p_base_desejada: "thumbnail",
@@ -1341,13 +1398,17 @@ async function t_drive_criativos(companyId: string) {
       nome: String(p.nome ?? "(sem nome)"),
       meio: p.meio != null && String(p.meio).trim() ? String(p.meio).trim() : null,
     }))
-    .filter((p) => p.folder_id);
+    .filter((p) => p.folder_id)
+    .filter((p) => raizDriveDoMeio(p, recorte.meio));
   let avisoFallback: string | null = null;
   if (!raizes.length) {
     return {
       erro: "nenhuma_pasta_drive_configurada_para_esta_empresa",
       detalhe_rpc: ePlano?.message ?? null,
-      aviso: "Falha fechada: o fallback global foi removido para impedir leitura de criativos de outra empresa.",
+      recorte,
+      aviso: recorte.meio
+        ? `Nenhuma pasta monitorada casou com meio=${recorte.meio}. Nao trate como pasta vazia.`
+        : "Falha fechada: o fallback global foi removido para impedir leitura de criativos de outra empresa.",
     };
   }
 
@@ -1379,6 +1440,7 @@ async function t_drive_criativos(companyId: string) {
       if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
       for (const f of j.files ?? []) {
         if (f.mimeType === "application/vnd.google-apps.folder") {
+          if (no.nivel === 0 && !pastaFormatoDoPedido(String(f.name ?? ""), recorte)) continue;
           if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz, meio: no.meio });
         } else if (arquivos.length < MAX_ARQUIVOS) {
           const caminhoRel = no.caminho || "(raiz)";
@@ -1429,6 +1491,7 @@ async function t_drive_criativos(companyId: string) {
     out.aviso_pastas_desativadas = `Existem ${desativadas.length} pasta(s) cadastradas e DESATIVADAS: elas nao foram lidas. Peca que exista nelas e invisivel para o sistema - declare isso se o gestor perguntar por peca que voce nao encontrou.`;
   }
   if (cortado) out.aviso_corte = `Inventario truncado nos tetos de leitura (${MAX_PASTAS} pastas / ${MAX_ARQUIVOS} arquivos), somados entre as pastas monitoradas. O que nao veio EXISTE nas pastas - nao trate como inexistente; peca um recorte por subpasta.`;
+  if (opts?.enxuto) return compactarInventarioDriveParaAgente(out, recorte);
   return out;
 }
 
@@ -1550,6 +1613,13 @@ function planoFallbackSeguro(
 ): { nome: string; foco: string }[] {
   const maxEsp = Math.max(1, Math.min(cap?.maxEspecialistas ?? nomes.length, nomes.length));
   const p = deacc(pergunta.toLowerCase());
+  if (pedidoExigeInventarioDrive(pergunta)) {
+    const drive = [
+      { nome: "criativos_drive", foco: FOCO_CRIATIVOS_DRIVE },
+      { nome: "estrutura_conta", foco: FOCO_ESTRUTURA_CONJUNTOS_DRIVE },
+    ].filter((x) => nomes.includes(x.nome));
+    if (drive.length) return drive.slice(0, maxEsp);
+  }
   const metaHit = RE_META_DICA.test(p);
   if (metaHit && nomes.includes("alertas_recomendacoes")) {
     return [{ nome: "alertas_recomendacoes", foco: FOCO_META_DICAS }];
@@ -1589,9 +1659,12 @@ async function planejar(pergunta: string, tel: any, cap?: Capacidade, escopo?: E
     ? "\nMODO LITE: no maximo 1 especialista; um dominio so."
     : cap?.tier === "standard"
       ? "\nMODO STANDARD: no maximo 2 especialistas; preferir 1 quando um dominio cobre."
-      : "\nMODO DEEP (teto 5 min): no maximo 3 especialistas. Overview/supergestor/avaliacao desde ativacao = desempenho_campanhas + criativos + (whatsapp_waba se pedir numeros/conversas, senao alertas). So acrescente compliance/estrutura se a pergunta pedir EXPLICITAMENTE.";
+      : "\nMODO DEEP (teto 5 min): no maximo 3 especialistas. Overview/supergestor/avaliacao desde ativacao = desempenho_campanhas + criativos + (whatsapp_waba se pedir numeros/conversas, senao alertas). Pedido de PASTA DRIVE / distribuir criativos / Reels+Videos = criativos_drive + estrutura_conta; NUNCA substitua por criativos (anuncios ja no ar). So acrescente compliance/estrutura se a pergunta pedir EXPLICITAMENTE.";
   const hintEscopo = escopo
     ? `\nCONTRATO DO PEDIDO (obrigatorio no foco de cada especialista):\n${escopo.bloco_contrato}\nO foco de cada subagente DEVE citar a janela date_from/date_to e o universo; nao invente historico fora disso.`
+    : "";
+  const hintDrive = pedidoExigeInventarioDrive(pergunta)
+    ? "\nDRIVE OBRIGATORIO NESTA RODADA: inclua criativos_drive. PROIBIDO usar o especialista criativos (pecas ja publicadas) no lugar do inventario de pastas. Historico da conversa nao substitui get_drive_criativos/get_acervo_para_anuncio."
     : "";
   const sys = `Voce e o ROTEADOR de um gestor de trafego Meta Ads. Leia a pergunta de forma FRIA e LITERAL: nao amplie o brief, nao troque a janela, nao acrescente historico que o gestor nao pediu.
 Encaminhe ao MENOR conjunto de especialistas que cobre as perguntas atomicas do contrato.
@@ -1604,7 +1677,7 @@ Especialistas disponiveis (use exatamente estes nomes):
 - alertas_recomendacoes: alertas ativos, recomendacoes pendentes e DICAS DA META (Opportunity Score, boost, musica)
 - criativos_drive: pasta de criativos NOVOS no Google Drive (inventario, formatos, eixos, comparacao com vencedores)\n- analise_visual_drive: analise VISUAL arquivo a arquivo das pecas do Drive (produto, texto visivel, riscos, veredito aproveitavel) - so quando pedirem CLASSIFICAR/ANALISAR CONTEUDO das pecas
 - conhecimento: fundamento tecnico puro (so quando a pergunta exige conceito alem do operacional)
-REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio + ranking alcance/conversas de peca -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive; dica/recomendacao/boost/musica/Opportunity Score da Meta -> SOMENTE alertas_recomendacoes (NAO acrescente criativos so porque a dica menciona musica). NAO inclua especialista cujo dominio a pergunta nao toca.${hintCap}${hintEscopo}
+REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio + ranking alcance/conversas de peca -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive; dica/recomendacao/boost/musica/Opportunity Score da Meta -> SOMENTE alertas_recomendacoes (NAO acrescente criativos so porque a dica menciona musica). NAO inclua especialista cujo dominio a pergunta nao toca.${hintCap}${hintEscopo}${hintDrive}
 SPLIT DE CUSTO: voce so escolhe especialistas. O backend manda coleta (tools) em modelo barato e a sintese final em modelo mais forte quando o pedido e profundo.
 Responda APENAS com JSON valido, sem markdown, no formato:
 {"subagentes":[{"nome":"...","foco":"instrucao curta e especifica do que ELE deve levantar, citando janela e universo"}]}
@@ -1644,7 +1717,7 @@ Para overview amplo, 3 especialistas bastam — nao dispare a equipe inteira.`;
 // ============================================================================
 // FASE 2 - SUBAGENTE (loop restrito, relatorio final)
 // ============================================================================
-async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx: { companyId: string; companyName: string; mcpKey: string }, prazo: () => number) {
+async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number) {
   const cfg = SUBAGENTES[nome];
   const tools = cfg.tools.map((t) => DEF[t]);
   const isLegal = norm(ctx.companyName).includes("legal");
@@ -2296,7 +2369,7 @@ async function pushProgresso(jobId: string, fase: string, detalhe: string) {
 // v2: helpers de lote, checkpoint e reinvocacao ------------------------------
 async function executarLote(
   lote: { nome: string; foco: string }[], pergunta: string,
-  ctx: { companyId: string; companyName: string; mcpKey: string }, prazo: () => number, tel: any,
+  ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number, tel: any,
 ): Promise<{ nome: string; relatorio: string; completo: boolean }[]> {
   const resultados = await Promise.allSettled(lote.map((p) =>
     p.nome === "analise_visual_drive"
@@ -2375,7 +2448,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.3";
+  tel.versao = "job-v4.4";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -2422,7 +2495,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           retomada.devolver.map((d: any) => ({ nome: String(d.nome),
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${String(d.motivo)}\nCorrija exatamente isso.` })),
-          pergunta, { companyId, companyName, mcpKey }, prazo, tel,
+          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -2443,7 +2516,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver2.map((d) => d.nome).join(", ")}`);
           const refeitos2 = await executarLote(
             devolver2.map((d) => ({ nome: d.nome, foco: `DEVOLUCAO DA COORDENACAO (rodada ${rodada}): ${d.motivo}. Corrija exatamente isso.` })),
-            pergunta, { companyId, companyName, mcpKey }, prazo, tel,
+            pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel,
           );
           for (const novo of refeitos2) {
             const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -2505,7 +2578,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
     // FASE 2 - subagentes em paralelo
     await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
-    let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey }, prazo, tel);
+    let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel);
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
 
     // FASE 2.5 - VALIDACAO + DEVOLUCAO (v4.0: deep/standard = 0 por padrao)
@@ -2526,7 +2599,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           devolver.map((d) => ({ nome: d.nome,
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${d.motivo}\nCorrija exatamente isso; o que ja estava certo nao precisa ser repetido do zero.` })),
-          pergunta, { companyId, companyName, mcpKey }, prazo, tel,
+          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);

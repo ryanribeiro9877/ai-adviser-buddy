@@ -1,4 +1,8 @@
-// supabase/functions/traffic-chat/index.ts (v28.66)
+// supabase/functions/traffic-chat/index.ts (v28.67)
+// v28.67 (25/08/2026) - MENSAGEM NOVA = COLETA NOVA no Drive. Pedido de inventariar/
+//   distribuir Reels/Videos (La Felicita) nao pode usar bloco [RETORNOS...] nem
+//   get_criativos_conteudo (anuncios ja no ar) como substituto. Recorte meio +
+//   so Reels/Videos; thumbnail fora do payload. Nudge se parar sem coletar Drive.
 // v28.66 (24/08/2026) - orcamento_diario_reais e REAIS. Trava o valor falado pelo gestor
 //   (30,00 nos 4) e recusa 3000-como-centavos. Incidente CONJ.1/2 LAF nasceram R$ 3000/dia.
 // v28.65 (24/08/2026) - recusa falsa de molde de trafego NAO fecha o turno.
@@ -625,6 +629,16 @@ import {
 } from "../_shared/identidade_instagram.ts";
 import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego } from "../_shared/intencao_turno.ts";
 import {
+  aplicarRecorteAcervo,
+  aplicarRecorteAnalisesDrive,
+  compactarInventarioDriveParaAgente,
+  injetarArgsDrive,
+  pastaFormatoDoPedido,
+  pedidoExigeInventarioDrive,
+  raizDriveDoMeio,
+  recorteDriveDoPedido,
+} from "../_shared/pedido_drive_criativos.ts";
+import {
   callReadTool,
   companyMetaAccounts,
   isReadOnlyTool,
@@ -707,7 +721,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.66";
+const VERSAO = "chat-v28.67";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -722,6 +736,13 @@ const MSG_NUDGE_SEM_MOLDE =
   "Chame propose_action AGORA: action_type=criar_conjunto_a_partir_de, target_name=sem_molde, " +
   "params.sem_molde=true, destination_type=WEBSITE, optimization_goal=LANDING_PAGE_VIEWS, familia_objetivo=trafego. " +
   "Use nomes, orcamento e campanha destino ja definidos nesta conversa. Um card por conjunto pedido.";
+const MSG_NUDGE_DRIVE =
+  "[CORRECAO DO SISTEMA — nao e o gestor] Pedido de inventario/distribuicao do Drive. " +
+  "OBRIGATORIO NESTE TURNO: chame get_drive_criativos E get_acervo_para_anuncio. " +
+  "Se for La Felicita, meio=la_felicita. So pastas Reels e Videos. " +
+  "PROIBIDO substituir por get_criativos_conteudo (anuncios ja no ar, LF_A_AD01…). " +
+  "Historico e bloco [RETORNOS...] NAO valem como inventario de arquivos — a pasta pode ter mudado. " +
+  "Liste nome + pasta + drive_file_id. Nao invente arquivo. Nao peca o gestor para colar o inventario.";
 const RE_CONTINUAR_AUTO =
   /^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/i;
 // Narracao mid-loop ("vou consultar…") — nao conta como resposta que fecha o turno.
@@ -1460,9 +1481,10 @@ function cortarLista(obj: Record<string, unknown>, campo: string, teto = TETO_TO
 }
 
 /** v28.31: acervo compacto — taxonomia + campos uteis por item; corta texto longo. */
-function compactarAcervoParaAgente(data: unknown, filtroAtivo: boolean): unknown {
-  if (!data || typeof data !== "object") return data;
-  const obj = { ...(data as Record<string, unknown>) };
+function compactarAcervoParaAgente(data: unknown, filtroAtivo: boolean, recorte?: { meio?: string | null; soReelsVideos?: boolean }): unknown {
+  const recortado = aplicarRecorteAcervo(data, recorte ?? {});
+  if (!recortado || typeof recortado !== "object") return recortado;
+  const obj = { ...(recortado as Record<string, unknown>) };
   const itens = Array.isArray(obj.itens) ? (obj.itens as Record<string, unknown>[]) : null;
   if (!itens) return obj;
   const compactos = itens.map((it) => {
@@ -1483,9 +1505,11 @@ function compactarAcervoParaAgente(data: unknown, filtroAtivo: boolean): unknown
     if (it.bloqueada_por_compliance) o.bloqueada_por_compliance = it.bloqueada_por_compliance;
     return o;
   });
-  const tetoItens = filtroAtivo ? 40 : 25;
-  const cortado = cortarLista({ ...obj, itens: compactos }, "itens", filtroAtivo ? 9000 : 8000) as Record<string, unknown>;
-  if ((compactos.length > tetoItens) && !filtroAtivo) {
+  const recorteAtivo = !!(recorte?.meio || recorte?.soReelsVideos);
+  const tetoItens = recorteAtivo || filtroAtivo ? 50 : 25;
+  const tetoChars = recorteAtivo ? 14000 : (filtroAtivo ? 9000 : 8000);
+  const cortado = cortarLista({ ...obj, itens: compactos }, "itens", tetoChars) as Record<string, unknown>;
+  if ((compactos.length > tetoItens) && !filtroAtivo && !recorteAtivo) {
     cortado.dica = "Para emitir slate conhecido, chame de novo com drive_file_ids=[...] — payload bem menor.";
   }
   return cortado;
@@ -4003,9 +4027,9 @@ const TOOLS = [
   { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando perguntarem maior alcance. PROIBIDO dizer alcance indisponivel sem chamar isto. Custo medio sozinho NAO autoriza pausa (Breakdown Effect).", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, date_from: { type: "string" } } } } },
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de UMA campanha pelo nome, com totais do periodo. Inclui special_ad_categories da CAMPANHA (FINANCIAL_PRODUCTS_SERVICES quando marcada) — a Meta aplica categoria especial no nivel campanha e os anuncios herdam. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "auditar_compliance_financeira", description: "Auditoria de categoria especial + regras financeiras de UMA campanha e seus anuncios. Devolve special_ad_categories do espelho, se e financeira, lista de anuncios (status/CTA/destino/criado_pelo_sistema), alertas de segmentacao (idade/genero/LAL) e as regras ativas FIN/LGL/CRI. Use quando o gestor perguntar se anuncios respeitam finanças/categoria especial/regras da Meta. NAO diga que o campo nao existe: esta tool e get_campaign_detail leem. Complemente com get_conhecimento(tema=compliance) e check_compliance nas legendas. Confirmacao ao vivo: ler_pipeboard get_campaign_details.", parameters: { type: "object", properties: { name_like: { type: "string", description: "Nome (ou trecho) da campanha" } }, required: ["name_like"] } } },
-  { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido: para cada arquivo, produto detectado PELOS PIXELS da miniatura, texto visivel, risco de compliance e veredito aproveitavel sim/nao/incerto com motivo. USE SEMPRE que o gestor pedir para classificar/avaliar/escolher pecas da pasta - e leitura instantanea de analise ja feita. Se total_analisados < inventario, ha pecas novas sem analise: diga que a classificacao delas exige a analise profunda, nao invente veredito. Os INCERTO (maioria videos - so um frame foi visto) sao a lista curta para conferencia humana.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho (1o nivel=formato, 2o nivel=eixo de mensagem), nome, tipo, data e thumbnail de cada arquivo, com resumo por formato e por eixo. Use para LISTAR o que existe na pasta. Para VEREDITO DE CONTEUDO por peca (aproveitavel ou nao, produto, risco), use get_analise_visual_drive - a classificacao visual ja esta persistida. LIMITES A DECLARAR: leitura de inventario e thumbnail - nao le conteudo interno de video; e CONCEDER permissao de acesso a pessoas segue sendo acao manual no Drive, fora do sistema.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA TOTAL do acervo do Drive. SEMPRE taxonomia_drive + inventario_global. Carrossel Meta HABILITADO via child_attachments. Videos liberados FIN-04 sao inventario apto (NAO confundir com o slate do pedido do gestor). Em lote/mix: chame SEM produto primeiro e cite o slate que o gestor pediu. Quando o slate JA tem drive_file_ids conhecidos (ex. 'emite os 5'), passe drive_file_ids para recorte compacto — evite dump completo.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional. Em lote/mix deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true." }, drive_file_ids: { type: "array", items: { type: "string" }, description: "Opcional. Recorte: so estes arquivos (slate conhecido). Preferir ao inventariar de novo antes de emitir." } } } } },
+  { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido. Pode vir recortado por meio/formatos do pedido. USE quando o gestor pedir para classificar pecas da pasta. Se total_analisados < inventario, ha pecas novas sem analise.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
+  { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, data — SEM thumbnail. Recorte com meio=la_felicita|juridico e formatos Reels/Videos. Use para LISTAR o que existe na pasta. NAO substitui por get_criativos_conteudo (anuncios ja no ar). LIMITES: nao le conteudo interno de video.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
+  { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA do acervo do Drive. Com recorte (meio/formatos ou pedido Reels+Videos), inventario_global e o RECORTE; o total da empresa fica em inventario_global_empresa. NAO cite o total da empresa como videos La Felicita. Em lote/mix: chame SEM produto primeiro. Quando o slate JA tem drive_file_ids, passe-os.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional. Em lote/mix deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true." }, drive_file_ids: { type: "array", items: { type: "string" }, description: "Opcional. Recorte: so estes arquivos (slate conhecido)." }, meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
@@ -4204,27 +4228,36 @@ async function driveToken(): Promise<string> {
   _driveToken = { token: j.access_token, exp: Date.now() + (Number(j.expires_in ?? 3600) - 120) * 1000 };
   return _driveToken.token;
 }
-async function t_drive_criativos(companyId: string) {
+async function t_drive_criativos(companyId: string, pedido = "", args: Record<string, unknown> = {}) {
+  const recorte = recorteDriveDoPedido(pedido, args);
   const { data: plano, error: planoError } = await supa.rpc("drive_plano_de_varredura", {
     p_company_id: companyId,
   });
   const pastas = Array.isArray((plano as any)?.pastas_ativas) ? (plano as any).pastas_ativas : [];
   const raizes = pastas
-    .map((p: any) => ({ id: String(p?.folder_id ?? ""), nome: String(p?.nome ?? "(pasta)") }))
-    .filter((p: any) => p.id);
+    .map((p: any) => ({
+      id: String(p?.folder_id ?? ""),
+      nome: String(p?.nome ?? "(pasta)"),
+      meio: p?.meio != null && String(p.meio).trim() ? String(p.meio).trim() : null,
+    }))
+    .filter((p: any) => p.id)
+    .filter((p: any) => raizDriveDoMeio(p, recorte.meio));
   if (!raizes.length) {
     return {
       erro: "nenhuma_pasta_drive_configurada_para_esta_empresa",
       detalhe: planoError?.message ?? null,
-      aviso: "Falha fechada: o fallback global foi removido para impedir leitura de criativos de outra empresa.",
+      recorte,
+      aviso: recorte.meio
+        ? `Nenhuma pasta monitorada casou com meio=${recorte.meio}. Nao trate como pasta vazia.`
+        : "Falha fechada: o fallback global foi removido para impedir leitura de criativos de outra empresa.",
     };
   }
   let token: string;
   try { token = await driveToken(); }
   catch (e) { return { erro: String((e as any)?.message ?? e), aviso: "Sem acesso ao Drive nesta rodada - o dado NAO foi lido; nao trate como pasta vazia." }; }
   const MAX_PASTAS = 40, MAX_ARQUIVOS = 250, MAX_PROFUNDIDADE = 4;
-  type No = { id: string; caminho: string; nivel: number };
-  const fila: No[] = raizes.map((raiz: any) => ({ id: raiz.id, caminho: raiz.nome, nivel: 0 }));
+  type No = { id: string; caminho: string; nivel: number; raiz: string; meio: string | null };
+  const fila: No[] = raizes.map((raiz: any) => ({ id: raiz.id, caminho: "", nivel: 0, raiz: raiz.nome, meio: raiz.meio }));
   const arquivos: any[] = [];
   let pastasLidas = 0, cortado = false;
   while (fila.length) {
@@ -4245,16 +4278,19 @@ async function t_drive_criativos(companyId: string) {
       if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
       for (const f of j.files ?? []) {
         if (f.mimeType === "application/vnd.google-apps.folder") {
-          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1 });
+          if (no.nivel === 0 && !pastaFormatoDoPedido(String(f.name ?? ""), recorte)) continue;
+          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz, meio: no.meio });
         } else if (arquivos.length < MAX_ARQUIVOS) {
-          // v28.10 (GT-13): o drive_file_id era lido do Drive e descartado aqui. Sem ele o agente
-          // sabia dizer "o video tal e o melhor" e nao sabia dizer QUAL ARQUIVO - logo nao havia
-          // como pedir anuncio com aquela peca. E o unico identificador estavel: nome repete.
-          arquivos.push({ drive_file_id: f.id, nome: f.name, caminho: no.caminho || "(raiz)",
+          const caminhoRel = no.caminho || "(raiz)";
+          arquivos.push({
+            drive_file_id: f.id, nome: f.name, caminho: `${no.raiz}/${caminhoRel}`,
+            pasta_monitorada: no.raiz,
+            meio: no.meio,
             formato_pasta: (no.caminho.split("/")[0] || "(raiz)"),
             eixo_pasta: (no.caminho.split("/")[1] ?? null),
             tipo: f.mimeType, tamanho_bytes: Number(f.size ?? 0) || null,
-            modificado_em: f.modifiedTime ?? null, thumbnail: f.thumbnailLink ?? null });
+            modificado_em: f.modifiedTime ?? null, thumbnail: f.thumbnailLink ?? null,
+          });
         } else { cortado = true; }
       }
       pageToken = j.nextPageToken ?? "";
@@ -4269,11 +4305,11 @@ async function t_drive_criativos(companyId: string) {
   const out: any = {
     total_arquivos: arquivos.length, pastas_lidas: pastasLidas,
     resumo_por_formato: porFormato, resumo_por_eixo_de_mensagem: porEixo,
-    nota: "Inventario da pasta de criativos do Drive (somente leitura). 1o nivel do caminho = formato, 2o nivel = eixo de mensagem. LIMITE: video e analisado por thumbnail+nome+caminho, nao pelo conteudo interno.",
+    nota: "Inventario da pasta de criativos do Drive (somente leitura). 1o nivel do caminho = formato. LIMITE: video e analisado por nome+caminho, nao pelo conteudo interno.",
     arquivos,
   };
   if (cortado) out.aviso_corte = `Inventario truncado nos tetos (${MAX_PASTAS} pastas / ${MAX_ARQUIVOS} arquivos). O que nao veio EXISTE - nao trate como inexistente.`;
-  return out;
+  return compactarInventarioDriveParaAgente(out, recorte);
 }
 
 async function runTool(name: string, args: any, ctx: any) {
@@ -4395,15 +4431,22 @@ async function runTool(name: string, args: any, ctx: any) {
         const somenteAtivas = informouAtivas ? args.somente_ativas === true : !buscaNome;
         return await t_criativos_conteudo(somenteAtivas, ctx.companyId, buscaNome, Number(args?.pagina ?? 1));
       }
-      case "get_drive_criativos": return await t_drive_criativos(ctx.companyId);
+      case "get_drive_criativos": {
+        const pedido = String(ctx.pedido ?? "");
+        const argsDrive = injetarArgsDrive(args, pedido);
+        return await t_drive_criativos(ctx.companyId, pedido, argsDrive);
+      }
       case "get_analise_visual_drive": {
         const { data, error } = await supa.rpc("get_drive_analises", { p_company_id: ctx.companyId });
-        return error ? { erro: error.message } : data;
+        if (error) return { erro: error.message };
+        return aplicarRecorteAnalisesDrive(data, recorteDriveDoPedido(String(ctx.pedido ?? ""), args));
       }
       case "get_acervo_para_anuncio": {
-        const produto = String(args?.produto ?? "").trim();
-        const idsFiltro = Array.isArray(args?.drive_file_ids)
-          ? (args.drive_file_ids as unknown[]).map((x) => String(x ?? "").trim()).filter(Boolean)
+        const pedido = String(ctx.pedido ?? "");
+        const argsDrive = injetarArgsDrive(args, pedido);
+        const produto = String(argsDrive?.produto ?? "").trim();
+        const idsFiltro = Array.isArray(argsDrive?.drive_file_ids)
+          ? (argsDrive.drive_file_ids as unknown[]).map((x) => String(x ?? "").trim()).filter(Boolean)
           : [];
         const rpcArgs: Record<string, unknown> = {
           p_company_id: ctx.companyId,
@@ -4429,7 +4472,7 @@ async function runTool(name: string, args: any, ctx: any) {
           }
         }
         if (error) return { erro: error.message };
-        return compactarAcervoParaAgente(data, idsFiltro.length > 0);
+        return compactarAcervoParaAgente(data, idsFiltro.length > 0, recorteDriveDoPedido(pedido, argsDrive));
       }
       case "upload_midia": {
         const dfid = String(args?.drive_file_id ?? "").trim();
@@ -4652,6 +4695,7 @@ entregue o que ja apurou com lacunas declaradas — nunca um "vou…" sozinho.
 
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
 R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os dois limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
+R1-DRIVE. MENSAGEM NOVA QUE PEDE VERIFICAR / LISTAR / DISTRIBUIR / INVENTARIAR pecas do Drive OBRIGA chamar get_drive_criativos e get_acervo_para_anuncio NESTE turno. Historico e bloco [RETORNOS...] valem para CONTRATO (nomes de conjunto, orcamento, publico ja definidos), NAO como inventario de arquivos: a pasta pode ter mudado. PROIBIDO substituir o Drive por get_criativos_conteudo (anuncios ja no ar). PROIBIDO pedir ao gestor que cole o inventario. Se o pedido for La Felicita, recorte meio=la_felicita e so pastas Reels/Videos.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
 R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. Para categoria especial: LEIA com get_campaign_detail / auditar_compliance_financeira / ler_pipeboard get_campaign_details; para ALTERAR ou REMOVER use alterar_categoria_especial (card alterar_categoria_especial_campanha). PROIBIDO dizer que "nao ha ferramenta" ou que "so na criacao". A Meta aplica a categoria na campanha; os anuncios herdam.
 R3. Distinga tres coisas diferentes: (a) o dado e ZERO, (b) o dado NAO EXISTE no sistema, (c) o dado NAO FOI COLETADO no periodo (sync/cobertura). Nunca trate (b) ou (c) como (a).
@@ -4845,7 +4889,7 @@ function argsCurtos(args: unknown): string {
 // sucesso agora para criar/emitir/alterar/executar.
 function blocoDeRetornos(lista: ToolResult[], quando: string, orcamento: number): { texto: string; usados: number } {
   if (!lista.length || orcamento <= 400) return { texto: "", usados: 0 };
-  const cabecalho = `[RETORNOS DE FERRAMENTA JA APURADOS EM ${quando}, reinjetados pelo sistema a partir do registro desta conversa - NAO sao memoria sua e NAO foram reconstruidos. Para a regra R1 e para "ato so existe com retorno de ferramenta": os numeros abaixo SAO retorno de ferramenta e podem ser citados como apurados, atribuindo-os a esta data. O que eles NAO autorizam e afirmar ATO nesta resposta - criar, emitir, alterar, executar ou verificar estado continua exigindo chamada com sucesso AGORA. Se precisar de dado mais novo que a data acima, chame a ferramenta de novo. Nao escreva que nao conseguiu consultar algo que esta listado aqui.]`;
+  const cabecalho = `[RETORNOS DE FERRAMENTA JA APURADOS EM ${quando}, reinjetados pelo sistema a partir do registro desta conversa - NAO sao memoria sua e NAO foram reconstruidos. Para a regra R1 e para "ato so existe com retorno de ferramenta": os numeros abaixo SAO retorno de ferramenta e podem ser citados como apurados, atribuindo-os a esta data. O que eles NAO autorizam: (1) afirmar ATO nesta resposta; (2) tratar este bloco como inventario ATUAL do Drive. Se a mensagem nova pede verificar/listar/distribuir pecas do Drive, chame get_drive_criativos e get_acervo_para_anuncio AGORA. Se precisar de dado mais novo que a data acima, chame a ferramenta de novo. Nao escreva que nao conseguiu consultar algo que esta listado aqui.]`;
   const partes: string[] = [];
   let restante = orcamento - cabecalho.length;
   let usados = 0;
@@ -5393,9 +5437,16 @@ Deno.serve(async (req) => {
     ehPedidoEmitirConjunto(msgText) &&
     (recusaFalsaMoldeTrafego(ultimoAssistantTxt) ||
       /conjunto molde ['"]?sem_molde/i.test(ultimoAssistantTxt + "\n" + histRetornos));
-  const textoLlm = precisaNudgeSemMolde ? `${msgText}\n\n${MSG_NUDGE_SEM_MOLDE}` : msgText;
-  if (precisaNudgeSemMolde && Array.isArray(userContent) && userContent[0]?.type === "text") {
-    userContent[0] = { ...userContent[0], text: String(userContent[0].text ?? "") + "\n\n" + MSG_NUDGE_SEM_MOLDE };
+  const precisaNudgeDrive = pedidoExigeInventarioDrive(objetivoOriginal);
+  const textoLlm = [
+    precisaNudgeSemMolde ? MSG_NUDGE_SEM_MOLDE : "",
+    precisaNudgeDrive ? MSG_NUDGE_DRIVE : "",
+  ].filter(Boolean).length
+    ? `${msgText}\n\n${[precisaNudgeSemMolde ? MSG_NUDGE_SEM_MOLDE : "", precisaNudgeDrive ? MSG_NUDGE_DRIVE : ""].filter(Boolean).join("\n\n")}`
+    : msgText;
+  if ((precisaNudgeSemMolde || precisaNudgeDrive) && Array.isArray(userContent) && userContent[0]?.type === "text") {
+    const extra = [precisaNudgeSemMolde ? MSG_NUDGE_SEM_MOLDE : "", precisaNudgeDrive ? MSG_NUDGE_DRIVE : ""].filter(Boolean).join("\n\n");
+    userContent[0] = { ...userContent[0], text: String(userContent[0].text ?? "") + "\n\n" + extra };
   }
   const perguntaSimples = userContent.length === 1;
   const perguntaCacheavel = perguntaSimples && textoLlm.length >= 4000;
@@ -5417,6 +5468,7 @@ Deno.serve(async (req) => {
     mcpKey: cfg?.api_key ?? "",
     complianceCache: new Map<string, any>(),
     perguntaLeitura: ehPerguntaDeLeitura(objetivoOriginal),
+    pedido: objetivoOriginal,
   };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
   const rotaLlm = resolverChamadaLlm({
@@ -5435,6 +5487,7 @@ Deno.serve(async (req) => {
   const decorrido = () => Date.now() - tInicio;
   let deadlineTools = false;
   let nudgesSemMolde = 0;
+  let nudgesDrive = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
   const toolsDeadlineMs = pedidoLoteTurno ? 90_000 : TOOLS_DEADLINE_MS;
   // v20: telemetria de custo. Capturamos os dois formatos possiveis - anthropic
@@ -5748,6 +5801,16 @@ Deno.serve(async (req) => {
       messages.push({ role: "assistant", content: reply });
       messages.push({ role: "user", content: MSG_NUDGE_SEM_MOLDE });
       finishReason = String(finishReason || "stop") + "+nudge_sem_molde";
+      continue;
+    }
+    const coletouDrive = toolsUsed.some((t) =>
+      t.tool === "get_drive_criativos" || t.tool === "get_acervo_para_anuncio" || t.tool === "get_analise_visual_drive",
+    );
+    if (pedidoExigeInventarioDrive(objetivoOriginal) && !coletouDrive && nudgesDrive < 1) {
+      nudgesDrive++;
+      messages.push({ role: "assistant", content: reply });
+      messages.push({ role: "user", content: MSG_NUDGE_DRIVE });
+      finishReason = String(finishReason || "stop") + "+nudge_drive";
       continue;
     }
     break;
