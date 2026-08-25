@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v28.71)
+// supabase/functions/traffic-chat/index.ts (v28.72)
+// v28.72 (25/08/2026) - SLATE DURAVEL + LEGENDAS LA FELICITA:
+//   (1) conversation_slate + get_slate_da_conversa / registrar_peca_da_conversa;
+//       parser extrai CONJ.N da fala (inventario Drive != slate); bloco [SLATE DA CONVERSA];
+//   (2) HIST_CAP preserva inicio+final quando a mensagem tem slate (nao so legendas);
+//   (3) pedido de legendas dos videos JA selecionados NAO reabre inventario Drive;
+//   (4) ler_brand_identity / gerar_legendas recebem meio=la_felicita (nao Juridico);
+//   (5) falha do redator: nudge para chamar de novo / escrever — nunca "ferramenta indisponivel".
 // v28.71 (25/08/2026) - SUBIR VIDEOS (plural) e lote de upload: "videos/pendentes"
 //   nao caia no detector (so "video") e o stub REPLY_CONTINUANDO_ATO ("pedidos de
 //   aprovacao") saia duas vezes. Lote de upload so devolve Status do upload.
@@ -629,9 +636,13 @@ import {
   ehSentinelaSemMolde,
   extrairLinksWaMePorConjunto,
   extrairNomesCriativoDaFala,
+  extrairSlateDaFala,
   nomeCompostoForaDeEscopoTrafego,
   numeroConjuntoDaFala,
   pareceNomeDePecaNaoMolde,
+  pecaChaveDoSlate,
+  temSlateNoTexto,
+  type PecaSlate,
 } from "../_shared/memoria_conjunto.ts";
 import {
   ERRO_INSTAGRAM_NAO_VINCULADO,
@@ -644,9 +655,12 @@ import {
   aplicarRecorteAcervo,
   aplicarRecorteAnalisesDrive,
   compactarInventarioDriveParaAgente,
+  inferirMeioDeProduto,
+  inferirMeioDrive,
   injetarArgsDrive,
   pastaFormatoDoPedido,
   pedidoExigeInventarioDrive,
+  pedidoUsaSlateExistente,
   raizDriveDoMeio,
   recorteDriveDoPedido,
 } from "../_shared/pedido_drive_criativos.ts";
@@ -708,6 +722,8 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   gerar_legendas: 3,
   registrar_legenda_da_conversa: 8,
   get_legendas_da_conversa: 2,
+  get_slate_da_conversa: 2,
+  registrar_peca_da_conversa: 12,
   get_estrutura_conjuntos: 3,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
@@ -734,7 +750,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.71";
+const VERSAO = "chat-v28.72";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_UPLOAD = 8;
@@ -762,6 +778,18 @@ const MSG_NUDGE_UPLOAD_BASE =
   "NAO pare no meio. NAO invente teto de 5 acoes/hora. NAO peca o gestor para repetir " +
   "'suba os restantes'. Chame upload_midia para CADA drive_file_id ainda fora da biblioteca, " +
   "varios na mesma rodada. Cite o NOME de cada peca (vem no retorno).";
+const MSG_NUDGE_SLATE =
+  "[CORRECAO DO SISTEMA — nao e o gestor] O SLATE desta conversa JA existe " +
+  "(bloco [SLATE DA CONVERSA] / get_slate_da_conversa): nome + drive_file_id + angulo + CTA por CONJ.N. " +
+  "Inventario Drive (N videos da pasta) NAO e o slate e NAO apaga a selecao. " +
+  "Use os drive_file_ids do store. PROIBIDO pedir ao gestor para re-colar. " +
+  "PROIBIDO recusar porque o acervo 'nao traz o slate'. Chame gerar_legendas por peca agora.";
+const MSG_NUDGE_LEGENDAS =
+  "[CORRECAO DO SISTEMA — nao e o gestor] gerar_legendas NAO esta 'indisponivel' como desculpa para parar. " +
+  "Chame gerar_legendas de novo (produto=imovel, meio=la_felicita, drive_file_id de cada peca do SLATE). " +
+  "Se a tool falhar de novo, ESCREVA as 3 variantes Hook→Beneficio→CTA no tom La Felicità " +
+  "(NAO Juridico: sem conta de luz, cobranca, emprestimo) e registre com registrar_legenda_da_conversa. " +
+  "PROIBIDO oferecer esperar vs o gestor escrever na mao.";
 const RE_CONTINUAR_AUTO =
   /^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/i;
 function ehStubProgressoChat(s: string): boolean {
@@ -3601,22 +3629,32 @@ async function t_check_compliance(
 async function t_gerar_legendas(
   companyId: string,
   mcpKey: string,
-  args: { produto?: string; objetivo?: string; eixo?: string; drive_file_id?: string; referencias?: string[]; peca_chave?: string },
+  args: { produto?: string; objetivo?: string; eixo?: string; drive_file_id?: string; referencias?: string[]; peca_chave?: string; meio?: string },
   convId?: string | null,
   timeoutMs = 28_000,
+  pedido = "",
 ) {
   const objetivo = String(args?.objetivo ?? args?.eixo ?? "").trim();
   if (!objetivo) {
     return {
       erro: "objetivo_obrigatorio",
-      detalhe: "Informe objetivo (o que a legenda deve comunicar). Ex.: 'CLT — simulacao rapida sem burocracia'.",
+      detalhe: "Informe objetivo (o que a legenda deve comunicar). Ex.: 'conhecer o La Felicità'.",
     };
   }
+  const meio =
+    (String(args?.meio ?? "").trim().toLowerCase() === "la_felicita" ||
+      String(args?.meio ?? "").trim().toLowerCase() === "juridico"
+      ? String(args.meio).trim().toLowerCase()
+      : null)
+    || inferirMeioDeProduto(String(args?.produto ?? ""))
+    || inferirMeioDrive(`${args?.produto ?? ""} ${objetivo} ${pedido}`);
+  const produto = String(args?.produto ?? "").trim() || (meio === "la_felicita" ? "imovel" : "");
   const body: Record<string, unknown> = {
     company_id: companyId,
-    produto: String(args?.produto ?? "").trim(),
+    produto,
     objetivo,
   };
+  if (meio) body.meio = meio;
   // produto pode vir vazio: a edge resolve de brand.linhas_produto (sem fallback CLT).
   const drive = String(args?.drive_file_id ?? "").trim();
   if (drive) body.drive_file_id = drive;
@@ -3674,6 +3712,10 @@ async function t_gerar_legendas(
     j.peca_chave = peca;
     j.nota_memoria =
       "Legendas gravadas em conversation_legendas desta conversa. Em turnos seguintes use get_legendas_da_conversa — NUNCA diga que o texto sumiu nem peca ao gestor para colar de novo.";
+  }
+  if (j && (j.erro || j.fail_closed) && !j.instrucao_agente) {
+    j.instrucao_agente =
+      "NAO diga que a ferramenta esta indisponivel e NAO ofereca esperar vs o gestor escrever. Chame gerar_legendas de novo OU ESCREVA as 3 variantes Hook→Beneficio→CTA no tom do produto (La Felicita ≠ Juridico) e registre com registrar_legenda_da_conversa.";
   }
   return j;
 }
@@ -3808,6 +3850,118 @@ async function carregarFalaConversa(convId: string): Promise<{ ultimoUser: strin
   const ultimoUser = String(rows.find((r: any) => r.role === "user")?.content ?? "");
   const blob = rows.map((r: any) => String(r.content ?? "")).join("\n");
   return { ultimoUser, blob };
+}
+
+async function upsertPecaSlate(opts: { companyId: string; convId: string; peca: PecaSlate }) {
+  const p = opts.peca;
+  const drive = String(p.drive_file_id ?? "").trim();
+  const nome = String(p.nome ?? "").trim();
+  if (!drive || !nome || !p.conjunto) return { ok: false, erro: "peca_incompleta" };
+  const row = {
+    company_id: opts.companyId,
+    conversation_id: opts.convId,
+    conjunto: p.conjunto,
+    peca_chave: String(p.peca_chave || pecaChaveDoSlate(p)).slice(0, 200),
+    drive_file_id: drive,
+    nome: nome.slice(0, 300),
+    pasta: p.pasta ? String(p.pasta).slice(0, 200) : null,
+    angulo: p.angulo ? String(p.angulo).slice(0, 500) : null,
+    cta: p.cta ? String(p.cta).slice(0, 300) : null,
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await supa.from("conversation_slate")
+    .upsert(row, { onConflict: "conversation_id,drive_file_id" });
+  if (error) return { ok: false, erro: error.message };
+  return { ok: true, peca_chave: row.peca_chave, drive_file_id: row.drive_file_id, conjunto: row.conjunto };
+}
+
+async function persistirSlateDaFala(companyId: string, convId: string, texto: string): Promise<number> {
+  if (!convId || !companyId) return 0;
+  const pecas = extrairSlateDaFala(texto);
+  if (!pecas.length) return 0;
+  let n = 0;
+  for (const p of pecas) {
+    const r = await upsertPecaSlate({ companyId, convId, peca: p });
+    if (r.ok) n++;
+  }
+  return n;
+}
+
+async function t_registrar_peca_da_conversa(
+  companyId: string,
+  convId: string,
+  args: { conjunto?: number; drive_file_id?: string; nome?: string; pasta?: string; angulo?: string; cta?: string; peca_chave?: string },
+) {
+  if (!convId) return { erro: "conversation_id_ausente" };
+  const drive = String(args?.drive_file_id ?? "").trim();
+  const nome = String(args?.nome ?? "").trim();
+  const conjunto = Number(args?.conjunto ?? 0);
+  if (!drive || !nome || conjunto < 1) {
+    return { erro: "peca_incompleta", detalhe: "Informe conjunto, drive_file_id e nome." };
+  }
+  const peca: PecaSlate = {
+    conjunto,
+    drive_file_id: drive,
+    nome,
+    pasta: args?.pasta ? String(args.pasta) : undefined,
+    angulo: args?.angulo ? String(args.angulo) : undefined,
+    cta: args?.cta ? String(args.cta) : undefined,
+    peca_chave: String(args?.peca_chave ?? "").trim() || pecaChaveDoSlate({ conjunto, nome, drive_file_id: drive }),
+  };
+  return await upsertPecaSlate({ companyId, convId, peca });
+}
+
+async function t_get_slate_da_conversa(
+  companyId: string,
+  convId: string,
+  args?: { conjunto?: number },
+) {
+  if (!convId) return { erro: "conversation_id_ausente" };
+  const { blob } = await carregarFalaConversa(convId);
+  const extraidas = await persistirSlateDaFala(companyId, convId, blob);
+  let q = supa.from("conversation_slate")
+    .select("conjunto, peca_chave, drive_file_id, nome, pasta, angulo, cta, updated_at")
+    .eq("company_id", companyId)
+    .eq("conversation_id", convId)
+    .order("conjunto", { ascending: true })
+    .order("nome", { ascending: true })
+    .limit(80);
+  const cj = Number(args?.conjunto ?? 0);
+  if (cj >= 1) q = q.eq("conjunto", cj);
+  const { data, error } = await q;
+  if (error) return { erro: error.message };
+  const pecas = data ?? [];
+  return {
+    total: pecas.length,
+    extraidas_da_fala_neste_turno: extraidas,
+    pecas,
+    nota:
+      "SLATE CONTRATUAL desta conversa (nao e inventario Drive). Se total>0, estes drive_file_ids SAO as pecas escolhidas. Inventario de 34 videos NAO apaga esta lista. PROIBIDO pedir ao gestor para re-colar. Pedido de legendas: gerar_legendas com cada drive_file_id daqui (produto=imovel / meio=la_felicita se for La Felicita).",
+  };
+}
+
+async function carregarBlocoSlateConversa(companyId: string, convId: string, extraTexto = ""): Promise<string> {
+  if (!convId) return "";
+  const { blob } = await carregarFalaConversa(convId);
+  await persistirSlateDaFala(companyId, convId, `${blob}\n${extraTexto}`);
+  const { data, error } = await supa.from("conversation_slate")
+    .select("conjunto, peca_chave, drive_file_id, nome, pasta, angulo, cta")
+    .eq("company_id", companyId)
+    .eq("conversation_id", convId)
+    .order("conjunto", { ascending: true })
+    .order("nome", { ascending: true })
+    .limit(80);
+  if (error || !data?.length) return "";
+  const linhas = data.map((r: any) =>
+    `- CONJ.${r.conjunto} | ${r.nome} | ${r.pasta ?? ""} | ${r.drive_file_id} | angulo: ${r.angulo ?? "—"} | CTA: ${r.cta ?? "—"} | chave=${r.peca_chave}`
+  );
+  return (
+    "[SLATE DA CONVERSA — store duravel; pecas JA escolhidas. " +
+    "Inventario Drive (N arquivos da pasta) NAO e este slate e NAO apaga a selecao. " +
+    "Pedido de legendas/cards destes videos: USE estes drive_file_ids. " +
+    "PROIBIDO pedir ao gestor para re-colar. PROIBIDO recusar porque o acervo nao lista o slate.]\n" +
+    linhas.join("\n")
+  );
 }
 
 async function carregarBlocoLinksConversa(convId: string): Promise<string> {
@@ -4044,7 +4198,7 @@ const TOOLS = [
   { type: "function", function: { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id da conversa e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e problema depois do clique e apenas apontado porque esta fora do escopo.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   { type: "function", function: { name: "avaliar_fadiga", description: "Avalia se uma peca cansou, teve queda sem saturacao, esta com frequencia alta antes da queda ou nao tem sinal de fadiga. Exige company_id da conversa e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e declara que frequencia deduplicada de 30 dias nao pode ser derivada das linhas diarias.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca do Drive com os anuncios criados PELO SISTEMA a partir dela e devolve metricas da janela (gasto, formularios, conversas, custo/formulario) + amostra_pequena (<20 resultados). Passe drive_file_id e/ou ad_external_id; sem filtro lista os pares existentes da empresa. Anuncios feitos so no Gerenciador NAO entram (lacuna declarada). Use ANTES de julgar peca do acervo por performance; ranking medio isolado nao prescreve pausa. Para fadiga, chame avaliar_fadiga com o ad_external_id devolvido.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer", description: "Janela em dias (default 7)." } } } } },
-  { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: le a identidade de marca VIGENTE da empresa da conversa: voz/tom, dos/donts, disclaimers obrigatorios, linhas de produto e referencias resolvidas (page_id/instagram/CTA/driver de meta_execution_config e destinos de destino_por_produto). E a fonte curada de voz da marca — use antes de redigir/avaliar copy. O motor gerar_legendas ja consome isso automaticamente. Leitura pura.", parameters: { type: "object", properties: {} } } },
+  { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: le a identidade de marca VIGENTE. COHAPM tem DUAS vozes: meio=juridico vs meio=la_felicita. Campanha/produto La Felicità ou imovel: passe meio=la_felicita — NUNCA use copy Juridico (conta de luz, cobranca, emprestimo). Sem meio, a RPC prefere juridico. gerar_legendas consome automaticamente quando produto/meio vem certo.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"], description: "Recorte de voz. Obrigatorio em COHAPM quando o pedido e La Felicita ou Juridico." } } } } },
   { type: "function", function: { name: "score_de_prontidao", description: "ESP-38: score read-only 0-100 de prontidao da empresa da conversa para propor/executar anuncios, agregando sinais que ja existem: config de execucao (25), integracao Meta viva (25), postura de criacao/pode_executar_acao (20), brand_identity (15), destino_por_produto (10) e driver resolvivel (5). Devolve nivel (bloqueado|parcial|operacional|pronto), checks itemizados com evidencia/lacuna, bloqueios duros e recomendacoes. Use quando o usuario pergunta 'estamos prontos?/por que nao consigo criar anuncio?/o que falta'. NAO altera nada e NAO substitui os gates por pedido (validar_pedido_contra_contrato / pedido_de_anuncio_completo).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "saude_dos_tokens", description: "ESP-30: saude dos tokens Meta (ads/waba) da empresa da conversa por METADADO gravado (meta_tokens): por token devolve dias para expirar, dias para o fim do data_access, escopos faltando vs o esperado do papel e veredito (ok|expira_em_breve|expirado|data_access_expirado|escopo_incompleto|invalido). Use quando o usuario pergunta 'o token vai vencer?/temos permissao pra X?/por que parou de coletar'. Leitura pura: le o ultimo estado do meta-token-monitor, NAO chama a Graph e NUNCA expoe o valor do token. Complementa saude_das_integracoes (entrega) e bm-monitor (status/cobranca da conta).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "ler_entregas_digest", description: "ESP-41: config de digest (cadencia/slots, e-mails, alerta critico) + entregas recentes (digest e alerta critico) da empresa da conversa, com status por entrega. Use quando o usuario pergunta 'o relatorio de hoje foi enviado?/chega por e-mail?/qual o horario do digest'. Leitura pura: reflete o que a edge enviar-digest e o trigger gravaram; status sem_provedor = falta configurar e-mail, sem_destinatario = sem e-mail cadastrado (nesses casos o digest segue no chat).", parameters: { type: "object", properties: { dias: { type: "integer", description: "Janela em dias (default 7)." } } } } },
@@ -4067,9 +4221,11 @@ const TOOLS = [
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
   { type: "function", function: { name: "alterar_categoria_especial", description: "Emite CARD DE APROVACAO para alterar ou REMOVER special_ad_categories de uma campanha JA CRIADA. Passe special_ad_categories=[] para remover. NAO diga que falta ferramenta. Leia antes com get_campaign_detail ou auditar_compliance_financeira.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } }, categorias_atuais: { type: "array", items: { type: "string" } }, justificativa: { type: "string" } }, required: ["campanha_atual", "special_ad_categories"] } } },
   { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha e alterar_categoria_especial_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (qualquer familia, inclusive trafego/website). Molde NAO e obrigatorio para criar do zero. Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal. PROIBIDO recusar criar_conjunto por falta de molde (trafego, social ou mensagens). Tudo que e criado nasce ACTIVE.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
-  { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes no framework Hook→Beneficio/prova→CTA (CET/FIN-04 so se a empresa for de credito). Cada variante ja passou por compliance-check (e checar_par_texto_e_peca se drive_file_id). NAO cria anuncio e NAO emite card. As variantes ficam GRAVADAS em conversation_legendas desta conversa. Use quando o gestor pedir legendas/copy. Depois escolha UMA com apto_para_card=true (aprovado OU atencao) e passe em propose_action criar_anuncio_a_partir_de. VOCE preenche legenda_referencias — NUNCA peca ao gestor. Nao invente CLT/CET para COHAPM.", parameters: { type: "object", properties: { produto: { type: "string", description: "Obrigatorio se brand nao tiver linhas_produto. Ex.: consignado_clt (Legal) ou juridico_whatsapp (COHAPM). SEM default CLT." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, drive_file_id: { type: "string", description: "Opcional: peca do Drive para alinhar ao par texto+peca." }, peca_chave: { type: "string", description: "Chave estavel no slate (ex.: carrossel_5, card_capa_1). Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
+  { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes Hook→Beneficio/prova→CTA (CET/FIN-04 so credito). NAO cria anuncio. Grava em conversation_legendas. La Felicita: produto=imovel + meio=la_felicita + drive_file_id do SLATE (get_slate_da_conversa). NAO use voz Juridico. Se a tool falhar, NAO diga indisponivel — escreva as 3 no tom certo e registre. VOCE preenche referencias. Nao invente CLT/CET para COHAPM.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: imovel / la_felicita (residencial) ou juridico_whatsapp (COHAPM Juridico) ou consignado_clt (Legal). SEM default CLT." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, meio: { type: "string", enum: ["la_felicita", "juridico"], description: "Voz da marca. La Felicita = la_felicita." }, drive_file_id: { type: "string", description: "Peca do Drive (do slate)." }, peca_chave: { type: "string", description: "Chave estavel. Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "get_legendas_da_conversa", description: "MEMORIA DURAVEL de legendas desta conversa (conversation_legendas). Devolve texto INTEGRAL por peca_chave/drive_file_id. OBRIGATORIO chamar ANTES de dizer que legenda 'nao existe' / 'texto integral nao disponivel' ou de pedir ao gestor para colar copy. Se a peca esta aqui, use o texto — nunca invente amnesia.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, drive_file_id: { type: "string" } } } } },
   { type: "function", function: { name: "registrar_legenda_da_conversa", description: "Grava/atualiza UMA legenda no store duravel desta conversa. Use quando voce propuser copy no chat SEM passar por gerar_legendas (ex.: slate de impulsão com legenda editorial), ou para marcar a variante selecionada pelo gestor. peca_chave estavel (carrossel_2, card_capa_1, …) + legenda integral. Com drive_file_id quando houver.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, legenda: { type: "string" }, drive_file_id: { type: "string" }, variante_indice: { type: "number" }, selecionada: { type: "boolean" }, objetivo: { type: "string" } }, required: ["peca_chave", "legenda"] } } },
+  { type: "function", function: { name: "get_slate_da_conversa", description: "MEMORIA DURAVEL do SLATE desta conversa (conversation_slate): pecas JA escolhidas por CONJ.N com nome, drive_file_id, angulo e CTA. Inventario Drive (N videos da pasta) NAO e o slate. OBRIGATORIO antes de dizer que 'o acervo nao traz o slate' ou de pedir ao gestor para re-colar os 8 videos. Pedido de legendas dos videos que VOCE selecionou: leia daqui e chame gerar_legendas por peca.", parameters: { type: "object", properties: { conjunto: { type: "number", description: "Opcional: so pecas deste CONJ.N." } } } } },
+  { type: "function", function: { name: "registrar_peca_da_conversa", description: "Grava UMA peca no slate duravel (conjunto + drive_file_id + nome). O sistema tambem extrai tabelas CONJ.N da propria conversa. Use se selecionar peca nova e quiser persistir na hora.", parameters: { type: "object", properties: { conjunto: { type: "number" }, drive_file_id: { type: "string" }, nome: { type: "string" }, pasta: { type: "string" }, angulo: { type: "string" }, cta: { type: "string" }, peca_chave: { type: "string" } }, required: ["conjunto", "drive_file_id", "nome"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida UMA legenda (texto integral) e/ou criativo anexado contra compliance_rules. Para esbocos que voce escreveu nesta conversa, PASSE o texto em legenda= — NAO use get_criativos_conteudo vazio como desculpa de '0 textos'. Para anuncios ja publicados, pegue a legenda em get_criativos_conteudo/legendas_unicas e passe aqui. Devolve veredito deterministicamente.", parameters: { type: "object", properties: { legenda: { type: "string", description: "Texto integral da legenda a validar (obrigatorio se nao houver imagem anexada)." } }, required: ["legenda"] } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Traz tambem destino_url (link do CTA do criativo) e destino (whatsapp quando wa.me/api.whatsapp, senao site): O NUMERO DE WHATSAPP DE DESTINO de cada peca SAI DAQUI (ex.: wa.me/5571993451315). Isso e CONFIG do criativo coletada do Pipeboard - NAO confunda com a analitica de conversa WABA (pos-clique), que esta congelada; o numero de destino do anuncio E legivel e voce DEVE informa-lo quando perguntado. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
@@ -4179,6 +4335,17 @@ function prioridadeTool(nome: string, pedido: string): number {
     nome === "propose_action" || nome === "gerar_legendas" ||
     nome === "upload_midia" || nome === "registrar_legenda_da_conversa"
   )) return 99;
+  if (pedidoUsaSlateExistente(pedido)) {
+    if (
+      nome === "gerar_legendas" || nome === "get_slate_da_conversa" ||
+      nome === "registrar_peca_da_conversa" || nome === "ler_brand_identity" ||
+      nome === "get_legendas_da_conversa" || nome === "registrar_legenda_da_conversa"
+    ) return 0;
+    if (
+      nome === "get_drive_criativos" || nome === "get_acervo_para_anuncio" ||
+      nome === "get_analise_visual_drive" || nome === "get_estrutura_conjuntos"
+    ) return 99;
+  }
   const pedeCriativo = /criativ|legenda|compliance|anuncio|peca|texto|copy|oferta/.test(p);
   const pedeReceita = /receita|contrato|cac|retorno|vende|vendas|funil|proposta|lucro/.test(p);
   const pedeEstrutura = /cbo|abo|conjunto|estrutura|publico|targeting|lance|orcamento/.test(p);
@@ -4211,7 +4378,7 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeConhecimento && nome === "get_conhecimento") return 0;
   if (pedeComplianceFin && (nome === "auditar_compliance_financeira" || nome === "get_campaign_detail" || nome === "check_compliance")) return 0;
   if (ehPedidoUploadLote(pedido) && (nome === "upload_midia" || nome === "get_acervo_para_anuncio")) return 0;
-  if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "upload_midia" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "gerar_legendas" || nome === "get_legendas_da_conversa" || nome === "registrar_legenda_da_conversa" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
+  if (pedeCriativo && (nome === "get_acervo_para_anuncio" || nome === "upload_midia" || nome === "get_criativos_conteudo" || nome === "check_compliance" || nome === "gerar_legendas" || nome === "get_legendas_da_conversa" || nome === "registrar_legenda_da_conversa" || nome === "get_slate_da_conversa" || nome === "registrar_peca_da_conversa" || nome === "checar_par_texto_e_peca" || nome === "nota_visual_da_peca")) return 0;
   if (pedeReceita && nome === "get_funil_credito") return 0;
   if (pedeEstrutura && nome === "get_estrutura_conjuntos") return 0;
   const base: Record<string, number> = {
@@ -4386,7 +4553,15 @@ async function runTool(name: string, args: any, ctx: any) {
         p_ad_external_id: args?.ad_external_id == null || String(args.ad_external_id).trim() === "" ? null : String(args.ad_external_id),
         p_dias: Number(args?.dias ?? 7),
       });
-      case "ler_brand_identity": return await t_rpc("ler_brand_identity", { p_company_id: ctx.companyId });
+      case "ler_brand_identity": {
+        const meioArg = String(args?.meio ?? "").trim().toLowerCase();
+        const meio = (meioArg === "la_felicita" || meioArg === "juridico")
+          ? meioArg
+          : (inferirMeioDrive(String(ctx.pedido ?? "")) || inferirMeioDeProduto(String(ctx.pedido ?? "")));
+        const rpc: Record<string, unknown> = { p_company_id: ctx.companyId };
+        if (meio) rpc.p_meio = meio;
+        return await t_rpc("ler_brand_identity", rpc);
+      }
       case "score_de_prontidao": return await t_rpc("score_de_prontidao", { p_company_id: ctx.companyId });
       case "saude_dos_tokens": return await t_rpc("saude_dos_tokens", { p_company_id: ctx.companyId });
       case "ler_entregas_digest": return await t_rpc("ler_entregas_digest", { p_company_id: ctx.companyId, p_dias: Number(args?.dias ?? 7) });
@@ -4447,10 +4622,13 @@ async function runTool(name: string, args: any, ctx: any) {
         }
         return await t_gerar_legendas(
           ctx.companyId, ctx.mcpKey, args, ctx.convId, Math.min(28_000, restante - 8_000),
+          String(ctx.pedido ?? ""),
         );
       }
       case "get_legendas_da_conversa": return await t_get_legendas_da_conversa(ctx.companyId, ctx.convId, args);
       case "registrar_legenda_da_conversa": return await t_registrar_legenda_da_conversa(ctx.companyId, ctx.convId, args);
+      case "get_slate_da_conversa": return await t_get_slate_da_conversa(ctx.companyId, ctx.convId, args);
+      case "registrar_peca_da_conversa": return await t_registrar_peca_da_conversa(ctx.companyId, ctx.convId, args);
       case "get_criativos_conteudo": {
         const buscaNome = String(args?.busca_nome ?? "").trim();
         // v28.11: COM BUSCA, o default de somente_ativas inverte para false. Medido: 'Reel02' com
@@ -4632,7 +4810,8 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 - Criacao em lote e degrau, nao rajada: proponha em etapas com leitura entre elas (motivo documentavel: limite de chamada e reinicio de aprendizado - nao invoque teoria de deteccao de automacao).
 - Divergencia persistente se registra, nao se vence: se o gestor sobrepor sem novo dado, declare a divergencia, registre a evidencia e execute a decisao dele.
 - Atribuicao com canais fora do sistema e DISPUTADA, nao apenas conservadora: outro canal pode ter originado o contato. Nao use atribuicao de canal unico como base para escalar.
-- Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar. Pedido de criar legendas: chame gerar_legendas (ESP-37, N=3, Hook→Beneficio→CTA; CET so se empresa de credito). Entregue as 3 com veredito; apto_para_card=true inclui aprovado e atencao. NAO invente legendas no chat sem a ferramenta (se improvisar por excecao editorial, registre com registrar_legenda_da_conversa IMEDIATAMENTE — uma chamada por variante).
+- Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar. Pedido de criar legendas: chame gerar_legendas (ESP-37, N=3, Hook→Beneficio→CTA; CET so se empresa de credito). Entregue as 3 com veredito; apto_para_card=true inclui aprovado e atencao. La Felicita / produto imovel: produto=imovel + meio=la_felicita — PROIBIDO voz Juridico. Se gerar_legendas falhar, NAO diga que a ferramenta esta indisponivel e NAO ofereca esperar vs o gestor escrever: ESCREVA as 3 no tom certo e registre com registrar_legenda_da_conversa.
+- SLATE JA ESCOLHIDO NESTA CONVERSA (25/08/2026): pecas com CONJ.N + drive_file_id + nome + angulo estao em conversation_slate (get_slate_da_conversa e bloco [SLATE DA CONVERSA]). Inventario Drive (N videos da pasta) NAO e o slate e NAO apaga a selecao. Pedido de legendas/cards dos videos que VOCE selecionou: use o store. PROIBIDO pedir ao gestor para re-colar. PROIBIDO recusar porque o acervo "nao traz o slate".
 - LEGENDAS JA PROPOSTAS NESTA CONVERSA: chame get_legendas_da_conversa ANTES de dizer que o texto "nao existe" / "nao esta disponivel". O store e o historico sao a memoria — PROIBIDO pedir ao gestor para re-colar copy que voce escreveu.
 - COMPLIANCE DE ESBOCOS DESTA CONVERSA (21/08/2026): se o gestor pedir "rode compliance" / "verifique as legendas" DEPOIS de voce ter escrito esbocos nesta conversa, o insumo e ESSES TEXTOS. Chame check_compliance com params.legenda = cada esboco (ate 3). Se ainda nao gravou, registre com registrar_legenda_da_conversa e depois cheque. PROIBIDO: (a) chamar so get_criativos_conteudo e declarar "0 textos" / "nada para validar"; (b) dizer que precisa sincronizar a Meta para auditar copy que VOCE acabou de propor; (c) inventar amnesia. get_criativos_conteudo e para anuncios JA publicados no espelho — nao substitui esbocos do chat.
 
@@ -4684,11 +4863,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   chame upload_midia em TODOS os na_biblioteca_da_meta=false. NAO invente teto de 5/hora.
   NAO peca o gestor para repetir "suba os restantes". Liste NOME de cada peca enviada,
   em andamento e ainda fora. O sistema emenda blocos sozinho antes do timeout de 2 min.
-- SLATE DO GESTOR (anti-alucinacao, 20/08/2026): quando o gestor definir um lote (ex. "3 videos
-  + 1 carrossel + 1 card"), ESSE e o unico conjunto valido nesta conversa. Repita tipos+nomes
-  antes de auditar ou emitir. PROIBIDO trocar por outro conjunto (ex. "5 videos 22-27" so porque
-  estao liberados no acervo). Inventario apto ≠ pedido. Se perder o slate no historico, peca
-  confirmacao — nao invente.
+- SLATE DO GESTOR (anti-alucinacao, 20/08/2026; store 25/08): quando o gestor (ou VOCE) definir um lote (ex. "3 videos + 1 carrossel" ou CONJ.1 com 8 videos), ESSE e o unico conjunto valido. Repita tipos+nomes antes de auditar ou emitir. Inventario apto ≠ pedido. O store conversation_slate / [SLATE DA CONVERSA] sobrevive ao corte de historico — CONSULTE-O; PROIBIDO pedir re-colar.
 - LOTE DE 6 CRIATIVOS (anti-repeticao + anti-timeout, 22/08/2026 v28.59): se o gestor pedir N pecas DIFERENTES do conjunto ativo e entre si, + legendas: (1) leia get_criativos_conteudo do conjunto ativo e EXCLUA esses arquivos; (2) 6 pecas = 6 EIXOS de mensagem — PROIBIDO tres videos da mesma familia (ex. 3x "juros abusivos"/"contrato com taxa"); (3) 1 gerar_legendas por peca com drive_file_id + objetivo daquela peca (nao distribua 3 variantes de UMA chamada em 3 videos); (4) no maximo 3 gerar_legendas por janela HTTP — o sistema continua=true para o restante. NAO encerre com "legendas pendentes" / "nao cobertos por falta de tempo" como se o pedido tivesse acabado. NAO emita card a menos que pecam emissao.
 - EMITE CONJUNTO N (anti-amnesia, 22/08/2026 v28.60): "emita os 3 cards do conjunto 2" = pecas NOVAS do slate desta conversa. Chame get_legendas_da_conversa (conjunto_2_*). propose_action criar_anuncio_a_partir_de com sem_molde=true + drive_file_id + legenda do store + conjunto_destino = JURIDICO_CONJ.02 (NAO o ultimo conjunto criado — pode ser o 03) + destino_url = o wa.me definido para AQUELE conjunto nesta conversa (bloco LINKS DE CONJUNTO). PROIBIDO usar o nome do video como molde. PROIBIDO copiar os anuncios do conjunto 1 (conta de luz / devolucao / emprestimo sobre emprestimo).
 - EMITE OS N (anti-loop + anti-timeout, 21/08/2026 v28.53): se o gestor disser "emite os N" / "emite os cards" e o
@@ -4755,7 +4930,7 @@ entregue o que ja apurou com lacunas declaradas — nunca um "vou…" sozinho.
 
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
 R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os dois limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
-R1-DRIVE. MENSAGEM NOVA QUE PEDE VERIFICAR / LISTAR / DISTRIBUIR / INVENTARIAR pecas do Drive OBRIGA chamar get_drive_criativos e get_acervo_para_anuncio NESTE turno. Historico e bloco [RETORNOS...] valem para CONTRATO (nomes de conjunto, orcamento, publico ja definidos), NAO como inventario de arquivos: a pasta pode ter mudado. PROIBIDO substituir o Drive por get_criativos_conteudo (anuncios ja no ar). PROIBIDO pedir ao gestor que cole o inventario. Se o pedido for La Felicita, recorte meio=la_felicita e so pastas Reels/Videos.
+R1-DRIVE. MENSAGEM NOVA QUE PEDE VERIFICAR / LISTAR / DISTRIBUIR / INVENTARIAR pecas do Drive OBRIGA chamar get_drive_criativos e get_acervo_para_anuncio NESTE turno. Historico e bloco [RETORNOS...] valem para CONTRATO (nomes de conjunto, orcamento, publico ja definidos), NAO como inventario de arquivos: a pasta pode ter mudado. PROIBIDO substituir o Drive por get_criativos_conteudo (anuncios ja no ar). PROIBIDO pedir ao gestor que cole o inventario. Se o pedido for La Felicita, recorte meio=la_felicita e so pastas Reels/Videos. EXCECAO: pedido de legendas/cards das pecas JA selecionadas (CONJ.N / "os 8 videos que selecionou") NAO e inventario — use get_slate_da_conversa / [SLATE DA CONVERSA]. PROIBIDO reabrir o Drive como se o slate nao existisse.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
 R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. Para categoria especial: LEIA com get_campaign_detail / auditar_compliance_financeira / ler_pipeboard get_campaign_details; para ALTERAR ou REMOVER use alterar_categoria_especial (card alterar_categoria_especial_campanha). PROIBIDO dizer que "nao ha ferramenta" ou que "so na criacao". A Meta aplica a categoria na campanha; os anuncios herdam.
 R3. Distinga tres coisas diferentes: (a) o dado e ZERO, (b) o dado NAO EXISTE no sistema, (c) o dado NAO FOI COLETADO no periodo (sync/cobertura). Nunca trate (b) ou (c) como (a).
@@ -5042,7 +5217,8 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
     ? "INSTRUCOES OBRIGATORIAS:\n" +
       "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir.\n" +
       "2. Retome SOMENTE o que falta: gerar_legendas das pecas ainda sem legenda (no maximo 3 nesta janela). " +
-      "Uma chamada por peca, com drive_file_id + objetivo DAQUELA peca. Nao atribua 3 variantes de uma chamada a 3 videos.\n" +
+      "Uma chamada por peca, com drive_file_id + objetivo DAQUELA peca (produto=imovel, meio=la_felicita se for La Felicita). " +
+      "Leia get_slate_da_conversa se o id nao estiver no checkpoint. Nao atribua 3 variantes de uma chamada a 3 videos.\n" +
       "3. 6 pecas = 6 EIXOS diferentes. PROIBIDO tres videos da mesma familia (ex. 3x juros/contrato abusivo). " +
       "EXCLUA pecas ja usadas no conjunto ativo (leia nomes em get_criativos_conteudo se ainda nao listou).\n" +
       "4. NAO emita card a menos que o objetivo original peca emissao. Entregue tabela: arquivo, drive_file_id, motivo, legenda escolhida.\n" +
@@ -5445,9 +5621,10 @@ Deno.serve(async (req) => {
   let histMsgsCortadas = 0;
   const temLegendaNoTexto = (s: string) =>
     /legenda criada|legendas geradas|variante\s*[123]\s*[—\-]|get_legendas_da_conversa|\[LEGENDAS DA CONVERSA/i.test(s);
+  const temSlateMsg = (s: string) => temSlateNoTexto(s) || /\[SLATE DA CONVERSA/i.test(s);
   const history = cronologico.map((m, i) => {
     const c = String(m.content ?? "");
-    const assistComLegenda = m.role === "assistant" && temLegendaNoTexto(c);
+    const assistComLegenda = m.role === "assistant" && (temLegendaNoTexto(c) || temSlateMsg(c));
     const cap = (m.role === "user" && i === ultimoUserIdx)
       ? HIST_CAP_USER_RECENTE
       : (assistComLegenda ? HIST_CAP_ASSIST_COM_LEGENDA : HIST_CAP);
@@ -5468,13 +5645,17 @@ Deno.serve(async (req) => {
       const cauda = cap - cabeca;
       return comEvidencia(
         c.slice(0, cabeca) +
-        `\n[AVISO DO SISTEMA: ${omitidos} caracteres do MEIO desta mensagem foram omitidos do historico por limite de tamanho. O INICIO e o FINAL estao preservados - a mensagem NAO termina neste corte; se houver legenda no trecho final, ela existe — consulte tambem get_legendas_da_conversa / bloco LEGENDAS DA CONVERSA.]\n` +
+        `\n[AVISO DO SISTEMA: ${omitidos} caracteres do MEIO desta mensagem foram omitidos do historico por limite de tamanho. O INICIO e o FINAL estao preservados - a mensagem NAO termina neste corte; se houver slate CONJ.N ou legenda no trecho final, ele existe — consulte get_slate_da_conversa / get_legendas_da_conversa e os blocos SLATE/LEGENDAS DA CONVERSA.]\n` +
         c.slice(-cauda));
     }
     return comEvidencia(
-      c.slice(0, cap) + `\n[AVISO DO SISTEMA: o final desta mensagem (${omitidos} caracteres) foi omitido do historico por limite de tamanho. Se a mensagem tinha legendas, chame get_legendas_da_conversa antes de declarar ausencia.]`);
+      c.slice(0, cap) + `\n[AVISO DO SISTEMA: o final desta mensagem (${omitidos} caracteres) foi omitido do historico por limite de tamanho. Se a mensagem tinha slate CONJ.N ou legendas, chame get_slate_da_conversa / get_legendas_da_conversa antes de declarar ausencia.]`);
   });
 
+  const blocoSlate = await carregarBlocoSlateConversa(company.id, convId!, msgText);
+  if (blocoSlate) {
+    history.push({ role: "assistant", content: blocoSlate });
+  }
   const blocoLegendas = await carregarBlocoLegendasConversa(company.id, convId!);
   if (blocoLegendas) {
     history.push({ role: "assistant", content: blocoLegendas });
@@ -5510,15 +5691,25 @@ Deno.serve(async (req) => {
     (recusaFalsaMoldeTrafego(ultimoAssistantTxt) ||
       /conjunto molde ['"]?sem_molde/i.test(ultimoAssistantTxt + "\n" + histRetornos));
   const precisaNudgeDrive = pedidoExigeInventarioDrive(objetivoOriginal);
-  const textoLlm = [
+  const precisaNudgeSlate =
+    pedidoUsaSlateExistente(objetivoOriginal) &&
+    /re-?colar|cole de novo|nao (inclui|traz|lista) o slate|inventario.{0,80}nao.{0,80}(os 8|selecion)|confirme os (8 )?videos|cole os (ids|nomes)/i.test(
+      ultimoAssistantTxt + "\n" + histRetornos,
+    );
+  const precisaNudgeLegendas =
+    pedidoUsaSlateExistente(objetivoOriginal) &&
+    /ferramenta.{0,40}indisponivel|redator indisponivel|aguardar.{0,40}ferramenta|escrever.{0,40}(na mao|manualmente)|nao vou invent/i.test(
+      ultimoAssistantTxt + "\n" + histRetornos,
+    );
+  const extrasNudge = [
     precisaNudgeSemMolde ? MSG_NUDGE_SEM_MOLDE : "",
     precisaNudgeDrive ? MSG_NUDGE_DRIVE : "",
-  ].filter(Boolean).length
-    ? `${msgText}\n\n${[precisaNudgeSemMolde ? MSG_NUDGE_SEM_MOLDE : "", precisaNudgeDrive ? MSG_NUDGE_DRIVE : ""].filter(Boolean).join("\n\n")}`
-    : msgText;
-  if ((precisaNudgeSemMolde || precisaNudgeDrive) && Array.isArray(userContent) && userContent[0]?.type === "text") {
-    const extra = [precisaNudgeSemMolde ? MSG_NUDGE_SEM_MOLDE : "", precisaNudgeDrive ? MSG_NUDGE_DRIVE : ""].filter(Boolean).join("\n\n");
-    userContent[0] = { ...userContent[0], text: String(userContent[0].text ?? "") + "\n\n" + extra };
+    precisaNudgeSlate ? MSG_NUDGE_SLATE : "",
+    precisaNudgeLegendas ? MSG_NUDGE_LEGENDAS : "",
+  ].filter(Boolean);
+  const textoLlm = extrasNudge.length ? `${msgText}\n\n${extrasNudge.join("\n\n")}` : msgText;
+  if (extrasNudge.length && Array.isArray(userContent) && userContent[0]?.type === "text") {
+    userContent[0] = { ...userContent[0], text: String(userContent[0].text ?? "") + "\n\n" + extrasNudge.join("\n\n") };
   }
   const perguntaSimples = userContent.length === 1;
   const perguntaCacheavel = perguntaSimples && textoLlm.length >= 4000;
@@ -5561,6 +5752,8 @@ Deno.serve(async (req) => {
   let nudgesSemMolde = 0;
   let nudgesDrive = 0;
   let nudgesUpload = 0;
+  let nudgesSlate = 0;
+  let nudgesLegendas = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
   const pedidoUploadTurno = ehPedidoUploadLote(objetivoOriginal);
   const nPendentesCp = (turnCheckpoint?.pendentes_upload ?? []).length;
@@ -5923,6 +6116,45 @@ Deno.serve(async (req) => {
       finishReason = String(finishReason || "stop") + "+nudge_drive";
       continue;
     }
+    if (
+      pedidoUsaSlateExistente(objetivoOriginal) &&
+      nudgesSlate < 1 &&
+      /re-?colar|cole de novo|nao (inclui|traz|lista) o slate|inventario.{0,80}nao.{0,80}(os 8|selecion)|confirme os (8 )?videos/i.test(String(reply))
+    ) {
+      nudgesSlate++;
+      messages.push({ role: "assistant", content: reply });
+      messages.push({ role: "user", content: MSG_NUDGE_SLATE });
+      finishReason = String(finishReason || "stop") + "+nudge_slate";
+      continue;
+    }
+    const gerouLegendaOk = toolResults.some((t) => {
+      if (t.tool !== "gerar_legendas" || t.erro) return false;
+      const r = t.retorno as any;
+      if (r && typeof r === "object" && r.ok === true) return true;
+      if (r && typeof r === "object" && Array.isArray(r.variantes) && r.variantes.length) return true;
+      return false;
+    });
+    const gerouLegendaFalhou = toolResults.some((t) => {
+      if (t.tool !== "gerar_legendas") return false;
+      if (t.erro) return true;
+      const r = t.retorno as any;
+      if (r && typeof r === "object" && r.erro) return true;
+      if (typeof r === "string" && /"erro"\s*:/.test(r) && !/"ok"\s*:\s*true/.test(r)) return true;
+      return false;
+    });
+    if (
+      pedidoUsaSlateExistente(objetivoOriginal) &&
+      nudgesLegendas < 1 &&
+      !gerouLegendaOk &&
+      (gerouLegendaFalhou ||
+        /ferramenta.{0,40}indisponivel|redator indisponivel|aguardar.{0,40}ferramenta|escrever.{0,40}(na mao|manualmente)|nao vou invent/i.test(String(reply)))
+    ) {
+      nudgesLegendas++;
+      messages.push({ role: "assistant", content: reply });
+      messages.push({ role: "user", content: MSG_NUDGE_LEGENDAS });
+      finishReason = String(finishReason || "stop") + "+nudge_legendas";
+      continue;
+    }
     if (pedidoUploadTurno && nudgesUpload < 1) {
       const relNudge = apurarUploadLote(toolResults, turnCheckpoint?.pendentes_upload, turnCheckpoint?.ja_na_meta);
       const semAcervo = !relNudge.teveAcervo && !toolsUsed.some((t) => t.tool === "get_acervo_para_anuncio");
@@ -6225,6 +6457,7 @@ Deno.serve(async (req) => {
     toolsUsed.length === 0 &&
     (replyNorm === lastAsstText || ehStubProgressoChat(lastAsstText));
   if (!duplicaStub) {
+    await persistirSlateDaFala(company.id, convId!, String(reply ?? ""));
     await supa.from("chat_messages").insert({ conversation_id: convId, company_id: company.id, role: "assistant", content: reply,
       tool_calls: toolsUsed.length ? toolsUsed : null, model: modeloRoteado, tokens_in: tokensIn, tokens_out: tokensOut,
       diagnostico, tool_results: toolResults.length ? toolResults : null,

@@ -7,8 +7,10 @@ import {
   ehSentinelaSemMolde,
   extrairLinksWaMePorConjunto,
   extrairNomesCriativoDaFala,
+  extrairSlateDaFala,
   nomeCompostoForaDeEscopoTrafego,
   numeroConjuntoDaFala,
+  pecasDoConjunto,
   pareceNomeDePecaNaoMolde,
 } from "./memoria-conjunto";
 
@@ -120,5 +122,21 @@ describe("trava de nome livre do contrato", () => {
     expect(ehNomeCompostoEstruturado("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(true);
     expect(nomeCompostoForaDeEscopoTrafego("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(true);
     expect(nomeCompostoForaDeEscopoTrafego("JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02")).toBe(false);
+  });
+});
+
+describe("extrairSlateDaFala", () => {
+  const fala = `### CONJ.1 — descoberta
+| Nº | Criativo | Pasta | drive_file_id | Motivação |
+| 1 | 01. Chegando em casa.mp4 | Junho/Vídeos | \`1gs0uF34wD3h4KRrknI5mcZ_Q32iod-tn\` | Abre pela chegada |
+**CTA:** conhecer o La Felicità.
+| Junho | Vídeos | 99. Inventario.mp4 | \`1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\` |`;
+
+  it("pega a peca numerada do CONJ.1 e ignora inventario sem numero", () => {
+    const slate = extrairSlateDaFala(fala);
+    expect(pecasDoConjunto(slate, 1)).toHaveLength(1);
+    expect(slate[0].drive_file_id).toBe("1gs0uF34wD3h4KRrknI5mcZ_Q32iod-tn");
+    expect(slate[0].cta).toMatch(/La Felicit/i);
+    expect(slate.some((p) => p.nome.includes("Inventario"))).toBe(false);
   });
 });

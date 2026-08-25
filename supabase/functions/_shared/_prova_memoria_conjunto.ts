@@ -5,7 +5,10 @@ import {
   ehNomeCompostoEstruturado,
   ehSentinelaSemMolde,
   extrairNomesCriativoDaFala,
+  extrairSlateDaFala,
   nomeCompostoForaDeEscopoTrafego,
+  pecasDoConjunto,
+  temSlateNoTexto,
 } from "./memoria_conjunto.ts";
 
 function assert(cond: boolean, msg: string) {
@@ -50,5 +53,33 @@ assert(ehSentinelaSemMolde("sem_molde"), "sentinela crua");
 assert(ehSentinelaSemMolde("sem molde"), "sentinela com espaco");
 assert(ehFlagSemMolde("true"), "flag string");
 assert(!ehSentinelaSemMolde("JURIDICO_CONJ.01"), "nome real nao e sentinela");
+
+const falaSlate = `Inventario: 34 videos
+| Mes | Pasta | Arquivo | drive_file_id |
+| Junho | Videos | 01. Chegando em casa.mp4 | \`1gs0uF34wD3h4KRrknI5mcZ_Q32iod-tn\` |
+
+### CONJ.1 — descoberta e rotina
+| Nº | Criativo | Pasta | drive_file_id | Motivação |
+| 1 | 01. Chegando em casa.mp4 | Junho/Vídeos | \`1gs0uF34wD3h4KRrknI5mcZ_Q32iod-tn\` | Abre a comunicação pela sensação de chegada e pertencimento |
+| 2 | 02. Família Gourmet.mp4 | Junho/Vídeos | \`1pRzXOOaI1ctoUwN-spXtOAse4KEXgjyP\` | Mostra convivência e uso coletivo do espaço |
+| 8 | 07. Noite.mp4 | Julho/Reels | \`1GGX2-aveLWKo4l_PUXGA-f92M72XJisP\` | Amplia a percepção de uso para além do horário diurno |
+
+**Ângulo de legenda:** descoberta, rotina e sensação de morar bem.
+**CTA:** conhecer o La Felicità.
+
+### CONJ.2 — lazer
+| Nº | Criativo | Pasta | drive_file_id | Motivação |
+| 1 | 06. Futebol.mp4 | Junho/Vídeos | \`1LKMMzydHkrC4_SvaZGPM6YEDFB1yiBIC\` | Mostra lazer esportivo |
+`;
+
+assert(temSlateNoTexto(falaSlate), "detecta slate no texto");
+const slate = extrairSlateDaFala(falaSlate);
+assert(slate.length === 4, `slate length=${slate.length}`);
+const c1 = pecasDoConjunto(slate, 1);
+assert(c1.length === 3, `conj1=${c1.length}`);
+assert(c1.some((p) => p.drive_file_id === "1gs0uF34wD3h4KRrknI5mcZ_Q32iod-tn"), "id chegando");
+assert(c1.some((p) => p.nome.includes("Gourmet")), "gourmet no conj1");
+assert(c1.every((p) => /conhecer o La Felicit/i.test(String(p.cta ?? ""))), "cta conj1");
+assert(pecasDoConjunto(slate, 2).length === 1, "conj2 um video");
 
 console.log("ok: _prova_memoria_conjunto");

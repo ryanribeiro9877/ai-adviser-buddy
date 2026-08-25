@@ -13,8 +13,27 @@ export function deaccPedido(s: string): string {
   return String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
+/** Pedido de legendas/copy sobre pecas JA selecionadas — nao e inventario novo do Drive. */
+export function pedidoUsaSlateExistente(pedido: string): boolean {
+  const p = deaccPedido(pedido);
+  const pedeLegenda = /\blegendas?\b/.test(p) || /\b(gerar|gere|produzir)\s+copy\b/.test(p);
+  const pedeConj = /\bconj(?:unto)?\.?\s*0*[1-9]\d?\b/.test(p);
+  const pedeSel =
+    /\b(que selecionou|que voce escolheu|sua analise|definicao dos|os 8 videos|8 videos que)\b/.test(p);
+  return pedeLegenda && (pedeConj || pedeSel);
+}
+
+export function inferirMeioDeProduto(produto: string): MeioDrive | null {
+  const p = deaccPedido(produto);
+  if (!p) return null;
+  if (/imovel|residencial|felicita|la_felicita|\blaf\b|morar|condominio/.test(p)) return "la_felicita";
+  if (/juridico|conta_de_luz|cobranca|emprestimo_abusivo/.test(p)) return "juridico";
+  return null;
+}
+
 /** Pedido que obriga abrir o Drive nesta rodada — não anúncios já publicados na Meta. */
 export function pedidoExigeInventarioDrive(pedido: string): boolean {
+  if (pedidoUsaSlateExistente(pedido)) return false;
   const p = deaccPedido(pedido);
   if (/\b(google\s*drive|\bno drive\b|\bdo drive\b|\bno google drive\b)\b/.test(p)) return true;
   if (/\bdrive\b/.test(p) && /\b(pasta|pastas|criativ|video|reels|acervo)\b/.test(p)) return true;

@@ -3,10 +3,12 @@ import {
   aplicarRecorteAcervo,
   caminhoEhReelsOuVideos,
   deaccPedido,
+  inferirMeioDeProduto,
   inferirMeioDrive,
   pastaFormatoIgnorada,
   pedidoExigeInventarioDrive,
   pedidoSoReelsVideos,
+  pedidoUsaSlateExistente,
   recortarItensDrive,
   recorteDriveDoPedido,
 } from "./pedido_drive_criativos.ts";
@@ -58,10 +60,20 @@ assert(chat.includes("pedidoExigeInventarioDrive"), "chat importa detector Drive
 assert(job.includes("pedidoExigeInventarioDrive"), "job importa detector Drive");
 assert(job.includes("FOCO_CRIATIVOS_DRIVE"), "job tem foco Drive forcado");
 assert(job.includes("inventario Drive (nao overview de campanha)"), "job forca plano Drive");
-assert(job.includes("job-v4.4"), "job versao 4.4");
+assert(job.includes("job-v4.6"), "job versao 4.6");
+assert(job.includes("v4.4"), "job ainda tem conserto Drive v4.4");
 assert(chat.includes("MSG_NUDGE_DRIVE"), "chat tem nudge se nao coletar Drive");
 assert(chat.includes("R1-DRIVE"), "chat R1-DRIVE");
-assert(chat.includes("chat-v28.67"), "chat versao 28.67");
+assert(chat.includes("chat-v28.72"), "chat versao 28.72");
+assert(chat.includes("get_slate_da_conversa"), "chat expoe slate duravel");
+assert(pedidoUsaSlateExistente(
+  "vamos iniciar com o conjunto 1, de acordo com sua analise e definicao dos 8 videos que selecionou, gere legendas para cada um deles",
+), "legendas do slate nao e inventario Drive");
+assert(!pedidoExigeInventarioDrive(
+  "gere legendas para os 8 videos que selecionou do conjunto 1",
+), "nao forca Drive em pedido de legendas do slate");
+assert(inferirMeioDeProduto("imovel") === "la_felicita", "produto imovel e La Felicita");
+assert(inferirMeioDeProduto("juridico_whatsapp") === "juridico", "produto juridico");
 assert(!job.includes('nome: "criativos", foco: FOCO_CRIATIVOS_OVERVIEW') || job.includes("pedidoExigeInventarioDrive(raw)"), "overview magro nao captura Drive");
 
 console.log("ok pedido_drive_criativos");

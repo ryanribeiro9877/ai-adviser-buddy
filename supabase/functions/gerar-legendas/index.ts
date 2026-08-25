@@ -1,4 +1,7 @@
-// supabase/functions/gerar-legendas/index.ts (v3)
+// supabase/functions/gerar-legendas/index.ts (v4)
+// v4 (25/08/2026): (1) NAO envia reasoning.enabled=false — Gemini 3.7 recusa com HTTP 400
+//   "Reasoning is mandatory and cannot be disabled" e o chat dizia "ferramenta indisponivel";
+//   (2) p_meio / produto imovel seleciona brand La Felicità, nunca Juridico.
 // v3 (21/08/2026): isolamento multi-empresa. company_id OBRIGATORIO (sem fallback LEV).
 //   produto obrigatorio OU linhas_produto da brand — NUNCA inventa CLT para COHAPM.
 //   Bloco CET/FIN-04 so para empresa de credito. Framework Hook→Beneficio→CTA para todos.
@@ -10,12 +13,29 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { bodyOpenRouter, resolverChamadaLlm } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
+import { inferirMeioDeProduto, inferirMeioDrive, type MeioDrive } from "../_shared/pedido_drive_criativos.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OR_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
-const VERSAO = "gerar-legendas-v3";
+const VERSAO = "gerar-legendas-v4";
 const N = 3;
+
+const FALLBACK_LA_FELICITA = {
+  marca_nome: "La Felicità (residencial COHAPM)",
+  tom: "acolhedor, sensorial e cotidiano; fala de morar bem, rotina e pertencimento",
+  persona: "quem ja vive no residencial e convida a conhecer o La Felicità",
+  dos: [
+    "Abrir pela sensacao da cena (chegada, familia, lazer, rotina, noite)",
+    "Beneficio concreto do residencial sem inventar metragem, preco ou condicao",
+    "CTA: conhecer o La Felicità / ver o empreendimento no site",
+  ],
+  donts: [
+    "Voz do nucleo Juridico (conta de luz, cobranca, emprestimo abusivo)",
+    "CET, consignado CLT, margem, correspondente bancario, Legal e Viver",
+    "Promessa juridica ou urgencia falsa",
+  ],
+};
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -99,9 +119,15 @@ Deno.serve(async (req) => {
       erro: "objetivo_obrigatorio",
       detalhe: ehCredito
         ? "Informe objetivo (ou eixo): o que a legenda deve comunicar (ex.: 'abrir simulacao CLT')."
-        : "Informe objetivo (ou eixo): o que a legenda deve comunicar (ex.: 'orientar sobre cobranca indevida no WhatsApp juridico').",
+        : "Informe objetivo (ou eixo): o que a legenda deve comunicar (ex.: 'conhecer o La Felicità' ou 'orientar no WhatsApp juridico').",
     }, 400);
   }
+
+  const meioArg = String(body?.meio ?? "").trim().toLowerCase();
+  const meio: MeioDrive | null =
+    (meioArg === "la_felicita" || meioArg === "juridico" ? meioArg : null)
+    || inferirMeioDeProduto(produto)
+    || inferirMeioDrive(`${produto} ${objetivo}`);
 
   const driveFileId = String(body?.drive_file_id ?? "").trim() || null;
   const referencias: string[] = Array.isArray(body?.referencias)
@@ -133,14 +159,16 @@ Deno.serve(async (req) => {
       .join("\n");
   }
 
-  // ESP-36: identidade de marca da empresa (voz/tom, dos/donts, disclaimers, produtos).
+  // ESP-36: identidade de marca da empresa (voz/tom). Meio La Felicita NAO herda Juridico.
   let brandBloco = "";
-  let marcaNome = ehCredito ? "Legal e Viver (credito consignado)" : "COHAPM (cooperativa / juridico)";
+  let marcaNome = ehCredito ? "Legal e Viver (credito consignado)" : "COHAPM";
   let linhasProduto: string[] = [];
   try {
-    const { data: bi } = await supa.rpc("ler_brand_identity", { p_company_id: companyId });
+    const rpcArgs: Record<string, unknown> = { p_company_id: companyId };
+    if (meio) rpcArgs.p_meio = meio;
+    const { data: bi } = await supa.rpc("ler_brand_identity", rpcArgs);
     const brand = (bi as any)?.brand;
-    if (brand) {
+    if (brand && (!meio || String(brand?.meio ?? "") === meio || !brand?.meio)) {
       marcaNome = String(brand?.marca_nome ?? marcaNome);
       const voz = brand?.voz_tom ?? {};
       const dos: string[] = Array.isArray(brand?.dos) ? brand.dos : [];
@@ -148,7 +176,7 @@ Deno.serve(async (req) => {
       const discl: string[] = Array.isArray(brand?.disclaimers_obrigatorios) ? brand.disclaimers_obrigatorios : [];
       linhasProduto = Array.isArray(brand?.linhas_produto) ? brand.linhas_produto.map(String) : [];
       brandBloco = [
-        `\n=== IDENTIDADE DE MARCA (ESP-36 — ${marcaNome}) ===`,
+        `\n=== IDENTIDADE DE MARCA (ESP-36 — ${marcaNome}${meio ? `, meio=${meio}` : ""}) ===`,
         voz?.tom ? `Tom: ${voz.tom}` : "",
         voz?.persona ? `Persona: ${voz.persona}` : "",
         voz?.pessoa ? `Voz: ${voz.pessoa}` : "",
@@ -162,25 +190,44 @@ Deno.serve(async (req) => {
     /* brand nao bloqueia */
   }
 
+  if (meio === "la_felicita" && (!brandBloco || /juridico/i.test(marcaNome))) {
+    marcaNome = FALLBACK_LA_FELICITA.marca_nome;
+    linhasProduto = ["imovel", "residencial", "la_felicita"];
+    brandBloco = [
+      `\n=== IDENTIDADE DE MARCA (La Felicità — editorial; nao usar Juridico) ===`,
+      `Tom: ${FALLBACK_LA_FELICITA.tom}`,
+      `Persona: ${FALLBACK_LA_FELICITA.persona}`,
+      `FACA:\n${FALLBACK_LA_FELICITA.dos.map((d) => `- ${d}`).join("\n")}`,
+      `NAO FACA:\n${FALLBACK_LA_FELICITA.donts.map((d) => `- ${d}`).join("\n")}`,
+      `Linhas de produto: ${linhasProduto.join(", ")}`,
+    ].join("\n");
+  }
+
   if (!produto) {
-    produto = linhasProduto[0] ? String(linhasProduto[0]) : "";
+    if (meio === "la_felicita") produto = "imovel";
+    else produto = linhasProduto[0] ? String(linhasProduto[0]) : "";
   }
   if (!produto) {
     return json({
       erro: "produto_obrigatorio",
       detalhe: ehCredito
         ? "Informe produto (ex.: CLT / consignado_clt) ou semeie brand_identity.linhas_produto."
-        : "Informe produto (ex.: juridico_whatsapp) ou semeie brand_identity.linhas_produto. Nao ha fallback CLT.",
+        : "Informe produto (ex.: imovel / la_felicita ou juridico_whatsapp) ou semeie brand_identity.linhas_produto. Nao ha fallback CLT.",
       linhas_produto_brand: linhasProduto,
+      meio,
     }, 400);
   }
 
   const blocoCet = ehCredito
     ? `4) CET — o CET (ou referencia ao CET da oferta) MORA NA LEGENDA DA PUBLICACAO (FIN-04 v4). Preferencia da casa quando NAO ha taxa oficial: "consulte o CET na sua simulacao". Isso E suficiente. NUNCA invente percentual.`
+    : meio === "la_felicita"
+    ? `4) FECHO — CTA conhecer o La Felicità / ver o empreendimento. NUNCA invente CET, consignado, conta de luz, cobranca, emprestimo ou copy do nucleo Juridico.`
     : `4) FECHO — CTA + canal oficial (WhatsApp/juridico). NUNCA invente CET, consignado CLT, margem disponivel, correspondente bancario ou "Legal e Viver".`;
 
   const regrasDuras = ehCredito
     ? `- Proibido: garantia de aprovacao, "sem consulta", "100% aprovado", dinheiro "gratis", omitir risco de credito.`
+    : meio === "la_felicita"
+    ? `- Proibido: voz Juridico (conta de luz, cobranca, emprestimo); inventar preco/metragem/financiamento; CET/CLT.`
     : `- Proibido: inventar credito/CLT/CET; prometer resultado juridico garantido; direcionar a numero de terceiro nao identificado.`;
 
   const sys = `Voce e redator de legendas de Meta Ads para ${marcaNome}.
@@ -207,26 +254,41 @@ ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.sl
   const userMsg = `Objetivo da legenda: ${objetivo}\nGere exatamente ${N} variantes.`;
 
   const rota = resolverChamadaLlm({ tipo: "legendas" });
-  const rl = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  // v4: NAO passar reasoning.enabled=false — Gemini 3.7 / alguns endpoints devolvem HTTP 400
+  // "Reasoning is mandatory for this endpoint and cannot be disabled".
+  const extraBody: Record<string, unknown> = {
+    max_tokens: 4000,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: userMsg },
+    ],
+  };
+  let rl = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${OR_KEY}` },
-    body: JSON.stringify(bodyOpenRouter(rota, {
-      max_tokens: 2200,
-      reasoning: { enabled: false },
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: userMsg },
-      ],
-    })),
+    body: JSON.stringify(bodyOpenRouter(rota, extraBody)),
   });
   if (!rl.ok) {
     const t = await rl.text().catch(() => "");
-    return json({
-      erro: "redator_indisponivel",
-      detalhe: `OpenRouter HTTP ${rl.status}`,
-      bruto: t.slice(0, 300),
-      fail_closed: true,
-    }, 502);
+    if (rl.status === 400 && /reasoning/i.test(t) && rota.fallbacks.length) {
+      const retryRota = { ...rota, model: rota.fallbacks[0], fallbacks: rota.fallbacks.slice(1) };
+      rl = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${OR_KEY}` },
+        body: JSON.stringify(bodyOpenRouter(retryRota, extraBody)),
+      });
+    }
+    if (!rl.ok) {
+      const t2 = t || (await rl.text().catch(() => ""));
+      return json({
+        erro: "redator_openrouter_falhou",
+        detalhe: `OpenRouter HTTP ${rl.status}`,
+        bruto: t2.slice(0, 400),
+        fail_closed: true,
+        instrucao_agente:
+          "NAO diga que a ferramenta esta indisponivel e NAO ofereca esperar vs o gestor escrever. ESCREVA VOCE as 3 variantes Hook→Beneficio→CTA no tom do produto desta conversa (La Felicita ≠ Juridico) e registre com registrar_legenda_da_conversa.",
+      }, 502);
+    }
   }
   const rj = await rl.json().catch(() => null);
   const bruto = String(rj?.choices?.[0]?.message?.content ?? "").trim();

@@ -213,3 +213,109 @@ function uniqNomes(xs: string[]): string[] {
   }
   return out;
 }
+
+/** Peca ja escolhida para um conjunto nesta conversa (contrato, nao inventario Drive). */
+export type PecaSlate = {
+  conjunto: number;
+  drive_file_id: string;
+  nome: string;
+  pasta?: string;
+  angulo?: string;
+  cta?: string;
+  peca_chave: string;
+};
+
+const RE_DRIVE_ID = /1[A-Za-z0-9_-]{24,40}/;
+const RE_MP4 = /([^|`\n\r]+?\.(?:mp4|mov|webm))/i;
+
+export function temSlateNoTexto(s: string): boolean {
+  const t = String(s ?? "");
+  return /conj(?:unto)?\.?\s*0*[1-9]/i.test(t) && RE_DRIVE_ID.test(t) && /\.mp4/i.test(t);
+}
+
+export function pecaChaveDoSlate(p: { conjunto: number; nome: string; drive_file_id: string }): string {
+  const slug = String(p.nome ?? "")
+    .replace(/\.[a-z0-9]+$/i, "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+  return `conjunto_${p.conjunto}_${slug || p.drive_file_id.slice(0, 12)}`;
+}
+
+/**
+ * Extrai o slate CONTRATUAL (CONJ.N + arquivos numerados) da fala.
+ * Ignora a tabela de inventario (mes/pasta sem numero de peca) — 34 arquivos
+ * nao sao o slate. Linhas "| 1 | arquivo.mp4 | pasta | drive_id | motivacao |"
+ * sob um heading CONJ.N sao.
+ */
+export function extrairSlateDaFala(texto: string): PecaSlate[] {
+  const lines = String(texto ?? "").split(/\r?\n/);
+  let conjunto: number | null = null;
+  let anguloConj: string | undefined;
+  let ctaConj: string | undefined;
+  const byId = new Map<string, PecaSlate>();
+
+  const stampMeta = () => {
+    if (conjunto == null) return;
+    for (const p of byId.values()) {
+      if (p.conjunto !== conjunto) continue;
+      if (anguloConj && !p.angulo) p.angulo = anguloConj;
+      if (ctaConj && !p.cta) p.cta = ctaConj;
+    }
+  };
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    const head = line.match(/(?:^#+\s*)?(?:\*\*)?conj(?:unto)?\.?\s*0*([1-9]\d?)\b/i);
+    if (head && !/^\|/.test(line)) {
+      stampMeta();
+      conjunto = Number(head[1]);
+      anguloConj = undefined;
+      ctaConj = undefined;
+      continue;
+    }
+    const ang = line.match(/\*\*Ângulo[^*]*\*\*:?\s*(.+)/i) || line.match(/\*\*Angulo[^*]*\*\*:?\s*(.+)/i);
+    if (ang) {
+      anguloConj = ang[1].replace(/\*+/g, "").trim();
+      stampMeta();
+      continue;
+    }
+    const ctaM = line.match(/\*\*CTA:\*\*\s*(.+)/i);
+    if (ctaM) {
+      ctaConj = ctaM[1].replace(/\*+/g, "").trim();
+      stampMeta();
+      continue;
+    }
+    if (conjunto == null) continue;
+    if (!/^\|\s*\d{1,2}\s*\|/.test(line)) continue;
+    const idM = line.match(RE_DRIVE_ID);
+    const nomeM = line.match(RE_MP4);
+    if (!idM || !nomeM) continue;
+    const drive = idM[0];
+    const nome = nomeM[1].replace(/^[|\s`]+|[|\s`]+$/g, "").trim();
+    const cells = line.split("|").map((c) => c.replace(/`/g, "").trim()).filter(Boolean);
+    const pasta = cells[2] && !RE_DRIVE_ID.test(cells[2]) && !/\.mp4/i.test(cells[2]) ? cells[2] : undefined;
+    const motivacao = cells.length >= 5 && !RE_DRIVE_ID.test(cells[cells.length - 1])
+      ? cells[cells.length - 1]
+      : undefined;
+    const peca: PecaSlate = {
+      conjunto,
+      drive_file_id: drive,
+      nome,
+      pasta,
+      angulo: motivacao || anguloConj,
+      cta: ctaConj,
+      peca_chave: "",
+    };
+    peca.peca_chave = pecaChaveDoSlate(peca);
+    byId.set(drive, peca);
+  }
+  stampMeta();
+  return [...byId.values()].sort((a, b) => a.conjunto - b.conjunto || a.nome.localeCompare(b.nome, "pt"));
+}
+
+export function pecasDoConjunto(pecas: PecaSlate[], n: number): PecaSlate[] {
+  return pecas.filter((p) => p.conjunto === n);
+}

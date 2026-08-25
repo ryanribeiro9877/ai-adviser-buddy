@@ -18,6 +18,14 @@ describe("pedidoLoteCriativo", () => {
     expect(pedidoLoteCriativo("gere as legendas para este criativo do drive")).toBe(false);
   });
 
+  it("reconhece 8 videos do conjunto 1 + legendas", () => {
+    expect(
+      pedidoLoteCriativo(
+        "iniciar com o conjunto 1 e gere legendas para cada um dos 8 videos que selecionou",
+      ),
+    ).toBe(true);
+  });
+
   it("reconhece o pedido original de conjuntos 2 e 3", () => {
     expect(
       pedidoLoteCriativo(
@@ -48,6 +56,14 @@ describe("replyLoteCriativoIncompleto", () => {
     expect(
       replyLoteCriativoIncompleto("Selecionei 6 vídeos e gerei as 6 legendas. Segue a tabela."),
     ).toBe(false);
+  });
+
+  it("detecta falsa ferramenta indisponivel", () => {
+    expect(
+      replyLoteCriativoIncompleto(
+        "A ferramenta de geração de legendas está indisponível. Posso aguardar ou você escreve na mão.",
+      ),
+    ).toBe(true);
   });
 });
 

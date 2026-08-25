@@ -238,6 +238,7 @@ import {
   aplicarRecorteAnalisesDrive,
   compactarInventarioDriveParaAgente,
   conjuntoNomeDoMeioLaFelicita,
+  inferirMeioDeProduto,
   inferirMeioDrive,
   injetarArgsDrive,
   pastaFormatoDoPedido,
@@ -1143,7 +1144,15 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
         p_ad_external_id: args?.ad_external_id == null || String(args.ad_external_id).trim() === "" ? null : String(args.ad_external_id),
         p_dias: Number(args?.dias ?? 7),
       });
-      case "ler_brand_identity": return await t_rpc("ler_brand_identity", { p_company_id: ctx.companyId });
+      case "ler_brand_identity": {
+        const meioArg = String(args?.meio ?? "").trim().toLowerCase();
+        const meio = (meioArg === "la_felicita" || meioArg === "juridico")
+          ? meioArg
+          : (inferirMeioDrive(String(ctx.pedido ?? "")) || inferirMeioDeProduto(String(ctx.pedido ?? "")));
+        const rpc: Record<string, unknown> = { p_company_id: ctx.companyId };
+        if (meio) rpc.p_meio = meio;
+        return await t_rpc("ler_brand_identity", rpc);
+      }
       case "score_de_prontidao": return await t_rpc("score_de_prontidao", { p_company_id: ctx.companyId });
       case "saude_dos_tokens": return await t_rpc("saude_dos_tokens", { p_company_id: ctx.companyId });
       case "ler_entregas_digest": return await t_rpc("ler_entregas_digest", { p_company_id: ctx.companyId, p_dias: Number(args?.dias ?? 7) });
@@ -1277,7 +1286,7 @@ const DEF: Record<string, any> = {
   diagnosticar_custo: { type: "function", function: { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id do job e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e pos-clique fica fora do escopo.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   avaliar_fadiga: { type: "function", function: { name: "avaliar_fadiga", description: "Avalia se a peca cansou, teve queda sem saturacao, frequencia alta antes da queda ou nenhum sinal. Exige company_id do job e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e nao deriva a frequencia deduplicada de 30 dias.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   casar_criativo_performance: { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca Drive com anuncios criados pelo sistema e metricas da janela + amostra_pequena. Filtros opcionais: drive_file_id, ad_external_id, dias.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer" } } } } },
-  ler_brand_identity: { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: identidade de marca vigente do company_id do job: voz/tom, dos/donts, disclaimers, linhas de produto e referencias resolvidas (page_id/instagram/CTA/driver + destinos). Fonte curada de voz da marca; leitura pura.", parameters: { type: "object", properties: {} } } },
+  ler_brand_identity: { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: identidade de marca vigente. COHAPM: passe meio=la_felicita ou juridico. Sem meio a RPC prefere juridico. La Felicita NAO herda voz Juridico.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] } } } } },
   computar_perfil_vencedor: { type: "function", function: { name: "computar_perfil_vencedor", description: "ESP-34: computa e VERSIONA o perfil do vencedor do company_id do job (regua evaluate_winners/ESP-01: >=30 resultados e >=30 gasto, custo <= teto_vigente*0,80; procedencia da peca ESP-33). Grava nova versao (dedup no mesmo dia salvo forcar). Nao substitui get_recommendations nem aprovacao humana; vencedor mora em ESCALA (ESP-39).", parameters: { type: "object", properties: { dias: { type: "integer" }, forcar: { type: "boolean" } } } } },
   ler_perfil_vencedor: { type: "function", function: { name: "ler_perfil_vencedor", description: "ESP-34: le a ultima versao (ou versao especifica) do perfil do vencedor ja computado para o company_id do job: vencedores, padroes, criterio, procedencia e lacunas. Leitura pura; se nunca computado, orienta chamar computar_perfil_vencedor.", parameters: { type: "object", properties: { versao: { type: "integer" } } } } },
   score_de_prontidao: { type: "function", function: { name: "score_de_prontidao", description: "ESP-38: score read-only 0-100 de prontidao do company_id do job para propor/executar anuncios: config (25), integracao viva (25), postura (20), brand (15), destino (10), driver (5). Devolve nivel (bloqueado|parcial|operacional|pronto), checks com evidencia/lacuna, bloqueios e recomendacoes. Nao altera nada nem substitui gates por pedido.", parameters: { type: "object", properties: {} } } },
