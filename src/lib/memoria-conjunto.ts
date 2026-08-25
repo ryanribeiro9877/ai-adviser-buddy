@@ -2,25 +2,41 @@ function deacc(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
-/** "conjunto 2", "CONJ.02", "cj_02" → 2. Nao pega "os 3 primeiros". */
-export function numeroConjuntoDaFala(s: string): number | null {
+/**
+ * "conjunto 2", "CONJ.02", "CONJ.1_LAF_…", "cj_02" → 2 / 1.
+ * Delimitador depois do numero: fim, nao-digito (inclui `_` e `/`). `\b` falha em CONJ.1_LAF.
+ * Nao pega "os 3 primeiros".
+ */
+export function numeroConjuntoDoNome(s: string): number | null {
   const t = deacc(String(s ?? "").toLowerCase());
   const m =
-    t.match(/\bconj(?:unto)?\.?\s*0*([1-9]\d?)\b/) ||
-    t.match(/\bcj[_\s.]*0*([1-9]\d?)\b/);
+    t.match(/(?:^|[^a-z0-9])conj(?:unto)?\.?\s*0*([1-9]\d?)(?=[^0-9]|$)/) ||
+    t.match(/(?:^|[^a-z0-9])cj[_\s.]*0*([1-9]\d?)(?=[^0-9]|$)/);
   if (!m) return null;
   const n = Number(m[1]);
   return n >= 1 && n <= 99 ? n : null;
 }
 
+export function numeroConjuntoDaFala(s: string): number | null {
+  return numeroConjuntoDoNome(s);
+}
+
+/** Unico CONJ.N compartilhado pelos sinais; ambiguo (1 e 4) → null. */
+export function numeroConjuntoDeSinais(
+  ...sinais: Array<string | null | undefined>
+): number | null {
+  const nums = new Set<number>();
+  for (const s of sinais) {
+    if (s == null || !String(s).trim()) continue;
+    const n = numeroConjuntoDoNome(String(s));
+    if (n != null) nums.add(n);
+  }
+  if (nums.size === 1) return [...nums][0];
+  return null;
+}
+
 export function conjuntoNomeCasaComNumero(name: string, n: number): boolean {
-  const t = deacc(String(name ?? "").toLowerCase());
-  const pad = String(n).padStart(2, "0");
-  return (
-    new RegExp(`\\bconj(?:unto)?\\.?\\s*0*${n}\\b`).test(t) ||
-    t.includes(`conj.${pad}`) ||
-    t.includes(`conj ${pad}`)
-  );
+  return numeroConjuntoDoNome(name) === n;
 }
 
 const RE_WAME = "https?:\\/\\/(?:wa\\.me|api\\.whatsapp\\.com\\/send)[^\\s)\\]\"'<>|]+";
@@ -408,4 +424,57 @@ export function escolherConjuntosDaMesmaLinha<T extends { name?: string | null }
   return hits.filter((h) =>
     classificarLinhaProdutoCohapm(String(h.name ?? ""), campanhaDe(h)) === peca
   );
+}
+
+/**
+ * Auto-pick: CONJ.N da mesma linha. Pool vazio = nao ha candidato (nunca o mais novo da linha).
+ */
+export function escolherConjuntosPorNumeroELinha<T extends { name?: string | null }>(
+  hits: T[],
+  n: number,
+  pecaSinais: Array<string | null | undefined>,
+  campanhaDe: (row: T) => string | null | undefined,
+): T[] {
+  const byNum = hits.filter((h) => conjuntoNomeCasaComNumero(String(h.name ?? ""), n));
+  return escolherConjuntosDaMesmaLinha(byNum, pecaSinais, campanhaDe);
+}
+
+export const ERRO_CONJUNTO_ERRADO = "conjunto_numero_errado";
+
+export type RecusaConjuntoErrado =
+  | { ok: true; pedido: number | null; dest: number | null }
+  | {
+    ok: false;
+    erro: typeof ERRO_CONJUNTO_ERRADO;
+    detalhe: string;
+    pedido: number;
+    dest: number | null;
+  };
+
+/**
+ * Hard block: peca/slate/fala pediu CONJ.N e o destino e outro (CONJ.1 ↛ CONJ.4).
+ * Sinal incompleto (sem numero no pedido) nao inventa recusa.
+ */
+export function recusarConjuntoErrado(opts: {
+  pedidoNumero?: number | null;
+  destNome?: string | null;
+  pecaSinais?: Array<string | null | undefined>;
+}): RecusaConjuntoErrado {
+  const nPedido = opts.pedidoNumero ?? numeroConjuntoDeSinais(...(opts.pecaSinais ?? []));
+  const nDest = numeroConjuntoDoNome(String(opts.destNome ?? ""));
+  if (nPedido == null) return { ok: true, pedido: null, dest: nDest };
+  if (nDest === nPedido) return { ok: true, pedido: nPedido, dest: nDest };
+  const destTxt = String(opts.destNome ?? "").trim() || "(sem nome)";
+  const pad = String(nPedido).padStart(2, "0");
+  const destRotulo = nDest != null ? `CONJ.${nDest}` : "um conjunto sem CONJ.N no nome";
+  return {
+    ok: false,
+    erro: ERRO_CONJUNTO_ERRADO,
+    pedido: nPedido,
+    dest: nDest,
+    detalhe:
+      `ERRO GRAVE (nao e aviso): o pedido e CONJ.${nPedido} mas o destino resolvido e ${destRotulo} (${destTxt}). ` +
+      `Esperado o conjunto CONJ.${nPedido} (CONJ.${pad}) da mesma linha de produto — nunca o mais novo da linha. ` +
+      `O card NAO pode ser emitido nem aplicado. Nao peca o ID numerico da Meta ao gestor: CONJ.${nPedido} no nome basta (get_estrutura_conjuntos).`,
+  };
 }

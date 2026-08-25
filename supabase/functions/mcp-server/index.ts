@@ -5,7 +5,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { situacaoDoCard } from "../_shared/aprovacoes.ts";
-import { recusarCruzamentoLinhaProduto } from "../_shared/memoria_conjunto.ts";
+import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto } from "../_shared/memoria_conjunto.ts";
 import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
 
 const db = createClient(
@@ -194,6 +194,11 @@ async function callTool(name: string, args: any, mcpKeyEncaminhada: string) {
             pecaSinais: [args.legenda, args.nome_criativo, args.drive_file_id, args.meio],
           });
           if (!cruz.ok) return toolText({ erro: cruz.erro, detalhe: cruz.detalhe, veredito: "reprova" }, true);
+          const num = recusarConjuntoErrado({
+            destNome: args.conjunto ?? args.conjunto_destino,
+            pecaSinais: [args.legenda, args.nome_criativo, args.drive_file_id, args.meio],
+          });
+          if (!num.ok) return toolText({ erro: num.erro, detalhe: num.detalhe, veredito: "reprova" }, true);
         }
         return await callRpc("checar_par_texto_e_peca", { p_company_id: args.company_id, p_legenda: args.legenda, p_drive_file_id: args.drive_file_id });
       }

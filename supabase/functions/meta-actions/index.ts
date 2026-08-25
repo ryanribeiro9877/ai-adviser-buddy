@@ -1,4 +1,5 @@
-// supabase/functions/meta-actions/index.ts (v5.50)
+// supabase/functions/meta-actions/index.ts (v5.51)
+// v5.51 (25/08/2026) - HARD BLOCK CONJ.N: peca/slate CONJ.1 nao aplica em CONJ.4.
 // v5.50 (25/08/2026) - HARD BLOCK cruzamento Juridico × La Felicità no apply (nao emite
 //   peca LAF em JURIDICO_CONJ e o inverso). Recusa antes da Graph.
 // v5.49 (24/08/2026) - recusa orcamento em centavos-como-reais; modo corrigir_orcamento_adsets
@@ -356,6 +357,7 @@ import {
   ehNomeCompostoEstruturado,
   ehSentinelaSemMolde,
   nomeCompostoForaDeEscopoTrafego,
+  recusarConjuntoErrado,
   recusarCruzamentoLinhaProduto,
 } from "../_shared/memoria_conjunto.ts";
 import {
@@ -2139,6 +2141,13 @@ export async function montarCriacao(
         pecaSinais: [nome, p?.drive_file_id, p?.legenda, p?.meio, p?.produto, p?.pasta],
       });
       if (!cruzAd.ok) return { erro: cruzAd.erro, detalhe: cruzAd.detalhe };
+      const nPed = Number(p?.conjunto_pedido_numero);
+      const cruzNum = recusarConjuntoErrado({
+        pedidoNumero: Number.isFinite(nPed) && nPed >= 1 ? nPed : null,
+        destNome: espelhoAd.conjunto ?? p?.conjunto_destino_nome,
+        pecaSinais: [nome, p?.drive_file_id, p?.legenda, p?.meio, p?.produto, p?.pasta],
+      });
+      if (!cruzNum.ok) return { erro: cruzNum.erro, detalhe: cruzNum.detalhe };
     }
     if (!creativeMolde && !pecaNovaSemMolde)
       return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };

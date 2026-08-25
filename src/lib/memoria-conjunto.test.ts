@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
+  ERRO_CONJUNTO_ERRADO,
   ERRO_CRUZAMENTO_LINHA_PRODUTO,
   classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
   escolherConjuntosDaMesmaLinha,
+  escolherConjuntosPorNumeroELinha,
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
   ehNomeCompostoEstruturado,
@@ -15,6 +17,7 @@ import {
   numeroConjuntoDaFala,
   pecasDoConjunto,
   pareceNomeDePecaNaoMolde,
+  recusarConjuntoErrado,
   recusarCruzamentoLinhaProduto,
 } from "./memoria-conjunto";
 
@@ -53,6 +56,14 @@ describe("conjuntoNomeCasaComNumero", () => {
   it("casa JURIDICO_CONJ.02", () => {
     expect(conjuntoNomeCasaComNumero("JURIDICO_CONJ.02 - MATURACAO", 2)).toBe(true);
     expect(conjuntoNomeCasaComNumero("JURIDICO_CONJ.01 - MATURACAO", 2)).toBe(false);
+  });
+
+  it("casa CONJ.1_LAF_ com underscore e slash (incidente 25/08)", () => {
+    expect(numeroConjuntoDaFala("CONJ.1_LAF_8CRIATIVOS_JUN/JUL26")).toBe(1);
+    expect(conjuntoNomeCasaComNumero("CONJ.1_LAF_8CRIATIVOS_JUN/JUL26", 1)).toBe(true);
+    expect(conjuntoNomeCasaComNumero("CONJ.1_LAF_8CRIATIVOS_JUNJUL26", 1)).toBe(true);
+    expect(conjuntoNomeCasaComNumero("CONJ.01_LAF_x", 1)).toBe(true);
+    expect(conjuntoNomeCasaComNumero("CONJ.4_LAF_10CRIATIVOS_AGO26", 1)).toBe(false);
   });
 });
 
@@ -164,6 +175,30 @@ describe("cruzamento linha produto COHAPM", () => {
     ];
     const alinhados = escolherConjuntosDaMesmaLinha(hits, [pecaLaf], (h) => h.campaign);
     expect(alinhados.map((h) => h.name)).toEqual([setLaf]);
+  });
+
+  it("recusa CONJ.1 peca no dest CONJ.4 e nao auto-pick o mais novo", () => {
+    const set1 = "CONJ.1_LAF_8CRIATIVOS_JUN/JUL26";
+    const set4 = "CONJ.4_LAF_10CRIATIVOS_AGO26";
+    const r = recusarConjuntoErrado({
+      pedidoNumero: 1,
+      destNome: set4,
+      pecaSinais: [pecaLaf],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.erro).toBe(ERRO_CONJUNTO_ERRADO);
+    const hits = [
+      { name: set4, campaign: campLaf, created_at: "2026-08-20T10:00:00Z" },
+      { name: set1, campaign: campLaf, created_at: "2026-06-01T10:00:00Z" },
+    ];
+    const pick = escolherConjuntosPorNumeroELinha(hits, 1, [pecaLaf], (h) => h.campaign);
+    expect(pick.map((h) => h.name)).toEqual([set1]);
+    const inv = recusarConjuntoErrado({
+      pedidoNumero: 4,
+      destNome: set1,
+      pecaSinais: ["CONJ.4_LAF_10CRIATIVOS_AGO26_AD01"],
+    });
+    expect(inv.ok).toBe(false);
   });
 });
 

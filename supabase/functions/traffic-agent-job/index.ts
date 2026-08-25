@@ -1,4 +1,5 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.7)
+// supabase/functions/traffic-agent-job/index.ts (v4.8)
+// v4.8 (25/08/2026) - checar_par recusa CONJ.N errado (CONJ.1 ↛ CONJ.4).
 // v4.7 (25/08/2026) - checar_par / check_compliance recusam cruzamento Juridico × La Felicità.
 // v4.6 (25/08/2026) - VIDEO ATE 4 GB: envio em partes; teto operacional = Meta.
 // v4.5 (25/08/2026) - TETO DE UPLOAD: video operacional 45 MB (nao 4 GB da Ads Guide).
@@ -232,7 +233,7 @@ import {
 } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
-import { recusarCruzamentoLinhaProduto } from "../_shared/memoria_conjunto.ts";
+import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto } from "../_shared/memoria_conjunto.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import {
   FOCO_CRIATIVOS_DRIVE,
@@ -1024,8 +1025,18 @@ function recusaCruzamentoJob(companyId: string, args: Record<string, unknown> | 
       a.legenda, a.nome_criativo, a.drive_file_id, a.meio, a.produto, a.nome, pedido,
     ].map((x) => (x != null ? String(x) : "")),
   });
-  if (r.ok) return null;
-  return { erro: r.erro, detalhe: r.detalhe, veredito: "reprovado", aprovado: false };
+  if (!r.ok) return { erro: r.erro, detalhe: r.detalhe, veredito: "reprovado", aprovado: false };
+  const destNome = [
+    a.conjunto, a.conjunto_destino, a.conjunto_destino_nome,
+  ].map((x) => (x != null ? String(x) : "")).find((s) => s.trim()) || "";
+  const num = recusarConjuntoErrado({
+    destNome,
+    pecaSinais: [
+      a.legenda, a.nome_criativo, a.drive_file_id, a.meio, a.produto, a.nome, pedido,
+    ].map((x) => (x != null ? String(x) : "")),
+  });
+  if (!num.ok) return { erro: num.erro, detalhe: num.detalhe, veredito: "reprovado", aprovado: false };
+  return null;
 }
 async function t_check_compliance(companyId: string, legenda: string, mcpKey: string) {
   if (!legenda) return { erro: "forneca a legenda" };

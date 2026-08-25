@@ -1,9 +1,15 @@
 // deno run --allow-read supabase/functions/_shared/_prova_linha_produto.ts
 // P0 25/08/2026: peca La Felicità NUNCA entra em campanha/conjunto Jurídico (e o inverso).
+// P0 25/08/2026 (2): CONJ.1 NUNCA cai no CONJ.4 da mesma linha.
 import {
+  ERRO_CONJUNTO_ERRADO,
   ERRO_CRUZAMENTO_LINHA_PRODUTO,
   classificarLinhaProdutoCohapm,
+  conjuntoNomeCasaComNumero,
   escolherConjuntosDaMesmaLinha,
+  escolherConjuntosPorNumeroELinha,
+  numeroConjuntoDaFala,
+  recusarConjuntoErrado,
   recusarCruzamentoLinhaProduto,
 } from "./memoria_conjunto.ts";
 
@@ -79,6 +85,56 @@ const soJur = escolherConjuntosDaMesmaLinha(
 );
 assert(soJur.length === 0, "nao escolhe Juridico quando a peca e LAF");
 
+const setLafConj1 = "CONJ.1_LAF_8CRIATIVOS_JUN/JUL26";
+const setLafConj1b = "CONJ.1_LAF_8CRIATIVOS_JUNJUL26";
+const setLafConj4 = "CONJ.4_LAF_10CRIATIVOS_AGO26";
+assert(numeroConjuntoDaFala(setLafConj1) === 1, "CONJ.1_LAF_ com underscore e slash");
+assert(numeroConjuntoDaFala(setLafConj1b) === 1, "CONJ.1 sem slash");
+assert(conjuntoNomeCasaComNumero(setLafConj1, 1), "casa CONJ.1 vs CONJ.01");
+assert(conjuntoNomeCasaComNumero("CONJ.01_LAF_x", 1), "CONJ.01 = CONJ.1");
+assert(!conjuntoNomeCasaComNumero(setLafConj4, 1), "CONJ.4 nao e CONJ.1");
+assert(conjuntoNomeCasaComNumero(setLafConj4, 4), "casa CONJ.4");
+
+const recusaConj4 = recusarConjuntoErrado({
+  pedidoNumero: 1,
+  destNome: setLafConj4,
+  pecaSinais: [pecaLafAd01, setLafConj1],
+});
+assert(!recusaConj4.ok && recusaConj4.erro === ERRO_CONJUNTO_ERRADO, "CONJ.1 peca recusa dest CONJ.4");
+assert(/ERRO GRAVE/.test(recusaConj4.ok ? "" : recusaConj4.detalhe), "conjunto errado diz ERRO GRAVE");
+assert((recusaConj4.ok ? "" : recusaConj4.detalhe).includes(setLafConj4), "cita CONJ.4 atual");
+
+const okConj1 = recusarConjuntoErrado({
+  pedidoNumero: 1,
+  destNome: setLafConj1,
+  pecaSinais: [pecaLafAd01],
+});
+assert(okConj1.ok, "CONJ.1 em CONJ.1 passa");
+
+const inversoConj = recusarConjuntoErrado({
+  pedidoNumero: 4,
+  destNome: setLafConj1,
+  pecaSinais: ["CONJ.4_LAF_10CRIATIVOS_AGO26_AD01"],
+});
+assert(!inversoConj.ok, "CONJ.4 peca recusa dest CONJ.1");
+
+const hitsLaf = [
+  { name: setLafConj4, campaign: campLaf, created_at: "2026-08-20T10:00:00Z" },
+  { name: setLafConj1, campaign: campLaf, created_at: "2026-06-01T10:00:00Z" },
+  { name: setJur, campaign: campJur, created_at: "2026-08-25T17:00:00Z" },
+];
+const pick1 = escolherConjuntosPorNumeroELinha(hitsLaf, 1, [pecaLafAd01], (h) => h.campaign);
+assert(pick1.length === 1 && pick1[0].name === setLafConj1, "auto-pick CONJ.1 nao devolve CONJ.4 mais novo");
+const pick4 = escolherConjuntosPorNumeroELinha(hitsLaf, 4, ["CONJ.4_LAF_10CRIATIVOS_AGO26_AD01"], (h) => h.campaign);
+assert(pick4.length === 1 && pick4[0].name === setLafConj4, "auto-pick CONJ.4 nao devolve CONJ.1");
+const pick1vazio = escolherConjuntosPorNumeroELinha(
+  [{ name: setLafConj4, campaign: campLaf, created_at: "2026-08-20T10:00:00Z" }],
+  1,
+  [pecaLafAd01],
+  (h) => h.campaign,
+);
+assert(pick1vazio.length === 0, "pool CONJ.1 vazio nao cai em CONJ.4");
+
 const chat = Deno.readTextFileSync(new URL("../traffic-chat/index.ts", import.meta.url));
 const meta = Deno.readTextFileSync(new URL("../meta-actions/index.ts", import.meta.url));
 const job = Deno.readTextFileSync(new URL("../traffic-agent-job/index.ts", import.meta.url));
@@ -91,5 +147,11 @@ assert(job.includes("recusarCruzamentoLinhaProduto"), "job checa cruzamento em c
 assert(mcp.includes("recusarCruzamentoLinhaProduto"), "mcp checar_par recusa cruzamento");
 assert(chat.includes("cruzamento_linha_produto") || chat.includes("ERRO_CRUZAMENTO_LINHA_PRODUTO"), "erro nomeado no chat");
 assert(/ERRO GRAVE/.test(chat), "prompt do chat trata como erro grave");
+assert(chat.includes("recusarConjuntoErrado") || chat.includes("ERRO_CONJUNTO_ERRADO"), "chat recusa CONJ.N errado");
+assert(chat.includes("escolherConjuntosPorNumeroELinha"), "auto-pick por numero+linha");
+assert(/PROIBIDO pedir ao gestor o ID numerico da Meta/.test(chat), "nao pede ID Graph");
+assert(meta.includes("recusarConjuntoErrado"), "apply recusa CONJ.N errado");
+assert(job.includes("recusarConjuntoErrado"), "job recusa CONJ.N errado");
+assert(mcp.includes("recusarConjuntoErrado"), "mcp recusa CONJ.N errado");
 
 console.log("ok: _prova_linha_produto");
