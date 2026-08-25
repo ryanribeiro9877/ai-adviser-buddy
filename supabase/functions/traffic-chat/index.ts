@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v28.72)
+// supabase/functions/traffic-chat/index.ts (v28.73)
+// v28.73 (25/08/2026) - HARD BLOCK cruzamento Juridico × La Felicità:
+//   peca/slate de uma linha NUNCA emite card na campanha/conjunto da outra.
+//   ERRO GRAVE (nao nudge). Auto-pick de CONJ.N deixa de pegar o Juridico mais novo.
 // v28.72 (25/08/2026) - SLATE DURAVEL + LEGENDAS LA FELICITA:
 //   (1) conversation_slate + get_slate_da_conversa / registrar_peca_da_conversa;
 //       parser extrai CONJ.N da fala (inventario Drive != slate); bloco [SLATE DA CONVERSA];
@@ -629,11 +632,14 @@ import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, digitosWhatsApp, ct
 import { pipeboardToken } from "../_shared/pipeboard.ts";
 import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto } from "../_shared/lote_criativo.ts";
 import {
+  classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
+  escolherConjuntosDaMesmaLinha,
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
   ehNomeCompostoEstruturado,
   ehSentinelaSemMolde,
+  ERRO_CRUZAMENTO_LINHA_PRODUTO,
   extrairLinksWaMePorConjunto,
   extrairNomesCriativoDaFala,
   extrairSlateDaFala,
@@ -641,6 +647,7 @@ import {
   numeroConjuntoDaFala,
   pareceNomeDePecaNaoMolde,
   pecaChaveDoSlate,
+  recusarCruzamentoLinhaProduto,
   temSlateNoTexto,
   type PecaSlate,
 } from "../_shared/memoria_conjunto.ts";
@@ -653,6 +660,7 @@ import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsa
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
 import {
   aplicarRecorteAcervo,
+  type RecorteDrive,
   aplicarRecorteAnalisesDrive,
   compactarInventarioDriveParaAgente,
   inferirMeioDeProduto,
@@ -681,7 +689,7 @@ import {
   diagnosticoRota,
   resolverChamadaLlm,
 } from "../_shared/llm_roteador.ts";
-import { tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
+import { COMPANY_COHAPM, tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import {
@@ -750,7 +758,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.72";
+const VERSAO = "chat-v28.73";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_UPLOAD = 8;
@@ -1534,7 +1542,7 @@ function cortarLista(obj: Record<string, unknown>, campo: string, teto = TETO_TO
 }
 
 /** v28.31: acervo compacto — taxonomia + campos uteis por item; corta texto longo. */
-function compactarAcervoParaAgente(data: unknown, filtroAtivo: boolean, recorte?: { meio?: string | null; soReelsVideos?: boolean }): unknown {
+function compactarAcervoParaAgente(data: unknown, filtroAtivo: boolean, recorte?: RecorteDrive): unknown {
   const recortado = aplicarRecorteAcervo(data, recorte ?? {});
   if (!recortado || typeof recortado !== "object") return recortado;
   const obj = { ...(recortado as Record<string, unknown>) };
@@ -1792,7 +1800,7 @@ async function t_buscar_geolocalizacao(companyId: string, args: any) {
 // unico guarda que DECLARA truncagem. Sem ele, a unica protecao seria o slice(0,14000) bruto la no
 // envio ao modelo, que corta JSON no meio sem avisar - a falha silenciosa que o v18 existe para
 // impedir.
-async function t_estrutura_conjuntos(companyId: string, pagina: number) {
+async function t_estrutura_conjuntos(companyId: string, pagina: number, pedido = "") {
   const tamanho = 20;
   const { data, error } = await supa.rpc("get_estrutura_conjuntos", {
     p_company_id: companyId,
@@ -1801,7 +1809,31 @@ async function t_estrutura_conjuntos(companyId: string, pagina: number) {
   });
   if (error) return { erro: `falha ao ler estrutura de conjuntos: ${error.message}` };
   if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
-  return cortarLista(data as Record<string, unknown>, "conjuntos");
+  const raw = cortarLista(data as Record<string, unknown>, "conjuntos") as Record<string, unknown>;
+  if (companyId === COMPANY_COHAPM && Array.isArray(raw.conjuntos)) {
+    const conjuntos = (raw.conjuntos as Record<string, unknown>[]).map((c) => ({
+      ...c,
+      meio: classificarLinhaProdutoCohapm(
+        String(c.conjunto ?? c.nome ?? c.name ?? ""),
+        String(c.campanha ?? ""),
+      ),
+    }));
+    const pedidoLf = inferirMeioDrive(pedido) === "la_felicita";
+    const ordenados = pedidoLf
+      ? [...conjuntos].sort((a, b) => {
+        const ma = a.meio === "la_felicita" ? 0 : 1;
+        const mb = b.meio === "la_felicita" ? 0 : 1;
+        return ma - mb;
+      })
+      : conjuntos;
+    return {
+      ...raw,
+      conjuntos: ordenados,
+      aviso_cruzamento:
+        "ERRO GRAVE misturar linhas COHAPM: peca La Felicità NUNCA em campanha/conjunto JURIDICO, e vice-versa. O card e recusado.",
+    };
+  }
+  return raw;
 }
 
 type CardInfo = { approval_id: string; action: string; entity_type: string; target_name: string; summary: string; params: any; status: string };
@@ -1831,6 +1863,85 @@ async function verificarPostura(companyId: string, action: string) {
   }
   return { perm, recusa: null };
 }
+
+function recusaCruzamentoCohapm(
+  companyId: string,
+  estruturaNomes: Array<string | null | undefined>,
+  pecaSinais: Array<string | null | undefined>,
+): { erro: string; detalhe: string } | null {
+  if (companyId !== COMPANY_COHAPM) return null;
+  const r = recusarCruzamentoLinhaProduto({ estruturaNomes, pecaSinais });
+  if (r.ok) return null;
+  return { erro: ERRO_CRUZAMENTO_LINHA_PRODUTO, detalhe: r.detalhe };
+}
+
+async function sinaisPecaDaConversa(
+  companyId: string,
+  convId: string,
+  params: Record<string, unknown> | null | undefined,
+  extra: Array<string | null | undefined> = [],
+): Promise<string[]> {
+  const p = params ?? {};
+  const bruto: Array<string | null | undefined> = [
+    ...extra,
+    p.nome_novo != null ? String(p.nome_novo) : "",
+    p.nome != null ? String(p.nome) : "",
+    p.name != null ? String(p.name) : "",
+    p.meio != null ? String(p.meio) : "",
+    p.produto != null ? String(p.produto) : "",
+    p.marca_meio != null ? String(p.marca_meio) : "",
+    p.drive_file_id != null ? String(p.drive_file_id) : "",
+    p.pasta != null ? String(p.pasta) : "",
+    p.legenda != null ? String(p.legenda) : "",
+  ];
+  const out = bruto.filter((s): s is string => !!s && s.trim().length > 0);
+  if (!convId) return out;
+  const drive = String(p.drive_file_id ?? "").trim();
+  let q = supa
+    .from("conversation_slate")
+    .select("nome,pasta,cta,drive_file_id")
+    .eq("company_id", companyId)
+    .eq("conversation_id", convId)
+    .limit(40);
+  if (drive) q = q.eq("drive_file_id", drive);
+  const { data } = await q;
+  for (const row of data ?? []) {
+    out.push(String(row.nome ?? ""), String(row.pasta ?? ""), String(row.cta ?? ""));
+  }
+  return out;
+}
+
+async function gateLinhaProdutoDasTools(
+  companyId: string,
+  convId: string,
+  args: Record<string, unknown> | null | undefined,
+): Promise<{ erro: string; detalhe: string; veredito: string; aprovado: false } | null> {
+  if (companyId !== COMPANY_COHAPM) return null;
+  const a = args ?? {};
+  const estrutura = [
+    a.campanha, a.conjunto, a.campanha_destino, a.conjunto_destino,
+    a.campanha_destino_nome, a.conjunto_destino_nome,
+  ].map((x) => (x != null ? String(x) : ""));
+  const peca = await sinaisPecaDaConversa(companyId, convId, a, [
+    a.legenda != null ? String(a.legenda) : "",
+    a.nome_criativo != null ? String(a.nome_criativo) : "",
+  ]);
+  const drive = String(a.drive_file_id ?? "").trim();
+  if (drive) {
+    const { data: up } = await supa
+      .from("media_uploads")
+      .select("nome,caminho_drive")
+      .eq("company_id", companyId)
+      .eq("drive_file_id", drive)
+      .limit(1)
+      .maybeSingle();
+    if (up) peca.push(String((up as any).nome ?? ""), String((up as any).caminho_drive ?? ""));
+  }
+  const cruz = recusaCruzamentoCohapm(companyId, estrutura, peca);
+  if (!cruz) return null;
+  return { ...cruz, veredito: "reprovado", aprovado: false };
+}
+
 async function t_propose_action(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[]) {
   const action = String(args?.action_type ?? "");
   const targetLike = String(args?.target_name ?? "").trim();
@@ -2427,6 +2538,13 @@ async function t_propose_criacao(
     if (!dest) return { erro: `campanha de destino '${campanhaDestino}' nao encontrada nem no sistema nem entre as criadas por pedido aprovado. Se ela ainda nao existe, proponha criar_campanha primeiro e aguarde a aprovacao. NAO invente o identificador.` };
     if (!dest.external_id) return { erro: `a campanha '${dest.name}' existe no sistema mas ainda nao tem identificador da Meta sincronizado - sem ele o conjunto nao tem onde nascer. Aguarde a proxima sincronizacao.` };
 
+    const cruzConj = recusaCruzamentoCohapm(
+      companyId,
+      [dest.name, campanhaDestino],
+      [nomeNovo, String(params?.meio ?? ""), String(params?.produto ?? ""), molde?.name ?? null],
+    );
+    if (cruzConj) return cruzConj;
+
     // v28.48/v28.49: geo/bairros — no Jurídico COHAPM aplica preset Salvador–BA (default + rejeição).
     const geoNorm = normalizarGeoDoPedido(params as Record<string, unknown>);
     if (geoNorm.erro) {
@@ -2492,11 +2610,11 @@ async function t_propose_criacao(
       ) {
         familiaEfetiva = "mensagens";
         mensagensEfetivo = true;
-        objetivoEfetivo = String((dest as any).objective);
+        objetivoEfetivo = (dest as any).objective || objetivoEfetivo;
       } else {
         familiaEfetiva = familiaDeObjetivo((dest as any).objective);
         socialEfetivo = true;
-        objetivoEfetivo = String((dest as any).objective);
+        objetivoEfetivo = (dest as any).objective || objetivoEfetivo;
       }
       if (!pageIdEfetivo) {
         return {
@@ -2766,20 +2884,33 @@ async function t_propose_criacao(
       numeroConjuntoDaFala(falaConv.ultimoUser) ||
       numeroConjuntoDaFala(falaConv.blob);
     const linksConversa = extrairLinksWaMePorConjunto(falaConv.blob);
-    if (!conjuntoDestino || nConjuntoPedido) {
+    const pecaSinaisEarly = await sinaisPecaDaConversa(companyId, convId, params, [
+      nomeAlvo,
+      nomePedidoBruto,
+    ]);
+    // Nao sobrescrever destino EXPLICITO com o CONJ.N mais novo da empresa (Juridico vs La Felicità).
+    if (!conjuntoDestinoParam && nConjuntoPedido) {
       const { data: setsAlias } = await supa
         .from("ad_sets")
         .select("external_id,name,campaign_id,created_at,destination_type")
         .eq("company_id", companyId);
-      if (nConjuntoPedido) {
-        const hits = (setsAlias ?? []).filter((s: any) =>
-          conjuntoNomeCasaComNumero(String(s.name ?? ""), nConjuntoPedido),
-        );
-        const escolhido = [...hits].sort((a: any, b: any) =>
-          String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
-        )[0];
-        if (escolhido?.external_id) conjuntoDestino = String(escolhido.external_id);
-      }
+      const { data: campsAlias } = await supa
+        .from("campaigns")
+        .select("id,name")
+        .eq("company_id", companyId);
+      const campNome = (cid: unknown) =>
+        String((campsAlias ?? []).find((c: any) => c.id === cid)?.name ?? "");
+      const hits = (setsAlias ?? []).filter((s: any) =>
+        conjuntoNomeCasaComNumero(String(s.name ?? ""), nConjuntoPedido),
+      );
+      const alinhados = escolherConjuntosDaMesmaLinha(hits, pecaSinaisEarly, (s: any) =>
+        campNome(s.campaign_id),
+      );
+      const pool = alinhados.length ? alinhados : [];
+      const escolhido = [...pool].sort((a: any, b: any) =>
+        String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
+      )[0];
+      if (escolhido?.external_id) conjuntoDestino = String(escolhido.external_id);
     }
     if (!conjuntoDestino) {
       // Ultimo conjunto criado NESTA conversa (aprovado com id_criado). Evita recusar
@@ -2793,9 +2924,16 @@ async function t_propose_criacao(
         .eq("status", "approved")
         .order("created_at", { ascending: false })
         .limit(8);
-      const hitConj = (lastSets ?? []).find((r: any) =>
-        r?.execution_result?.ok === true && String(r?.execution_result?.id_criado ?? "").trim(),
-      );
+      const hitConj = (lastSets ?? []).find((r: any) => {
+        if (!(r?.execution_result?.ok === true && String(r?.execution_result?.id_criado ?? "").trim())) {
+          return false;
+        }
+        const cruzLast = recusarCruzamentoLinhaProduto({
+          estruturaNomes: [r?.payload?.campanha_destino_nome, r?.payload?.nome_novo],
+          pecaSinais: pecaSinaisEarly,
+        });
+        return cruzLast.ok;
+      });
       if (hitConj) {
         conjuntoDestino = String((hitConj as any).execution_result.id_criado).trim();
       }
@@ -2932,9 +3070,14 @@ async function t_propose_criacao(
       const byNum = (sets ?? []).filter((s: any) =>
         conjuntoNomeCasaComNumero(String(s.name ?? ""), nConjuntoPedido),
       );
-      if (byNum.length) {
-        const inCamp = campHintRow ? byNum.filter((s) => s.campaign_id === campHintRow.id) : byNum;
-        dest = [...(inCamp.length ? inCamp : byNum)].sort((a: any, b: any) =>
+      const alinhadosNum = escolherConjuntosDaMesmaLinha(byNum, pecaSinaisEarly, (s: any) => {
+        const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
+        return camp?.name ?? null;
+      });
+      const poolNum = alinhadosNum.length ? alinhadosNum : [];
+      if (poolNum.length) {
+        const inCamp = campHintRow ? poolNum.filter((s) => s.campaign_id === campHintRow.id) : poolNum;
+        dest = [...(inCamp.length ? inCamp : poolNum)].sort((a: any, b: any) =>
           String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
         )[0];
       }
@@ -3024,6 +3167,13 @@ async function t_propose_criacao(
     if (!utmCampaign) {
       utmCampaign = String(resolvidoAd.partes?.rotulo || resolvidoAd.partes?.periodo || nomeNovo).trim();
     }
+
+    const cruzAd = recusaCruzamentoCohapm(
+      companyId,
+      [nomeCampanhaDest, dest.name, campanhaHint, conjuntoDestinoParam],
+      [...pecaSinaisEarly, nomeNovo, driveFileId, pecaMem.pecaChave, pecaMem.legenda],
+    );
+    if (cruzAd) return cruzAd;
 
     // v28.62: Instagram vinculated — auto-fill da config; recusa se Instagram esta nas plataformas.
     const plataformasCard = params?.plataformas_publicacao ?? params?.publisher_platforms ?? ["facebook", "instagram"];
@@ -4189,7 +4339,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_recommendations", description: "FILA INTERNA pendente (ai_recommendations: custo de midia / regua nossa). NAO e o badge '1 recomendacao' do Ads Manager nem Opportunity Score. Para dicas da Meta use get_meta_dicas.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "get_meta_dicas", description: "Dicas da Meta (Opportunity Score GET /act_*/recommendations + campo classico recommendations), com first_seen_on/last_seen_on e veredito interno (concorda|discorda|nao_aplicavel|sem_regua). E PROIBIDO repetir a dica da Meta como se fosse nossa. A API pode ter MENOS itens que o badge do Ads Manager.", parameters: { type: "object", properties: { dias: { type: "integer", description: "Janela em dias (default 14)." }, veredito: { type: "string", description: "Filtro opcional: concorda|discorda|nao_aplicavel|sem_regua" } } } } },
   { type: "function", function: { name: "teto_vigente", description: "FONTE PRIORITARIA para julgar teto vigente. Exige o company_id da conversa e uma metrica. Devolve qual regua governa, valor, denominador, autor/data/citacao da meta de negocio, consistencia historica, aspiracao e divergencias/avisos. A tabela targets isolada NAO decide teto vigente.", parameters: { type: "object", properties: { metric: { type: "string", description: "Metrica exata, por exemplo custo_por_formulario, custo_por_conversa ou custo_por_lead_lp." } }, required: ["metric"] } } },
-  { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia o PAR legenda + peca pela concatenacao do texto disponivel. Exige company_id da conversa, legenda e drive_file_id. Devolve veredito, leituras separadas, cobertura e lacunas; e deteccao por padroes, NAO aprovacao. Audio sem transcricao permanece explicitamente nao lido.", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
+  { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia o PAR legenda + peca pela concatenacao do texto disponivel. Exige company_id da conversa, legenda e drive_file_id. Devolve veredito, leituras separadas, cobertura e lacunas; e deteccao por padroes, NAO aprovacao. Audio sem transcricao permanece explicitamente nao lido. COHAPM: se campanha/conjunto de uma linha e peca da outra (Juridico vs La Felicità), REPROVA — ERRO GRAVE, nao aviso. Passe campanha e conjunto quando for emitir.", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" }, campanha: { type: "string", description: "Nome da campanha destino (COHAPM: obriga casar linha da peca)." }, conjunto: { type: "string", description: "Nome do conjunto destino." }, nome_criativo: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
   { type: "function", function: { name: "saude_das_integracoes", description: "Mede a saude das integracoes Meta desta empresa por evidencia de ads, snapshots, breakdown e tres relogios. Exige company_id da conversa. Declara divergencias contra status/estado_operacional sem alterar nenhum deles; nao promete diagnosticar provedores fora desse retorno.", parameters: { type: "object", properties: { dias_tolerancia: { type: "integer", description: "Opcional; padrao da RPC = 3 dias." } } } } },
   { type: "function", function: { name: "custo_llm_periodo", description: "Calcula em USD o custo derivado dos tokens gravados de chat e jobs no periodo para o company_id da conversa. Declara premissa de modelos e lacunas: cache pode ser cobrado como teto, ha subagentes sem tokens, visao e compliance-check ficam invisiveis. Nao e custo faturado.", parameters: { type: "object", properties: { de: { type: "string", description: "Data inicial YYYY-MM-DD." }, ate: { type: "string", description: "Data final YYYY-MM-DD." } }, required: ["de", "ate"] } } },
   { type: "function", function: { name: "panorama_utm_anuncios", description: "Mostra, para o company_id da conversa, coleta de url_tags e destino dos anuncios: nunca lido, lido sem/com rotulo, rotulos, ambiguidades e URLs. Distingue ausencia configurada de nao coleta quando o retorno permite. Limite: nao mede desempenho/leads por UTM e o token alcanca apenas parte das contas.", parameters: { type: "object", properties: {} } } },
@@ -4220,13 +4370,13 @@ const TOOLS = [
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
   { type: "function", function: { name: "alterar_categoria_especial", description: "Emite CARD DE APROVACAO para alterar ou REMOVER special_ad_categories de uma campanha JA CRIADA. Passe special_ad_categories=[] para remover. NAO diga que falta ferramenta. Leia antes com get_campaign_detail ou auditar_compliance_financeira.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } }, categorias_atuais: { type: "array", items: { type: "string" } }, justificativa: { type: "string" } }, required: ["campanha_atual", "special_ad_categories"] } } },
-  { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha e alterar_categoria_especial_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (qualquer familia, inclusive trafego/website). Molde NAO e obrigatorio para criar do zero. Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal. PROIBIDO recusar criar_conjunto por falta de molde (trafego, social ou mensagens). Tudo que e criado nasce ACTIVE.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha e alterar_categoria_especial_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (qualquer familia, inclusive trafego/website). Molde NAO e obrigatorio para criar do zero. Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal. PROIBIDO recusar criar_conjunto por falta de molde (trafego, social ou mensagens). Tudo que e criado nasce ACTIVE. COHAPM ERRO GRAVE: peca La Felicità (_LAF_ / CONJ.1_LAF / FELICITA) NUNCA em campanha/conjunto JURIDICO, e peca Juridico NUNCA em LAFELICITA. O sistema RECUSA o card — nao e aviso.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes Hook→Beneficio/prova→CTA (CET/FIN-04 so credito). NAO cria anuncio. Grava em conversation_legendas. La Felicita: produto=imovel + meio=la_felicita + drive_file_id do SLATE (get_slate_da_conversa). NAO use voz Juridico. Se a tool falhar, NAO diga indisponivel — escreva as 3 no tom certo e registre. VOCE preenche referencias. Nao invente CLT/CET para COHAPM.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: imovel / la_felicita (residencial) ou juridico_whatsapp (COHAPM Juridico) ou consignado_clt (Legal). SEM default CLT." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, meio: { type: "string", enum: ["la_felicita", "juridico"], description: "Voz da marca. La Felicita = la_felicita." }, drive_file_id: { type: "string", description: "Peca do Drive (do slate)." }, peca_chave: { type: "string", description: "Chave estavel. Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "get_legendas_da_conversa", description: "MEMORIA DURAVEL de legendas desta conversa (conversation_legendas). Devolve texto INTEGRAL por peca_chave/drive_file_id. OBRIGATORIO chamar ANTES de dizer que legenda 'nao existe' / 'texto integral nao disponivel' ou de pedir ao gestor para colar copy. Se a peca esta aqui, use o texto — nunca invente amnesia.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, drive_file_id: { type: "string" } } } } },
   { type: "function", function: { name: "registrar_legenda_da_conversa", description: "Grava/atualiza UMA legenda no store duravel desta conversa. Use quando voce propuser copy no chat SEM passar por gerar_legendas (ex.: slate de impulsão com legenda editorial), ou para marcar a variante selecionada pelo gestor. peca_chave estavel (carrossel_2, card_capa_1, …) + legenda integral. Com drive_file_id quando houver.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, legenda: { type: "string" }, drive_file_id: { type: "string" }, variante_indice: { type: "number" }, selecionada: { type: "boolean" }, objetivo: { type: "string" } }, required: ["peca_chave", "legenda"] } } },
   { type: "function", function: { name: "get_slate_da_conversa", description: "MEMORIA DURAVEL do SLATE desta conversa (conversation_slate): pecas JA escolhidas por CONJ.N com nome, drive_file_id, angulo e CTA. Inventario Drive (N videos da pasta) NAO e o slate. OBRIGATORIO antes de dizer que 'o acervo nao traz o slate' ou de pedir ao gestor para re-colar os 8 videos. Pedido de legendas dos videos que VOCE selecionou: leia daqui e chame gerar_legendas por peca.", parameters: { type: "object", properties: { conjunto: { type: "number", description: "Opcional: so pecas deste CONJ.N." } } } } },
   { type: "function", function: { name: "registrar_peca_da_conversa", description: "Grava UMA peca no slate duravel (conjunto + drive_file_id + nome). O sistema tambem extrai tabelas CONJ.N da propria conversa. Use se selecionar peca nova e quiser persistir na hora.", parameters: { type: "object", properties: { conjunto: { type: "number" }, drive_file_id: { type: "string" }, nome: { type: "string" }, pasta: { type: "string" }, angulo: { type: "string" }, cta: { type: "string" }, peca_chave: { type: "string" } }, required: ["conjunto", "drive_file_id", "nome"] } } },
-  { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida UMA legenda (texto integral) e/ou criativo anexado contra compliance_rules. Para esbocos que voce escreveu nesta conversa, PASSE o texto em legenda= — NAO use get_criativos_conteudo vazio como desculpa de '0 textos'. Para anuncios ja publicados, pegue a legenda em get_criativos_conteudo/legendas_unicas e passe aqui. Devolve veredito deterministicamente.", parameters: { type: "object", properties: { legenda: { type: "string", description: "Texto integral da legenda a validar (obrigatorio se nao houver imagem anexada)." } }, required: ["legenda"] } } },
+  { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida UMA legenda (texto integral) e/ou criativo anexado contra compliance_rules. Para esbocos que voce escreveu nesta conversa, PASSE o texto em legenda= — NAO use get_criativos_conteudo vazio como desculpa de '0 textos'. Para anuncios ja publicados, pegue a legenda em get_criativos_conteudo/legendas_unicas e passe aqui. Devolve veredito deterministicamente. COHAPM: se campanha/conjunto Juridico vs peca La Felicità (ou o inverso), REPROVA — ERRO GRAVE. Passe campanha/conjunto/nome_criativo ao auditar par destino×peca.", parameters: { type: "object", properties: { legenda: { type: "string", description: "Texto integral da legenda a validar (obrigatorio se nao houver imagem anexada)." }, campanha: { type: "string" }, conjunto: { type: "string" }, nome_criativo: { type: "string" }, drive_file_id: { type: "string" }, meio: { type: "string", enum: ["la_felicita", "juridico"] } }, required: ["legenda"] } } },
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Traz tambem destino_url (link do CTA do criativo) e destino (whatsapp quando wa.me/api.whatsapp, senao site): O NUMERO DE WHATSAPP DE DESTINO de cada peca SAI DAQUI (ex.: wa.me/5571993451315). Isso e CONFIG do criativo coletada do Pipeboard - NAO confunda com a analitica de conversa WABA (pos-clique), que esta congelada; o numero de destino do anuncio E legivel e voce DEVE informa-lo quando perguntado. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
   { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha ACTIVE), estrategia de lance, orcamento, segmentacao, gasto, destination_type (WEBSITE vs WHATSAPP). destination_type NAO e o wa.me: conjunto WEBSITE nao guarda o link; o wa.me fica no criativo (get_aprovacoes.destino_url / get_criativos_conteudo). PEGADA/destino e numeros_whatsapp = DESTINO Click-to-WA do criativo (wa.me) — NAO e inventario WABA. Para numeros operacionais vs inventario CTWA use get_waba_status. Conjunto ACTIVE sob campanha PAUSED = entregando false. PAGINADO 20; se restantes>0, pagine.", parameters: { type: "object", properties: { pagina: { type: "number", description: "Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero." } } } } },
@@ -4530,7 +4680,11 @@ async function runTool(name: string, args: any, ctx: any) {
         return data;
       }
       case "teto_vigente": return await t_rpc("teto_vigente", { p_company_id: ctx.companyId, p_metric: String(args?.metric ?? "") });
-      case "checar_par_texto_e_peca": return await t_rpc("checar_par_texto_e_peca", { p_company_id: ctx.companyId, p_legenda: String(args?.legenda ?? ""), p_drive_file_id: String(args?.drive_file_id ?? "") });
+      case "checar_par_texto_e_peca": {
+        const cruzPar = await gateLinhaProdutoDasTools(ctx.companyId, ctx.convId, args);
+        if (cruzPar) return { ...cruzPar, veredito: "reprova" };
+        return await t_rpc("checar_par_texto_e_peca", { p_company_id: ctx.companyId, p_legenda: String(args?.legenda ?? ""), p_drive_file_id: String(args?.drive_file_id ?? "") });
+      }
       case "saude_das_integracoes": return await t_rpc("saude_das_integracoes", { p_company_id: ctx.companyId, p_dias_tolerancia: Number(args?.dias_tolerancia ?? 3) });
       case "custo_llm_periodo": return await t_rpc("custo_llm_periodo", { p_company_id: ctx.companyId, p_de: String(args?.de ?? ""), p_ate: String(args?.ate ?? "") });
       case "panorama_utm_anuncios": return await t_rpc("panorama_utm_anuncios", { p_company_id: ctx.companyId });
@@ -4608,10 +4762,13 @@ async function runTool(name: string, args: any, ctx: any) {
       case "alterar_categoria_especial": return await t_alterar_categoria_especial(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "auditar_compliance_financeira":
         return await t_auditar_compliance_financeira(ctx.companyId, String(args?.name_like ?? ""));
-      case "check_compliance":
+      case "check_compliance": {
+        const cruzComp = await gateLinhaProdutoDasTools(ctx.companyId, ctx.convId, args);
+        if (cruzComp) return cruzComp;
         return await t_check_compliance(
           ctx.companyId, String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey, ctx.complianceCache,
         );
+      }
       case "gerar_legendas": {
         const restante = Number(ctx.restanteMs ?? 30_000);
         if (restante < 18_000) {
@@ -4738,7 +4895,7 @@ async function runTool(name: string, args: any, ctx: any) {
         };
       }
       case "get_estrutura_conjuntos":
-        return await t_estrutura_conjuntos(ctx.companyId, Number(args?.pagina ?? 1));
+        return await t_estrutura_conjuntos(ctx.companyId, Number(args?.pagina ?? 1), String(ctx.pedido ?? ""));
       case "get_waba_status":
         return await t_waba_status(ctx.companyId, args?.meio != null ? String(args.meio) : undefined);
       case "listar_ferramentas_pipeboard":
@@ -4801,6 +4958,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 - LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, get_waba_status, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
 - GEO/BAIRROS NO CRIAR_CONJUNTO: HA campo. Use buscar_geolocalizacao (lotes <=40). No propose: params.bairros ou params.geo_locations. Presets em geo_targeting_presets sao POR empresa+meio; outra empresa/meio NAO herda. NUNCA diga que falta campo de bairros.
 - WHATSAPP / NUMEROS DE PE (21/08/2026): pergunta sobre numero operacional, de pe, qual WA linkar, WABA, qualidade/tier OU isolamento Juridico vs La Felicita OBRIGA get_waba_status (meio=juridico|la_felicita quando o pedido recortar). get_estrutura_conjuntos / get_criativos_conteudo so mostram destino wa.me do anuncio (Click-to-WA) — NAO substituem. Separe sempre: (1) WABA Cloud/ON_PREMISE — de_pe so CONNECTED; (2) CTWA — inventario; de_pe so IN_ACTIVE_ADS. NUNCA peca escolher so entre CTWA como se fossem os unicos. Conjunto ACTIVE sob campanha PAUSED = entregando=false (nao esta no ar). COHAPM: isole JUR vs LF.
+- CRUZAMENTO DE LINHA COHAPM (25/08/2026) E ERRO GRAVE, NAO AVISO: as duas linhas compartilham a empresa mas NUNCA a campanha. Peca/slate La Felicità (CONJ.1_LAF_…, pasta LAF, meio=la_felicita/imovel) so vai para campanha/conjunto La Felicità (COHAPM_LAFELICITA_* / conjunto do mesmo CONJ.N). Peca Juridico (JUR_…, JURIDICO_CONJ) so vai para COHAPM_JURIDICO_* / JURIDICO_CONJ. Colocar video La Felicità em JURIDICO_CONJ.01 MATURACAO e falta operacional grave. O sistema RECUSA o card. Se o slate desta conversa e CONJ.1 La Felicità, o unico destino valido e o conjunto La Felicità correspondente — nunca o Juridico mais novo ou o primeiro da lista por gasto.
 - DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations SO se quiser a fila INTERNA de custo). Cite SEMPRE o veredito interno — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta. get_recommendations NAO e o badge do Ads Manager. Se get_meta_dicas vier vazio apos sync e o gestor apontar badge na UI, diga a assimetria documentada pela Meta (API pode listar menos que Ads Manager) — nao invente o texto da dica.
 - Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.
 - Uma decisao por leitura. Escolha a janela ANTES de olhar o resultado; se duas janelas discordam, mostre as duas e diga qual decide.

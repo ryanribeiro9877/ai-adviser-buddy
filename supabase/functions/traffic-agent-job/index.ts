@@ -1,4 +1,5 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.6)
+// supabase/functions/traffic-agent-job/index.ts (v4.7)
+// v4.7 (25/08/2026) - checar_par / check_compliance recusam cruzamento Juridico × La Felicità.
 // v4.6 (25/08/2026) - VIDEO ATE 4 GB: envio em partes; teto operacional = Meta.
 // v4.5 (25/08/2026) - TETO DE UPLOAD: video operacional 45 MB (nao 4 GB da Ads Guide).
 // v4.4 (25/08/2026) - DRIVE NAO E OVERVIEW: "analise completa de criativos" das pastas
@@ -230,6 +231,8 @@ import {
   type TipoTarefaLlm,
 } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
+import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
+import { recusarCruzamentoLinhaProduto } from "../_shared/memoria_conjunto.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import {
   FOCO_CRIATIVOS_DRIVE,
@@ -1009,6 +1012,21 @@ async function t_estrutura_conjuntos(companyId: string, pedido?: string) {
   }
   return cortarLista(obj, "conjuntos");
 }
+function recusaCruzamentoJob(companyId: string, args: Record<string, unknown> | null | undefined, pedido?: string) {
+  if (companyId !== COMPANY_COHAPM) return null;
+  const a = args ?? {};
+  const r = recusarCruzamentoLinhaProduto({
+    estruturaNomes: [
+      a.campanha, a.conjunto, a.campanha_destino, a.conjunto_destino,
+      a.campanha_destino_nome, a.conjunto_destino_nome,
+    ].map((x) => (x != null ? String(x) : "")),
+    pecaSinais: [
+      a.legenda, a.nome_criativo, a.drive_file_id, a.meio, a.produto, a.nome, pedido,
+    ].map((x) => (x != null ? String(x) : "")),
+  });
+  if (r.ok) return null;
+  return { erro: r.erro, detalhe: r.detalhe, veredito: "reprovado", aprovado: false };
+}
 async function t_check_compliance(companyId: string, legenda: string, mcpKey: string) {
   if (!legenda) return { erro: "forneca a legenda" };
   const r = await fetch(`${SUPABASE_URL}/functions/v1/compliance-check`, { method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey }, body: JSON.stringify({ company_id: companyId, legenda }) });
@@ -1131,7 +1149,11 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
         return data;
       }
       case "teto_vigente": return await t_rpc("teto_vigente", { p_company_id: ctx.companyId, p_metric: String(args?.metric ?? "") });
-      case "checar_par_texto_e_peca": return await t_rpc("checar_par_texto_e_peca", { p_company_id: ctx.companyId, p_legenda: String(args?.legenda ?? ""), p_drive_file_id: String(args?.drive_file_id ?? "") });
+      case "checar_par_texto_e_peca": {
+        const cruzPar = recusaCruzamentoJob(ctx.companyId, args, ctx.pedido);
+        if (cruzPar) return { ...cruzPar, veredito: "reprova" };
+        return await t_rpc("checar_par_texto_e_peca", { p_company_id: ctx.companyId, p_legenda: String(args?.legenda ?? ""), p_drive_file_id: String(args?.drive_file_id ?? "") });
+      }
       case "saude_das_integracoes": return await t_rpc("saude_das_integracoes", { p_company_id: ctx.companyId, p_dias_tolerancia: Number(args?.dias_tolerancia ?? 3) });
       case "custo_llm_periodo": return await t_rpc("custo_llm_periodo", { p_company_id: ctx.companyId, p_de: String(args?.de ?? ""), p_ate: String(args?.ate ?? "") });
       case "panorama_utm_anuncios": return await t_rpc("panorama_utm_anuncios", { p_company_id: ctx.companyId });
@@ -1258,7 +1280,11 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
             : (j?.nota ?? null),
         };
       }
-      case "check_compliance": return await t_check_compliance(ctx.companyId, String(args?.legenda ?? "").trim(), ctx.mcpKey);
+      case "check_compliance": {
+        const cruzComp = recusaCruzamentoJob(ctx.companyId, args, ctx.pedido);
+        if (cruzComp) return cruzComp;
+        return await t_check_compliance(ctx.companyId, String(args?.legenda ?? "").trim(), ctx.mcpKey);
+      }
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       case "get_waba_status": return await t_waba_status(ctx.companyId, args?.meio != null ? String(args.meio) : undefined);
       case "get_waba_template_insights": return await t_waba_template_insights(ctx.companyId, Number(args?.days ?? 30));
@@ -1278,7 +1304,7 @@ const DEF: Record<string, any> = {
   get_recommendations: { type: "function", function: { name: "get_recommendations", description: "FILA INTERNA de custo de midia (nao e badge Ads Manager).", parameters: { type: "object", properties: {} } } },
   get_meta_dicas: { type: "function", function: { name: "get_meta_dicas", description: "Dicas da Meta (Opportunity Score + campo classico) com veredito interno. Cite sempre o veredito.", parameters: { type: "object", properties: { dias: { type: "integer" }, veredito: { type: "string" } } } } },
   teto_vigente: { type: "function", function: { name: "teto_vigente", description: "FONTE PRIORITARIA para teto vigente. Exige company_id do job e metrica; declara regua governante, denominador, autor/data/citacao, historico, aspiracao e divergencias. Targets isolado NAO e veredito de negocio.", parameters: { type: "object", properties: { metric: { type: "string" } }, required: ["metric"] } } },
-  checar_par_texto_e_peca: { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia legenda + peca juntas no company_id do job. Devolve PAR, leituras separadas, cobertura e lacunas. E deteccao por texto, NAO aprovacao; audio sem transcricao fica declarado como nao lido.", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
+  checar_par_texto_e_peca: { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia legenda + peca juntas no company_id do job. Devolve PAR, leituras separadas, cobertura e lacunas. E deteccao por texto, NAO aprovacao; audio sem transcricao fica declarado como nao lido. COHAPM: cruzamento Juridico × La Felicità REPROVA (ERRO GRAVE).", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" }, campanha: { type: "string" }, conjunto: { type: "string" }, nome_criativo: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
   saude_das_integracoes: { type: "function", function: { name: "saude_das_integracoes", description: "Mede integracoes Meta do company_id por ads, snapshots, breakdown e relogios; declara divergencias com status sem altera-lo. Nao cobre alem do retorno.", parameters: { type: "object", properties: { dias_tolerancia: { type: "integer" } } } } },
   custo_llm_periodo: { type: "function", function: { name: "custo_llm_periodo", description: "Custo derivado em USD dos tokens gravados de chat/jobs do company_id no periodo. Nao e fatura; declara modelos presumidos, cache-teto, tokens ausentes e visao/compliance invisiveis.", parameters: { type: "object", properties: { de: { type: "string" }, ate: { type: "string" } }, required: ["de", "ate"] } } },
   panorama_utm_anuncios: { type: "function", function: { name: "panorama_utm_anuncios", description: "Panorama do company_id para url_tags e destino: nunca lido, sem/com rotulo, rotulos e ambiguidades. Nao mede leads por UTM; token cobre so parte das contas.", parameters: { type: "object", properties: {} } } },
@@ -1304,7 +1330,7 @@ const DEF: Record<string, any> = {
   get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto. Inclui entregando (adset+campanha ACTIVE), pegada e numeros_whatsapp (=destino CTWA wa.me, NAO inventario WABA). Para de pe / Cloud / ON_PREMISE use get_waba_status.", parameters: { type: "object", properties: {} } } },
   listar_ferramentas_pipeboard: { type: "function", function: { name: "listar_ferramentas_pipeboard", description: "Catalogo ao vivo das ferramentas de LEITURA do Pipeboard. Use antes de ler_pipeboard quando nao souber o nome do endpoint.", parameters: { type: "object", properties: {} } } },
   ler_pipeboard: { type: "function", function: { name: "ler_pipeboard", description: "Leitura AO VIVO do Pipeboard (so get_/list_/search_/...). Preferir DB quando bastar; use ao vivo para breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca. Escopo: contas da empresa do job.", parameters: { type: "object", properties: { ferramenta: { type: "string" }, argumentos: { type: "object" } }, required: ["ferramenta"] } } },
-  check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL).", parameters: { type: "object", properties: { legenda: { type: "string" } }, required: ["legenda"] } } },
+  check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL). COHAPM: cruzamento Juridico × La Felicità REPROVA (ERRO GRAVE).", parameters: { type: "object", properties: { legenda: { type: "string" }, campanha: { type: "string" }, conjunto: { type: "string" }, nome_criativo: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda"] } } },
   get_conhecimento: { type: "function", function: { name: "get_conhecimento", description: "Base tecnica: politicas Meta, metricas, otimizacao, criativo. Use 'secao' p/ temas extensos.", parameters: { type: "object", properties: { tema: { type: "string" }, secao: { type: "string" } }, required: ["tema"] } } },
   get_waba_status: { type: "function", function: { name: "get_waba_status", description: "INVENTARIO WHATSAPP da empresa (RPC get_waba_phones). SEMPRE use quando perguntarem numero de pe, qual WA linkar, WABA, Cloud, qualidade/tier, Juridico vs La Felicita. Devolve DUAS listas: waba_cloud_on_premise (CLOUD_API+ON_PREMISE+null; de_pe=CONNECTED; qualidade/tier) e click_to_whatsapp_inventario (destino wa.me; de_pe so IN_ACTIVE_ADS). NUNCA trate CTWA IN_ADS como de pe nem como unico candidato. Filtro meio=juridico|la_felicita|financeiro|outro.", parameters: { type: "object", properties: { meio: { type: "string", description: "Opcional: juridico | la_felicita | financeiro | outro" } } } } },
   get_waba_template_insights: { type: "function", function: { name: "get_waba_template_insights", description: "Insights por TEMPLATE WhatsApp numa janela: envios, entregues, leituras, cliques e taxa de clique. Detalhe por numero ainda nao e coletado (declarado no retorno).", parameters: { type: "object", properties: { days: { type: "number", description: "janela em dias (default 30)" } } } } },
@@ -2470,7 +2496,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.6";
+  tel.versao = "job-v4.7";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,

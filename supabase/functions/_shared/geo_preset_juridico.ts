@@ -186,6 +186,9 @@ export function detectarMeioCohapm(
   const lf =
     /la[\s_-]*felicita/.test(n) ||
     /lafelicita/.test(n) ||
+    /_laf_/.test(n) ||
+    /(^|[^a-z0-9])laf([^a-z0-9]|$)/.test(n) ||
+    /\blaf_/.test(n) ||
     /(^|[^a-z0-9])lf([^a-z0-9]|$)/.test(n) ||
     /_lf_/.test(n) ||
     /\blf_/.test(n) ||

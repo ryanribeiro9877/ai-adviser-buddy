@@ -44,7 +44,7 @@ assert(
 );
 assert(
   job.includes('p_company_id: companyId') &&
-    job.includes('case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId)'),
+    job.includes('case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId, ctx.pedido)'),
   "job: estrutura deve ser escopada pela empresa",
 );
 assert(
@@ -97,7 +97,7 @@ assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&
     chat.includes("PERGUNTA") &&
-    chat.includes("chat-v28.66") &&
+    chat.includes("chat-v28.73") &&
     chat.includes("instagram_nao_vinculado") &&
     chat.includes("nome_trocado_pelo_padrao_estruturado") &&
     chat.includes("recusaFalsaMoldeTrafego") &&

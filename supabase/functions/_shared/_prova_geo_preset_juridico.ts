@@ -24,6 +24,7 @@ assert(detectarMeioCohapm("COHAPM_JURIDICO_ENGAJ_TOFU") === "juridico", "campanh
 assert(detectarMeioCohapm("JUR_TOFU_SSA-50KM") === "juridico", "conjunto JUR_");
 assert(detectarMeioCohapm("CJ_INSS_45+_BAIRROS") === "juridico", "CJ_INSS");
 assert(detectarMeioCohapm("COHAPM_LAFELICITA_ENGAJ") === "la_felicita", "LAFELICITA");
+assert(detectarMeioCohapm("CONJ.1_LAF_8CRIATIVOS_JUNJUL26_AD01") === "la_felicita", "_LAF_ no criativo");
 assert(detectarMeioCohapm("LF_TOFU_SSA") === "la_felicita", "LF_");
 assert(detectarMeioCohapm("[SALT] [LF | CONV | OBRA]") === "la_felicita", "SALT LF");
 assert(detectarMeioCohapm("JURIDICO e LA FELICITA misturados") === null, "ambiguidade");

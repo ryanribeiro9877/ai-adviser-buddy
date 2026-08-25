@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  ERRO_CRUZAMENTO_LINHA_PRODUTO,
+  classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
+  escolherConjuntosDaMesmaLinha,
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
   ehNomeCompostoEstruturado,
@@ -12,6 +15,7 @@ import {
   numeroConjuntoDaFala,
   pecasDoConjunto,
   pareceNomeDePecaNaoMolde,
+  recusarCruzamentoLinhaProduto,
 } from "./memoria-conjunto";
 
 describe("numeroConjuntoDaFala", () => {
@@ -122,6 +126,44 @@ describe("trava de nome livre do contrato", () => {
     expect(ehNomeCompostoEstruturado("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(true);
     expect(nomeCompostoForaDeEscopoTrafego("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(true);
     expect(nomeCompostoForaDeEscopoTrafego("JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02")).toBe(false);
+  });
+});
+
+describe("cruzamento linha produto COHAPM", () => {
+  const pecaLaf = "CONJ.1_LAF_8CRIATIVOS_JUNJUL26_AD01_ChegandoEmCasa_V3";
+  const campJur = "COHAPM_JURIDICO_CONV_LEVA01";
+  const setJur = "JURIDICO_CONJ.01 - MATURACAO";
+  const campLaf = "COHAPM_LAFELICITA_CONV_AGO26";
+  const setLaf = "LAFELICITA_CONJ.01 - DESCOBERTA";
+
+  it("recusa peca La Felicità em conjunto Jurídico (incidente 25/08)", () => {
+    expect(classificarLinhaProdutoCohapm(pecaLaf)).toBe("la_felicita");
+    const r = recusarCruzamentoLinhaProduto({
+      estruturaNomes: [campJur, setJur],
+      pecaSinais: [pecaLaf],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.erro).toBe(ERRO_CRUZAMENTO_LINHA_PRODUTO);
+      expect(r.detalhe).toMatch(/ERRO GRAVE/);
+    }
+  });
+
+  it("recusa o inverso (Jurídico em La Felicità)", () => {
+    const r = recusarCruzamentoLinhaProduto({
+      estruturaNomes: [campLaf, setLaf],
+      pecaSinais: ["JUR_CONV_CONJ03_AD01_Emprestimo_Pessoal_LEVA02"],
+    });
+    expect(r.ok).toBe(false);
+  });
+
+  it("nao escolhe JURIDICO_CONJ.01 mais novo para peca LAF", () => {
+    const hits = [
+      { name: setJur, campaign: campJur, created_at: "2026-08-25T17:00:00Z" },
+      { name: setLaf, campaign: campLaf, created_at: "2026-08-20T10:00:00Z" },
+    ];
+    const alinhados = escolherConjuntosDaMesmaLinha(hits, [pecaLaf], (h) => h.campaign);
+    expect(alinhados.map((h) => h.name)).toEqual([setLaf]);
   });
 });
 

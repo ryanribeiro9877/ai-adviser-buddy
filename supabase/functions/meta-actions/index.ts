@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.49)
+// supabase/functions/meta-actions/index.ts (v5.50)
+// v5.50 (25/08/2026) - HARD BLOCK cruzamento Juridico × La Felicità no apply (nao emite
+//   peca LAF em JURIDICO_CONJ e o inverso). Recusa antes da Graph.
 // v5.49 (24/08/2026) - recusa orcamento em centavos-como-reais; modo corrigir_orcamento_adsets
 //   para o incidente CONJ.1/2 LAF (R$ 3000 gravado, gestor pediu R$ 30).
 // v5.48 (24/08/2026) - sentinela sem_molde compartilhada (ehSentinelaSemMolde / ehFlagSemMolde).
@@ -332,6 +334,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
 import {
+  COMPANY_COHAPM,
   empresaPorAdAccount,
   empresasComTokenAds,
   redactAllMetaTokens,
@@ -353,6 +356,7 @@ import {
   ehNomeCompostoEstruturado,
   ehSentinelaSemMolde,
   nomeCompostoForaDeEscopoTrafego,
+  recusarCruzamentoLinhaProduto,
 } from "../_shared/memoria_conjunto.ts";
 import {
   aplicarPadraoPosicionamentoVideo,
@@ -1437,6 +1441,40 @@ function recusarSemIdentidadeNasPlataformas(
   return { erro: check.erro || ERRO_INSTAGRAM_NAO_VINCULADO, detalhe: check.detalhe };
 }
 
+/** Nomes no espelho: apply deve recusar mesmo se o payload omitiu campanha_destino_nome. */
+async function nomesDestinoEspelhoCohapm(opts: {
+  companyId: string;
+  campanhaExternalId?: string;
+  conjuntoExternalId?: string;
+}): Promise<{ campanha: string; conjunto: string }> {
+  let campanha = "";
+  let conjunto = "";
+  if (opts.conjuntoExternalId) {
+    const { data } = await supa
+      .from("ad_sets")
+      .select("name,campaign_id")
+      .eq("company_id", opts.companyId)
+      .eq("external_id", opts.conjuntoExternalId)
+      .maybeSingle();
+    conjunto = String((data as { name?: string } | null)?.name ?? "");
+    const campId = (data as { campaign_id?: string } | null)?.campaign_id;
+    if (campId) {
+      const { data: camp } = await supa.from("campaigns").select("name").eq("id", campId).maybeSingle();
+      campanha = String((camp as { name?: string } | null)?.name ?? "");
+    }
+  }
+  if (!campanha && opts.campanhaExternalId) {
+    const { data: camp } = await supa
+      .from("campaigns")
+      .select("name")
+      .eq("company_id", opts.companyId)
+      .eq("external_id", opts.campanhaExternalId)
+      .maybeSingle();
+    campanha = String((camp as { name?: string } | null)?.name ?? "");
+  }
+  return { campanha, conjunto };
+}
+
 // v2: monta o corpo de criacao lendo o molde quando necessario. Retorna o path de colecao,
 // o body do POST e, opcionalmente, um passo previo (criacao de adcreative).
 // v5.1: exportada para que as recusas nomeadas sejam verificaveis fora de uma execucao real. Sem
@@ -1524,6 +1562,17 @@ export async function montarCriacao(
       return {
         erro: "payload incompleto (campanha_destino_external_id, nome_novo)",
       };
+    if (companyId && companyId === COMPANY_COHAPM) {
+      const espelho = await nomesDestinoEspelhoCohapm({
+        companyId,
+        campanhaExternalId: campanha,
+      });
+      const cruz = recusarCruzamentoLinhaProduto({
+        estruturaNomes: [p?.campanha_destino_nome, p?.campanha_destino, espelho.campanha],
+        pecaSinais: [nome, p?.meio, p?.produto, p?.molde_nome],
+      });
+      if (!cruz.ok) return { erro: cruz.erro, detalhe: cruz.detalhe };
+    }
     if (!semMoldeConj && !molde)
       return {
         erro: "payload incompleto (molde_external_id, campanha_destino_external_id, nome_novo)",
@@ -2073,6 +2122,24 @@ export async function montarCriacao(
     const pecaNovaSemMolde = !creativeMolde && !!(videoNovo || imagemNova || temPedidoCarrossel);
     if (!adset || !nome)
       return { erro: "payload incompleto (conjunto_destino_external_id, nome_novo)" };
+    if (companyId && companyId === COMPANY_COHAPM) {
+      const espelhoAd = await nomesDestinoEspelhoCohapm({
+        companyId,
+        conjuntoExternalId: adset,
+        campanhaExternalId: String(p?.campanha_destino_external_id ?? "").trim() || undefined,
+      });
+      const cruzAd = recusarCruzamentoLinhaProduto({
+        estruturaNomes: [
+          p?.campanha_destino_nome,
+          p?.conjunto_destino_nome,
+          p?.campanha_destino,
+          espelhoAd.campanha,
+          espelhoAd.conjunto,
+        ],
+        pecaSinais: [nome, p?.drive_file_id, p?.legenda, p?.meio, p?.produto, p?.pasta],
+      });
+      if (!cruzAd.ok) return { erro: cruzAd.erro, detalhe: cruzAd.detalhe };
+    }
     if (!creativeMolde && !pecaNovaSemMolde)
       return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
 
@@ -3374,7 +3441,7 @@ Deno.serve(async (req) => {
       const vdAtual = specAtual?.video_data ?? {};
       const videoId = String(item.video_id ?? vdAtual?.video_id ?? "").trim();
       const message = String(
-        item.message ?? vdAtual?.message ?? creativeAtual?.body ?? "",
+        (item as { message?: string }).message ?? vdAtual?.message ?? creativeAtual?.body ?? "",
       ).trim();
       const imageUrl = String(vdAtual?.image_url ?? vdAtual?.image_hash ?? "").trim();
       if (!videoId) {

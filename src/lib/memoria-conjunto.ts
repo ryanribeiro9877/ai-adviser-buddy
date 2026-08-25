@@ -315,3 +315,97 @@ export function extrairSlateDaFala(texto: string): PecaSlate[] {
 export function pecasDoConjunto(pecas: PecaSlate[], n: number): PecaSlate[] {
   return pecas.filter((p) => p.conjunto === n);
 }
+
+/** Linhas de produto que compartilham a empresa COHAPM. Nao misturar. */
+export type LinhaProdutoCohapm = "juridico" | "la_felicita";
+export const ERRO_CRUZAMENTO_LINHA_PRODUTO = "cruzamento_linha_produto";
+
+export function classificarLinhaProdutoCohapm(
+  ...sinais: Array<string | null | undefined>
+): LinhaProdutoCohapm | null {
+  const n = sinais
+    .filter((s) => s != null && String(s).trim())
+    .map((s) => deacc(String(s)).toLowerCase())
+    .join(" || ");
+  if (!n.trim()) return null;
+
+  const lf =
+    /la[\s_-]*felicita/.test(n) ||
+    /lafelicita/.test(n) ||
+    /_laf_/.test(n) ||
+    /(^|[^a-z0-9])laf([^a-z0-9]|$)/.test(n) ||
+    /\blaf_/.test(n) ||
+    /(^|[^a-z0-9])lf([^a-z0-9]|$)/.test(n) ||
+    /_lf_/.test(n) ||
+    /\bimovel\b/.test(n) ||
+    /\bresidencial\b/.test(n);
+
+  const jur =
+    /juridico/.test(n) ||
+    /(^|[^a-z0-9])jur([^a-z0-9]|$)/.test(n) ||
+    /_jur_/.test(n) ||
+    /\bjur_/.test(n) ||
+    /cj_inss/.test(n) ||
+    /coop_social_juridico/.test(n);
+
+  if (lf && jur) return null;
+  if (lf) return "la_felicita";
+  if (jur) return "juridico";
+  return null;
+}
+
+function rotuloLinhaProduto(l: LinhaProdutoCohapm): string {
+  return l === "la_felicita" ? "La Felicità" : "Jurídico";
+}
+
+function hintDestinoLinha(l: LinhaProdutoCohapm): string {
+  return l === "la_felicita"
+    ? "a campanha COHAPM_LAFELICITA_* (ou equivalente) e o conjunto La Felicità do mesmo CONJ.N — nunca COHAPM_JURIDICO_* / JURIDICO_CONJ"
+    : "a campanha COHAPM_JURIDICO_* e o conjunto JURIDICO_CONJ.* — nunca LAFELICITA / LAF / FELICITA";
+}
+
+export type RecusaCruzamentoLinhaProduto =
+  | { ok: true; dest: LinhaProdutoCohapm | null; peca: LinhaProdutoCohapm | null }
+  | {
+    ok: false;
+    erro: typeof ERRO_CRUZAMENTO_LINHA_PRODUTO;
+    detalhe: string;
+    dest: LinhaProdutoCohapm;
+    peca: LinhaProdutoCohapm;
+  };
+
+export function recusarCruzamentoLinhaProduto(opts: {
+  estruturaNomes: Array<string | null | undefined>;
+  pecaSinais: Array<string | null | undefined>;
+}): RecusaCruzamentoLinhaProduto {
+  const dest = classificarLinhaProdutoCohapm(...opts.estruturaNomes);
+  const peca = classificarLinhaProdutoCohapm(...opts.pecaSinais);
+  if (!dest || !peca || dest === peca) return { ok: true, dest, peca };
+  const destTxt = opts.estruturaNomes.map((s) => String(s ?? "").trim()).filter(Boolean).join(" / ") ||
+    "(sem nome)";
+  const pecaTxt = opts.pecaSinais.map((s) => String(s ?? "").trim()).filter(Boolean).slice(0, 6).join(" / ") ||
+    "(sem nome)";
+  return {
+    ok: false,
+    erro: ERRO_CRUZAMENTO_LINHA_PRODUTO,
+    dest,
+    peca,
+    detalhe:
+      `ERRO GRAVE (nao e aviso): peca de ${rotuloLinhaProduto(peca)} no destino de ${rotuloLinhaProduto(dest)}. ` +
+      `Misturar as duas linhas da COHAPM e falta operacional grave — o card NAO pode ser emitido nem aplicado no Gerenciador. ` +
+      `Destino escolhido: ${destTxt}. Peca/slate: ${pecaTxt}. ` +
+      `Reemitir SOMENTE em ${hintDestinoLinha(peca)}.`,
+  };
+}
+
+export function escolherConjuntosDaMesmaLinha<T extends { name?: string | null }>(
+  hits: T[],
+  pecaSinais: Array<string | null | undefined>,
+  campanhaDe: (row: T) => string | null | undefined,
+): T[] {
+  const peca = classificarLinhaProdutoCohapm(...pecaSinais);
+  if (!peca) return hits;
+  return hits.filter((h) =>
+    classificarLinhaProdutoCohapm(String(h.name ?? ""), campanhaDe(h)) === peca
+  );
+}

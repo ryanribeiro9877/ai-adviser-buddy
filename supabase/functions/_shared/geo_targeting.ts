@@ -518,7 +518,7 @@ export async function buscarGeolocalizacoesMeta(opts: {
         if (encontrados.length) {
           encontradosAll = encontrados;
           // Se ja tem match Salvador–BA, para; senao tenta proxima variante.
-          if (!exigirSsa || encontrados.some((e) => ehLocalSalvadorBA(e))) break;
+          if (!exigirSsa || encontrados.some((e: (typeof encontrados)[number]) => ehLocalSalvadorBA(e))) break;
         }
       } catch (e) {
         lastErro = String((e as Error)?.message ?? e).slice(0, 200);
