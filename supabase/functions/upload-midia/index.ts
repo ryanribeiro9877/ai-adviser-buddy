@@ -1,5 +1,9 @@
-// supabase/functions/upload-midia/index.ts (v5.2)
+// supabase/functions/upload-midia/index.ts (v6)
 // =============================================================================
+// v6 (25/08/2026) - VIDEO ATE 4 GB: envio em partes Graph (upload_phase start/
+//   transfer/finish) + Range no Drive. A edge nao baixa o arquivo inteiro.
+//   Sessao persistida em media_uploads (status=enviando) para retomar apos o wall.
+//   Recusa por tamanho SO acima de 4 GB. Imagem segue 8 MB.
 // v5.2 (21/08/2026) - status_video: token Ads POR EMPRESA (company_id/company ou
 //   resolve via media_uploads). Sem isso COHAPM lia com token Legal → Graph 400
 //   (#100) e o portao de emissao de card falhava fechado. Leitura: GET /{id}?fields=id,status.
@@ -39,9 +43,8 @@
 //   5. dry_run=true -> registra a intencao e NAO chama a Meta (ensaio)
 //   6. dedup: (drive_file_id, conta) ja enviado -> devolve o hash existente, nao reenvia
 //
-// LIMITES DECLARADOS v1: imagem ate 8 MB (base64 no corpo p/ adimages);
-// video ate 45 MB em envio unico (multipart 'source' p/ advideos) - acima disso a
-// recusa explica que o envio em partes e v2. Video grande nao e "erro silencioso".
+// LIMITES: imagem ate 8 MB (base64 no corpo p/ adimages);
+// video ate 4 GB (biblioteca Meta), sempre em partes. Nao recusar 50 MB–4 GB.
 // =============================================================================
 
 // esm.sh, nao npm:, para casar com _shared/mcp_auth.ts e com as outras 22 edges
@@ -53,6 +56,20 @@ import {
   redactAllMetaTokens,
   tokenAdsPorCompanyId,
 } from "../_shared/meta_company_tokens.ts";
+import {
+  MAX_IMG_BYTES,
+  MAX_VIDEO_BYTES,
+  VIDEO_WALL_MS,
+  driveRangeHeader,
+  faixaAEnviar,
+  limitesUploadCopy,
+  nextPhase,
+  parseGraphOffsets,
+  recusaTamanhoImagem,
+  recusaTamanhoVideo,
+  sessaoDeLinha,
+  type VideoSessao,
+} from "../_shared/meta_video_chunked.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -60,8 +77,7 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 let META_ADS_TOKEN = "";
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
 const GRAPH = "https://graph.facebook.com/v21.0";
-const MAX_IMG_BYTES = 8 * 1024 * 1024;
-const MAX_VIDEO_BYTES = 45 * 1024 * 1024;
+const GRAPH_VIDEO = "https://graph-video.facebook.com/v21.0";
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 const json = (b: unknown, s = 200) =>
@@ -142,6 +158,24 @@ async function driveBaixar(fileId: string): Promise<Uint8Array> {
   return new Uint8Array(await r.arrayBuffer());
 }
 
+async function driveBaixarFaixa(fileId: string, start: number, endExclusive: number): Promise<Uint8Array> {
+  const esperado = endExclusive - start;
+  const t = await driveToken();
+  const r = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
+    { headers: { authorization: `Bearer ${t}`, range: driveRangeHeader(start, endExclusive) } },
+  );
+  const cl = Number(r.headers.get("content-length") ?? NaN);
+  if (r.status === 200 && Number.isFinite(cl) && cl > esperado + 1024) {
+    try { await r.body?.cancel(); } catch { /* */ }
+    throw new Error("Drive ignorou Range e devolveu o arquivo inteiro — abortado para nao estourar memoria");
+  }
+  if (r.status !== 206 && r.status !== 200) throw new Error(`Drive range ${r.status}`);
+  const bytes = new Uint8Array(await r.arrayBuffer());
+  if (!bytes.length) throw new Error(`Drive range vazio em ${start}-${endExclusive}`);
+  return bytes;
+}
+
 // ---------------- Meta ----------------
 function b64(u: Uint8Array): string {
   let s = ""; const CH = 0x8000;
@@ -157,16 +191,177 @@ async function metaUploadImagem(account: string, nome: string, bytes: Uint8Array
   if (!img?.hash) throw new Error(`adimages sem hash: ${JSON.stringify(j).slice(0, 220)}`);
   return String(img.hash);
 }
-async function metaUploadVideo(account: string, nome: string, bytes: Uint8Array, mime: string) {
+
+async function graphAdvideos(account: string, fd: FormData): Promise<any> {
+  const r = await fetch(`${GRAPH_VIDEO}/${account}/advideos`, { method: "POST", body: fd });
+  const j = await r.json();
+  if (!r.ok || j?.error) throw new Error(`advideos ${r.status}: ${JSON.stringify(j).slice(0, 280)}`);
+  return j;
+}
+
+async function metaVideoStart(account: string, tamanho: number): Promise<VideoSessao> {
   const fd = new FormData();
+  fd.set("upload_phase", "start");
+  fd.set("file_size", String(tamanho));
+  fd.set("access_token", META_ADS_TOKEN);
+  const j = await graphAdvideos(account, fd);
+  const off = parseGraphOffsets(j);
+  const session_id = String(j.upload_session_id ?? "").trim();
+  const video_id = String(j.video_id ?? j.id ?? "").trim();
+  if (!session_id) throw new Error(`advideos start sem upload_session_id: ${JSON.stringify(j).slice(0, 200)}`);
+  return { session_id, video_id, start: off.start, end: off.end };
+}
+
+async function metaVideoTransfer(
+  account: string,
+  sessao: VideoSessao,
+  chunk: Uint8Array,
+  nome: string,
+  mime: string,
+): Promise<VideoSessao> {
+  const fd = new FormData();
+  fd.set("upload_phase", "transfer");
+  fd.set("upload_session_id", sessao.session_id);
+  fd.set("start_offset", String(sessao.start));
+  fd.set("access_token", META_ADS_TOKEN);
+  fd.set("video_file_chunk", new Blob([chunk as Uint8Array<ArrayBuffer>], { type: mime || "video/mp4" }), nome);
+  const j = await graphAdvideos(account, fd);
+  const off = parseGraphOffsets(j);
+  return {
+    session_id: sessao.session_id,
+    video_id: String(j.video_id ?? sessao.video_id ?? "").trim(),
+    start: off.start,
+    end: off.end,
+  };
+}
+
+async function metaVideoFinish(account: string, sessao: VideoSessao, nome: string): Promise<string> {
+  const fd = new FormData();
+  fd.set("upload_phase", "finish");
+  fd.set("upload_session_id", sessao.session_id);
+  fd.set("title", nome);
   fd.set("name", nome);
   fd.set("access_token", META_ADS_TOKEN);
-  // Cast so para o checador (mesmo motivo de drive-audio-transcribe).
-  fd.set("source", new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mime || "video/mp4" }), nome);
-  const r = await fetch(`${GRAPH}/${account}/advideos`, { method: "POST", body: fd });
-  const j = await r.json();
-  if (!r.ok || !j.id) throw new Error(`advideos ${r.status}: ${JSON.stringify(j).slice(0, 220)}`);
-  return String(j.id);
+  const j = await graphAdvideos(account, fd);
+  const id = String(j.video_id ?? j.id ?? sessao.video_id ?? "").trim();
+  if (!id && j.success !== true) throw new Error(`advideos finish sem video_id: ${JSON.stringify(j).slice(0, 200)}`);
+  return id || sessao.video_id;
+}
+
+type VideoUploadOut =
+  | { ok: true; feito: true; video_id: string }
+  | { ok: true; feito: false; em_andamento: true; sessao: VideoSessao; bytes_enviados: number }
+  | { ok: false; erro: string };
+
+async function gravarSessaoVideo(p: {
+  companyId: string;
+  account: string;
+  fileId: string;
+  nome: string;
+  mime: string;
+  tamanho: number;
+  status: "enviando" | "enviado" | "erro";
+  sessao?: VideoSessao | null;
+  video_id?: string | null;
+  erro?: string | null;
+}) {
+  const enviado = p.status === "enviado";
+  const enviando = p.status === "enviando";
+  await supa.from("media_uploads").upsert({
+    company_id: p.companyId,
+    account_external_id: p.account,
+    drive_file_id: p.fileId,
+    nome: p.nome,
+    mime: p.mime,
+    tamanho_bytes: p.tamanho,
+    tipo: "video",
+    status: p.status,
+    dry_run: false,
+    erro: p.erro ?? null,
+    meta_video_id: enviado ? (p.video_id ?? p.sessao?.video_id ?? null) : null,
+    upload_session_id: enviando ? (p.sessao?.session_id ?? null) : null,
+    upload_video_id: enviando ? (p.sessao?.video_id ?? null) : null,
+    upload_start_offset: enviando ? (p.sessao?.start ?? null) : null,
+    upload_end_offset: enviando ? (p.sessao?.end ?? null) : null,
+    enviado_em: enviado ? new Date().toISOString() : null,
+    criado_por: "upload-midia v6",
+  }, { onConflict: "drive_file_id,account_external_id" });
+}
+
+async function enviarVideoEmPartes(opts: {
+  account: string;
+  fileId: string;
+  nome: string;
+  mime: string;
+  tamanho: number;
+  companyId: string;
+  sessaoExistente?: VideoSessao | null;
+  wallMs?: number;
+  jaReiniciou?: boolean;
+}): Promise<VideoUploadOut> {
+  const wall = opts.wallMs ?? VIDEO_WALL_MS;
+  const t0 = Date.now();
+  let sessao = opts.sessaoExistente ?? null;
+  try {
+    if (!sessao) {
+      sessao = await metaVideoStart(opts.account, opts.tamanho);
+      await gravarSessaoVideo({
+        companyId: opts.companyId, account: opts.account, fileId: opts.fileId,
+        nome: opts.nome, mime: opts.mime, tamanho: opts.tamanho,
+        status: "enviando", sessao,
+      });
+    }
+    while (nextPhase(sessao.start, sessao.end) === "transfer") {
+      if (Date.now() - t0 > wall - 8_000) {
+        await gravarSessaoVideo({
+          companyId: opts.companyId, account: opts.account, fileId: opts.fileId,
+          nome: opts.nome, mime: opts.mime, tamanho: opts.tamanho,
+          status: "enviando", sessao,
+        });
+        return { ok: true, feito: false, em_andamento: true, sessao, bytes_enviados: sessao.start };
+      }
+      const faixa = faixaAEnviar(sessao.start, sessao.end);
+      const chunk = await driveBaixarFaixa(opts.fileId, faixa.start, faixa.end);
+      sessao = await metaVideoTransfer(opts.account, { ...sessao, start: faixa.start, end: faixa.end }, chunk, opts.nome, opts.mime);
+      await gravarSessaoVideo({
+        companyId: opts.companyId, account: opts.account, fileId: opts.fileId,
+        nome: opts.nome, mime: opts.mime, tamanho: opts.tamanho,
+        status: "enviando", sessao,
+      });
+    }
+    const video_id = await metaVideoFinish(opts.account, sessao, opts.nome);
+    await gravarSessaoVideo({
+      companyId: opts.companyId, account: opts.account, fileId: opts.fileId,
+      nome: opts.nome, mime: opts.mime, tamanho: opts.tamanho,
+      status: "enviado", sessao, video_id,
+    });
+    return { ok: true, feito: true, video_id };
+  } catch (e) {
+    const msg = String((e as any)?.message ?? e).slice(0, 400);
+    const sessaoExpirou = /session|offset|upload_phase/i.test(msg) && !!opts.sessaoExistente && !opts.jaReiniciou;
+    if (sessaoExpirou && opts.sessaoExistente) {
+      try {
+        return await enviarVideoEmPartes({ ...opts, sessaoExistente: null, jaReiniciou: true });
+      } catch (e2) {
+        const msg2 = String((e2 as any)?.message ?? e2).slice(0, 400);
+        await gravarSessaoVideo({
+          companyId: opts.companyId, account: opts.account, fileId: opts.fileId,
+          nome: opts.nome, mime: opts.mime, tamanho: opts.tamanho,
+          status: "erro", sessao, erro: msg2,
+        });
+        return { ok: false, erro: msg2 };
+      }
+    }
+    await gravarSessaoVideo({
+      companyId: opts.companyId, account: opts.account, fileId: opts.fileId,
+      nome: opts.nome, mime: opts.mime, tamanho: opts.tamanho,
+      status: sessao ? "enviando" : "erro",
+      sessao,
+      erro: sessao ? `pausa_com_erro: ${msg}` : msg,
+    });
+    if (sessao) return { ok: true, feito: false, em_andamento: true, sessao, bytes_enviados: sessao.start };
+    return { ok: false, erro: msg };
+  }
 }
 
 // ---------------- Handler ----------------
@@ -514,7 +709,7 @@ Deno.serve(async (req) => {
         }
         if (tamanho > MAX_IMG_BYTES) {
           falhas++;
-          const msg = `arquivo excede o limite v1 (${tamanho} bytes)`;
+          const msg = recusaTamanhoImagem(tamanho);
           await supa.from("media_uploads").upsert({
             company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
             nome: meta.name ?? item.nome, mime, tamanho_bytes: tamanho, tipo: "imagem",
@@ -623,21 +818,39 @@ Deno.serve(async (req) => {
       });
     }
 
-    const lote = pendentes.slice(0, slots);
+    const { data: emCurso } = await supa.from("media_uploads")
+      .select("drive_file_id, nome, mime")
+      .eq("company_id", comp.id)
+      .eq("account_external_id", account)
+      .eq("tipo", "video")
+      .eq("status", "enviando");
+    const continuacoes = (emCurso ?? []).map((r: any) => ({
+      drive_file_id: String(r.drive_file_id),
+      nome: String(r.nome ?? r.drive_file_id),
+      mime: String(r.mime ?? "video/mp4"),
+    }));
+    const idsCurso = new Set(continuacoes.map((c) => c.drive_file_id));
+    const lote = [...continuacoes, ...pendentes.filter((p) => !idsCurso.has(p.drive_file_id)).slice(0, slots)];
     const resultados: any[] = [];
     let enviados = 0, dedup = 0, falhas = 0;
 
     for (const item of lote) {
+      const { data: existentePre } = await supa.from("media_uploads")
+        .select("status")
+        .eq("drive_file_id", item.drive_file_id)
+        .eq("account_external_id", account)
+        .maybeSingle();
+      const continuando = existentePre?.status === "enviando";
       const { count: agora } = await supa.from("media_uploads").select("id", { count: "exact", head: true })
         .eq("company_id", comp.id).eq("status", "enviado")
         .gte("enviado_em", new Date(Date.now() - 3600_000).toISOString());
-      if ((agora ?? 0) >= teto) {
+      if (!continuando && (agora ?? 0) >= teto) {
         resultados.push({ drive_file_id: item.drive_file_id, nome: item.nome, status: "parado_pelo_teto" });
         break;
       }
 
       const { data: existente } = await supa.from("media_uploads")
-        .select("id,status,meta_video_id,enviado_em")
+        .select("id,status,meta_video_id,enviado_em,upload_session_id,upload_video_id,upload_start_offset,upload_end_offset")
         .eq("drive_file_id", item.drive_file_id)
         .eq("account_external_id", account)
         .maybeSingle();
@@ -672,28 +885,37 @@ Deno.serve(async (req) => {
         }
         if (tamanho > MAX_VIDEO_BYTES) {
           falhas++;
-          const msg = `arquivo excede o limite v1 (${tamanho} bytes) - envio em partes e v2`;
-          await supa.from("media_uploads").upsert({
-            company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
-            nome: meta.name ?? item.nome, mime, tamanho_bytes: tamanho, tipo: "video",
-            status: "erro", dry_run: false, erro: msg, criado_por: "upload-midia v5.1 escoar_videos",
-          }, { onConflict: "drive_file_id,account_external_id" });
+          const msg = recusaTamanhoVideo(tamanho);
+          await gravarSessaoVideo({
+            companyId: comp.id, account, fileId: item.drive_file_id,
+            nome: meta.name ?? item.nome, mime, tamanho, status: "erro", erro: msg,
+          });
           resultados.push({ drive_file_id: item.drive_file_id, nome: meta.name ?? item.nome, status: "erro", erro: msg });
           continue;
         }
 
-        const bytes = await driveBaixar(item.drive_file_id);
-        const video_id = await metaUploadVideo(account, meta.name ?? item.nome, bytes, mime);
-        await supa.from("media_uploads").upsert({
-          company_id: comp.id, account_external_id: account, drive_file_id: item.drive_file_id,
-          nome: meta.name ?? item.nome, mime, tamanho_bytes: tamanho, tipo: "video",
-          status: "enviado", dry_run: false, meta_video_id: video_id,
-          enviado_em: new Date().toISOString(), criado_por: "upload-midia v5.1 escoar_videos",
-        }, { onConflict: "drive_file_id,account_external_id" });
+        const ret = await enviarVideoEmPartes({
+          account, fileId: item.drive_file_id, nome: meta.name ?? item.nome, mime, tamanho,
+          companyId: comp.id,
+          sessaoExistente: existente?.status === "enviando" ? sessaoDeLinha(existente) : null,
+        });
+        if (!ret.ok) {
+          falhas++;
+          resultados.push({ drive_file_id: item.drive_file_id, nome: meta.name ?? item.nome, status: "erro", erro: ret.erro });
+          continue;
+        }
+        if (!ret.feito) {
+          resultados.push({
+            drive_file_id: item.drive_file_id, nome: meta.name ?? item.nome,
+            status: "enviando", bytes_enviados: ret.bytes_enviados, tamanho_bytes: tamanho,
+            aviso: "sessao Graph persistida; o proximo escoar_videos / upload_midia continua de onde parou",
+          });
+          continue;
+        }
         enviados++;
         resultados.push({
           drive_file_id: item.drive_file_id, nome: meta.name ?? item.nome,
-          status: "enviado", video_id,
+          status: "enviado", video_id: ret.video_id,
           aviso: "id devolvido pela Meta; processamento pode ainda estar em andamento - consulte status_video antes de emitir card",
         });
       } catch (e) {
@@ -751,7 +973,8 @@ Deno.serve(async (req) => {
   };
 
   // dedup: ja subiu antes?
-  const { data: existente } = await supa.from("media_uploads").select("id,status,meta_image_hash,meta_video_id,enviado_em")
+  const { data: existente } = await supa.from("media_uploads")
+    .select("id,status,meta_image_hash,meta_video_id,enviado_em,upload_session_id,upload_video_id,upload_start_offset,upload_end_offset")
     .eq("drive_file_id", fileId).eq("account_external_id", account || "(indefinida)").maybeSingle();
 
   const plano = {
@@ -763,7 +986,8 @@ Deno.serve(async (req) => {
       ? { em: existente.enviado_em, image_hash: existente.meta_image_hash, video_id: existente.meta_video_id,
           nota: "dedup: este arquivo JA esta na biblioteca desta conta - reuso do identificador, nada sera reenviado" }
       : null,
-    limites_v1: `imagem <= ${MAX_IMG_BYTES / 1048576} MB; video <= ${MAX_VIDEO_BYTES / 1048576} MB em envio unico (video maior = envio em partes, v2)`,
+    em_andamento: existente?.status === "enviando" ? sessaoDeLinha(existente) : null,
+    limites_v1: limitesUploadCopy(),
   };
 
   if (acao === "plan") return json({ ok: true, acao: "plan", ...plano, nota: "nada foi enviado - ensaio" });
@@ -775,12 +999,17 @@ Deno.serve(async (req) => {
   if (!travas.conta_definida) return recusa("conta de destino indefinida");
   if (!travas.conta_permitida) return recusa(`conta ${account} fora de contas_permitidas_criacao`);
   if (!travas.tipo_suportado) return recusa(`tipo nao suportado: ${mime}`);
-  if (!travas.tamanho_ok) return recusa(`arquivo excede o limite v1 (${tamanho} bytes)`);
+  if (!travas.tamanho_ok) {
+    return recusa(tipo === "video" ? recusaTamanhoVideo(tamanho) : recusaTamanhoImagem(tamanho));
+  }
 
-  // teto por hora (compartilhado com as demais acoes de escrita)
+  // teto por hora (compartilhado com as demais acoes de escrita).
+  // Continuacao de sessao enviando NAO consome slot novo.
   const { count: naHora } = await supa.from("media_uploads").select("id", { count: "exact", head: true })
     .eq("company_id", comp.id).eq("status", "enviado").gte("enviado_em", new Date(Date.now() - 3600_000).toISOString());
-  if ((naHora ?? 0) >= (ex.max_actions_per_hour ?? 5)) return recusa(`teto por hora atingido (${ex.max_actions_per_hour})`);
+  if (existente?.status !== "enviando" && (naHora ?? 0) >= (ex.max_actions_per_hour ?? 5)) {
+    return recusa(`teto por hora atingido (${ex.max_actions_per_hour})`);
+  }
 
   if (existente?.status === "enviado") {
     let status_processamento: string | null = null;
@@ -821,46 +1050,61 @@ Deno.serve(async (req) => {
 
   // envio real
   try {
-    const bytes = await driveBaixar(fileId);
-    let image_hash: string | null = null, video_id: string | null = null;
-    if (tipo === "imagem") image_hash = await metaUploadImagem(account, meta.name, bytes);
-    else video_id = await metaUploadVideo(account, meta.name, bytes, mime);
-    await supa.from("media_uploads").upsert({
-      company_id: comp.id, account_external_id: account, drive_file_id: fileId,
-      nome: meta.name, mime, tamanho_bytes: tamanho, tipo, status: "enviado", dry_run: false,
-      meta_image_hash: image_hash, meta_video_id: video_id, enviado_em: new Date().toISOString(),
-      criado_por: "upload-midia v1",
-    }, { onConflict: "drive_file_id,account_external_id" });
-
-    let status_processamento: string | null = null;
-    let pronto: boolean | null = null;
-    if (video_id) {
+    if (tipo === "video") {
+      const ret = await enviarVideoEmPartes({
+        account, fileId, nome: meta.name, mime, tamanho, companyId: comp.id,
+        sessaoExistente: existente?.status === "enviando" ? sessaoDeLinha(existente) : null,
+      });
+      if (!ret.ok) return json({ ok: false, error: ret.erro }, 502);
+      if (!ret.feito) {
+        return json({
+          ok: true, acao: "executar", enviado: false, em_andamento: true,
+          video_id: ret.sessao.video_id || null,
+          bytes_enviados: ret.bytes_enviados, tamanho_bytes: tamanho,
+          upload_session_id: ret.sessao.session_id,
+          proximo_passo: "chame upload_midia de novo com o mesmo drive_file_id — a sessao continua",
+          nota: `Envio em partes pausado no wall da edge (${ret.bytes_enviados}/${tamanho} bytes). Nao e recusa de tamanho. Chame de novo.`,
+        });
+      }
+      let status_processamento: string | null = null;
+      let pronto: boolean | null = null;
       try {
         const sr = await fetch(
-          `${GRAPH}/${encodeURIComponent(video_id)}?fields=id,status` +
+          `${GRAPH}/${encodeURIComponent(ret.video_id)}?fields=id,status` +
             `&access_token=${encodeURIComponent(META_ADS_TOKEN)}`,
         );
         const sj = await sr.json();
         status_processamento = String(sj?.status?.video_status ?? "").trim() || null;
         pronto = status_processamento === "ready";
-      } catch { /* status e informativo; falha de leitura nao desfaz o upload */ }
+      } catch { /* status e informativo */ }
+      return json({
+        ok: true, acao: "executar", enviado: true, image_hash: null, video_id: ret.video_id,
+        status_processamento, pronto,
+        nota: pronto === true
+          ? "video na biblioteca e pronto para uso em anuncio"
+          : "video na biblioteca - id existe, mas processamento pode ainda estar em andamento. Consulte status_video antes de emitir card; anuncio com video processando falha na Meta.",
+      });
     }
 
+    const bytes = await driveBaixar(fileId);
+    const image_hash = await metaUploadImagem(account, meta.name, bytes);
+    await supa.from("media_uploads").upsert({
+      company_id: comp.id, account_external_id: account, drive_file_id: fileId,
+      nome: meta.name, mime, tamanho_bytes: tamanho, tipo, status: "enviado", dry_run: false,
+      meta_image_hash: image_hash, meta_video_id: null, enviado_em: new Date().toISOString(),
+      criado_por: "upload-midia v6",
+    }, { onConflict: "drive_file_id,account_external_id" });
     return json({
-      ok: true, acao: "executar", enviado: true, image_hash, video_id,
-      status_processamento, pronto,
-      nota: video_id
-        ? (pronto === true
-          ? "video na biblioteca e pronto para uso em anuncio"
-          : "video na biblioteca - id existe, mas processamento pode ainda estar em andamento. Consulte status_video antes de emitir card; anuncio com video processando falha na Meta.")
-        : "midia na biblioteca da conta - use image_hash/video_id ao criar o anuncio",
+      ok: true, acao: "executar", enviado: true, image_hash, video_id: null,
+      status_processamento: null, pronto: true,
+      nota: "midia na biblioteca da conta - use image_hash ao criar o anuncio",
     });
   } catch (e) {
     const msg = String((e as any)?.message ?? e).slice(0, 400);
     await supa.from("media_uploads").upsert({
       company_id: comp.id, account_external_id: account, drive_file_id: fileId,
       nome: meta.name, mime, tamanho_bytes: tamanho, tipo, status: "erro", dry_run: false, erro: msg,
-      criado_por: "upload-midia v1",
+      criado_por: "upload-midia v6",
     }, { onConflict: "drive_file_id,account_external_id" });
     return json({ ok: false, error: msg }, 502);
   }

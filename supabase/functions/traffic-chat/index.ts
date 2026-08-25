@@ -1,4 +1,9 @@
-// supabase/functions/traffic-chat/index.ts (v28.67)
+// supabase/functions/traffic-chat/index.ts (v28.69)
+// v28.69 (25/08/2026) - VIDEO ATE 4 GB: o carregador envia em partes. Teto operacional
+//   = teto da Meta (4 GB). Nao recusar 50 MB–4 GB. Se em_andamento, chamar de novo.
+// v28.68 (25/08/2026) - TETO DE UPLOAD: o agente citava 4 GB (Ads Guide) como se fosse o
+//   limite que recusa o arquivo. O carregador recusa video > 45 MB (envio unico). Prompt,
+//   descricao da tool e recusa agora separam teto operacional vs teto da Meta.
 // v28.67 (25/08/2026) - MENSAGEM NOVA = COLETA NOVA no Drive. Pedido de inventariar/
 //   distribuir Reels/Videos (La Felicita) nao pode usar bloco [RETORNOS...] nem
 //   get_criativos_conteudo (anuncios ja no ar) como substituto. Recorte meio +
@@ -721,7 +726,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.67";
+const VERSAO = "chat-v28.69";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const REPLY_CONTINUANDO =
@@ -3890,14 +3895,18 @@ async function t_upload_midia(companyId: string, driveFileId: string, mcpKey: st
     drive_file_id: driveFileId,
   };
   if (accountId) body.account_id = accountId;
-  const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
-    body: JSON.stringify(body),
-  });
-  const t = await r.text();
-  let j: any; try { j = JSON.parse(t); } catch { return { ok: false, erro: `upload-midia falhou (${r.status}): ${t.slice(0, 200)}` }; }
-  return j;
+  let last: any = null;
+  for (let i = 0; i < 4; i++) {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+      body: JSON.stringify(body),
+    });
+    const t = await r.text();
+    try { last = JSON.parse(t); } catch { return { ok: false, erro: `upload-midia falhou (${r.status}): ${t.slice(0, 200)}` }; }
+    if (!last?.em_andamento) return last;
+  }
+  return last;
 }
 
 // Auto-resolucao de LEITURA (doutrina Ryan 11/08): estado de conjunto ausente/desatualizado e uma
@@ -4030,7 +4039,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido. Pode vir recortado por meio/formatos do pedido. USE quando o gestor pedir para classificar pecas da pasta. Se total_analisados < inventario, ha pecas novas sem analise.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, data — SEM thumbnail. Recorte com meio=la_felicita|juridico e formatos Reels/Videos. Use para LISTAR o que existe na pasta. NAO substitui por get_criativos_conteudo (anuncios ja no ar). LIMITES: nao le conteudo interno de video.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA do acervo do Drive. Com recorte (meio/formatos ou pedido Reels+Videos), inventario_global e o RECORTE; o total da empresa fica em inventario_global_empresa. NAO cite o total da empresa como videos La Felicita. Em lote/mix: chame SEM produto primeiro. Quando o slate JA tem drive_file_ids, passe-os.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional. Em lote/mix deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true." }, drive_file_ids: { type: "array", items: { type: "string" }, description: "Opcional. Recorte: so estes arquivos (slate conhecido)." }, meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
-  { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
+  { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive (imagem ou video) para a biblioteca da conta Meta (Graph adimages/advideos) e grava meta_image_hash ou meta_video_id em media_uploads. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false e o gestor quiser anunciar essa peca. NAO cria anuncio, NAO emite card. Respeita flag upload_midia e teto de 5 acoes/hora. Idempotente: se ja enviou, devolve o id existente sem reenviar. TETO = biblioteca Meta: video <= 4 GB (4294967296 bytes), imagem <= 8 MB. Este carregador envia video em partes e NAO recusa arquivo abaixo de 4 GB. Se o retorno vier em_andamento=true, chame upload_midia de novo com o MESMO drive_file_id. Se o gestor perguntar o tamanho maximo PARA CARREGAR AQUI, a resposta e 4 GB. VIDEO: o id pode existir antes do processamento terminar - o retorno traz status_processamento/pronto; se pronto!=true, NAO emita o card ainda; diga o estado real e tente de novo depois (nao invente prazo). Off-brand/reprovadas: so suba se o gestor pedir explicitamente essa peca.", parameters: { type: "object", properties: { drive_file_id: { type: "string", description: "Id do arquivo no Drive (vem de get_acervo_para_anuncio)." }, account_id: { type: "string", description: "Opcional; default = unica conta permitida da empresa." } }, required: ["drive_file_id"] } } },
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
   { type: "function", function: { name: "alterar_categoria_especial", description: "Emite CARD DE APROVACAO para alterar ou REMOVER special_ad_categories de uma campanha JA CRIADA. Passe special_ad_categories=[] para remover. NAO diga que falta ferramenta. Leia antes com get_campaign_detail ou auditar_compliance_financeira.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } }, categorias_atuais: { type: "array", items: { type: "string" } }, justificativa: { type: "string" } }, required: ["campanha_atual", "special_ad_categories"] } } },
@@ -4481,15 +4490,30 @@ async function runTool(name: string, args: any, ctx: any) {
         const out = await t_upload_midia(ctx.companyId, dfid, ctx.mcpKey, accountId);
         // Traduz para o agente: o que fazer a seguir, sem jargao de edge.
         if (out?.recusado) {
+          const motivo = String(out.motivo ?? "");
           return {
             ok: false,
             recusado: true,
-            motivo: out.motivo,
-            mensagem: `Upload recusado: ${out.motivo}. Nao invente o id; resolva a trava (flag/teto/conta) ou aguarde a proxima janela do teto.`,
+            motivo,
+            limites_v1: out.limites_v1 ?? null,
+            teto_video_bytes: 4294967296,
+            teto_video_gb: 4,
+            mensagem: `Upload recusado: ${motivo}. Video so e recusado por tamanho acima de 4 GB. Nao invente o id; resolva a trava (flag/teto/conta) ou aguarde a proxima janela do teto.`,
           };
         }
         if (out?.error || out?.erro) {
           return { ok: false, erro: out.error ?? out.erro, mensagem: "Upload falhou. Relate o erro exato ao gestor." };
+        }
+        if (out?.em_andamento) {
+          return {
+            ok: true,
+            em_andamento: true,
+            enviado: false,
+            drive_file_id: dfid,
+            bytes_enviados: out.bytes_enviados ?? null,
+            tamanho_bytes: out.tamanho_bytes ?? null,
+            mensagem: "Upload em partes ainda nao terminou. Chame upload_midia de novo com o MESMO drive_file_id. NAO recuse por tamanho — o teto e 4 GB.",
+          };
         }
         return {
           ok: true,
@@ -4624,6 +4648,9 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
   (Videos/Educacao financeira/Capa) = inventariar sempre; (6) Cards = mecanismo instrucional
   "leia a legenda", nao imagem generica; (7) complemente com get_drive_criativos se precisar.
   Se na_biblioteca_da_meta=false, upload_midia(drive_file_id). Video: so card com status ready.
+  TETO DE UPLOAD = biblioteca Meta: video ate 4 GB, imagem ate 8 MB. Envio em partes.
+  NAO recuse video de 50 MB–4 GB. Se em_andamento, chame upload_midia de novo (mesmo id).
+  Se o gestor perguntar o tamanho maximo para carregar aqui, a resposta e 4 GB.
 - SLATE DO GESTOR (anti-alucinacao, 20/08/2026): quando o gestor definir um lote (ex. "3 videos
   + 1 carrossel + 1 card"), ESSE e o unico conjunto valido nesta conversa. Repita tipos+nomes
   antes de auditar ou emitir. PROIBIDO trocar por outro conjunto (ex. "5 videos 22-27" so porque

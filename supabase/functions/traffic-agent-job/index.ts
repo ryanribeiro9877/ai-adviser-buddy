@@ -1,4 +1,6 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.4)
+// supabase/functions/traffic-agent-job/index.ts (v4.6)
+// v4.6 (25/08/2026) - VIDEO ATE 4 GB: envio em partes; teto operacional = Meta.
+// v4.5 (25/08/2026) - TETO DE UPLOAD: video operacional 45 MB (nao 4 GB da Ads Guide).
 // v4.4 (25/08/2026) - DRIVE NAO E OVERVIEW: "analise completa de criativos" das pastas
 //   Reels/Videos (La Felicita) caia no plano magro desempenho+criativos+alertas. O
 //   especialista `criativos` lia anuncios JA NO AR e o job pedia o inventario ao gestor.
@@ -1217,23 +1219,34 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
           drive_file_id: dfid,
         };
         if (String(args?.account_id ?? "").trim()) body.account_id = String(args.account_id).trim();
-        const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
-          method: "POST",
-          headers: { "content-type": "application/json", "x-mcp-key": ctx.mcpKey },
-          body: JSON.stringify(body),
-        });
-        const t = await r.text();
-        let j: any; try { j = JSON.parse(t); } catch { return { erro: `upload-midia falhou (${r.status})` }; }
+        let j: any = null;
+        for (let i = 0; i < 4; i++) {
+          const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-mcp-key": ctx.mcpKey },
+            body: JSON.stringify(body),
+          });
+          const t = await r.text();
+          try { j = JSON.parse(t); } catch { return { erro: `upload-midia falhou (${r.status})` }; }
+          if (!j?.em_andamento) break;
+        }
         return {
           ok: !j?.recusado && !j?.error && !j?.erro,
           dedup: !!j?.dedup,
+          em_andamento: !!j?.em_andamento,
           meta_video_id: j?.video_id ?? null,
           meta_image_hash: j?.image_hash ?? null,
           status_processamento: j?.status_processamento ?? null,
           pronto: j?.pronto ?? (j?.image_hash ? true : null),
           recusado: j?.recusado ?? false,
           motivo: j?.motivo ?? j?.error ?? j?.erro ?? null,
-          nota: j?.nota ?? null,
+          limites_v1: j?.limites_v1 ?? null,
+          teto_video_bytes: 4294967296,
+          teto_video_gb: 4,
+          bytes_enviados: j?.bytes_enviados ?? null,
+          nota: j?.em_andamento
+            ? "Envio em partes pausado. Chame upload_midia de novo com o mesmo drive_file_id. Teto e 4 GB."
+            : (j?.nota ?? null),
         };
       }
       case "check_compliance": return await t_check_compliance(ctx.companyId, String(args?.legenda ?? "").trim(), ctx.mcpKey);
@@ -1250,7 +1263,7 @@ const DEF: Record<string, any> = {
   get_analise_visual_drive: { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Leitura instantanea - nao repete a visao. Se total_analisados < inventario, pecas novas ainda nao passaram pela visao: declare, nao invente.", parameters: { type: "object", properties: {} } } },
   get_drive_criativos: { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, tamanho, data de cada arquivo, com resumo por formato e por eixo. SEM thumbnail (estoura o teto). Pode vir recortado por meio=la_felicita|juridico e formatos Reels/Videos. Pode vir truncado: leia aviso_corte e nunca trate item omitido como inexistente. LIMITE: video e analisado por nome+caminho, nao pelo conteudo interno.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"], description: "Recorte de marca/pasta monitorada." }, formatos: { type: "array", items: { type: "string" }, description: "Ex.: Reels, Videos. Ignora Adesivo/Brutos/Cards." } } } } },
   get_acervo_para_anuncio: { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA do acervo Drive. Devolve inventario_global do RECORTE quando meio/formatos (ou o pedido) restringem. inventario_global_empresa e o total da empresa - NAO cite como videos La Felicita. Em lote/mix chame SEM produto primeiro. apta=true so = pronta pra publicar agora; NAO use para afirmar escassez. NAO use get_criativos_conteudo.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional; em lote deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true (leitura total)." }, meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
-  upload_midia: { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive para a biblioteca Meta (adimages/advideos) e grava meta_image_hash ou meta_video_id. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false. NAO cria anuncio. Respeita flag e teto 5/hora. Idempotente. Video: so considere pronta se pronto=true.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, account_id: { type: "string" } }, required: ["drive_file_id"] } } },
+  upload_midia: { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive para a biblioteca Meta (adimages/advideos) e grava meta_image_hash ou meta_video_id. USE quando get_acervo_para_anuncio mostrar na_biblioteca_da_meta=false. NAO cria anuncio. Respeita flag e teto 5/hora. Idempotente. TETO = Meta: video <= 4 GB, imagem <= 8 MB. Envio em partes; se em_andamento, chame de novo com o mesmo drive_file_id. Video: so considere pronta se pronto=true.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, account_id: { type: "string" } }, required: ["drive_file_id"] } } },
   get_overview: { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real), gasto/resultados 7d, dias_com_dado.", parameters: { type: "object", properties: {} } } },
   get_alerts: { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema.", parameters: { type: "object", properties: {} } } },
   get_recommendations: { type: "function", function: { name: "get_recommendations", description: "FILA INTERNA de custo de midia (nao e badge Ads Manager).", parameters: { type: "object", properties: {} } } },
@@ -2448,7 +2461,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.4";
+  tel.versao = "job-v4.6";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
