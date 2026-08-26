@@ -17,7 +17,7 @@ const TITULO_POR_ACAO: Record<string, string> = {
   alterar_orcamento: "Card de alterar orçamento",
   renomear_campanha: "Card de renomear campanha",
   alterar_categoria_especial_campanha: "Card de alterar categoria especial",
-  ajustar_posicionamentos_do_conjunto: "Card de ajustar posicionamentos",
+  vincular_instagram_dos_anuncios: "Card de vincular Instagram",
   registrar_veredito_peca: "Card de veredito de compliance",
 };
 
@@ -93,6 +93,9 @@ export function previaDoCardAprovacao(
   }
   if (acao === "pausar_criativo" || acao === "ativar_criativo" || acao === "escalar_criativo") {
     return { criativo: campo(payload, "target_name") ?? criativo ?? undefined };
+  }
+  if (acao === "vincular_instagram_dos_anuncios") {
+    return { campanha: campo(payload, "campanha_destino_nome", "target_name") ?? campanha ?? undefined };
   }
   return {
     campanha: campanha ?? undefined,

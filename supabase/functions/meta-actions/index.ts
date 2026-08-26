@@ -1,5 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.51)
-// v5.51 (25/08/2026) - HARD BLOCK CONJ.N: peca/slate CONJ.1 nao aplica em CONJ.4.
+// supabase/functions/meta-actions/index.ts (v5.52)
+// v5.52 (26/08/2026) - vincular_instagram_dos_anuncios: novo adcreative + update_ad
+//   para @cohapm na campanha La Felicità em trabalho (ACTIVE+PAUSED).
 // v5.50 (25/08/2026) - HARD BLOCK cruzamento Juridico × La Felicità no apply (nao emite
 //   peca LAF em JURIDICO_CONJ e o inverso). Recusa antes da Graph.
 // v5.49 (24/08/2026) - recusa orcamento em centavos-como-reais; modo corrigir_orcamento_adsets
@@ -352,6 +353,13 @@ import {
   SEM_IDENTIDADE_INSTAGRAM,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
+import {
+  criarGraphClient,
+  HANDLE_COHAPM_OFICIAL,
+  listarAnunciosInstagramDaCampanha,
+  recusarCampanhaForaEscopoIg,
+  relincarInstagramNoAnuncio,
+} from "../_shared/instagram_anuncios.ts";
 import {
   ehFlagSemMolde,
   ehNomeCompostoEstruturado,
@@ -4451,6 +4459,151 @@ Deno.serve(async (req) => {
         reconciliacao_estado: reconciliacao?.estado ?? null,
         reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
         adcreative_orfao: !sucesso && creativeCriado ? creativeCriado : null,
+      });
+      continue;
+    }
+
+    if (acao === "vincular_instagram_dos_anuncios") {
+      const campNome = String(
+        r.payload?.campanha_destino_nome ?? r.payload?.target_name ?? "",
+      ).trim();
+      const escopo = recusarCampanhaForaEscopoIg(campNome);
+      if (!escopo.ok) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: escopo.erro,
+          detalhe: escopo.detalhe,
+          acao,
+        });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo: escopo.erro,
+          detalhe: escopo.detalhe,
+        });
+        continue;
+      }
+      const campExt = String(
+        r.payload?.campanha_external_id ?? r.payload?.target_external_id ?? "",
+      ).trim();
+      let accountId = String(r.payload?.conta_destino ?? "").replace(/^act_/i, "");
+      if (!accountId || !campExt) {
+        const { data: campRow } = await supa
+          .from("campaigns")
+          .select("external_id,external_account_id,name")
+          .eq("company_id", r.company_id)
+          .eq("external_id", campExt || "0")
+          .maybeSingle();
+        accountId = String((campRow as any)?.external_account_id ?? "").replace(/^act_/i, "");
+      }
+      if (!campExt || !accountId) {
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "falha",
+          motivo: "campanha_external_id ou conta_destino ausente",
+        });
+        continue;
+      }
+      const { data: cfgIg } = await supa
+        .from("meta_execution_config")
+        .select("page_id,instagram_identity_page_id")
+        .eq("company_id", r.company_id)
+        .maybeSingle();
+      const pageId = String(
+        (cfgIg as any)?.page_id ?? (cfgIg as any)?.instagram_identity_page_id ?? "",
+      ).trim() || null;
+      const destId = String(r.payload?.instagram_destino_id ?? "").trim();
+      const destHandle = String(r.payload?.instagram_destino_handle ?? `@${HANDLE_COHAPM_OFICIAL}`);
+      const identPayload = destId
+        ? {
+            encontrada: true as const,
+            instagram_actor_id: destId,
+            instagram_handle: destHandle,
+            fonte: "config_empresa" as const,
+            procedencia: "payload do card",
+            vinculo_pagina_confirmado: true as boolean | null,
+          }
+        : await resolverIdentidadeInstagram(String(r.company_id), "", r.payload);
+      if (!identPayload.encontrada || !identPayload.instagram_actor_id) {
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "falha",
+          motivo: "instagram_destino_ausente",
+        });
+        continue;
+      }
+      const gIg = criarGraphClient(TOKEN);
+      const { data: setsIg } = await supa
+        .from("ad_sets")
+        .select("name,external_id")
+        .eq("company_id", r.company_id);
+      const conjuntosNomes: Record<string, string> = {};
+      for (const s of setsIg ?? []) {
+        if (s.external_id) conjuntosNomes[String(s.external_id)] = String(s.name ?? "");
+      }
+      const lista = await listarAnunciosInstagramDaCampanha({
+        g: gIg,
+        campaignId: campExt,
+        accountId,
+        pageId,
+        conjuntosNomes,
+        oficialId: identPayload.instagram_actor_id,
+        oficialHandle: identPayload.instagram_handle ?? HANDLE_COHAPM_OFICIAL,
+      });
+      const lote: unknown[] = [];
+      let okN = 0;
+      let failN = 0;
+      let skipN = 0;
+      for (const ad of lista) {
+        const rAd = await relincarInstagramNoAnuncio({
+          g: gIg,
+          accountId,
+          ad,
+          identidade: identPayload,
+        });
+        lote.push({ ad_id: ad.ad_id, nome: ad.nome, ...rAd });
+        if (rAd.ok && rAd.pulado) skipN++;
+        else if (rAd.ok) okN++;
+        else failN++;
+      }
+      const sucessoLote = failN === 0;
+      await supa
+        .from("approval_requests")
+        .update({
+          executed_at: new Date().toISOString(),
+          ultima_falha: sucessoLote ? null : {
+            em: new Date().toISOString(),
+            etapa: "vincular_instagram_dos_anuncios",
+            motivo_para_o_gestor: `${failN} anuncio(s) falharam ao relincar Instagram`,
+            tentativa: Number(r.ultima_falha?.tentativa ?? 0) + 1,
+            re_executavel: true,
+          },
+          execution_result: {
+            ok: sucessoLote,
+            relincados: okN,
+            ja_estavam: skipN,
+            falhas: failN,
+            lote,
+            driver_escrita: "graph",
+          },
+        })
+        .eq("id", r.id);
+      await audit(r.company_id, sistema, sucessoLote ? "meta_action_executed" : "meta_action_failed", r.id, {
+        acao,
+        relincados: okN,
+        ja_estavam: skipN,
+        falhas: failN,
+      });
+      resultados.push({
+        id: r.id,
+        acao,
+        resultado: sucessoLote ? "EXECUTADO" : "falha_meta",
+        relincados: okN,
+        ja_estavam: skipN,
+        falhas: failN,
+        driver_escrita: "graph",
       });
       continue;
     }

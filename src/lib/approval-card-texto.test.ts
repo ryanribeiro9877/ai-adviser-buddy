@@ -13,8 +13,10 @@ describe("tituloDoCardAprovacao", () => {
   it("criação de campanha", () => {
     expect(tituloDoCardAprovacao("criar_campanha")).toBe("Card de criação de campanha");
   });
-  it("criação de conjunto", () => {
-    expect(tituloDoCardAprovacao("criar_conjunto_a_partir_de")).toBe("Card de criação de conjunto");
+  it("vincular instagram", () => {
+    expect(tituloDoCardAprovacao("vincular_instagram_dos_anuncios")).toBe(
+      "Card de vincular Instagram",
+    );
   });
   it("nao despeja o ensaio do summary como titulo", () => {
     const ensaio =

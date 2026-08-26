@@ -1,5 +1,8 @@
-// supabase/functions/traffic-chat/index.ts (v28.74)
-// v28.74 (25/08/2026) - HARD BLOCK CONJ.N: CONJ.1 nao cai no CONJ.4 (mais novo da linha).
+// supabase/functions/traffic-chat/index.ts (v28.75)
+// v28.75 (26/08/2026) - Instagram dos anuncios: get_instagram_dos_anuncios le handle
+//   por peca (Graph); vincular_instagram_dos_anuncios emite card para @cohapm
+//   so na campanha La Felicità em trabalho (ACTIVE+PAUSED). Sem isso o agente
+//   lia so o perfil da conta e dizia que faltava ferramenta de edicao.
 //   Match de CONJ.1_LAF_… (underscore/slash); recusa se dest ≠ pedido; nao pede ID Graph.
 // v28.73 (25/08/2026) - HARD BLOCK cruzamento Juridico × La Felicità:
 //   peca/slate de uma linha NUNCA emite card na campanha/conjunto da outra.
@@ -662,6 +665,7 @@ import {
   ERRO_INSTAGRAM_NAO_VINCULADO,
   exigirIdentidadeRedes,
   idInstagramDeParams,
+  type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
 import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto } from "../_shared/intencao_turno.ts";
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
@@ -697,6 +701,16 @@ import {
   resolverChamadaLlm,
 } from "../_shared/llm_roteador.ts";
 import { COMPANY_COHAPM, tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
+import {
+  campanhaNoEscopoVinculoIg,
+  criarGraphClient,
+  HANDLE_COHAPM_OFICIAL,
+  HANDLE_COOP_COHAPM,
+  listarAnunciosInstagramDaCampanha,
+  mapearHandlesInstagramConta,
+  recusarCampanhaForaEscopoIg,
+  type AnuncioIgLido,
+} from "../_shared/instagram_anuncios.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import {
@@ -740,6 +754,8 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   get_slate_da_conversa: 2,
   registrar_peca_da_conversa: 12,
   get_estrutura_conjuntos: 3,
+  get_instagram_dos_anuncios: 3,
+  vincular_instagram_dos_anuncios: 2,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
   buscar_geolocalizacao: 6,
@@ -765,7 +781,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.73";
+const VERSAO = "chat-v28.75";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_UPLOAD = 8;
@@ -1986,6 +2002,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     "renomear_campanha",
     "alterar_categoria_especial_campanha",
     "ajustar_posicionamentos_do_conjunto",
+    "vincular_instagram_dos_anuncios",
   ];
   if (!VALID.includes(action)) return { erro: `action_type invalido; use: ${VALID.join(", ")}` };
   if (!targetLike) return { erro: "target_name obrigatorio" };
@@ -2129,6 +2146,11 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     })(),
     ajustar_posicionamentos_do_conjunto:
       `Ajustar posicionamentos de "${alvo.name}" para ${String(params?.formato_midia).toUpperCase()}: excluir Facebook Coluna da direita quando incompatível, preservar Instagram/Threads e demais posicionamentos compatíveis`,
+    vincular_instagram_dos_anuncios: (() => {
+      const n = Array.isArray(params?.anuncios) ? (params.anuncios as unknown[]).length : 0;
+      const h = String(params?.instagram_destino_handle ?? "@cohapm");
+      return `Vincular ${h} em ${n} anúncio(s) de "${alvo.name}" (conjuntos ativos e pausados)`;
+    })(),
   } as Record<string, string>)[action];
   const avisosExtra = [avisoOrcamentoAlteracao, avisoGuardaConjunto].filter(Boolean);
   const summary = avisosExtra.length ? `${summaryBase} — ${avisosExtra.join(" · ")}` : summaryBase;
@@ -2243,6 +2265,219 @@ async function t_alterar_categoria_especial(
     params: {
       special_ad_categories: cats,
       categorias_atuais: catsAntes,
+    },
+  }, cards);
+}
+
+async function identidadeOficialIgEmpresa(
+  companyId: string,
+  g: ReturnType<typeof criarGraphClient>,
+  accountId: string,
+  pageId?: string | null,
+): Promise<IdentidadeInstagramResolvida> {
+  const handles = await mapearHandlesInstagramConta(g, accountId, pageId);
+  const parCohapm = Object.entries(handles).find(([, u]) => u === HANDLE_COHAPM_OFICIAL);
+  if (companyId === COMPANY_COHAPM && parCohapm) {
+    return {
+      encontrada: true,
+      instagram_actor_id: parCohapm[0],
+      instagram_handle: `@${HANDLE_COHAPM_OFICIAL}`,
+      fonte: "config_empresa",
+      procedencia: "instagram_accounts da conta Meta (@cohapm)",
+      vinculo_pagina_confirmado: true,
+    };
+  }
+  const { data } = await supa.rpc("identidade_instagram_para_criacao", {
+    p_company_id: companyId,
+    p_creative_id: null,
+  });
+  const id = String((data as any)?.instagram_actor_id ?? "").trim();
+  const handle = String((data as any)?.instagram_handle ?? "").trim() || null;
+  if (id) {
+    return {
+      encontrada: true,
+      instagram_actor_id: id,
+      instagram_handle: handle,
+      fonte: "config_empresa",
+      procedencia: String((data as any)?.procedencia ?? "meta_execution_config"),
+      vinculo_pagina_confirmado: null,
+    };
+  }
+  const unico = Object.entries(handles);
+  if (unico.length === 1 && unico[0][1] !== HANDLE_COOP_COHAPM) {
+    return {
+      encontrada: true,
+      instagram_actor_id: unico[0][0],
+      instagram_handle: `@${unico[0][1]}`,
+      fonte: "config_empresa",
+      procedencia: "unico Instagram cadastrado na conta Meta",
+      vinculo_pagina_confirmado: true,
+    };
+  }
+  return {
+    encontrada: false,
+    instagram_actor_id: null,
+    instagram_handle: null,
+    fonte: null,
+    procedencia: null,
+    vinculo_pagina_confirmado: null,
+  };
+}
+
+async function resolverCampanhaParaIg(companyId: string, nameLike: string) {
+  const needle = String(nameLike ?? "").trim();
+  if (!needle) {
+    return { erro: "campanha obrigatoria (ex.: COHAPM_LAFELICITA_CONV_AGO26)" };
+  }
+  const { data: camps } = await supa
+    .from("campaigns")
+    .select("id,name,external_id,external_account_id")
+    .eq("company_id", companyId);
+  const hits = (camps ?? []).filter((c) =>
+    norm(c.name).includes(norm(needle)) || norm(needle).includes(norm(c.name)),
+  );
+  if (!hits.length) return { erro: `nenhuma campanha contendo '${needle}'` };
+  let camp = hits[0];
+  if (hits.length > 1) {
+    const exact = hits.filter((c) => norm(c.name) === norm(needle));
+    const noEscopo = hits.filter((c) => campanhaNoEscopoVinculoIg(c.name));
+    if (exact.length === 1) camp = exact[0];
+    else if (noEscopo.length === 1) camp = noEscopo[0];
+    else {
+      return {
+        erro: "campanha_ambigua",
+        opcoes: hits.slice(0, 8).map((c) => c.name),
+        instrucao: "Passe o nome COMPLETO da campanha em trabalho (COHAPM_LAFELICITA_CONV_AGO26).",
+      };
+    }
+  }
+  const escopo = recusarCampanhaForaEscopoIg(camp.name);
+  if (!escopo.ok) return { erro: escopo.erro, detalhe: escopo.detalhe, campanha: camp.name };
+  return { camp };
+}
+
+async function t_ler_instagram_anuncios(companyId: string, args: any) {
+  const nameLike = String(args?.campanha ?? args?.name_like ?? args?.target_name ?? "").trim();
+  const resolvido = await resolverCampanhaParaIg(companyId, nameLike);
+  if ("erro" in resolvido) return resolvido;
+  const camp = resolvido.camp;
+  const tok = tokenAdsPorCompanyId(companyId);
+  if (!tok) return { erro: "token_ads_ausente_para_empresa" };
+  const g = criarGraphClient(tok.token);
+  const { data: cfg } = await supa
+    .from("meta_execution_config")
+    .select("page_id,instagram_identity_page_id")
+    .eq("company_id", companyId)
+    .maybeSingle();
+  const pageId = String((cfg as any)?.page_id ?? (cfg as any)?.instagram_identity_page_id ?? "").trim() ||
+    null;
+  const accountId = String((camp as any).external_account_id ?? "").replace(/^act_/i, "");
+  if (!accountId || !camp.external_id) {
+    return { erro: "campanha_sem_account_ou_external_id", campanha: camp.name };
+  }
+  const ident = await identidadeOficialIgEmpresa(companyId, g, accountId, pageId);
+  if (!ident.encontrada || !ident.instagram_actor_id) {
+    return {
+      erro: "instagram_oficial_nao_resolvido",
+      detalhe: "Nao achei @cohapm na conta Meta nem identidade na config. Nao classifiquei os anuncios.",
+      campanha: camp.name,
+    };
+  }
+  const { data: sets } = await supa
+    .from("ad_sets")
+    .select("name,external_id")
+    .eq("company_id", companyId)
+    .eq("campaign_id", camp.id);
+  const conjuntosNomes: Record<string, string> = {};
+  for (const s of sets ?? []) {
+    if (s.external_id) conjuntosNomes[String(s.external_id)] = String(s.name ?? "");
+  }
+  const anuncios = await listarAnunciosInstagramDaCampanha({
+    g,
+    campaignId: String(camp.external_id),
+    accountId,
+    pageId,
+    conjuntosNomes,
+    oficialId: ident.instagram_actor_id,
+    oficialHandle: ident.instagram_handle ?? HANDLE_COHAPM_OFICIAL,
+  });
+  const porClasse = (c: string) => anuncios.filter((a) => a.classificacao === c);
+  return {
+    ok: true,
+    campanha: camp.name,
+    campanha_external_id: camp.external_id,
+    account_id: accountId,
+    instagram_oficial: {
+      handle: ident.instagram_handle,
+      id: ident.instagram_actor_id,
+      procedencia: ident.procedencia,
+    },
+    totais: {
+      lidos: anuncios.length,
+      coop_cohapm: porClasse("coop_cohapm").length,
+      cohapm: porClasse("cohapm").length,
+      outro: porClasse("outro").length,
+      sem_vinculo: porClasse("sem_vinculo").length,
+      id_sem_handle: porClasse("id_sem_handle").length,
+      precisam_relincar: anuncios.filter((a) => a.precisa_relincar).length,
+    },
+    anuncios: anuncios.map((a) => ({
+      ad_id: a.ad_id,
+      nome: a.nome,
+      conjunto: a.conjunto_nome ?? a.adset_id,
+      status: a.status,
+      effective_status: a.effective_status,
+      instagram_id: a.instagram_id,
+      instagram_handle: a.instagram_handle,
+      classificacao: a.classificacao,
+      precisa_relincar: a.precisa_relincar,
+    })),
+    instrucao:
+      "Classifique com classificacao (coop_cohapm / cohapm / outro / sem_vinculo / id_sem_handle). " +
+      "Nao presuma pelo perfil unico da conta. Para alterar, chame vincular_instagram_dos_anuncios na MESMA campanha.",
+  };
+}
+
+async function t_vincular_instagram_anuncios(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+) {
+  const leitura = await t_ler_instagram_anuncios(companyId, args);
+  if (!(leitura as any)?.ok) return leitura;
+  const aMudar = ((leitura as any).anuncios as AnuncioIgLido[]).filter((a) => a.precisa_relincar);
+  if (!aMudar.length) {
+    return {
+      ok: true,
+      sem_alteracao: true,
+      campanha: (leitura as any).campanha,
+      mensagem:
+        "Todos os anuncios lidos desta campanha ja estao no Instagram oficial. Nenhum card foi emitido.",
+      totais: (leitura as any).totais,
+    };
+  }
+  return await t_propose_action(companyId, convId, requestedBy, {
+    action_type: "vincular_instagram_dos_anuncios",
+    target_name: (leitura as any).campanha,
+    justificativa: String(args?.justificativa ?? "").trim() ||
+      `Vincular @cohapm nos ${aMudar.length} anuncios da campanha ${(leitura as any).campanha} que ainda nao usam o Instagram oficial (conjuntos ACTIVE e PAUSED). Outras campanhas ficam de fora.`,
+    reversa:
+      "Recriar o criativo com o Instagram anterior (id lido no card) pelo mesmo fluxo, ou restaurar no Gerenciador. Quem desfaz: administrador, em ate 24h.",
+    metrica_sucesso:
+      "get_instagram_dos_anuncios na mesma campanha devolve classificacao=cohapm e precisa_relincar=false em todos os anuncios do lote.",
+    risco:
+      "A Meta reanalisa o criativo; anuncio ACTIVE pode ir a PENDING_REVIEW. Conjuntos PAUSED nao sao ativados. Nao cria anuncio novo.",
+    mecanismo:
+      "Novo adcreative com a mesma peca + instagram_user_id @cohapm; update_ad no creative_id. Status do anuncio se mantem.",
+    params: {
+      campanha_destino_nome: (leitura as any).campanha,
+      campanha_external_id: (leitura as any).campanha_external_id,
+      conta_destino: (leitura as any).account_id,
+      instagram_destino_id: (leitura as any).instagram_oficial?.id,
+      instagram_destino_handle: (leitura as any).instagram_oficial?.handle,
+      anuncios: aMudar,
     },
   }, cards);
 }
@@ -4445,7 +4680,9 @@ const TOOLS = [
   { type: "function", function: { name: "get_funil_credito", description: "FORA DE ESCOPO desde 28/07/2026: CRM/conversao final foram removidos do sistema por decisao da empresa. Esta ferramenta existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta/contrato/receita, explique a exclusao e ofereca as metricas de midia.", parameters: { type: "object", properties: { dias: { type: "number", description: "janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar." } } } } },
   { type: "function", function: { name: "renomear_campanha", description: "Emite CARD DE APROVACAO para renomear campanha existente pelo update_campaign nativo do Pipeboard. NAO altera antes da aprovacao. NOME LIVRE: passe novo_nome com qualquer string desejada. O padrao [MARCA][CANAL][OBJ]… e apenas sugestao opcional (marque/canal/objetivo_tag/papel/periodo so se quiser montar sugestao). Localiza a campanha atual pelo nome; ambiguidade exige nome completo. Ao aprovar, meta-actions exige Pipeboard, envia somente campaign_id + name e reconcilia pela Graph.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, novo_nome: { type: "string", description: "Nome livre desejado (prioridade)." }, marca: { type: "string" }, canal: { type: "string" }, objetivo_tag: { type: "string" }, produto: { type: "string" }, papel: { type: "string", description: "TESTE ou ESCALA (opcional, so para sugestao estruturada)" }, rotulo: { type: "string" }, periodo: { type: "string" }, justificativa: { type: "string" } }, required: ["campanha_atual", "novo_nome"] } } },
   { type: "function", function: { name: "alterar_categoria_especial", description: "Emite CARD DE APROVACAO para alterar ou REMOVER special_ad_categories de uma campanha JA CRIADA. Passe special_ad_categories=[] para remover. NAO diga que falta ferramenta. Leia antes com get_campaign_detail ou auditar_compliance_financeira.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } }, categorias_atuais: { type: "array", items: { type: "string" } }, justificativa: { type: "string" } }, required: ["campanha_atual", "special_ad_categories"] } } },
-  { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha e alterar_categoria_especial_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (qualquer familia, inclusive trafego/website). Molde NAO e obrigatorio para criar do zero. Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal. PROIBIDO recusar criar_conjunto por falta de molde (trafego, social ou mensagens). Tudo que e criado nasce ACTIVE. COHAPM ERRO GRAVE: peca La Felicità (_LAF_ / CONJ.1_LAF / FELICITA) NUNCA em campanha/conjunto JURIDICO, e peca Juridico NUNCA em LAFELICITA. O sistema RECUSA o card — nao e aviso. criar_anuncio: params.conjunto_destino e o NOME com CONJ.N (CONJ.1_LAF_… / CONJ.1 / CONJ.01). PROIBIDO pedir ID numerico da Meta. CONJ.1 nunca e o CONJ.4 mais novo da linha.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "get_instagram_dos_anuncios", description: "LEITURA AO VIVO na Graph: Instagram de CADA anuncio da campanha (conjuntos ACTIVE e PAUSED). Devolve handle quando a Meta expoe, id, classificacao coop_cohapm|cohapm|outro|sem_vinculo|id_sem_handle. NAO presuma pelo perfil unico da conta. SO a campanha La Felicità em trabalho (COHAPM_LAFELICITA_CONV_*). Juridico e SALT ficam de fora. Use ANTES de afirmar vinculo ou de emitir alteracao.", parameters: { type: "object", properties: { campanha: { type: "string", description: "Nome da campanha (ex.: COHAPM_LAFELICITA_CONV_AGO26)." } }, required: ["campanha"] } } },
+  { type: "function", function: { name: "vincular_instagram_dos_anuncios", description: "Emite CARD DE APROVACAO para vincular o Instagram oficial @cohapm em TODOS os anuncios da campanha em trabalho que ainda nao o usam (conjuntos ativos E pausados). NAO executa na hora. NAO ativa conjunto pausado. NAO toca outras campanhas. Le a Graph na hora da proposta. Aprovacao = novo criativo + republica o anuncio com o mesmo status.", parameters: { type: "object", properties: { campanha: { type: "string", description: "Nome da campanha (ex.: COHAPM_LAFELICITA_CONV_AGO26)." }, justificativa: { type: "string" } }, required: ["campanha"] } } },
+  { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha e alterar_categoria_especial_campanha. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (qualquer familia, inclusive trafego/website). Molde NAO e obrigatorio para criar do zero. Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal. PROIBIDO recusar criar_conjunto por falta de molde (trafego, social ou mensagens). Tudo que e criado nasce ACTIVE. COHAPM ERRO GRAVE: peca La Felicità (_LAF_ / CONJ.1_LAF / FELICITA) NUNCA em campanha/conjunto JURIDICO, e peca Juridico NUNCA em LAFELICITA. O sistema RECUSA o card — nao e aviso. criar_anuncio: params.conjunto_destino e o NOME com CONJ.N (CONJ.1_LAF_… / CONJ.1 / CONJ.01). PROIBIDO pedir ID numerico da Meta. CONJ.1 nunca e o CONJ.4 mais novo da linha.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "vincular_instagram_dos_anuncios", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes Hook→Beneficio/prova→CTA (CET/FIN-04 so credito). NAO cria anuncio. Grava em conversation_legendas. La Felicita: produto=imovel + meio=la_felicita + drive_file_id do SLATE (get_slate_da_conversa). NAO use voz Juridico. Se a tool falhar, NAO diga indisponivel — escreva as 3 no tom certo e registre. VOCE preenche referencias. Nao invente CLT/CET para COHAPM.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: imovel / la_felicita (residencial) ou juridico_whatsapp (COHAPM Juridico) ou consignado_clt (Legal). SEM default CLT." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, meio: { type: "string", enum: ["la_felicita", "juridico"], description: "Voz da marca. La Felicita = la_felicita." }, drive_file_id: { type: "string", description: "Peca do Drive (do slate)." }, peca_chave: { type: "string", description: "Chave estavel. Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "get_legendas_da_conversa", description: "MEMORIA DURAVEL de legendas desta conversa (conversation_legendas). Devolve texto INTEGRAL por peca_chave/drive_file_id. OBRIGATORIO chamar ANTES de dizer que legenda 'nao existe' / 'texto integral nao disponivel' ou de pedir ao gestor para colar copy. Se a peca esta aqui, use o texto — nunca invente amnesia.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, drive_file_id: { type: "string" } } } } },
   { type: "function", function: { name: "registrar_legenda_da_conversa", description: "Grava/atualiza UMA legenda no store duravel desta conversa. Use quando voce propuser copy no chat SEM passar por gerar_legendas (ex.: slate de impulsão com legenda editorial), ou para marcar a variante selecionada pelo gestor. peca_chave estavel (carrossel_2, card_capa_1, …) + legenda integral. Com drive_file_id quando houver.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, legenda: { type: "string" }, drive_file_id: { type: "string" }, variante_indice: { type: "number" }, selecionada: { type: "boolean" }, objetivo: { type: "string" } }, required: ["peca_chave", "legenda"] } } },
@@ -4835,6 +5072,10 @@ async function runTool(name: string, args: any, ctx: any) {
       }
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_categoria_especial": return await t_alterar_categoria_especial(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "get_instagram_dos_anuncios":
+        return await t_ler_instagram_anuncios(ctx.companyId, args);
+      case "vincular_instagram_dos_anuncios":
+        return await t_vincular_instagram_anuncios(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "auditar_compliance_financeira":
         return await t_auditar_compliance_financeira(ctx.companyId, String(args?.name_like ?? ""));
       case "check_compliance": {
@@ -5052,6 +5293,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 == LIMITES DUROS (nao negociaveis, mesmo se pedirem) ==
 - NOME LIVRE JA FALADO E CONTRATO (22/08/2026 v28.62): se VOCE listou os nomes nesta conversa (ex. JUR_CONV_CONJ03_AD01_…), esses nomes SAO o contrato; alterar na emissao e perda de memoria. params.nome_novo = o string EXATO. PROIBIDO substituir por [COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26] ou qualquer [MARCA][CANAL][OBJ]…. WEBSITE + LANDING_PAGE_VIEWS / OUTCOME_TRAFFIC NAO recebe canal WA nem objetivo LEADS (wa.me no criativo ≠ familia mensagens).
 - INSTAGRAM VINCULATED (22/08/2026 v28.62): todo card de criativo com Instagram (padrao facebook+instagram) DEVE nascer com a identidade Instagram da config JA vinculada (instagram_user_id / instagram_actor_id). O codigo auto-preenche da meta_execution_config; se a config nao tiver id, a emissao recusa com instagram_nao_vinculado. NUNCA emita peca que o gestor precise vincular Instagram a mao no Gerenciador. Threads continua OFF.
+- INSTAGRAM DOS ANUNCIOS JA NO AR (26/08/2026 v28.75): para ver @coop_cohapm vs @cohapm, chame get_instagram_dos_anuncios(campanha=COHAPM_LAFELICITA_CONV_AGO26). NAO use so get_criativos_conteudo nem o perfil unico da conta. Para ALTERAR, chame vincular_instagram_dos_anuncios na MESMA campanha — emite card; so apos aprovacao a Meta troca o criativo e republica. Conjuntos pausados entram; outras campanhas (Juridico, SALT) ficam de fora. PROIBIDO dizer que falta ferramenta de edicao.
 - PERGUNTA ≠ ATO (22/08/2026 v28.61): se a mensagem do gestor e uma PERGUNTA (tem ? / "antes da aprovacao" / "o anuncio esta com o mesmo link") SEM verbo de emitir/criar/pausar: RESPONDA o fato. Tools: get_aprovacoes (destino_url e conjunto dos cards JA na fila), get_estrutura_conjuntos (destination_type do conjunto), get_criativos_conteudo (link de anuncio JA no ar). PROIBIDO propose_action. Citar card PENDENTE devolvido por get_aprovacoes NAO e fabricar ato.
 - DESTINO CONJUNTO vs ANUNCIO: conjunto WEBSITE/LANDING_PAGE_VIEWS NAO guarda o wa.me — so o tipo WEBSITE. O link fica no CRIATIVO (destino_url do card de anuncio / ads.destino_url). Quando perguntarem se o anuncio tem o mesmo link do conjunto: compare destino_url do card com o wa.me definido para aquele CONJ.0N nesta conversa.
 - ATO SO EXISTE COM RETORNO DE FERRAMENTA: voce so pode afirmar que EMITIU card NESTA rodada se propose_action desta resposta devolveu approval_id (UUID) — cite o id. Sem approval_id NESTA rodada e PROIBIDO escrever "emiti o card" / "## Card emitido". Cards JA na fila (get_aprovacoes) podem ser descritos como pendentes. Se propose_action falhou ou nao foi chamada num pedido de EMISSAO, diga isso em UMA linha. Escrever "emiti" sem approval_id desta rodada e fabricar um ato.
