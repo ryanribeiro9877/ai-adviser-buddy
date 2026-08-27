@@ -1,4 +1,9 @@
-// supabase/functions/traffic-chat/index.ts (v28.75)
+// supabase/functions/traffic-chat/index.ts (v28.77)
+// v28.77 (27/08/2026) - get_ads_ranking honra date_to da janela; versao da leitura por blocos.
+// v28.76 (27/08/2026) - LEITURA COMPLETA POR BLOCOS: detalhamento de campanha
+//   nao encerra com "nao retornado nesta rodada" nem pede nova pergunta.
+//   Tool get_detalhe_anuncios (ID Meta ou nome + serie diaria por anuncio/conjunto);
+//   get_campaign_detail aceita ID e date_from/date_to; turno incompleto continua sozinho.
 // v28.75 (26/08/2026) - Instagram dos anuncios: get_instagram_dos_anuncios le handle
 //   por peca (Graph); vincular_instagram_dos_anuncios emite card para @cohapm
 //   so na campanha La Felicità em trabalho (ACTIVE+PAUSED). Sem isso o agente
@@ -667,7 +672,8 @@ import {
   idInstagramDeParams,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
-import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto } from "../_shared/intencao_turno.ts";
+import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import { tDetalheAnuncios, DEF_GET_DETALHE_ANUNCIOS, casarCampanhas, escolherCampanhaUnica, janelaDetalhe } from "../_shared/leitura_desempenho.ts";
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
 import {
   aplicarRecorteAcervo,
@@ -755,6 +761,9 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   registrar_peca_da_conversa: 12,
   get_estrutura_conjuntos: 3,
   get_instagram_dos_anuncios: 3,
+  get_detalhe_anuncios: 6,
+  get_campaign_detail: 4,
+  get_ads_ranking: 4,
   vincular_instagram_dos_anuncios: 2,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
@@ -781,9 +790,10 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.75";
+const VERSAO = "chat-v28.77";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
+const MAX_TURN_SEGMENTS_LEITURA = 6;
 const MAX_TURN_SEGMENTS_UPLOAD = 8;
 const REPLY_CONTINUANDO =
   "Continuando automaticamente a partir do ponto em que o orçamento desta janela esgotou.";
@@ -1283,19 +1293,28 @@ async function t_funnel(companyId: string, date_from?: string, date_to?: string)
     campanhas_sem_formulario_nem_conversa: semEvento.length,
     nota: "funil de MIDIA agregado da conta. cliques_todos = todos os cliques; cliques_no_link = so os que levam ao destino - nao misture as bases. visualizacoes_lp e resultado valido, reporte. CUSTO POR RESULTADO: por_formulario e por_conversa usam SO o gasto das campanhas que registraram aquele evento (veja gasto_base_do_*), justamente para nao diluir a regua com campanha que nem persegue o evento - e PROIBIDO recalcular dividindo `gasto` total pelo evento. Se a janela mistura objetivos (ex.: periodo de mensagens + periodo de engajamento), diga QUAL campanha sustenta o custo antes de usar como benchmark. Proposta/contrato/receita estao FORA do escopo desde 28/07/2026 - nao existe fonte de conversao final; trate custo por clique/LP como proxy e declare isso." };
 }
-async function t_ads_ranking(companyId: string, days = 30, ordenar_por = "gasto", date_from?: string) {
+async function t_ads_ranking(companyId: string, days = 30, ordenar_por = "gasto", date_from?: string, name_like?: string, date_to?: string) {
   const d = Math.min(Math.max(Number(days) || 30, 1), 120);
   const ordenar = String(ordenar_por ?? "gasto").toLowerCase();
   const from = date_from?.slice(0, 10) || new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
-  const { data: ads } = await supa.from("ads").select("external_id,name,campaign_id").eq("company_id", companyId);
-  const { data: camps } = await supa.from("campaigns").select("id,name,category").eq("company_id", companyId).eq("status", "active");
-  const campMap = new Map((camps ?? []).map((c) => [c.id, c]));
+  const to = date_to?.slice(0, 10);
+  const { data: ads } = await supa.from("ads").select("external_id,name,campaign_id,status").eq("company_id", companyId);
+  let campQ = supa.from("campaigns").select("id,name,category,status,external_id").eq("company_id", companyId);
+  const needle = String(name_like ?? "").trim();
+  const { data: camps } = needle ? await campQ : await campQ.eq("status", "active");
+  let campList = camps ?? [];
+  if (needle) {
+    campList = casarCampanhas(campList, needle) as typeof campList;
+  }
+  const campMap = new Map(campList.map((c) => [c.id, c]));
   const active = (ads ?? []).filter((a) => campMap.has(a.campaign_id));
-  if (!active.length) return { ranking: [], nota: "sem criativos em campanhas ativas" };
+  if (!active.length) return { ranking: [], nota: needle ? "sem criativos neste recorte de campanha" : "sem criativos em campanhas ativas" };
   const ids = active.map((a) => a.external_id);
-  const { data: snaps } = await supa.from("ad_metric_snapshots")
+  let snapQ = supa.from("ad_metric_snapshots")
     .select("ad_external_id,spend,form_leads,messaging_started,reach,impressions,link_clicks")
     .gte("snapshot_date", from).in("ad_external_id", ids);
+  if (to) snapQ = snapQ.lte("snapshot_date", to);
+  const { data: snaps } = await snapQ;
   type Agg = { spend: number; forms: number; convs: number; reach: number; imp: number; link: number };
   const agg = new Map<string, Agg>();
   for (const s of snaps ?? []) {
@@ -1333,24 +1352,37 @@ async function t_ads_ranking(companyId: string, days = 30, ordenar_por = "gasto"
     return b.gasto_num - a.gasto_num;
   });
   return {
-    date_from: from, ordenar_por: ordenar,
+    date_from: from, date_to: to || undefined, ordenar_por: ordenar,
+    name_like: needle || undefined,
     ranking: rows.slice(0, 20).map(({ gasto_num, ...r }) => r),
-    nota: "alcance_soma_diaria nao e unico. ordenar_por=alcance|gasto|conversas|impressoes|custo. PROIBIDO dizer alcance indisponivel se o ranking veio preenchido. Ranking por custo medio NAO autoriza pausa sozinho (Breakdown Effect).",
+    nota: "alcance_soma_diaria nao e unico. ordenar_por=alcance|gasto|conversas|impressoes|custo. name_like/campaign ID recorta o universo. PROIBIDO dizer alcance indisponivel se o ranking veio preenchido. Ranking por custo medio NAO autoriza pausa sozinho (Breakdown Effect).",
   };
 }
-async function t_campaign_detail(companyId: string, name_like: string) {
+async function t_campaign_detail(companyId: string, name_like: string, date_from?: string, date_to?: string) {
   const { data: all } = await supa
     .from("campaigns")
     .select("id,name,status,category,spend,special_ad_categories,objective,external_id")
     .eq("company_id", companyId);
-  const needle = norm(name_like);
-  const camps = (all ?? []).filter((c) => norm(c.name).includes(needle)).slice(0, 3);
-  if (!camps.length) return { erro: `nenhuma campanha com nome contendo '${name_like}'` };
-  const c = camps[0];
-  const from = new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10);
+  const needle = String(name_like ?? "").trim();
+  const hits = casarCampanhas((all ?? []) as { id?: string; name?: string | null; external_id?: string | null }[], needle);
+  const escolha = escolherCampanhaUnica(hits, needle);
+  if (!escolha.unica) {
+    if (escolha.ambiguo?.length) {
+      return {
+        ambiguo: true,
+        opcoes: escolha.ambiguo.slice(0, 8).map((c) => ({ nome: c.name, campaign_id: c.external_id })),
+        instrucao: "chame de novo com o ID Meta ou o nome completo de UMA campanha",
+      };
+    }
+    return { erro: `nenhuma campanha com nome ou ID contendo '${name_like}'` };
+  }
+  const c = escolha.unica as typeof hits[0] & {
+    status?: string; category?: string; spend?: number; special_ad_categories?: unknown; objective?: string;
+  };
+  const { from, to } = janelaDetalhe(date_from, date_to, 14);
   const { data: serie } = await supa.from("metric_snapshots")
     .select("snapshot_date,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,frequency,landing_page_views")
-    .eq("campaign_id", c.id).gte("snapshot_date", from).order("snapshot_date");
+    .eq("campaign_id", c.id).gte("snapshot_date", from).lte("snapshot_date", to).order("snapshot_date");
   const rows = serie ?? [];
   const num = (v: unknown) => Number(v || 0);
   const pct = (n: number, d: number) => d > 0 ? `${(100 * n / d).toFixed(2)}%` : null;
@@ -1398,7 +1430,9 @@ async function t_campaign_detail(companyId: string, name_like: string) {
           : (cats.length ? "outra_categoria_especial" : "nao_marcada_no_espelho"),
       gasto_acumulado: brl(num(c.spend)),
     },
+    serie_diaria: rows.map(linhaDia),
     serie_diaria_14d: rows.map(linhaDia),
+    janela: { date_from: from, date_to: to },
     totais_periodo: {
       dias_com_dado: rows.length, dias_fechados: fechados.length,
       inclui_dia_parcial: rows.some((s: Record<string, unknown>) => String(s.snapshot_date) === hoje),
@@ -1412,7 +1446,7 @@ async function t_campaign_detail(companyId: string, name_like: string) {
       cpm: tot.imp ? brl(1000 * tot.spend / tot.imp) : null,
       custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
     },
-    outras_encontradas: camps.slice(1).map((x) => x.name),
+    outras_encontradas: hits.filter((x) => x.id !== c.id).slice(0, 5).map((x) => x.name),
     nota: "serie diaria e totais vem de metric_snapshots (D-1, coletor oficial pipeboard:meta). special_ad_categories e campo da CAMPANHA (Meta nao grava isso no anuncio): se a campanha tem FINANCIAL_PRODUCTS_SERVICES, TODOS os anuncios dela estao sob a categoria especial. Para confirmar ao vivo, ler_pipeboard get_campaign_details. DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques; cliques_no_link = SO cliques de destino. ALCANCE: alcance_soma_diaria_nao_deduplicada e SOMA diaria (nao pessoas unicas).",
   };
 }
@@ -4670,8 +4704,9 @@ const TOOLS = [
   { type: "function", function: { name: "avaliar_pacing", description: "Calcula capacidade diaria da estrutura e, se meta_leads_dia for informada, o PISO de verba diaria ao custo atual. Exige company_id da conversa; meta_leads_dia e opcional. Declara que nao existe meta registrada e que a projecao nao e estimativa: escalar tende a elevar o custo, portanto a verba real pode ser maior.", parameters: { type: "object", properties: { meta_leads_dia: { type: "number" } } } } },
   { type: "function", function: { name: "validar_pedido_contra_contrato", description: "Valida um pedido (json) contra o contrato declarado em contrato_de_execucao para a acao. Assinatura real: (acao text, pedido jsonb). Se nao houver linhas vigentes para a acao, devolve valido=false com motivo contrato_desconhecido (nao inventa campos). Se faltar campo obrigatorio, recusa com faltando[]. Campos extras NAO invalidam - vao em nao_previstos_no_contrato para decisao humana. O contrato de criar_anuncio_a_partir_de e o MESMO vocabulario que pedido_de_anuncio_completo aceita: um pedido valido aqui e entendido la, e vice-versa. LACUNAS HONESTAS: o contrato foi derivado do codigo montarCriacao (meta-actions), nao de card executado; url_tags e opcional e vai no adcreative, nao no ad; meta_video_id/legenda/thumbnail_url sao opcionais da rota peca nova; status_inicial e opcional porque o executor FORCA ACTIVE no body (campanha/conjunto/anuncio) e nao le o payload. NAO substitui pedido_de_anuncio_completo (biblioteca, compliance, procedencia).", parameters: { type: "object", properties: { acao: { type: "string", description: "Ex.: criar_anuncio_a_partir_de, criar_conjunto_a_partir_de, criar_campanha." }, pedido: { type: "object", description: "Objeto com os campos do payload que o executor leria." } }, required: ["acao", "pedido"] } } },
   { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real (dias efetivamente com dado). Nao contem proposta/contrato.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
-  { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando perguntarem maior alcance. PROIBIDO dizer alcance indisponivel sem chamar isto. Custo medio sozinho NAO autoriza pausa (Breakdown Effect).", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, date_from: { type: "string" } } } } },
-  { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria (14d) de UMA campanha pelo nome, com totais do periodo. Inclui special_ad_categories da CAMPANHA (FINANCIAL_PRODUCTS_SERVICES quando marcada) — a Meta aplica categoria especial no nivel campanha e os anuncios herdam. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
+  { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando perguntarem maior alcance. Recorte com name_like ou campaign_id (ID Meta). Passe date_from/date_to da janela. PROIBIDO dizer alcance indisponivel sem chamar isto. Custo medio sozinho NAO autoriza pausa (Breakdown Effect).", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, date_from: { type: "string" }, date_to: { type: "string" }, name_like: { type: "string" }, campaign_id: { type: "string" } } } } },
+  { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria de UMA campanha (nome OU campaign_id Meta), com totais do periodo. Passe date_from/date_to quando o gestor der a janela. Inclui special_ad_categories da CAMPANHA. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, CTR/CPC/CPM. DUAS BASES DE CLIQUE - NUNCA misture. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero. NAO substitui get_detalhe_anuncios (serie por anuncio/conjunto).", parameters: { type: "object", properties: { name_like: { type: "string" }, campaign_id: { type: "string" }, date_from: { type: "string" }, date_to: { type: "string" } } } } },
+  DEF_GET_DETALHE_ANUNCIOS,
   { type: "function", function: { name: "auditar_compliance_financeira", description: "Auditoria de categoria especial + regras financeiras de UMA campanha e seus anuncios. Devolve special_ad_categories do espelho, se e financeira, lista de anuncios (status/CTA/destino/criado_pelo_sistema), alertas de segmentacao (idade/genero/LAL) e as regras ativas FIN/LGL/CRI. Use quando o gestor perguntar se anuncios respeitam finanças/categoria especial/regras da Meta. NAO diga que o campo nao existe: esta tool e get_campaign_detail leem. Complemente com get_conhecimento(tema=compliance) e check_compliance nas legendas. Confirmacao ao vivo: ler_pipeboard get_campaign_details.", parameters: { type: "object", properties: { name_like: { type: "string", description: "Nome (ou trecho) da campanha" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido. Pode vir recortado por meio/formatos do pedido. USE quando o gestor pedir para classificar pecas da pasta. Se total_analisados < inventario, ha pecas novas sem analise.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, data — SEM thumbnail. Recorte com meio=la_felicita|juridico e formatos Reels/Videos. Use para LISTAR o que existe na pasta. NAO substitui por get_criativos_conteudo (anuncios ja no ar). LIMITES: nao le conteudo interno de video.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
@@ -5051,8 +5086,23 @@ async function runTool(name: string, args: any, ctx: any) {
         Number(args?.days ?? 30),
         String(args?.ordenar_por ?? "gasto"),
         args?.date_from ? String(args.date_from) : undefined,
+        args?.name_like ? String(args.name_like) : (args?.campaign_id ? String(args.campaign_id) : undefined),
+        args?.date_to ? String(args.date_to) : undefined,
       );
-      case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
+      case "get_campaign_detail": return await t_campaign_detail(
+        ctx.companyId,
+        String(args?.name_like ?? args?.campaign_id ?? ""),
+        args?.date_from ? String(args.date_from) : undefined,
+        args?.date_to ? String(args.date_to) : undefined,
+      );
+      case "get_detalhe_anuncios": return await tDetalheAnuncios(supa, ctx.companyId, {
+        name_like: args?.name_like ? String(args.name_like) : undefined,
+        campaign_id: args?.campaign_id ? String(args.campaign_id) : undefined,
+        date_from: args?.date_from ? String(args.date_from) : undefined,
+        date_to: args?.date_to ? String(args.date_to) : undefined,
+        pagina: args?.pagina != null ? Number(args.pagina) : 1,
+        incluir_serie_diaria: args?.incluir_serie_diaria !== false,
+      });
       case "get_funil_credito": return await t_funil_credito(Number(args?.dias ?? 90));
       case "propose_action": {
         if (ctx.perguntaLeitura) {
@@ -5247,7 +5297,7 @@ HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia co
 == FIDELIDADE AO PEDIDO (interpretacao fria) ==
 - PERGUNTA vs ATO: a mensagem ATUAL manda. Se tem ? ou pede conferir um fato (link, destino, estado do card, resultado de video) SEM verbo de emitir/criar/pausar/ativar: RESPONDA o fato. Tools: get_aprovacoes, get_estrutura_conjuntos, get_criativos_conteudo. PROIBIDO propose_action. "antes da aprovacao" NAO e pedido de emitir.
 - Leia a pergunta de forma LITERAL. Nao amplie o brief: se pediu "desde a ativacao dessas campanhas", NAO entregue serie historica da conta inteira (SALT/pausadas antigas) como corpo da analise.
-- Responda cada pergunta atomica do gestor (melhor criativo, maior alcance, mais conversas, numeros WA). Se faltar dado, diga 'nao coletado nesta rodada' apos tentar a tool — PROIBIDO 'indisponivel' para alcance sem chamar get_ads_ranking(ordenar_por=alcance).
+- Responda cada pergunta atomica do gestor (melhor criativo, maior alcance, mais conversas, numeros WA). Detalhamento de campanha: get_detalhe_anuncios (ID Meta ou nome) + get_campaign_detail com a janela. PROIBIDO 'indisponivel' para alcance/anuncio/serie diaria sem chamar a tool. PROIBIDO pedir nova pergunta — o sistema continua o bloco.
 - Distinga objective da campanha vs optimization_goal do conjunto (ex.: OUTCOME_ENGAGEMENT + LANDING_PAGE_VIEWS).
 - Historico fora do pedido: no maximo uma linha rotulada FORA DO PEDIDO.
 
@@ -5515,7 +5565,7 @@ ${legal ? "Lead(LP) e nome historico desta conta de credito para clique no link;
 Siga TODAS as regras abaixo na montagem da resposta. Elas definem como o gestor le seu texto.
 ${estilo}
 
-Alem delas: em pedido amplo, consulte o que for necessario e responda bloco a bloco na ordem pedida. Compliance de ANUNCIOS JA NO AR: pegue a legenda com get_criativos_conteudo e passe para check_compliance. Compliance de ESBOCOS/legendas QUE VOCE ESCREVEU NESTA CONVERSA: passe o proprio texto em check_compliance(legenda=...) — NAO dependa do espelho Meta. Escreva de forma continua ate acabar; se a mensagem for cortada por tamanho, o sistema emenda sozinho, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
+Alem delas: em pedido amplo, consulte o que for necessario e responda bloco a bloco na ordem pedida. Detalhamento de campanha (com ID ou nome): chame get_detalhe_anuncios por campanha (campaign_id Meta ou name_like) e get_campaign_detail com date_from/date_to da janela pedida; pagine se restantes>0. PROIBIDO encerrar com "nao foi retornado nesta rodada" ou pedir que o gestor envie outra pergunta — se a janela HTTP acabar, o sistema continua sozinho no proximo bloco. Compliance de ANUNCIOS JA NO AR: pegue a legenda com get_criativos_conteudo e passe para check_compliance. Compliance de ESBOCOS/legendas QUE VOCE ESCREVEU NESTA CONVERSA: passe o proprio texto em check_compliance(legenda=...) — NAO dependa do espelho Meta. Escreva de forma continua ate acabar; se a mensagem for cortada por tamanho, o sistema emenda sozinho, entao NAO pare voluntariamente nem pergunte se pode continuar. Nunca responda "nao consegui".
 
 == MEMORIA INSTITUCIONAL (fatos verificados desta conta - considere sempre) ==
 ${memoria}`;
@@ -5680,6 +5730,7 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
   const parcial = (cp.reply_parcial || "").trim();
   const lote = pedidoLoteCriativo(cp.objetivo);
   const uploadLote = ehPedidoUploadLote(cp.objetivo);
+  const detalhe = ehPedidoDetalhamentoCampanha(cp.objetivo) || replyLeituraIncompleta(cp.reply_parcial || "");
   const faltamUp = (cp.pendentes_upload ?? [])
     .map((p) => `- ${p.nome} (${p.drive_file_id})`).join("\n");
   const instrucao = uploadLote
@@ -5699,6 +5750,12 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
       "EXCLUA pecas ja usadas no conjunto ativo (leia nomes em get_criativos_conteudo se ainda nao listou).\n" +
       "4. NAO emita card a menos que o objetivo original peca emissao. Entregue tabela: arquivo, drive_file_id, motivo, legenda escolhida.\n" +
       "5. Use ferramentas so do que falta; nao releia acervo inteiro se ja consta acima."
+    : detalhe
+    ? "INSTRUCOES OBRIGATORIAS (LEITURA INCOMPLETA):\n" +
+      "1. NAO cumprimente. NAO peca o gestor para repetir nem enviar nova pergunta.\n" +
+      "2. Chame AGORA o que faltou: get_detalhe_anuncios (campaign_id Meta OU name_like; date_from/date_to da janela; pagine se restantes>0) e get_campaign_detail da mesma campanha. Duas campanhas = duas chamadas.\n" +
+      "3. Escreva SOMENTE os blocos que faltavam (anuncios + serie diaria). Nao reescreva o que ja foi entregue.\n" +
+      "4. PROIBIDO 'nao retornado nesta rodada' se voce ainda nao chamou get_detalhe_anuncios nesta continuacao."
     : "INSTRUCOES OBRIGATORIAS:\n" +
       "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir ou focar.\n" +
       "2. Retome do ponto em que parou. Se o objetivo era criar campanha/conjunto/anuncio (ou emitir card), " +
@@ -5810,12 +5867,13 @@ function replyFechaTurno(texto: string): boolean {
   const raw = String(texto ?? "").trim();
   if (raw.length < 100) return false;
   if (replyLoteCriativoIncompleto(raw) || replyLoteComLegendas(raw)) return false;
+  if (replyLeituraIncompleta(raw)) return false;
   const t = deacc(raw.toLowerCase());
   if (RE_INTENCAO.test(raw)) return false;
   if (recusaFalsaMoldeTrafego(raw)) return false;
   if (RE_CONTINUAR_AUTO.test(t) || /continuando automaticamente/.test(t)) return false;
   const perguntaOuDecisao =
-    /\?/.test(raw) ||
+    (/\?/.test(raw) && !/envie (novamente|de novo)|nova pergunta|peca de novo/.test(t)) ||
     /\b(preciso (da sua|que voce|confirmar|saber|da decisao)|qual (o |a )?(objetivo|opcao|caminho|meta|foco)|me (confirma|diga|escolha|oriente)|antes de (criar|emitir|propor|subir|montar)|contradic|incompatib|nao (posso|vou) (criar|emitir|propor)|aguardo (sua|a) (resposta|decisao|confirmacao)|escolha (uma|o|a)|decida)\b/.test(t);
   if (perguntaOuDecisao) return true;
   // Prosa longa sem narrar intencao: o gestor ja tem a resposta do turno.
@@ -5839,14 +5897,17 @@ function decidirRotaAssincrona(pedido: string, nAnexos: number): { rotear: boole
   const familias = FAMILIAS_ASSUNTO.reduce((a, re) => a + (re.test(p) ? 1 : 0), 0);
   const porFamilia = familias >= ROTA_FAMILIAS_MIN;
   const porTamanho = pedido.length >= ROTA_CHARS_MIN;
-  if (!porFamilia && !porTamanho) return { rotear: false, motivo: "cabe no turno sincrono", familias };
+  const detalhe = ehPedidoDetalhamentoCampanha(pedido);
+  if (!porFamilia && !porTamanho && !detalhe) return { rotear: false, motivo: "cabe no turno sincrono", familias };
   // As tres guardas abaixo NAO sao cautela generica: cada uma cobre uma capacidade que a rota
   // assincrona nao tem, e mandar o pedido para la seria perde-la em silencio.
   if (RE_CONTINUACAO.test(p)) return { rotear: false, motivo: "continuacao: o job replaneja do zero e nao retoma texto cortado", familias };
   if (nAnexos > 0) return { rotear: false, motivo: "pedido com anexo: o job nao le anexo", familias };
   if (ehPedidoDeAto(pedido)) return { rotear: false, motivo: "pedido de ato: propose_action nao existe no job e o card seria perdido", familias };
   return { rotear: true, familias,
-    motivo: porFamilia ? `pedido cobre ${familias} familias de assunto (>= ${ROTA_FAMILIAS_MIN})` : `pedido com ${pedido.length} chars (>= ${ROTA_CHARS_MIN})` };
+    motivo: detalhe && !porFamilia && !porTamanho
+      ? "detalhamento de campanha (leitura completa)"
+      : porFamilia ? `pedido cobre ${familias} familias de assunto (>= ${ROTA_FAMILIAS_MIN})` : `pedido com ${pedido.length} chars (>= ${ROTA_CHARS_MIN})` };
 }
 
 Deno.serve(async (req) => {
@@ -6484,7 +6545,7 @@ Deno.serve(async (req) => {
             erro: "consulta_nao_realizada_nesta_rodada",
             aviso: flushUpload
               ? "Bloco encerrado para entregar o progresso ao gestor. O sistema continua no proximo bloco os ids que faltam. NAO peca para repetir."
-              : "O orcamento de tempo de coleta acabou antes desta consulta. O dado NAO foi lido — nao o trate como zero nem como inexistente. Responda com o que ja tem." }) });
+              : "O orcamento de tempo de coleta acabou antes desta consulta. O dado NAO foi lido — nao o trate como zero nem como inexistente. O sistema continua no proximo bloco. NAO peca ao gestor para repetir a pergunta. NAO escreva que o item ficou para a proxima." }) });
           toolResults.push({ tool: nomeSkip, args: argsSkip, chars: 0, cortado: false, retorno: null,
             erro: flushUpload ? "flush_upload_bloco" : "deadline de coleta — o dado NAO foi lido" });
           continue;
@@ -6550,7 +6611,7 @@ Deno.serve(async (req) => {
             erro: "consulta_nao_realizada_nesta_rodada",
             aviso: eUpload
               ? "Limite desta janela HTTP. O sistema continua no proximo bloco os ids que faltam. NAO peca ao gestor para repetir. NAO invente teto de 5 acoes/hora."
-              : "Esta consulta nao foi executada nesta rodada. O dado NAO foi lido - nao o trate como zero nem como inexistente. Responda com o que ja tem e diga ao gestor, em UMA linha e em linguagem natural, que este item ficou para a proxima. NAO cite nome de ferramenta, numero de limite nem detalhe de implementacao. Se o pedido era EMITIR cards e o slate/legendas ja estavam no chat, NAO peca para repetir 'emite' — emita o que couber agora e declare o que falta sem pedir eco." }) });
+              : "Esta consulta nao foi executada nesta janela. O dado NAO foi lido - nao o trate como zero nem como inexistente. O sistema continua no proximo bloco. NAO peca ao gestor para repetir. NAO escreva que o item ficou para a proxima pergunta. Se o pedido era EMITIR cards e o slate/legendas ja estavam no chat, NAO peca para repetir 'emite' — emita o que couber agora." }) });
           // v28.11: a consulta NAO feita tambem se registra. Sem isto a continuacao veria a
           // ausencia do dado e nao saberia distinguir "nao foi lido" de "nao existe" (R3).
           toolResults.push({ tool: nomeTc, args, chars: 0, cortado: false, retorno: null,
@@ -6654,8 +6715,8 @@ Deno.serve(async (req) => {
 
   if (!reply && !atalhoMetaDicas) {
     messages.push({ role: "user", content: deadlineTools
-      ? "PARE de usar ferramentas: o tempo de coleta acabou. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes. Diga em UMA linha, no fim, quais itens do pedido nao foram cobertos por falta de tempo de coleta, para o usuario poder pedir so esses depois. Nao responda que nao conseguiu."
-      : "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes, dizendo explicitamente o que nao esta disponivel. Nao responda que nao conseguiu." });
+      ? "PARE de usar ferramentas: o tempo de coleta desta janela acabou. Com os dados JA coletados, escreva o que couber. O sistema continua sozinho no proximo bloco o que faltou. NAO peca ao gestor para reenviar a pergunta. NAO escreva que o item ficou para a proxima."
+      : "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes. O sistema continua o que faltar. Nao responda que nao conseguiu." });
     const rf = await chamar(false, tokensDisponiveis(), true);
     if (!rf.erro) {
       const p = rf.parsed;
@@ -6728,7 +6789,8 @@ Deno.serve(async (req) => {
   const turnoJaFechado = replyFechaTurno(replyTrim) && !(
     claimSan.reescreveu ||
     (pedidoAtoCards && cardsJaNoPedido === 0 && toolsIncluemPropose(toolsUsed)) ||
-    uploadIncompleto
+    uploadIncompleto ||
+    replyLeituraIncompleta(replyTrim)
   );
   const tentouEmitir =
     toolsIncluemPropose(toolsUsed) ||
@@ -6770,19 +6832,31 @@ Deno.serve(async (req) => {
 
   const nLegendasOk = nGerarLegendasOk(turnCheckpoint, toolResults);
   const loteFaltamLegendas = pedidoLote && nLegendasOk < 6;
+  const toolsPuladas = toolResults.some((t) =>
+    /consulta_nao_realizada|deadline|teto de ferramentas|nao foi lido|flush_upload/i.test(String(t.erro ?? "")));
+  const pedidoDetalhe = ehPedidoDetalhamentoCampanha(objetivoOriginal);
+  const toolsJaNoPedido = [...(turnCheckpoint?.tools_resumo ?? []), ...toolsUsed];
+  const chamouDetalhe = toolsJaNoPedido.some((t) => String((t as any).tool ?? "") === "get_detalhe_anuncios");
+  const chamouDetalheOkNeste = toolResults.some((t) =>
+    String(t.tool ?? "") === "get_detalhe_anuncios" && !t.erro);
+  const leituraIncompleta = replyLeituraIncompleta(replyTrim);
+  const detalheSemTool = pedidoDetalhe && !chamouDetalhe && !pedidoAtoCards && !pedidoUploadTurno;
   const deadlineSemConteudo = deadlineTools && (
     pedidoUploadTurno
       ? uploadIncompleto
-      : (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas)
+      : (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas || leituraIncompleta || detalheSemTool)
   );
   const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && (
     deadlineSemConteudo ||
     (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas)) ||
-    uploadIncompleto
+    uploadIncompleto ||
+    leituraIncompleta ||
+    (toolsPuladas && (pedidoDetalhe || leituraIncompleta)) ||
+    detalheSemTool
   );
   const maxSeg = pedidoUploadTurno
     ? (uploadCurto ? 3 : MAX_TURN_SEGMENTS_UPLOAD)
-    : MAX_TURN_SEGMENTS;
+    : (pedidoDetalhe || leituraIncompleta ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS);
   const podeContinuarSegmento = segmentoAtual < maxSeg;
   let continuarTurno = false;
   let usouFallback = false;
@@ -6868,6 +6942,15 @@ Deno.serve(async (req) => {
       ) {
         continuarTurno = false;
       }
+      if (
+        continuarTurno &&
+        (pedidoDetalhe || leituraIncompleta) &&
+        segmentoAtual > 1 &&
+        !chamouDetalheOkNeste &&
+        toolsNesteSegmento === 0
+      ) {
+        continuarTurno = false;
+      }
       finishReason = continuarTurno
         ? `continuar_turno+seg${segmentoAtual}`
         : (finishReason || "stop");
@@ -6889,8 +6972,8 @@ Deno.serve(async (req) => {
         finishReason = deadlineTools ? "orcamento_ato_sem_card" : "erro_ato_sem_conteudo";
       } else {
         reply = deadlineTools
-          ? "Nao deu tempo de concluir esta rodada dentro do limite do servidor. Peça de novo de forma mais focada (ex.: só as dicas da Meta neste conjunto, ou só emitir o card já montado) — assim a resposta chega inteira."
-          : "Nao consegui produzir a resposta desta vez. Tente de novo, ou divida o pedido em partes menores.";
+          ? "O orçamento desta janela esgotou no meio da coleta. Continuação automática tenta o próximo bloco — não envie a pergunta de novo."
+          : "Não fechei o texto neste bloco. O sistema retoma do checkpoint — não envie a pergunta de novo.";
         finishReason = deadlineTools ? "orcamento_tempo_sem_conteudo" : "erro_sem_conteudo";
       }
       usouFallback = true;

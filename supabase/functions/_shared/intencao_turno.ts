@@ -78,3 +78,42 @@ export function ehUploadLoteCurto(pedido: string, nPendentes?: number): boolean 
   return /\b([123]|um|dois|tres)\b/.test(p) &&
     /\b(ultimos?|pendentes?|faltantes?|restantes?)\b/.test(p);
 }
+
+/** Detalhamento de campanha/anúncio/série diária — coleta completa, nao Q&A pontual. */
+export function ehPedidoDetalhamentoCampanha(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  const pedeDetalhe =
+    /\b(detalhamento|detalhe|detalha|detalhar|maturacao|serie diaria|desempenho.{0,60}(campanha|anuncio|conjunto|criativ)|por anuncio|por conjunto|ranking por|abertura por (anuncio|peca|criativo))\b/.test(p)
+    || (/\b(campanha|anuncio|conjunto)\b/.test(p) && /\b(id\b|external_id|7 dias|sete dias|janela)\b/.test(p) &&
+      /\b(gasto|ctr|formular|engaj|impress|alcance|desempenho|resultado)\b/.test(p))
+    || (/\bcampanhas?\b/.test(p) && /\d{8,}/.test(p) &&
+      /\b(janela|\d+\s*dias|anuncio|conjunto|desempenho|analise|detalh)\b/.test(p));
+  const temAlvo = /\b(campanhas?|anuncios?|conjuntos?|criativ|ad set|adset)\b/.test(p);
+  return pedeDetalhe && temAlvo;
+}
+
+/**
+ * Relatorio de leitura que declara lacuna ou pede nova pergunta —
+ * o sistema deve continuar o bloco, nao encerrar o turno.
+ */
+export function replyLeituraIncompleta(texto: string): boolean {
+  const t = deacc(String(texto ?? "").toLowerCase());
+  if (!t) return false;
+  const lacuna =
+    /nao (foi |foram )?(retornad|lid[oa]|disponivel|coletad).{0,60}nesta (rodada|consulta|resposta)/.test(t)
+    || /nao ficou disponivel nesta rodada/.test(t)
+    || /nao foi possivel (confirmar|verificar) nesta (resposta|rodada)/.test(t)
+    || /nao (foi |foram )?possivel verificar nesta rodada/.test(t)
+    || /o levantamento veio incompleto/.test(t)
+    || /serie diaria.{0,400}nao (disponivel|retornada|lida)/.test(t)
+    || /detalhamento (dos anuncios|por anuncio).{0,400}nao (foi |foram )?(lid|retorn)/.test(t)
+    || /consulta nao realizada nesta rodada/.test(t);
+  const pedeEco =
+    /envie (novamente|de novo) (uma )?(nova )?pergunta/.test(t)
+    || /manda(r)? enviar novamente/.test(t)
+    || /peca (de novo|novamente).{0,50}(focado|pergunta|pedido|forma mais)/.test(t)
+    || /item ficou para a proxima/.test(t)
+    || /para o usuario poder pedir so esses depois/.test(t);
+  return lacuna || pedeEco;
+}

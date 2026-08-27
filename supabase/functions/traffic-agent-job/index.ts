@@ -1,4 +1,9 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.8)
+// supabase/functions/traffic-agent-job/index.ts (v4.10)
+// v4.10 (27/08/2026) - Devolucao DETERMINISTICA se desempenho nao chamou get_detalhe_anuncios;
+//   nao marca FALHO apos redo que ja coletou; sintese nao pede nova pergunta.
+// v4.9 (27/08/2026) - LEITURA COMPLETA: detalhamento de campanha forca desempenho+criativos,
+//   get_detalhe_anuncios (ID Meta + serie diaria por anuncio/conjunto), janela do pedido,
+//   e o subagente nao fecha apos 2-3 tools se ainda faltar anuncio/serie.
 // v4.8 (25/08/2026) - checar_par recusa CONJ.N errado (CONJ.1 ↛ CONJ.4).
 // v4.7 (25/08/2026) - checar_par / check_compliance recusam cruzamento Juridico × La Felicità.
 // v4.6 (25/08/2026) - VIDEO ATE 4 GB: envio em partes; teto operacional = Meta.
@@ -250,6 +255,15 @@ import {
   raizDriveDoMeio,
   recorteDriveDoPedido,
 } from "../_shared/pedido_drive_criativos.ts";
+import { ehPedidoDetalhamentoCampanha, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import {
+  tDetalheAnuncios,
+  DEF_GET_DETALHE_ANUNCIOS,
+  casarCampanhas,
+  escolherCampanhaUnica,
+  janelaDetalhe,
+  parseJanelaDatasPedido,
+} from "../_shared/leitura_desempenho.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -295,7 +309,7 @@ const TOKENS_POR_SEGUNDO = 60;
 // Planner: classificacao curta, sem raciocinio longo.
 const PLANNER_MAX_TOKENS = 800;
 // Subagente: v4.0 — menos iteracoes/reasoning; prioriza tools locais e fecha o relatorio.
-const SUB_MAX_ITER = 4;
+const SUB_MAX_ITER = 6;
 const SUB_MAX_TOKENS = 4000;
 const SUB_RELATORIO_MAX_PARTES = 2;
 const SUB_REASONING = { max_tokens: 600 };
@@ -344,7 +358,7 @@ const RE_JULGAMENTO_CURTO = /^(sim|nao|ok|pode|confirma|vale a pena|e bom|e ruim
 const FOCO_META_DICAS =
   "Levantar as dicas/recomendacoes da Meta (get_meta_dicas) citadas na pergunta — em especial musica/boost/Opportunity Score — e devolver julgamento acionavel (viavel ou nao + o que fazer). Nao inventariar criativos nem abrir outras frentes.";
 const FOCO_DESEMPENHO_OVERVIEW =
-  "Respeite o CONTRATO DO PEDIDO. Numeros so da janela e do universo declarados. Use get_funnel com date_from/date_to da janela; get_campaign_detail por campanha do universo; get_ads_ranking com ordenar_por=gasto E ordenar_por=alcance E ordenar_por=conversas. Cite optimization_goal do conjunto (nao so o objective da campanha). Nao misture campanhas pausadas historicas se o contrato proibir.";
+  "Respeite o CONTRATO DO PEDIDO. Numeros so da janela e do universo declarados. Use get_funnel com date_from/date_to da janela; get_campaign_detail por campanha (nome OU campaign_id Meta) com a mesma janela; get_detalhe_anuncios por campanha (pagine se restantes>0) para status/gasto/CTR/formularios/serie diaria POR ANUNCIO e POR CONJUNTO; get_ads_ranking com name_like/campaign_id e ordenar_por=gasto E ordenar_por=alcance. Cite optimization_goal do conjunto (nao so o objective da campanha). PROIBIDO fechar com 'nao retornado nesta rodada' sem ter chamado get_detalhe_anuncios. Nao misture campanhas pausadas historicas se o contrato proibir.";
 const FOCO_CRIATIVOS_OVERVIEW =
   "Respeite o CONTRATO DO PEDIDO. Conteudo + ranking dos criativos do universo (get_criativos_conteudo + get_ads_ranking por gasto/alcance/conversas). Responda explicitamente: melhor por conversao, maior alcance, mais conversas. Se zero, diga zero — nunca 'indisponivel'.";
 const FOCO_ALERTAS_OVERVIEW =
@@ -389,6 +403,10 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
     metricas.push("numeros_whatsapp");
   }
 
+  const janelaPedido = parseJanelaDatasPedido(raw, hoje);
+  let date_from: string | undefined = janelaPedido.date_from;
+  let date_to: string | undefined = janelaPedido.date_to ?? hoje;
+
   const perguntas_obrigatorias: string[] = [];
   if (/\bfuncionaram melhor\b|\bmelhor(es)? criativo|\bperformance dos criativos\b/.test(p)) {
     perguntas_obrigatorias.push("Quais criativos funcionaram melhor (criterio declarado: conversao; se zero, declare zero e use gasto/alcance como proxy)?");
@@ -411,6 +429,10 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
     perguntas_obrigatorias.push("Visao geral das campanhas do universo do pedido (status, gasto, objetivo + optimization_goal).");
     perguntas_obrigatorias.push("Funil/metricas NA JANELA do pedido (nao fora dela).");
   }
+  if (ehPedidoDetalhamentoCampanha(raw) || (/\banuncio/.test(p) && /\b(diario|diaria|conjunto|campanha)/.test(p))) {
+    perguntas_obrigatorias.push("Quantos anuncios em cada conjunto, status, gasto, impressoes, alcance, cliques, CTR, formularios/engajamento, custo e destino (get_detalhe_anuncios; pagine se restantes>0).");
+    perguntas_obrigatorias.push("Serie diaria da janela por conjunto e por anuncio (get_detalhe_anuncios + get_campaign_detail com date_from/date_to).");
+  }
 
   // Default: se fala "essas campanhas" / ativacao → nao expandir para conta historica
   const proibir_misturar_pausadas_historicas = (desdeAtivacao || dessasCampanhas || soAtivas) && !contaInteira && !/\bsalt\b/.test(p);
@@ -421,9 +443,9 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
       : "ativas";
 
   let janela_regra: string;
-  let date_from: string | undefined;
-  let date_to: string | undefined = hoje;
-  if (desdeAtivacao) {
+  if (date_from && date_to) {
+    janela_regra = `${date_from} a ${date_to} (janela explicita no pedido)`;
+  } else if (desdeAtivacao) {
     janela_regra = "desde a primeira data com dado das campanhas do universo (ativacao operacional) ate hoje; NAO usar historico anterior de outras campanhas";
     // date_from preenchido depois com dado real do banco
   } else if (contaInteira) {
@@ -442,7 +464,7 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
     metricas.length ? `Metricas pedidas: ${metricas.join(", ")}` : "",
     "Perguntas que DEVEM ter resposta explicita (cada uma):",
     ...(perguntas_obrigatorias.length ? perguntas_obrigatorias.map((q, i) => `${i + 1}. ${q}`) : ["1. Responder exatamente o que o gestor perguntou, sem secoes extras de historico nao pedido."]),
-    "PROIBIDO: dizer que um dado 'nao esta disponivel' sem ter chamado a tool que o expoe (ex.: alcance via get_ads_ranking ordenar_por=alcance).",
+    "PROIBIDO: dizer que um dado 'nao esta disponivel' sem ter chamado a tool que o expoe (ex.: alcance via get_ads_ranking; anuncio/serie diaria via get_detalhe_anuncios).",
     "PROIBIDO: responder com serie da conta inteira quando o pedido e 'desde a ativacao dessas campanhas'.",
     "Se houver dado historico fora do contrato, no maximo uma linha de contexto rotulada FORA DO PEDIDO — nunca como corpo da analise.",
   ].filter(Boolean).join("\n");
@@ -510,6 +532,7 @@ function classificarCapacidade(pergunta: string): Capacidade {
   const len = raw.length;
   const linhas = raw.split(/\n/).filter((l) => l.trim().length > 0).length;
   const perguntas = (raw.match(/\?/g) ?? []).length;
+  const detalheCampanha = ehPedidoDetalhamentoCampanha(raw);
   const deepHit = RE_DEEP.test(p)
     || len >= 1400
     || (len >= 900 && (perguntas >= 3 || linhas >= 8))
@@ -527,6 +550,20 @@ function classificarCapacidade(pergunta: string): Capacidade {
       forcarPlano: [
         { nome: "criativos_drive", foco: FOCO_CRIATIVOS_DRIVE },
         { nome: "estrutura_conta", foco: FOCO_ESTRUTURA_CONJUNTOS_DRIVE },
+      ],
+    };
+  }
+  if (detalheCampanha) {
+    return {
+      tier: deepHit ? "deep" : "standard",
+      motivo: "detalhamento de campanha/anuncio (leitura completa)",
+      maxEspecialistas: 2,
+      devolucoesMax: 1,
+      permitirCheckpoint: true,
+      openRouterTimeoutMs: deepHit ? OPENROUTER_TIMEOUT_MS : STANDARD_OPENROUTER_TIMEOUT_MS,
+      forcarPlano: [
+        { nome: "desempenho_campanhas", foco: FOCO_DESEMPENHO_OVERVIEW },
+        { nome: "criativos", foco: FOCO_CRIATIVOS_OVERVIEW },
       ],
     };
   }
@@ -689,26 +726,25 @@ async function t_ads_ranking(companyId: string, opts: {
   ordenar_por?: string;
   somente_ativas?: boolean;
   date_from?: string;
+  date_to?: string;
   name_like?: string;
+  campaign_id?: string;
 } = {}) {
   const days = Math.min(Math.max(Number(opts.days ?? 30) || 30, 1), 120);
   const ordenar = String(opts.ordenar_por ?? "gasto").toLowerCase();
   const somenteAtivas = opts.somente_ativas !== false;
   const from = opts.date_from?.slice(0, 10)
     || new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+  const to = opts.date_to?.slice(0, 10);
   const { data: ads } = await supa.from("ads").select("external_id,name,campaign_id,adset_external_id").eq("company_id", companyId);
-  let campQ = supa.from("campaigns").select("id,name,category,status,objective").eq("company_id", companyId);
+  let campQ = supa.from("campaigns").select("id,name,category,status,objective,external_id").eq("company_id", companyId);
   if (somenteAtivas) campQ = campQ.eq("status", "active");
   const { data: camps } = await campQ;
-  const campMap = new Map((camps ?? []).map((c) => [c.id, c]));
-  let active = (ads ?? []).filter((a) => campMap.has(a.campaign_id));
-  if (opts.name_like?.trim()) {
-    const needle = norm(opts.name_like);
-    active = active.filter((a) => {
-      const camp = campMap.get(a.campaign_id)?.name ?? "";
-      return norm(a.name).includes(needle) || norm(camp).includes(needle);
-    });
-  }
+  let campList = camps ?? [];
+  const needle = String(opts.campaign_id || opts.name_like || "").trim();
+  if (needle) campList = casarCampanhas(campList, needle) as typeof campList;
+  const campMap = new Map(campList.map((c) => [c.id, c]));
+  const active = (ads ?? []).filter((a) => campMap.has(a.campaign_id));
   if (!active.length) {
     return {
       ranking: [],
@@ -720,10 +756,12 @@ async function t_ads_ranking(companyId: string, opts: {
     };
   }
   const ids = active.map((a) => a.external_id);
-  const { data: snaps } = await supa.from("ad_metric_snapshots")
+  let snapQ = supa.from("ad_metric_snapshots")
     .select("ad_external_id,spend,form_leads,messaging_started,reach,impressions,link_clicks")
     .gte("snapshot_date", from)
     .in("ad_external_id", ids);
+  if (to) snapQ = snapQ.lte("snapshot_date", to);
+  const { data: snaps } = await snapQ;
   type Agg = { spend: number; forms: number; convs: number; reach: number; imp: number; link: number };
   const agg = new Map<string, Agg>();
   for (const s of snaps ?? []) {
@@ -771,22 +809,31 @@ async function t_ads_ranking(companyId: string, opts: {
   rows.sort(sortFn);
   return {
     date_from: from,
+    date_to: to || undefined,
     ordenar_por: ordenar,
     somente_ativas: somenteAtivas,
     ranking: rows.slice(0, 20).map(({ gasto_num, ...r }) => r),
     nota: "alcance_soma_diaria NAO e alcance unico do periodo (soma dos dias). Use ordenar_por=alcance|gasto|conversas|impressoes|custo. PROIBIDO dizer 'alcance indisponivel' se este ranking veio preenchido.",
   };
 }
-async function t_campaign_detail(companyId: string, name_like: string) {
-  const { data: all } = await supa.from("campaigns").select("id,name,status,category,spend").eq("company_id", companyId);
-  const needle = norm(name_like);
-  const camps = (all ?? []).filter((c) => norm(c.name).includes(needle)).slice(0, 3);
-  if (!camps.length) return { erro: `nenhuma campanha com nome contendo '${name_like}'` };
-  const c = camps[0];
-  const from = new Date(Date.now() - 14 * 864e5).toISOString().slice(0, 10);
+async function t_campaign_detail(companyId: string, name_like: string, date_from?: string, date_to?: string) {
+  const { data: all } = await supa.from("campaigns").select("id,name,status,category,spend,external_id,objective,special_ad_categories").eq("company_id", companyId);
+  const hits = casarCampanhas((all ?? []) as { id?: string; name?: string | null; external_id?: string | null }[], name_like);
+  const escolha = escolherCampanhaUnica(hits, name_like);
+  if (!escolha.unica) {
+    if (escolha.ambiguo?.length) {
+      return {
+        ambiguo: true,
+        opcoes: escolha.ambiguo.slice(0, 8).map((c) => ({ nome: c.name, campaign_id: c.external_id })),
+      };
+    }
+    return { erro: `nenhuma campanha com nome ou ID contendo '${name_like}'` };
+  }
+  const c = escolha.unica as typeof hits[0] & { status?: string; category?: string; spend?: number };
+  const { from, to } = janelaDetalhe(date_from, date_to, 14);
   const { data: serie } = await supa.from("metric_snapshots")
     .select("snapshot_date,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,frequency,landing_page_views")
-    .eq("campaign_id", c.id).gte("snapshot_date", from).order("snapshot_date");
+    .eq("campaign_id", c.id).gte("snapshot_date", from).lte("snapshot_date", to).order("snapshot_date");
   const rows = serie ?? [];
   const num = (v: unknown) => Number(v || 0);
   const pct = (n: number, d: number) => d > 0 ? `${(100 * n / d).toFixed(2)}%` : null;
@@ -814,7 +861,17 @@ async function t_campaign_detail(companyId: string, name_like: string) {
   const fechados = rows.filter((s: Record<string, unknown>) => String(s.snapshot_date) < hoje);
   const gastoFechado = fechados.reduce((a, s: Record<string, unknown>) => a + num(s.spend), 0);
   return {
-    campanha: { nome: c.name, status: c.status, categoria: c.category, gasto_acumulado: brl(num(c.spend)) },
+    campanha: {
+      nome: c.name,
+      campaign_id: (c as any).external_id ?? null,
+      status: c.status,
+      categoria: c.category,
+      objetivo: (c as any).objective ?? null,
+      special_ad_categories: Array.isArray((c as any).special_ad_categories) ? (c as any).special_ad_categories : [],
+      gasto_acumulado: brl(num(c.spend)),
+    },
+    janela: { date_from: from, date_to: to },
+    serie_diaria: rows.map(linhaDia),
     serie_diaria_14d: rows.map(linhaDia),
     totais_periodo: {
       dias_com_dado: rows.length, dias_fechados: fechados.length,
@@ -829,7 +886,7 @@ async function t_campaign_detail(companyId: string, name_like: string) {
       cpm: tot.imp ? brl(1000 * tot.spend / tot.imp) : null,
       custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
     },
-    outras_encontradas: camps.slice(1).map((x) => x.name),
+    outras_encontradas: hits.filter((x) => x.id !== c.id).slice(0, 5).map((x) => x.name),
     nota: "serie diaria e totais vem de metric_snapshots (D-1, coletor oficial pipeboard:meta). DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques; cliques_no_link = SO cliques que levam ao destino - ao falar de 'CTR/CPC de link' cite ctr_link/cpc_link. visualizacoes_lp e RESULTADO valido e deve ser reportado. dia sem linha = coleta D-1 ainda nao chegou, NAO e entrega zero. ALCANCE: alcance_soma_diaria_nao_deduplicada e a SOMA dos alcances diarios (mesma pessoa em 2 dias conta 2x) - e PROIBIDO apresenta-la como 'alcance do periodo reportado pela plataforma' ou pessoas unicas; alcance unico do periodo so ao vivo via ler_pipeboard (insights com time_range inteiro, sem quebra por dia). MEDIA DIARIA: use gasto_medio_por_dia_fechado para pacing e comparacao com orcamento - o dia corrente e parcial e dividir por ele dilui a media e esconde estouro de verba.",
   };
 }
@@ -1209,9 +1266,24 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
         ordenar_por: String(args?.ordenar_por ?? "gasto"),
         somente_ativas: args?.somente_ativas !== false,
         date_from: args?.date_from ? String(args.date_from) : undefined,
+        date_to: args?.date_to ? String(args.date_to) : undefined,
         name_like: args?.name_like ? String(args.name_like) : undefined,
+        campaign_id: args?.campaign_id ? String(args.campaign_id) : undefined,
       });
-      case "get_campaign_detail": return await t_campaign_detail(ctx.companyId, String(args?.name_like ?? ""));
+      case "get_campaign_detail": return await t_campaign_detail(
+        ctx.companyId,
+        String(args?.name_like ?? args?.campaign_id ?? ""),
+        args?.date_from ? String(args.date_from) : undefined,
+        args?.date_to ? String(args.date_to) : undefined,
+      );
+      case "get_detalhe_anuncios": return await tDetalheAnuncios(supa, ctx.companyId, {
+        name_like: args?.name_like ? String(args.name_like) : undefined,
+        campaign_id: args?.campaign_id ? String(args.campaign_id) : undefined,
+        date_from: args?.date_from ? String(args.date_from) : undefined,
+        date_to: args?.date_to ? String(args.date_to) : undefined,
+        pagina: args?.pagina != null ? Number(args.pagina) : 1,
+        incluir_serie_diaria: args?.incluir_serie_diaria !== false,
+      });
       case "get_criativos_conteudo": {
         const buscaNome = String(args?.busca_nome ?? "").trim();
         const informouAtivas = typeof args?.somente_ativas === "boolean";
@@ -1335,8 +1407,9 @@ const DEF: Record<string, any> = {
   avaliar_pacing: { type: "function", function: { name: "avaliar_pacing", description: "Calcula capacidade diaria e, com meta_leads_dia opcional, o PISO de verba ao custo atual. Exige company_id do job. Nao ha meta registrada e a projecao nao e estimativa: escalar tende a elevar o custo, entao a verba real pode ser maior.", parameters: { type: "object", properties: { meta_leads_dia: { type: "number" } } } } },
   validar_pedido_contra_contrato: { type: "function", function: { name: "validar_pedido_contra_contrato", description: "Valida pedido jsonb contra contrato_de_execucao. Assinatura: (acao, pedido). contrato_desconhecido se acao sem linhas; recusa obrigatorios faltantes; extras nao invalidam. Lacunas: contrato de anuncio veio do codigo montarCriacao; url_tags opcional no adcreative; NAO substitui pedido_de_anuncio_completo.", parameters: { type: "object", properties: { acao: { type: "string" }, pedido: { type: "object" } }, required: ["acao", "pedido"] } } },
   get_funnel: { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
-  get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando o gestor perguntar quem trouxe mais alcance. Inclui conversas/formularios/gasto.", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, somente_ativas: { type: "boolean" }, date_from: { type: "string" }, name_like: { type: "string" } } } } },
-  get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria 14d de UMA campanha pelo nome, com totais do periodo. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, e os derivados ctr_todos, ctr_link, cpc_todos, cpc_link e cpm. DUAS BASES DE CLIQUE - NUNCA misture: ctr_link/cpc_link usam SO cliques no link (use ao falar de 'CTR/CPC de link'); ctr_todos/cpc_todos usam TODOS os cliques (engajamento amplo). visualizacoes_lp e resultado valido e deve ser reportado (nao omita), sobretudo em engajamento/trafego. Esta e a fonte por-campanha de metricas basicas E avancadas - NUNCA diga que sao indisponiveis. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero.", parameters: { type: "object", properties: { name_like: { type: "string" } }, required: ["name_like"] } } },
+  get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando o gestor perguntar quem trouxe mais alcance. Recorte com name_like ou campaign_id (ID Meta). Passe date_from/date_to da janela.", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, somente_ativas: { type: "boolean" }, date_from: { type: "string" }, date_to: { type: "string" }, name_like: { type: "string" }, campaign_id: { type: "string" } } } } },
+  get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria de UMA campanha (nome OU campaign_id Meta). Passe date_from/date_to da janela do pedido. Totais e cada dia: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, CTR/CPC/CPM. NAO substitui get_detalhe_anuncios.", parameters: { type: "object", properties: { name_like: { type: "string" }, campaign_id: { type: "string" }, date_from: { type: "string" }, date_to: { type: "string" } } } } },
+  get_detalhe_anuncios: DEF_GET_DETALHE_ANUNCIOS,
   get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios; traz tambem destino_url e destino (whatsapp quando wa.me, senao site) - o numero de WhatsApp de destino da peca sai daqui (CONFIG do criativo, nao a analitica WABA congelada). Sem busca_nome: PAGINADO por gasto (20). Com busca_nome: sobrecarga (somente_ativas, company, offset, limit, busca_nome) para achar molde sem folhear; default somente_ativas=false quando busca. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, busca_nome: { type: "string", description: "Parte do nome do anuncio (ex.: LPV2_A2_Reel02 ou TESTE-GT02 no molde)." }, pagina: { type: "integer", description: "Pagina de 20, comecando em 1." } } } } },
   get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto. Inclui entregando (adset+campanha ACTIVE), pegada e numeros_whatsapp (=destino CTWA wa.me, NAO inventario WABA). Para de pe / Cloud / ON_PREMISE use get_waba_status.", parameters: { type: "object", properties: {} } } },
   listar_ferramentas_pipeboard: { type: "function", function: { name: "listar_ferramentas_pipeboard", description: "Catalogo ao vivo das ferramentas de LEITURA do Pipeboard. Use antes de ler_pipeboard quando nao souber o nome do endpoint.", parameters: { type: "object", properties: {} } } },
@@ -1352,9 +1425,9 @@ const DEF: Record<string, any> = {
 // especialista nao atende fora do proprio dominio, recusa e registra em LACUNAS).
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
-    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_campaign_detail: 2, get_ads_ranking: 3, computar_perfil_vencedor: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 9,
-    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir DB; use ler_pipeboard so se faltar numero critico (nao catalogue o Pipeboard por curiosidade). Relatorio denso e curto. Respeitar lacunas e guardas das RPCs; ranking medio isolado nunca prescreve pausa.",
+    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "listar_ferramentas_pipeboard", "ler_pipeboard"],
+    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, get_ads_ranking: 4, get_estrutura_conjuntos: 2, computar_perfil_vencedor: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 14,
+    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, detalhe POR ANUNCIO e serie diaria (get_detalhe_anuncios), diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir DB; use ler_pipeboard so se faltar numero critico. Relatorio denso. PROIBIDO fechar sem get_detalhe_anuncios quando o pedido pede anuncio/serie diaria.",
   },
   criativos: {
     tools: ["get_criativos_conteudo", "get_ads_ranking", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard"],
@@ -1788,8 +1861,8 @@ MISSAO: ${cfg.missao}
 FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
 FIDELIDADE AO PEDIDO: interprete a pergunta de forma fria e literal. Nao amplie janela, nao misture campanhas fora do universo do CONTRATO DO PEDIDO, nao responda perguntas que nao foram feitas. Se o contrato traz date_from, use-o em get_funnel/get_ads_ranking/get_campaign_detail.
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio, registre em LACUNAS e siga so com a sua parte.
-VELOCIDADE: teto ~5 min. DB local primeiro; Pipeboard so se faltar numero. Apos 2-3 tools uteis, ESCREVA.
-PROIBIDO dizer 'nao disponivel'/'nao coletado a tempo' para alcance, gasto ou serie diaria se voce NAO chamou get_ads_ranking (ordenar_por=alcance|gasto) ou get_campaign_detail. Se a tool falhar, diga a falha; se nao chamou, chame ou declare LACUNA: tool nao acionada.
+VELOCIDADE: teto ~5 min. DB local primeiro; Pipeboard so se faltar numero. Apos cobrir o FOCO, ESCREVA. Se o foco pedir anuncio/serie diaria, chame get_detalhe_anuncios (ID Meta ou nome; pagine se restantes>0) ANTES de fechar — 2-3 tools so vale para pergunta pontual.
+PROIBIDO dizer 'nao disponivel'/'nao coletado a tempo' para alcance, gasto, anuncio ou serie diaria se voce NAO chamou get_detalhe_anuncios / get_ads_ranking / get_campaign_detail. Se a tool falhar, diga a falha; se nao chamou, chame.
 REGRAS: todo numero vem de ferramenta CHAMADA AGORA; distinga zero / nao existe / nao coletado; incorpore 'nota'/'aviso'; nao misture janelas.\nPAGINACAO: se restantes > 0 E o foco exigir cobertura total, peca a proxima pagina ate o teto; senao declare o corte em LACUNAS.
 Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, terminando com 'LACUNAS:' (ou 'nenhuma').`;
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
@@ -1873,7 +1946,7 @@ function montarSysSintese(companyName: string, estilo: string, memoria: string, 
   return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
 PERFIL EMPRESARIAL: ${perfil}.
 ESCOPO RIGIDO: somente trafego pago (midia, criativo, publico, orcamento, custo). Bancos, esteira interna, politica de credito, atendimento humano e conversao final do CRM estao FORA - se a pergunta tocar nisso, declare fora de escopo e siga.
-${contrato}REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao coletado nesta rodada' (nunca invente). (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) relatorios INCOMPLETOS: escreva 'o levantamento veio incompleto nesta rodada' - PROIBIDO tratar ausencia como inexistencia. (R4) nao misture janelas. (R4b) HOJE e a data da primeira linha - ultimo dia coletado costuma ser ONTEM. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes. (R9) incoerencia entre numeros: aponte. Sem jargao interno.
+${contrato}REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao coletado nesta rodada' (nunca invente). (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R1c) PROIBIDO pedir ao gestor que envie outra pergunta ou 'peca de novo' — a coleta e o bloco continuam no sistema. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) relatorios INCOMPLETOS: se o especialista JA trouxe anuncios/serie, use esses numeros; PROIBIDO substituir coleta feita por 'nao foi retornado nesta rodada'. (R4) nao misture janelas. (R4b) HOJE e a data da primeira linha - ultimo dia coletado costuma ser ONTEM. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes. (R9) incoerencia entre numeros: aponte. Sem jargao interno.
 PROIBIDO NARRAR INTENCAO: nunca "vou cruzar/ler/consultar". Entregue UMA resposta completa — veredito + evidencia + recomendacao.
 FORMATO (regras vigentes do sistema):
 ${estilo}
@@ -2384,34 +2457,94 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
 // A mae nao valida "esta certo" no sentido absoluto - valida criterios VERIFICAVEIS:
 // cobriu o foco atribuido? tem numero+fonte+janela? saiu do escopo? termina em LACUNAS?
 // Veredito subjetivo de "qualidade" e proibido de proposito: e a receita do loop infinito.
+function toolsDoEspecialista(tel: any, nome: string): string[] {
+  const subs = Array.isArray(tel?.subagentes) ? tel.subagentes : [];
+  const hits = subs.filter((s: any) => String(s?.nome ?? "") === nome);
+  const last = hits.length ? hits[hits.length - 1] : null;
+  const raw = last?.tools;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((t: unknown) => String(t));
+}
+
+function especialistaChamou(tel: any, nome: string, tool: string): boolean {
+  return toolsDoEspecialista(tel, nome).includes(tool);
+}
+
+function motivosDevolucaoDetalhe(
+  pergunta: string,
+  plano: { nome: string }[],
+  relatorios: { nome: string; relatorio: string }[],
+  tel: any,
+): { nome: string; motivo: string }[] {
+  if (!ehPedidoDetalhamentoCampanha(pergunta)) return [];
+  const out: { nome: string; motivo: string }[] = [];
+  if (
+    plano.some((p) => p.nome === "desempenho_campanhas") &&
+    !especialistaChamou(tel, "desempenho_campanhas", "get_detalhe_anuncios")
+  ) {
+    out.push({
+      nome: "desempenho_campanhas",
+      motivo:
+        "O pedido pede anuncio/serie diaria e get_detalhe_anuncios NAO foi chamada. Chame get_detalhe_anuncios por campanha (campaign_id Meta ou name_like, date_from/date_to da janela; pagine se restantes>0) e so depois escreva o relatorio. PROIBIDO fechar com 'nao retornado nesta rodada'.",
+    });
+  }
+  for (const r of relatorios) {
+    if (r.nome !== "desempenho_campanhas") continue;
+    if (replyLeituraIncompleta(r.relatorio) && !out.some((d) => d.nome === r.nome)) {
+      out.push({
+        nome: r.nome,
+        motivo:
+          "O relatorio declara lacuna ('nao retornado nesta rodada'). Complete com get_detalhe_anuncios; nao peca nova pergunta ao gestor.",
+      });
+    }
+  }
+  return out;
+}
+
 async function validarRelatorios(
   pergunta: string,
   plano: { nome: string; foco: string }[],
   relatorios: { nome: string; relatorio: string; completo: boolean }[],
   tel: any,
 ): Promise<{ nome: string; motivo: string }[]> {
+  const det = motivosDevolucaoDetalhe(pergunta, plano, relatorios, tel);
   const resumo = relatorios.map((r) => {
     const foco = plano.find((p) => p.nome === r.nome)?.foco ?? "";
     return `--- ${r.nome} (foco atribuido: ${foco || "geral"}) [${r.completo ? "COMPLETO" : "INCOMPLETO-cortado"}] ---\n${r.relatorio.slice(0, 3200)}`;
   }).join("\n\n");
   const sys = `Voce e a COORDENACAO de uma equipe de especialistas de trafego pago. Avalie cada relatorio contra CRITERIOS VERIFICAVEIS, nunca contra gosto:
-(1) COBERTURA: o relatorio atende o foco que foi atribuido ao especialista? (2) FORMA: numeros vem com fonte e janela, e existe a linha LACUNAS? (3) ESCOPO: ele respondeu o que era de OUTRO especialista em vez do proprio dominio? (4) COERENCIA INTERNA: ha contradicao evidente dentro do proprio relatorio? (5) COBERTURA PAGINAVEL: o relatorio aceitou corte de dados ('X de Y exibidos', 'restantes') SEM esgotar as paginas disponiveis, quando o foco exigia a lista inteira? Isso E motivo de devolucao - a ferramenta pagina e o especialista tinha teto sobrando.
-NAO devolva por: estilo, tamanho, relatorio marcado INCOMPLETO-cortado (isso e limite de tamanho, nao erro do especialista), ou lacuna JA DECLARADA na linha LACUNAS (declarar lacuna e comportamento correto).
+(1) COBERTURA: o relatorio atende o foco que foi atribuido ao especialista? (2) FORMA: numeros vem com fonte e janela, e existe a linha LACUNAS? (3) ESCOPO: ele respondeu o que era de OUTRO especialista em vez do proprio dominio? (4) COERENCIA INTERNA: ha contradicao evidente dentro do proprio relatorio? (5) COBERTURA PAGINAVEL: o relatorio aceitou corte de dados ('X de Y exibidos', 'restantes') SEM esgotar as paginas disponiveis, quando o foco exigia a lista inteira? Isso E motivo de devolucao - a ferramenta pagina e o especialista tinha teto sobrando. (6) DETALHAMENTO: se o pedido pede anuncio/serie diaria e desempenho_campanhas declara 'nao retornado nesta rodada' sem ter listado os anuncios, DEVOLVA — declarar LACUNAS nesse caso NAO e suficiente; a tool get_detalhe_anuncios existe.
+NAO devolva por: estilo, tamanho, relatorio marcado INCOMPLETO-cortado (isso e limite de tamanho, nao erro do especialista).
 Responda APENAS JSON valido: {"avaliacoes":[{"nome":"...","veredito":"ok"|"devolver","motivo":"especifico: o que faltou/errou e o que a nova tentativa deve trazer"}]}`;
   const r = await chamarLLM(
     [{ role: "system", content: sys },
      { role: "user", content: `PERGUNTA DO GESTOR:\n${pergunta.slice(0, 4000)}\n\nRELATORIOS:\n${resumo}` }],
     { maxTokens: 1500, reasoning: REASONING_OFF, tipo: "coordenacao" },
   );
-  if (r.erro) { tel.validacao = { erro: r.erro, aviso: "validacao indisponivel - relatorios seguem sem devolucao" }; return []; }
+  const byNome = new Map<string, { nome: string; motivo: string }>();
+  for (const d of det) byNome.set(d.nome, d);
+  if (r.erro) {
+    tel.validacao = {
+      erro: r.erro,
+      aviso: det.length
+        ? "validacao LLM indisponivel - vale devolucao deterministica de detalhamento"
+        : "validacao indisponivel - relatorios seguem sem devolucao",
+      devolvidos: [...byNome.keys()],
+    };
+    return [...byNome.values()];
+  }
   const u = usoDe(r.parsed);
   const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
   const lista = Array.isArray(bruto?.avaliacoes) ? bruto.avaliacoes : [];
   const nomesValidos = new Set(relatorios.map((x) => x.nome));
-  const devolver = lista
+  const llm = lista
     .filter((a: any) => String(a?.veredito ?? "") === "devolver" && nomesValidos.has(String(a?.nome ?? "")))
     .map((a: any) => ({ nome: String(a.nome), motivo: String(a?.motivo ?? "sem motivo declarado").slice(0, 500) }));
-  tel.validacao = { tokens_in: u.tin, tokens_out: u.tout, devolvidos: devolver.map((d: any) => d.nome) };
+  for (const d of llm) {
+    if (!byNome.has(d.nome)) byNome.set(d.nome, d);
+  }
+  const devolver = [...byNome.values()];
+  tel.validacao = { tokens_in: u.tin, tokens_out: u.tout, devolvidos: devolver.map((d) => d.nome), det: det.map((d) => d.nome) };
   return devolver;
 }
 
@@ -2507,7 +2640,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.7";
+  tel.versao = "job-v4.10";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -2665,7 +2798,12 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
         }
         if (rodada >= cap.devolucoesMax) {
-          for (const d of devolver) if (!falhosDefinitivos.includes(d.nome)) falhosDefinitivos.push(d.nome);
+          const ainda = motivosDevolucaoDetalhe(pergunta, plano, relatorios, tel);
+          const aindaNomes = new Set(ainda.map((x) => x.nome));
+          for (const d of devolver) {
+            if (ehPedidoDetalhamentoCampanha(pergunta) && !aindaNomes.has(d.nome)) continue;
+            if (!falhosDefinitivos.includes(d.nome)) falhosDefinitivos.push(d.nome);
+          }
         }
       }
     } else {

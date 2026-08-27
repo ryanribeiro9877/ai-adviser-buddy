@@ -36,7 +36,7 @@ import {
 import { Markdown } from "@/components/markdown";
 import { JobProgressCard } from "@/components/job-progress-card";
 import { replyLoteComLegendas, replyLoteCriativoIncompleto } from "@/lib/lote-criativo";
-import { ehPedidoUploadLote, ehUploadLoteCurto } from "@/lib/intencao-turno";
+import { ehPedidoUploadLote, ehUploadLoteCurto, replyLeituraIncompleta } from "@/lib/intencao-turno";
 import { ActionCard, decideApproval, reexecutarApproval, type Approval, type Decision } from "@/components/action-card";
 import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
@@ -88,7 +88,7 @@ type ChatReply = {
 const CONTINUE_PROMPT =
   "Sua resposta anterior foi cortada pelo limite de tamanho. Continue EXATAMENTE do ponto onde parou, na próxima palavra ou linha. Não repita nada do que já escreveu, não reintroduza o assunto, não reescreva títulos já entregues, não cumprimente. Apenas continue até concluir.";
 // Segmentos extras alem da costura por tamanho (checkpoint de orçamento / ato).
-const MAX_CONTINUATIONS = 5;
+const MAX_CONTINUATIONS = 6;
 const MAX_CONTINUATIONS_UPLOAD = 8;
 const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 const needsAutoContinue = (data?: ChatReply | null) =>
@@ -173,9 +173,10 @@ function looksLikeCompleteTurn(text: string): boolean {
   const raw = (text ?? "").trim();
   if (raw.length < 100 || isProgressOnlyReply(raw)) return false;
   if (replyLoteCriativoIncompleto(raw) || replyLoteComLegendas(raw)) return false;
+  if (replyLeituraIncompleta(raw)) return false;
   if (/##\s*status do upload/i.test(raw) && /ainda fora da meta/i.test(raw)) return false;
   const t = deaccFront(raw.toLowerCase());
-  if (/\?/.test(raw)) return true;
+  if (/\?/.test(raw) && !/envie (novamente|de novo)|nova pergunta|peca de novo/.test(t)) return true;
   return /\b(preciso (da sua|que voce|confirmar|saber)|qual (o |a )?(objetivo|opcao|caminho|meta)|me (confirma|diga|escolha)|antes de (criar|emitir|propor)|contradic|aguardo (sua|a) (resposta|decisao)|escolha (uma|o|a)|decida)\b/.test(t);
 }
 
@@ -190,8 +191,19 @@ function uploadLoteAberto(msgs: Message[]): boolean {
   return ehPedidoUploadLote(lastUserContent(msgs));
 }
 
+function leituraAindaAberta(msgs: Message[]): boolean {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role === "user") break;
+    if (m.role !== "assistant") continue;
+    if (replyLeituraIncompleta(m.content ?? "")) return true;
+  }
+  return false;
+}
+
 function devePararContinuacao(msgs: Message[]): boolean {
   if (uploadLoteAberto(msgs)) return false;
+  if (leituraAindaAberta(msgs)) return false;
   return countSubstantiveAssistantsSinceLastUser(msgs) >= 2 && !loteAindaAberto(msgs);
 }
 
