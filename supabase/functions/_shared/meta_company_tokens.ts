@@ -149,3 +149,68 @@ export function empresasComTokenWaba(): Array<EmpresaMetaCfg & { token: string; 
   }
   return out;
 }
+
+export function normNomeEmpresa(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/[_]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+export type MatchEmpresa =
+  | { ok: true; id: string; name: string }
+  | { ok: false; motivo: "ausente" | "ambigua"; matches: string[] };
+
+/**
+ * Resolve empresa por UUID, slug conhecido (COHAPM / Legal) ou nome EXATO.
+ * Nunca substring: `ilike %COHAPM%` casa tambem "Cooperativa_ Cohapm" e maybeSingle
+ * devolve vazio — o cron de escoamento COHAPM respondia 404.
+ */
+export function matchEmpresaPorRef(
+  ref: string | null | undefined,
+  empresas: Array<{ id: string; name: string }>,
+): MatchEmpresa {
+  const s = String(ref ?? "").trim();
+  if (!s) return { ok: false, motivo: "ausente", matches: [] };
+  const lista = empresas ?? [];
+
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) {
+    const hit = lista.find((e) => e.id.toLowerCase() === s.toLowerCase());
+    return hit
+      ? { ok: true, id: hit.id, name: hit.name }
+      : { ok: false, motivo: "ausente", matches: [] };
+  }
+
+  const n = normNomeEmpresa(s);
+  if (n === "cohapm") {
+    const hit =
+      lista.find((e) => e.id === COMPANY_COHAPM) ??
+      lista.find((e) => normNomeEmpresa(e.name) === "cohapm");
+    if (hit) return { ok: true, id: hit.id, name: hit.name };
+  }
+  if (n === "legal" || n === "legal e viver") {
+    const hit =
+      lista.find((e) => e.id === COMPANY_LEGAL) ??
+      lista.find((e) => normNomeEmpresa(e.name) === "legal e viver");
+    if (hit) return { ok: true, id: hit.id, name: hit.name };
+  }
+
+  const exact = lista.filter((e) => normNomeEmpresa(e.name) === n);
+  if (exact.length === 1) return { ok: true, id: exact[0].id, name: exact[0].name };
+  if (exact.length > 1) {
+    return { ok: false, motivo: "ambigua", matches: exact.map((e) => e.name) };
+  }
+  return { ok: false, motivo: "ausente", matches: [] };
+}
+
+/** Ads Management 80004 / user limit — nao e token ausente; nao adianta repetir o GET. */
+export function graphRateLimited(status: number, body: unknown): boolean {
+  if (status !== 400 && status !== 429 && status !== 17) return false;
+  const err = (body as { error?: { code?: number; message?: string } } | null)?.error;
+  const code = Number(err?.code ?? 0);
+  const msg = String(err?.message ?? (typeof body === "string" ? body : "")).toLowerCase();
+  return code === 80004 || code === 17 || /too many calls|rate.?limit|user request limit/.test(msg);
+}

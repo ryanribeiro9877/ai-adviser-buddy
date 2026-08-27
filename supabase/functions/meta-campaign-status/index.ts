@@ -1,4 +1,10 @@
-// supabase/functions/meta-campaign-status/index.ts (v18)
+// supabase/functions/meta-campaign-status/index.ts (v19)
+// v19 (27/08/2026) - Cota Ads Management (80004): a corrida diaria fazia 1 GET por
+//   objeto por campo (url_tags, status, spec...) em TODAS as contas connected,
+//   inclusive Read-Only nao_operacional. Isso esgotava act_COHAPM e act_Legal
+//   antes do bm-monitor das 09:20. Agora: so contas estado_operacional=ativa;
+//   campos estaveis no mesmo GET; aborta o lote no 80004; Opportunity Score
+//   nao tenta 6 URLs depois de quota.
 // v18 (21/08/2026) - Graph v26+ quebrou GET /?ids=... (parametro `ids` deprecado).
 //   lerCampoPorIds passou a GET /{id}?fields=... (caminho por objeto). Sem isso a coleta
 //   pontual de is_dynamic_creative falhava (HTTP 500), o portao de emissao fail-closava
@@ -140,6 +146,7 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import {
   empresaPorAdAccount,
   empresasComTokenAds,
+  graphRateLimited,
   redactAllMetaTokens,
   tokenAdsPorCompanyId,
 } from "../_shared/meta_company_tokens.ts";
@@ -293,16 +300,23 @@ async function lerCampoPorIds(
           p = null;
         }
         if (!r.ok || !p || typeof p !== "object") {
-          return { id, ok: false as const, erro: `graph ${r.status}: ${redact(t).slice(0, 240)}` };
+          return {
+            id,
+            ok: false as const,
+            erro: `graph ${r.status}: ${redact(t).slice(0, 240)}`,
+            rate: graphRateLimited(r.status, p ?? t),
+          };
         }
-        return { id, ok: true as const, obj: p };
+        return { id, ok: true as const, obj: p, rate: false };
       } catch (e) {
-        return { id, ok: false as const, erro: `fetch: ${String(e).slice(0, 200)}` };
+        return { id, ok: false as const, erro: `fetch: ${String(e).slice(0, 200)}`, rate: false };
       }
     }));
+    let abortRate = false;
     for (const item of leituras) {
       if (!item.ok) {
         diagnostico.erros.push(`${item.id}: ${item.erro}`);
+        if (item.rate) abortRate = true;
         continue;
       }
       const obj = item.obj;
@@ -313,6 +327,10 @@ async function lerCampoPorIds(
       valores.set(item.id, valor);
       diagnostico.com_chave++;
       if (diagnostico.exemplos.length < 2) diagnostico.exemplos.push(exemploSeguro(valor));
+    }
+    if (abortRate) {
+      diagnostico.erros.push("abortado: Graph 80004 rate-limit da conta");
+      break;
     }
   }
   return { valores, respondidos, diagnostico };
@@ -390,6 +408,148 @@ async function lerCampoPorIdsMultiToken(
   if (semToken.length) {
     merged.diagnostico.erros.push(`token_ausente_empresa para ${semToken.length} id(s)`);
     merged.diagnostico.solicitados = ids.length;
+  }
+  return merged;
+}
+
+function resultadoVazio(
+  nivel: LeituraCampo["nivel"],
+  campo: string,
+  solicitados: number,
+): ResultadoCampo {
+  return {
+    valores: new Map(),
+    respondidos: new Set(),
+    diagnostico: {
+      nivel,
+      campo,
+      solicitados,
+      respostas: 0,
+      com_chave: 0,
+      exemplos: [],
+      erros: [],
+    },
+  };
+}
+
+/** Um GET por objeto com varios campos. Corta ~5-10x vs 1 campo por request. */
+async function lerCamposPorIds(
+  ids: string[],
+  nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
+  campos: string[],
+  tokenOverride?: string,
+): Promise<Map<string, ResultadoCampo>> {
+  const tok = (tokenOverride ?? TOKEN).trim();
+  const out = new Map<string, ResultadoCampo>();
+  for (const c of campos) out.set(c, resultadoVazio(nivel, c, ids.length));
+  if (!campos.length) return out;
+  if (!tok) {
+    for (const c of campos) {
+      out.get(c)!.diagnostico.erros.push("token Ads ausente para esta leitura");
+    }
+    return out;
+  }
+  if (campos.length === 1) {
+    out.set(campos[0], await lerCampoPorIds(ids, nivel, campos[0], tok));
+    return out;
+  }
+  const fieldsParam = campos.join(",");
+  let abortRate = false;
+  for (let i = 0; i < ids.length; i += 20) {
+    if (abortRate) break;
+    const lote = ids.slice(i, i + 20);
+    const leituras = await Promise.all(lote.map(async (id) => {
+      const url =
+        `${GRAPH}/${encodeURIComponent(id)}?fields=${encodeURIComponent(fieldsParam)}` +
+        `&access_token=${encodeURIComponent(tok)}`;
+      try {
+        const r = await fetch(url);
+        const t = await r.text();
+        let p: any;
+        try {
+          p = JSON.parse(t);
+        } catch {
+          p = null;
+        }
+        if (!r.ok || !p || typeof p !== "object") {
+          return {
+            id,
+            ok: false as const,
+            erro: `graph ${r.status}: ${redact(t).slice(0, 240)}`,
+            rate: graphRateLimited(r.status, p ?? t),
+          };
+        }
+        return { id, ok: true as const, obj: p, rate: false };
+      } catch (e) {
+        return { id, ok: false as const, erro: `fetch: ${String(e).slice(0, 200)}`, rate: false };
+      }
+    }));
+    for (const item of leituras) {
+      if (!item.ok) {
+        if (item.rate) abortRate = true;
+        for (const campo of campos) {
+          out.get(campo)!.diagnostico.erros.push(`${item.id}: ${item.erro}`);
+        }
+        continue;
+      }
+      for (const campo of campos) {
+        const dest = out.get(campo)!;
+        dest.diagnostico.respostas++;
+        dest.respondidos.add(item.id);
+        if (!temChave(item.obj, campo)) continue;
+        const valor = item.obj[campo];
+        dest.valores.set(item.id, valor);
+        dest.diagnostico.com_chave++;
+        if (dest.diagnostico.exemplos.length < 2) dest.diagnostico.exemplos.push(exemploSeguro(valor));
+      }
+    }
+    if (abortRate) {
+      for (const campo of campos) {
+        out.get(campo)!.diagnostico.erros.push("abortado: Graph 80004 rate-limit da conta");
+      }
+    }
+  }
+  return out;
+}
+
+async function lerCamposPorIdsMultiToken(
+  ids: string[],
+  tokenDe: (id: string) => string | null,
+  nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
+  campos: string[],
+): Promise<Map<string, ResultadoCampo>> {
+  const grupos = new Map<string, string[]>();
+  const semToken: string[] = [];
+  for (const id of ids) {
+    const tok = tokenDe(id);
+    if (!tok) {
+      semToken.push(id);
+      continue;
+    }
+    const arr = grupos.get(tok) ?? [];
+    arr.push(id);
+    grupos.set(tok, arr);
+  }
+  const partsPorCampo = new Map<string, ResultadoCampo[]>();
+  for (const c of campos) partsPorCampo.set(c, []);
+  for (const [tok, groupIds] of grupos) {
+    const part = await lerCamposPorIds(groupIds, nivel, campos, tok);
+    for (const c of campos) partsPorCampo.get(c)!.push(part.get(c)!);
+  }
+  const merged = new Map<string, ResultadoCampo>();
+  for (const c of campos) {
+    const parts = partsPorCampo.get(c)!;
+    merged.set(
+      c,
+      parts.length ? mergeResultadoCampo(parts) : resultadoVazio(nivel, c, ids.length),
+    );
+  }
+  if (semToken.length) {
+    for (const c of campos) {
+      const d = merged.get(c)!;
+      d.diagnostico.erros.push(`token_ausente_empresa para ${semToken.length} id(s)`);
+      d.diagnostico.solicitados = ids.length;
+    }
   }
   return merged;
 }
@@ -612,8 +772,8 @@ async function fetchOpportunityRecommendations(accountId: string, tokenOverride?
     }
     if (!r.ok) {
       lastErro = redact(t).slice(0, 320);
-      // 403/400 nesta conta: nao adianta tentar outras URLs com o mesmo token.
-      if (r.status === 403 || r.status === 401) break;
+      // 403/401: token sem grant. 80004: quota da conta — outras URLs so pioram.
+      if (r.status === 403 || r.status === 401 || graphRateLimited(r.status, p)) break;
       continue;
     }
     const recs = achatarRecsOs(p);
@@ -625,18 +785,21 @@ async function fetchOpportunityRecommendations(accountId: string, tokenOverride?
   }
 
   let score: unknown = null;
-  try {
-    const su =
-      `${GRAPH_OS}/act_${encodeURIComponent(accountId)}` +
-      `?fields=opportunity_score&access_token=${encodeURIComponent(tok)}`;
-    const sr = await fetch(su);
-    const st = await sr.text();
-    if (sr.ok) {
-      const sj = JSON.parse(st);
-      score = sj?.opportunity_score ?? null;
+  const quotaJa = /80004|too many calls/.test(String(lastErro ?? "").toLowerCase());
+  if (!quotaJa) {
+    try {
+      const su =
+        `${GRAPH_OS}/act_${encodeURIComponent(accountId)}` +
+        `?fields=opportunity_score&access_token=${encodeURIComponent(tok)}`;
+      const sr = await fetch(su);
+      const st = await sr.text();
+      if (sr.ok) {
+        const sj = JSON.parse(st);
+        score = sj?.opportunity_score ?? null;
+      }
+    } catch {
+      /* score e opcional */
     }
-  } catch {
-    /* score e opcional */
   }
 
   const ok = lastStatus >= 200 && lastStatus < 300 && !lastErro;
@@ -936,7 +1099,7 @@ async function coletarMetaDicasAoVivo(corpo: any): Promise<Response> {
     candidatas: linhas.length,
     upsert,
     diagnostico,
-    versao: "meta-campaign-status-v17",
+    versao: "meta-campaign-status-v19",
     nota:
       "Refresh ao vivo do Opportunity Score (GET /act_*/recommendations). " +
       "Badge do Ads Manager pode exceder a lista da API (assimetria documentada pela Meta).",
@@ -966,11 +1129,12 @@ Deno.serve(async (req) => {
 
   const { data: integs } = await supa
     .from("integrations")
-    .select("external_id, account_name, company_id")
+    .select("external_id, account_name, company_id, estado_operacional")
     .eq("provider", "meta_ads");
   const contasMeta = [
     ...new Map(
       (integs ?? [])
+        .filter((i: any) => String(i.estado_operacional ?? "") === "ativa")
         .map((i: any) => {
           const external_id = String(i.external_id ?? "").replace(/^act_/, "").trim();
           if (!external_id) return null;
@@ -1220,41 +1384,57 @@ Deno.serve(async (req) => {
     estadoConjuntos = error ? { erro: error.message } : data;
   }
 
-  const adUrlTags = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "url_tags");
-  diagnosticoCampos.push(adUrlTags.diagnostico);
-  const trackingSpecs = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "tracking_specs");
-  diagnosticoCampos.push(trackingSpecs.diagnostico);
-
-  // ESP-13: status configurado e status efetivo sao fatos distintos. Cada campo e consultado
-  // sozinho; `issues_info` ausente nunca vira [].
-  const adStatus = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "status");
-  diagnosticoCampos.push(adStatus.diagnostico);
-  const adEffectiveStatus = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "effective_status");
-  diagnosticoCampos.push(adEffectiveStatus.diagnostico);
-  const adIssuesInfo = await lerCampoPorIdsMultiToken(adIds, tokenDeAd, "anuncio", "issues_info");
-  diagnosticoCampos.push(adIssuesInfo.diagnostico);
+  const adLidos = await lerCamposPorIdsMultiToken(adIds, tokenDeAd, "anuncio", [
+    "url_tags",
+    "tracking_specs",
+    "status",
+    "effective_status",
+    "issues_info",
+  ]);
+  const adUrlTags = adLidos.get("url_tags") ?? resultadoVazio("anuncio", "url_tags", adIds.length);
+  const trackingSpecs = adLidos.get("tracking_specs") ?? resultadoVazio("anuncio", "tracking_specs", adIds.length);
+  const adStatus = adLidos.get("status") ?? resultadoVazio("anuncio", "status", adIds.length);
+  const adEffectiveStatus = adLidos.get("effective_status") ?? resultadoVazio("anuncio", "effective_status", adIds.length);
+  const adIssuesInfo = adLidos.get("issues_info") ?? resultadoVazio("anuncio", "issues_info", adIds.length);
+  diagnosticoCampos.push(
+    adUrlTags.diagnostico,
+    trackingSpecs.diagnostico,
+    adStatus.diagnostico,
+    adEffectiveStatus.diagnostico,
+    adIssuesInfo.diagnostico,
+  );
 
   const accountGraphIds = acessiveis.map((id) => `act_${id}`);
-  const accountStatus = await lerCampoPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", "account_status");
-  diagnosticoCampos.push(accountStatus.diagnostico);
-  const accountDisableReason = await lerCampoPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", "disable_reason");
-  diagnosticoCampos.push(accountDisableReason.diagnostico);
-  const accountSpendCap = await lerCampoPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", "spend_cap");
-  diagnosticoCampos.push(accountSpendCap.diagnostico);
-  const accountCapabilities = await lerCampoPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", "capabilities");
-  diagnosticoCampos.push(accountCapabilities.diagnostico);
+  const accLidos = await lerCamposPorIdsMultiToken(accountGraphIds, tokenDeAccountGraphId, "conta", [
+    "account_status",
+    "disable_reason",
+    "spend_cap",
+    "capabilities",
+  ]);
+  const accountStatus = accLidos.get("account_status") ?? resultadoVazio("conta", "account_status", accountGraphIds.length);
+  const accountDisableReason = accLidos.get("disable_reason") ?? resultadoVazio("conta", "disable_reason", accountGraphIds.length);
+  const accountSpendCap = accLidos.get("spend_cap") ?? resultadoVazio("conta", "spend_cap", accountGraphIds.length);
+  const accountCapabilities = accLidos.get("capabilities") ?? resultadoVazio("conta", "capabilities", accountGraphIds.length);
+  diagnosticoCampos.push(
+    accountStatus.diagnostico,
+    accountDisableReason.diagnostico,
+    accountSpendCap.diagnostico,
+    accountCapabilities.diagnostico,
+  );
 
   const camposCriativo = new Map<string, Map<string, unknown>>();
   let storySpec: ResultadoCampo | null = null;
   let assetFeedSpec: ResultadoCampo | null = null;
-  for (const campo of [
+  const criativoCampos = [
     "url_tags",
     "object_story_spec",
     "template_url_spec",
     "asset_feed_spec",
     "link_destination_display_url",
-  ]) {
-    const lido = await lerCampoPorIdsMultiToken(creativeIds, tokenDeCreative, "criativo", campo);
+  ];
+  const criLidos = await lerCamposPorIdsMultiToken(creativeIds, tokenDeCreative, "criativo", criativoCampos);
+  for (const campo of criativoCampos) {
+    const lido = criLidos.get(campo) ?? resultadoVazio("criativo", campo, creativeIds.length);
     camposCriativo.set(campo, lido.valores);
     if (campo === "object_story_spec") storySpec = lido;
     if (campo === "asset_feed_spec") assetFeedSpec = lido;
@@ -1943,6 +2123,6 @@ Deno.serve(async (req) => {
       },
       nota: "v16: Opportunity Score GET /act_*/recommendations (badge Ads Manager) + campo classico recommendations em objetos ACTIVE. first_seen_on/last_seen_on + veredito via upsert_meta_recomendacoes.",
     },
-    versao: "meta-campaign-status-v17",
+    versao: "meta-campaign-status-v19",
   });
 });

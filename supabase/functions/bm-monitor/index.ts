@@ -1,4 +1,7 @@
-// supabase/functions/bm-monitor/index.ts (v3) — F4.4 multi-empresa
+// supabase/functions/bm-monitor/index.ts (v4) — F4.4 multi-empresa
+// v4 (27/08/2026): HTTP 400 code 80004 (too many calls / ad-account) NAO e token
+//   ausente e NAO deve retry. O retry sem funding_source_details era certo para
+//   task MANAGE; em quota ele duplicava a chamada e gravava alerta critico falso.
 // v3 (25/08/2026): HTTP 400 em funding_source_details NAO e "token ausente".
 //   O secret foi enviado; a Graph recusa o CAMPO (exige task MANAGE) e o pedido
 //   inteiro cai. Retry sem o campo. Alerta cita o erro Graph. Sucesso posterior
@@ -21,6 +24,7 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import {
   EMPRESAS_META,
   empresasComTokenAds,
+  graphRateLimited,
   redactAllMetaTokens,
   tokenAdsPorCompanyId,
 } from "../_shared/meta_company_tokens.ts";
@@ -28,7 +32,7 @@ import {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GRAPH = "https://graph.facebook.com/v21.0";
-const VERSAO = "bm-monitor-v3";
+const VERSAO = "bm-monitor-v4";
 const CAMPOS_CONTA = "name,account_status,disable_reason,balance,currency,spend_cap,amount_spent";
 const CAMPOS_CONTA_COM_FUNDING = `${CAMPOS_CONTA},funding_source_details`;
 const TITULO_FALHA_CONTA = (slug: string) => `[BM][${slug}] Falha ao consultar a conta de anúncios`;
@@ -83,6 +87,10 @@ function erroPareceToken(status: number, body: unknown): boolean {
 async function lerContaAds(adAccount: string, token: string) {
   const comFunding = await g(`/${adAccount}?fields=${CAMPOS_CONTA_COM_FUNDING}`, token);
   if (comFunding.status === 200) return { ...comFunding, funding_omitido: false };
+  // Quota da conta: repetir o GET piora o 80004 e nao prova token ausente.
+  if (graphRateLimited(comFunding.status, comFunding.body)) {
+    return { ...comFunding, funding_omitido: false };
+  }
   // HTTP 400 neste campo e comum (task MANAGE). Nao e prova de secret ausente.
   if (comFunding.status === 400) {
     const sem = await g(`/${adAccount}?fields=${CAMPOS_CONTA}`, token);
@@ -136,13 +144,16 @@ async function coletarEmpresa(
     if (conta.status !== 200) {
       const graph = mensagemGraph(conta.body);
       const tokenRuim = erroPareceToken(conta.status, conta.body);
+      const quota = graphRateLimited(conta.status, conta.body);
       criados.push(
         await upsertAlert(
           companyId,
-          "critical",
+          quota ? "high" : "critical",
           TITULO_FALHA_CONTA(slug),
           tokenRuim
             ? `Graph recusou o token Ads de ${slug} ao ler ${adAccount} (HTTP ${conta.status}${graph ? `: ${graph}` : ""}). Conferir o Edge Secret ${tokenRef} (valor novo so entra no isolate apos frio/redeploy).`
+            : quota
+            ? `Graph recusou a leitura de ${adAccount} por LIMITE DE CHAMADAS (HTTP ${conta.status}${graph ? `: ${graph}` : ""}). O secret ${tokenRef} FOI enviado — nao e token da outra empresa. A corrida diaria (meta-campaign-status) esgota a cota da conta; tentar de novo depois.`
             : `Graph recusou a leitura de ${adAccount} (HTTP ${conta.status}${graph ? `: ${graph}` : ""}). O secret desta empresa FOI enviado — nao e ausencia de token.`,
         ),
       );

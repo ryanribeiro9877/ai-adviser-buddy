@@ -1,5 +1,8 @@
-// supabase/functions/upload-midia/index.ts (v6)
+// supabase/functions/upload-midia/index.ts (v6.1)
 // =============================================================================
+// v6.1 (27/08/2026) - Resolver empresa por UUID/slug/nome EXATO. ilike %COHAPM%
+//   casava tambem "Cooperativa_ Cohapm"; maybeSingle falhava e o cron de
+//   escoamento COHAPM respondia 404 a cada hora (chave MCP certa, empresa errada).
 // v6 (25/08/2026) - VIDEO ATE 4 GB: envio em partes Graph (upload_phase start/
 //   transfer/finish) + Range no Drive. A edge nao baixa o arquivo inteiro.
 //   Sessao persistida em media_uploads (status=enviando) para retomar apos o wall.
@@ -53,6 +56,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import {
   COMPANY_LEGAL,
+  matchEmpresaPorRef,
   redactAllMetaTokens,
   tokenAdsPorCompanyId,
 } from "../_shared/meta_company_tokens.ts";
@@ -536,8 +540,10 @@ Deno.serve(async (req) => {
       .maybeSingle();
     if (row?.company_id) companyProbe = String(row.company_id);
     if (row?.account_external_id) accountHint = String(row.account_external_id);
-    if (!companyProbe || !/^[0-9a-f-]{36}$/i.test(companyProbe)) {
-      companyProbe = COMPANY_LEGAL;
+    if (!companyProbe || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(companyProbe)) {
+      const { data: empresas } = await supa.from("companies").select("id,name");
+      const hit = matchEmpresaPorRef(companyProbe, empresas ?? []);
+      companyProbe = hit.ok ? hit.id : COMPANY_LEGAL;
     }
 
     const ativ = ativarTokenEmpresa(companyProbe);
@@ -579,13 +585,20 @@ Deno.serve(async (req) => {
     });
   }
 
-  // empresa
-  const compRef = String(body?.company ?? "").trim();
-  if (!compRef) return json({ error: "company obrigatorio (nome ou uuid)" }, 400);
-  const { data: comp } = /^[0-9a-f-]{36}$/i.test(compRef)
-    ? await supa.from("companies").select("id,name").eq("id", compRef).maybeSingle()
-    : await supa.from("companies").select("id,name").ilike("name", `%${compRef}%`).maybeSingle();
-  if (!comp) return json({ error: `empresa nao encontrada: ${compRef}` }, 404);
+  // empresa — UUID, slug (COHAPM/Legal) ou nome EXATO. Nunca ilike %x%:
+  // %COHAPM% casa tambem "Cooperativa_ Cohapm" e maybeSingle falha fechado (404).
+  const compRef = String(body?.company_id ?? body?.company ?? "").trim();
+  if (!compRef) return json({ error: "company obrigatorio (nome, slug ou uuid)" }, 400);
+  const { data: empresas } = await supa.from("companies").select("id,name");
+  const hitEmpresa = matchEmpresaPorRef(compRef, empresas ?? []);
+  if (!hitEmpresa.ok) {
+    return json({
+      error: `empresa nao encontrada: ${compRef}`,
+      motivo: hitEmpresa.motivo,
+      matches: hitEmpresa.matches,
+    }, 404);
+  }
+  const comp = { id: hitEmpresa.id, name: hitEmpresa.name };
 
   // Token Ads DA EMPRESA resolvida — se COHAPM sem secret, falha (não usa Legal).
   const ativEmpresa = ativarTokenEmpresa(comp.id);

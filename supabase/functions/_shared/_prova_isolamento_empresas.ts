@@ -15,6 +15,9 @@ const legendas = await Deno.readTextFile(
 const metaActions = await Deno.readTextFile(
   new URL("../meta-actions/index.ts", import.meta.url),
 );
+const uploadMidia = await Deno.readTextFile(
+  new URL("../upload-midia/index.ts", import.meta.url),
+);
 const empCredito = await Deno.readTextFile(
   new URL("./empresa_credito.ts", import.meta.url),
 );
@@ -151,6 +154,11 @@ assert(
 assert(
   !job.includes("EXCLUSIVAMENTE de credito consignado CLT"),
   "job visao nao pode forcar CLT exclusivo",
+);
+assert(
+  uploadMidia.includes("matchEmpresaPorRef") &&
+    !uploadMidia.includes('ilike("name", `%${compRef}%`)'),
+  "upload-midia nao pode resolver empresa por substring (COHAPM vs Cooperativa_ Cohapm)",
 );
 
 console.log("ok: _prova_isolamento_empresas");
