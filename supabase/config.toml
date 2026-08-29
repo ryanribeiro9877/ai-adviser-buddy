@@ -106,3 +106,7 @@ verify_jwt = true
 # Cron 09:35 UTC autentica via x-mcp-key; gateway JWT aberto.
 [functions.traffic-reco-job]
 verify_jwt = false
+
+# 29/08/2026 — inspect/register de numeros WABA (Cloud API). Auth na edge (x-mcp-key).
+[functions.waba-phone-connect]
+verify_jwt = false
