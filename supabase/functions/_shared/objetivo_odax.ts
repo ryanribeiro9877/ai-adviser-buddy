@@ -255,7 +255,11 @@ export type AdsetEngajamentoDefaults = {
   billing_event: string;
   destination_type: string | null;
   /** promoted_object so com page_id — sem pixel/conversao. */
-  promoted_object: { page_id: string; whatsapp_phone_number?: string };
+  promoted_object: {
+    page_id: string;
+    whatsapp_phone_number?: string;
+    whats_app_business_phone_number_id?: string;
+  };
 };
 
 /**
@@ -352,6 +356,7 @@ export function defaultsConjuntoMensagens(
   pageId: string,
   opts?: {
     whatsapp_phone_number?: unknown;
+    whats_app_business_phone_number_id?: unknown;
     destination_type?: unknown;
     optimization_goal?: unknown;
   },
@@ -400,12 +405,22 @@ export function defaultsConjuntoMensagens(
       erro: "whatsapp_phone_number_obrigatorio_para_mensagens",
       detalhe:
         "Conjunto Click-to-WhatsApp (destination_type=WHATSAPP) exige params.whatsapp_phone_number " +
-        "(digitos com DDI, ex.: 5571991088073). O numero fica no promoted_object do conjunto; " +
+        "(digitos com DDI, ex.: 557191088073). O numero fica no promoted_object do conjunto; " +
         "o criativo usa api.whatsapp.com/send + WHATSAPP_MESSAGE — nao embuta o telefone em wa.me no anuncio.",
     };
   }
-  const promoted: { page_id: string; whatsapp_phone_number?: string } = { page_id: page };
-  if (waDigits.length >= 10) promoted.whatsapp_phone_number = waDigits;
+  const promoted: {
+    page_id: string;
+    whatsapp_phone_number?: string;
+    whats_app_business_phone_number_id?: string;
+  } = { page_id: page };
+  if (waDigits.length >= 10) {
+    // Import dinamico evitado: o canon 12-digitos vive em whatsapp_pagina; aqui so gravamos
+    // os digitos crus. montarCriacao/resolverWhatsAppCtwa reescreve para o formato Ads.
+    promoted.whatsapp_phone_number = waDigits;
+  }
+  const phoneId = String(opts?.whats_app_business_phone_number_id ?? "").trim();
+  if (/^\d{5,}$/.test(phoneId)) promoted.whats_app_business_phone_number_id = phoneId;
 
   return {
     optimization_goal: opt,

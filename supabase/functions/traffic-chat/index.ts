@@ -1,4 +1,8 @@
-// supabase/functions/traffic-chat/index.ts (v28.78)
+// supabase/functions/traffic-chat/index.ts (v28.80)
+// v28.80 (31/08/2026) - WhatsApp da Pagina para CTWA: get_whatsapp_da_pagina (Graph ao vivo)
+//   e canonicalize 55+DDD+8 + phone_number_id no card de conjunto. Meta 1487246 nos
+//   cards VISTTA: o Gerenciador listava o numero; a API recebia 13 digitos sem id.
+// v28.79 (31/08/2026) - apos gravar a pergunta, nao devolver 502 HTTP; objetivo do fio.
 // v28.78 (31/08/2026) - COHAPM Sistema Ocular / VISTTA: terceiro meio no Drive
 //   (juridico | la_felicita | sistema_ocular). Mesmo isolamento de campanha/peca.
 // v28.77 (27/08/2026) - get_ads_ranking honra date_to da janela; versao da leitura por blocos.
@@ -641,7 +645,8 @@ import {
   ODAX_OBJETIVOS,
 } from "../_shared/objetivo_odax.ts";
 import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, digitosWhatsApp, ctaPadraoMensagensWhatsApp, ctaPadraoTrafegoWebsite, LINK_CTWA_API_WHATSAPP } from "../_shared/destino_url_lp.ts";
-import { pipeboardToken } from "../_shared/pipeboard.ts";
+import { preferidoWhatsAppParaAds, resolverWhatsAppCtwa, toolGetWhatsAppDaPagina } from "../_shared/whatsapp_pagina.ts";
+import { pipeboardListTools, pipeboardToken } from "../_shared/pipeboard.ts";
 import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto } from "../_shared/lote_criativo.ts";
 import {
   classificarLinhaProdutoCohapm,
@@ -709,7 +714,7 @@ import {
   diagnosticoRota,
   resolverChamadaLlm,
 } from "../_shared/llm_roteador.ts";
-import { COMPANY_COHAPM, tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
+import { COMPANY_COHAPM, businessIdPorCompanyId, tokenAdsPorCompanyId, tokenWabaPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import {
   campanhaNoEscopoVinculoIg,
   criarGraphClient,
@@ -764,6 +769,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   registrar_peca_da_conversa: 12,
   get_estrutura_conjuntos: 3,
   get_instagram_dos_anuncios: 3,
+  get_whatsapp_da_pagina: 2,
   get_detalhe_anuncios: 6,
   get_campaign_detail: 4,
   get_ads_ranking: 4,
@@ -793,7 +799,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.79";
+const VERSAO = "chat-v28.80";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -1744,6 +1750,15 @@ async function t_listar_ferramentas_pipeboard() {
   if (!token) return { erro: "PIPEBOARD_API_TOKEN ausente" };
   const catalog = await listReadTools(token);
   if (!catalog.ok) return { erro: catalog.erro ?? "falha ao listar ferramentas Pipeboard" };
+  const listed = await pipeboardListTools(token);
+  const waRel = (listed.tools ?? []).filter((t: any) =>
+    /whatsapp|waba|phone_number|account_pages|create_adset/i
+      .test(`${t?.name ?? ""} ${t?.description ?? ""}`)
+  ).map((t: any) => ({
+    name: String(t?.name ?? ""),
+    description: String(t?.description ?? "").slice(0, 180),
+    leitura: isReadOnlyTool(String(t?.name ?? "")),
+  }));
   const cut = truncatePipeboardPayload({
     ok: true,
     source: "pipeboard:meta",
@@ -1755,7 +1770,11 @@ async function t_listar_ferramentas_pipeboard() {
       argumentos: t.properties,
       obrigatorios: t.required,
     })),
-    nota: "Estas sao as ferramentas de LEITURA do Pipeboard. Para chamar uma, use ler_pipeboard com o nome exato. Preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo) quando bastarem; use Pipeboard ao vivo quando faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca).",
+    tools_whatsapp_relacionadas: waRel,
+    nota:
+      "Estas sao as ferramentas de LEITURA do Pipeboard. Para chamar uma, use ler_pipeboard com o nome exato. " +
+      "create_adset / update_* sao ESCRITA: recusados em ler_pipeboard. Para ligar WhatsApp no conjunto use " +
+      "get_whatsapp_da_pagina + propose_action criar_conjunto_a_partir_de. Preferir tools de DB quando bastarem.",
   });
   return cut.data;
 }
@@ -2933,6 +2952,32 @@ async function t_propose_criacao(
 
     // v28.56: o cartao mostra so nomes. Avisos de orcamento/redes/geo ficam no payload
     // (e na resposta da tool, para o agente falar no chat se precisar).
+    let waCanon = String(params?.whatsapp_phone_number ?? "").trim();
+    let waPhoneId = String(params?.whats_app_business_phone_number_id ?? "").trim();
+    if (mensagensEfetivo && (waCanon || waPhoneId)) {
+      const tokAds = tokenAdsPorCompanyId(companyId);
+      if (tokAds && pageIdEfetivo) {
+        try {
+          const wabaTok = tokenWabaPorCompanyId(companyId);
+          const resolvido = await resolverWhatsAppCtwa({
+            gAds: criarGraphClient(tokAds.token),
+            gWaba: wabaTok ? criarGraphClient(wabaTok.token) : null,
+            pageId: pageIdEfetivo,
+            companyId,
+            businessId: businessIdPorCompanyId(companyId),
+            pedido: waCanon,
+            phoneIdPedido: waPhoneId,
+            supa,
+          });
+          waCanon = resolvido.promoted.whatsapp_phone_number || preferidoWhatsAppParaAds(waCanon) || waCanon;
+          waPhoneId = resolvido.promoted.whats_app_business_phone_number_id || waPhoneId;
+        } catch {
+          waCanon = preferidoWhatsAppParaAds(waCanon) || waCanon;
+        }
+      } else {
+        waCanon = preferidoWhatsAppParaAds(waCanon) || waCanon;
+      }
+    }
     const summary = summaryPreviaCriacao({ campanha: dest.name, conjunto: nomeNovo });
     const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde!.id, summary, {
       nome_novo: nomeNovo,
@@ -2962,8 +3007,11 @@ async function t_propose_criacao(
         : (String(params?.destination_type ?? "").trim() || null),
       destino_social: socialEfetivo,
       destino_mensagens: mensagensEfetivo,
-      ...(params?.whatsapp_phone_number
-        ? { whatsapp_phone_number: String(params.whatsapp_phone_number).trim() }
+      ...(mensagensEfetivo && waCanon
+        ? {
+          whatsapp_phone_number: waCanon,
+          ...(waPhoneId ? { whats_app_business_phone_number_id: waPhoneId } : {}),
+        }
         : {}),
       ...(gateGeo.meio ? { meio: gateGeo.meio } : {}),
       ...(geoEfetivo
@@ -4733,7 +4781,8 @@ const TOOLS = [
   { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Traz tambem destino_url (link do CTA do criativo) e destino (whatsapp quando wa.me/api.whatsapp, senao site): O NUMERO DE WHATSAPP DE DESTINO de cada peca SAI DAQUI (ex.: wa.me/5571993451315). Isso e CONFIG do criativo coletada do Pipeboard - NAO confunda com a analitica de conversa WABA (pos-clique), que esta congelada; o numero de destino do anuncio E legivel e voce DEVE informa-lo quando perguntado. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
   { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha ACTIVE), estrategia de lance, orcamento, segmentacao, gasto, destination_type (WEBSITE vs WHATSAPP). destination_type NAO e o wa.me: conjunto WEBSITE nao guarda o link; o wa.me fica no criativo (get_aprovacoes.destino_url / get_criativos_conteudo). PEGADA/destino e numeros_whatsapp = DESTINO Click-to-WA do criativo (wa.me) — NAO e inventario WABA. Para numeros operacionais vs inventario CTWA use get_waba_status. Conjunto ACTIVE sob campanha PAUSED = entregando false. PAGINADO 20; se restantes>0, pagine. CONJ.N no NOME basta para criar_anuncio (CONJ.1_LAF_… = CONJ.1). PROIBIDO pedir ao gestor o ID numerico da Meta. CONJ.1 nao e o CONJ.4 mais novo da mesma linha.", parameters: { type: "object", properties: { pagina: { type: "number", description: "Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero." } } } } },
-  { type: "function", function: { name: "get_waba_status", description: "INVENTARIO WHATSAPP da empresa (obrigatorio para 'numero de pe', 'qual WA linkar', WABA, qualidade/tier, Juridico vs La Felicita). Devolve waba_cloud_on_premise (CLOUD_API+ON_PREMISE; de_pe=CONNECTED) e click_to_whatsapp_inventario (wa.me; de_pe so IN_ACTIVE_ADS). NUNCA trate so os CTWA como candidatos se a lista WABA veio no retorno. Filtro meio=juridico|la_felicita|financeiro|outro.", parameters: { type: "object", properties: { meio: { type: "string", description: "Opcional: juridico | la_felicita | financeiro | outro" } } } } },
+  { type: "function", function: { name: "get_waba_status", description: "INVENTARIO WHATSAPP da empresa (obrigatorio para 'numero de pe', 'qual WA linkar', WABA, qualidade/tier, Juridico vs La Felicita). Devolve waba_cloud_on_premise (CLOUD_API+ON_PREMISE; de_pe=CONNECTED) e click_to_whatsapp_inventario (wa.me; de_pe so IN_ACTIVE_ADS). NUNCA trate so os CTWA como candidatos se a lista WABA veio no retorno. Filtro meio=juridico|la_felicita|financeiro|outro. NAO e o dropdown da Pagina no conjunto — para habilitar numero no ad set use get_whatsapp_da_pagina.", parameters: { type: "object", properties: { meio: { type: "string", description: "Opcional: juridico | la_felicita | financeiro | outro" } } } } },
+  { type: "function", function: { name: "get_whatsapp_da_pagina", description: "LEITURA AO VIVO: numeros WhatsApp que a Pagina/conta expoe para Click-to-WA (o dropdown do Gerenciador). Cruza Graph (Pagina + WABA) com conjuntos ja criados e waba_phone_numbers. Passe numero= para casar o pedido (com/sem o 9 extra do celular BR) e receber digitos_para_ads + whats_app_business_phone_number_id. Distinto de get_waba_status (inventario Cloud). Escrita no conjunto = propose_action criar_conjunto_a_partir_de — Pipeboard create_adset e recusado em ler_pipeboard. COHAPM: nao misture numero Juridico em VISTTA/La Felicita.", parameters: { type: "object", properties: { numero: { type: "string", description: "Opcional. Telefone ou wa.me para casar com o inventario da Pagina." } } } } },
   { type: "function", function: { name: "listar_ferramentas_pipeboard", description: "Catalogo ao vivo das ferramentas de LEITURA do Pipeboard (get_/list_/search_/estimate_/...). Use quando precisar saber QUAL endpoint chama para um dado que as tools de DB nao cobrem (pages, pixels, audiences, activities, breakdowns, Instagram, lead forms, catalogs, etc.). Depois chame ler_pipeboard com o nome exato.", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "ler_pipeboard", description: "Leitura AO VIVO do Pipeboard na conta Meta da empresa desta conversa. Preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, funil/ranking) quando bastarem. Use ler_pipeboard quando faltar dado: config fresca do dia, breakdown, activities, pages, pixels, audiences, insights pontuais, creatives detalhados, etc. Parametro ferramenta = nome exato do catalogo (ex.: get_adset_details, get_insights, get_account_pages). argumentos = objeto JSON do schema da ferramenta. SO leitura: create/update/delete/upload sao recusados. Contas fora da empresa sao recusadas. Resposta pode vir truncada (aviso_corte).", parameters: { type: "object", properties: { ferramenta: { type: "string", description: "Nome exato da tool Pipeboard de leitura (ex.: get_campaign_details)." }, argumentos: { type: "object", description: "Argumentos da tool (account_id e injetado se a empresa tiver uma unica conta)." } }, required: ["ferramenta"] } } },
   { type: "function", function: { name: "buscar_geolocalizacao", description: "Resolve NOMES de bairro/cidade/regiao para KEYS Meta (Graph /search type=adgeolocation). Use ANTES de criar_conjunto com geo fino. Lote max 40 nomes por chamada — para ~118 bairros chame em lotes e una bairros_keys. Default tipo=neighborhood, country_code=BR. Devolve resolvidos, ambiguos, nao_encontrados, geo_locations_sugerido e bairros_keys para params.bairros ou params.geo_locations no propose_action criar_conjunto_a_partir_de. NAO cria conjunto. Em credito (fair lending) bairros/CEP podem ser recusados no gate.", parameters: { type: "object", properties: { nomes: { type: "array", items: { type: "string" }, description: "Lista de nomes (ate 40 por chamada)." }, tipo: { type: "string", description: "neighborhood|city|region|zip (default neighborhood)." }, country_code: { type: "string", description: "Default BR." }, cidade_contexto: { type: "string", description: "Opcional: filtra ambiguidade (ex. Salvador)." } }, required: ["nomes"] } } },
@@ -4852,7 +4901,7 @@ function prioridadeTool(nome: string, pedido: string): number {
   const pedeCriativo = /criativ|legenda|compliance|anuncio|peca|texto|copy|oferta/.test(p);
   const pedeReceita = /receita|contrato|cac|retorno|vende|vendas|funil|proposta|lucro/.test(p);
   const pedeEstrutura = /cbo|abo|conjunto|estrutura|publico|targeting|lance|orcamento/.test(p);
-  const pedeWhatsapp = /whatsapp|waba|wa\.me|click.?to.?wa|numero.*(wa|whats)|de pe|cloud.?api|on.?premise|ctwa/.test(p);
+  const pedeWhatsapp = /whatsapp|waba|wa\.me|click.?to.?wa|numero.*(wa|whats)|de pe|cloud.?api|on.?premise|ctwa|associar.*n[uú]mero|habilitar.*n[uú]mero/.test(p);
   const pedeUtm = /utm|teste a\/b|teste a b|teste abc|teste a\/b\/c|variante|rastreio|rotulo/.test(p);
   const pedeCustoLlm = /custo.*agente|agente.*cust|custo.*llm|token/.test(p);
   const pedeSaudeIntegracao = /conta.*conect|integrac|trazendo dado|coletor/.test(p);
@@ -4865,7 +4914,8 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeFila && nome === "get_aprovacoes") return 0;
   if (perguntaLeitura && /destino|link|wa\.me|aprov/.test(p) && (nome === "get_estrutura_conjuntos" || nome === "get_criativos_conteudo")) return 0;
   // v28.47: numero WA / de pe / WABA — get_waba_status antes de estrutura/criativos (que so veem CTWA).
-  if (pedeWhatsapp && nome === "get_waba_status") return 0;
+  if (pedeWhatsapp && nome === "get_whatsapp_da_pagina") return 0;
+  if (pedeWhatsapp && nome === "get_waba_status") return 1;
   // v28.32: dicas/recomendacoes da Meta — so get_meta_dicas (+ fila interna). Nao gastar o
   // lote em Pipeboard/catalogo; foi o padrao que estourava 150s em pergunta simples.
   const pedeMetaDica = /dica.*meta|recomendac.*(meta|facebook|anuncio|impulsionar|boost)|meta emitiu|meta.*recomend|impulsionar.*(anuncio|eles|campanha)|opportunity score|recomendacao da meta/.test(p);
@@ -4889,7 +4939,7 @@ function prioridadeTool(nome: string, pedido: string): number {
     get_criativos_conteudo: 5, check_compliance: 6, get_funnel: 7, get_ads_ranking: 8,
     teto_vigente: 2, checar_par_texto_e_peca: 2, custo_llm_periodo: 2, panorama_utm_anuncios: 2,
     nota_visual_da_peca: 3, saude_das_integracoes: 3, get_acervo_para_anuncio: 3, upload_midia: 3,
-    get_waba_status: 3, get_estrutura_conjuntos: 9, get_conhecimento: 9, auditar_compliance_financeira: 4, get_recommendations: 11, get_meta_dicas: 5,
+    get_waba_status: 3, get_whatsapp_da_pagina: 2, get_estrutura_conjuntos: 9, get_conhecimento: 9, auditar_compliance_financeira: 4, get_recommendations: 11, get_meta_dicas: 5,
   };
   return base[nome] ?? 12;
 }
@@ -5269,6 +5319,12 @@ async function runTool(name: string, args: any, ctx: any) {
         return await t_estrutura_conjuntos(ctx.companyId, Number(args?.pagina ?? 1), String(ctx.pedido ?? ""));
       case "get_waba_status":
         return await t_waba_status(ctx.companyId, args?.meio != null ? String(args.meio) : undefined);
+      case "get_whatsapp_da_pagina":
+        return await toolGetWhatsAppDaPagina({
+          companyId: ctx.companyId,
+          numero: args?.numero ?? args?.whatsapp_phone_number ?? args?.telefone,
+          supa,
+        });
       case "listar_ferramentas_pipeboard":
         return await t_listar_ferramentas_pipeboard();
       case "ler_pipeboard":
@@ -5329,6 +5385,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 - LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, get_waba_status, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
 - GEO/BAIRROS NO CRIAR_CONJUNTO: HA campo. Use buscar_geolocalizacao (lotes <=40). No propose: params.bairros ou params.geo_locations. Presets em geo_targeting_presets sao POR empresa+meio; outra empresa/meio NAO herda. NUNCA diga que falta campo de bairros.
 - WHATSAPP / NUMEROS DE PE (21/08/2026): pergunta sobre numero operacional, de pe, qual WA linkar, WABA, qualidade/tier OU isolamento Juridico vs La Felicita OBRIGA get_waba_status (meio=juridico|la_felicita quando o pedido recortar). get_estrutura_conjuntos / get_criativos_conteudo so mostram destino wa.me do anuncio (Click-to-WA) — NAO substituem. Separe sempre: (1) WABA Cloud/ON_PREMISE — de_pe so CONNECTED; (2) CTWA — inventario; de_pe so IN_ACTIVE_ADS. NUNCA peca escolher so entre CTWA como se fossem os unicos. Conjunto ACTIVE sob campanha PAUSED = entregando=false (nao esta no ar). COHAPM: isole JUR vs LF.
+- WHATSAPP NO CONJUNTO / DROPDOWN DA PAGINA (31/08/2026 v28.80): para HABILITAR o numero no conjunto (o que o Gerenciador faz no destino manual), chame get_whatsapp_da_pagina(numero=...). Isso e o inventario da PAGINA, nao get_waba_status. Pipeboard create_adset NAO e chamavel via ler_pipeboard (escrita). O caminho e propose_action criar_conjunto_a_partir_de com params.whatsapp_phone_number = digitos_para_ads (55+DDD+8, sem o 9 extra do celular BR) e whats_app_business_phone_number_id se a tool devolver. PROIBIDO dizer que falta ferramenta. PROIBIDO colocar numero Juridico em campanha VISTTA/Ocular ou La Felicita. Se a Meta recusou 1487246 "not linked", o executor agora tenta as variantes — peca ao gestor reexecutar o card.
 - CRUZAMENTO DE LINHA COHAPM (31/08/2026) E ERRO GRAVE, NAO AVISO: as linhas compartilham a empresa mas NUNCA a campanha. Tres meios: Juridico (JUR_…, JURIDICO_CONJ, meio=juridico), La Felicità (CONJ.1_LAF_…, COHAPM_LAFELICITA_*, meio=la_felicita/imovel) e Sistema Ocular / VISTTA (pasta COHAPM - VISTTA, meio=sistema_ocular). Peca de um empreendimento so vai para campanha/conjunto do mesmo. Colocar video La Felicità em JURIDICO_CONJ ou peca VISTTA em LAF e falta operacional grave. O sistema RECUSA o card.
 - CONJ.N NO NOME BASTA (25/08/2026): params.conjunto_destino = o NOME (CONJ.1_LAF_8CRIATIVOS_JUN/JUL26, CONJ.1, CONJ.01). Barra ou nao (JUN/JUL vs JUNJUL) e CONJ.1 vs CONJ.01 sao o mesmo numero. PROIBIDO pedir ao gestor o ID numerico da Meta / Graph. Resolva com get_estrutura_conjuntos ou o slate. CONJ.1 NUNCA cai no CONJ.4 (mais novo da linha La Felicità). Se o numero do destino ≠ CONJ.N do pedido/slate/peca, o sistema RECUSA (ERRO GRAVE) — nao emita card.
 - DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations SO se quiser a fila INTERNA de custo). Cite SEMPRE o veredito interno — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta. get_recommendations NAO e o badge do Ads Manager. Se get_meta_dicas vier vazio apos sync e o gestor apontar badge na UI, diga a assimetria documentada pela Meta (API pode listar menos que Ads Manager) — nao invente o texto da dica.
@@ -5495,7 +5552,9 @@ reconhecimento: REACH + page_id. NUNCA misture REACH como goal de campanha OUTCO
 EXCECAO CONJUNTO MENSAGENS / CTWA: conversas WhatsApp NAO sao impulsão de
 post. Campanha OUTCOME_ENGAGEMENT (ou tag CONV/MESSAGES/WHATSAPP) + conjunto com
 familia_objetivo=mensagens OU optimization_goal=CONVERSATIONS → destination_type=WHATSAPP +
-promoted_object={page_id, whatsapp_phone_number}. O criativo usa WHATSAPP_MESSAGE + api.whatsapp.com/send (nao CONTACT_US + wa.me). Pode usar target_name=sem_molde.
+promoted_object={page_id, whatsapp_phone_number no formato Ads 55+DDD+8, whats_app_business_phone_number_id se conhecido}.
+Antes de emitir, chame get_whatsapp_da_pagina(numero=...) — e o dropdown da Pagina, nao get_waba_status.
+O criativo usa WHATSAPP_MESSAGE + api.whatsapp.com/send (nao CONTACT_US + wa.me). Pode usar target_name=sem_molde.
 EXCECAO TRAFEGO + LINK wa.me: se o gestor pedir destino WEBSITE / LANDING_PAGE_VIEWS
 com URL wa.me, isso NAO e CTWA. familia_objetivo=trafego, destination_type=WEBSITE,
 optimization_goal=LANDING_PAGE_VIEWS. O numero fica no LINK do criativo. Nao recuse WEBSITE

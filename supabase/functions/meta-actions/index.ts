@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.52)
+// supabase/functions/meta-actions/index.ts (v5.53)
+// v5.53 (31/08/2026) - CTWA: resolver WhatsApp da Pagina (formato 55+DDD+8 +
+//   whats_app_business_phone_number_id) e retry em Meta 1487246. Cards VISTTA
+//   falhavam com "number is not linked" enquanto o Gerenciador listava o numero.
 // v5.52 (26/08/2026) - vincular_instagram_dos_anuncios: novo adcreative + update_ad
 //   para @cohapm na campanha La Felicità em trabalho (ACTIVE+PAUSED).
 // v5.50 (25/08/2026) - HARD BLOCK cruzamento Juridico × La Felicità no apply (nao emite
@@ -337,11 +340,19 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { traduzirFalha } from "../_shared/aprovacoes.ts";
 import {
   COMPANY_COHAPM,
+  businessIdPorCompanyId,
   empresaPorAdAccount,
   empresasComTokenAds,
   redactAllMetaTokens,
   tokenAdsPorCompanyId,
+  tokenWabaPorCompanyId,
 } from "../_shared/meta_company_tokens.ts";
+import {
+  candidatosPromotedObjectCtwa,
+  ehRecusaWhatsappNaoLigado,
+  resolverWhatsAppCtwa,
+  type CandidatoPromotedCtwa,
+} from "../_shared/whatsapp_pagina.ts";
 import {
   aplicarIdentidadeInstagramNoSpec,
   avisoIdentidadeInstagram,
@@ -1915,6 +1926,8 @@ export async function montarCriacao(
     }
     } // fim else criar_conjunto (plataformas)
 
+    let ctwaCandidatos: CandidatoPromotedCtwa[] = [];
+
     // v5.43: trafego WEBSITE (wa.me no criativo) distinto de CTWA/mensagens.
     // v5.28/v5.29/v5.35: familia engajamento/reconhecimento/mensagens — molde so empresta targeting.
     // Campanha OUTCOME_ENGAGEMENT + mensagens → CONVERSATIONS+WHATSAPP (CTWA), NAO POST+ON_POST.
@@ -1936,6 +1949,7 @@ export async function montarCriacao(
         : mensagensTopo
         ? defaultsConjuntoMensagens(pageId, {
           whatsapp_phone_number: p?.whatsapp_phone_number,
+          whats_app_business_phone_number_id: p?.whats_app_business_phone_number_id,
           destination_type: p?.destination_type,
           optimization_goal: p?.optimization_goal,
         })
@@ -1955,6 +1969,46 @@ export async function montarCriacao(
       } else {
         body.promoted_object = JSON.stringify(defs.promoted_object);
         delete body.attribution_spec;
+      }
+      if (mensagensTopo && pageId) {
+        const pedidoWa = p?.whatsapp_phone_number ?? defs.promoted_object?.whatsapp_phone_number;
+        const phoneIdPedido = p?.whats_app_business_phone_number_id;
+        if (TOKEN && companyId) {
+          const wabaTok = tokenWabaPorCompanyId(companyId);
+          const resolvido = await resolverWhatsAppCtwa({
+            gAds: criarGraphClient(TOKEN),
+            gWaba: wabaTok ? criarGraphClient(wabaTok.token) : null,
+            pageId,
+            companyId,
+            businessId: businessIdPorCompanyId(companyId),
+            pedido: pedidoWa,
+            phoneIdPedido,
+            supa,
+          });
+          body.promoted_object = JSON.stringify(resolvido.promoted);
+          ctwaCandidatos = resolvido.candidatos;
+          posicionamento = {
+            ...(posicionamento && typeof posicionamento === "object" ? posicionamento : {}),
+            whatsapp_resolucao: {
+              digitos: resolvido.promoted.whatsapp_phone_number,
+              phone_number_id: resolvido.promoted.whats_app_business_phone_number_id ?? null,
+              casou_na_api: !!resolvido.match,
+              candidatos: resolvido.candidatos.length,
+              aviso: resolvido.aviso,
+            },
+          };
+        }
+        if (!ctwaCandidatos.length) {
+          ctwaCandidatos = candidatosPromotedObjectCtwa({
+            pageId,
+            pedido: pedidoWa,
+            phoneIdPedido,
+            match: null,
+          });
+          if (ctwaCandidatos[0]) {
+            body.promoted_object = JSON.stringify(ctwaCandidatos[0].promoted);
+          }
+        }
       }
       if (defs.destination_type) {
         body.destination_type = defs.destination_type;
@@ -2114,6 +2168,7 @@ export async function montarCriacao(
       molde_lido: semMoldeConj ? { sem_molde: true } : mb,
       posicionamento,
       nome_partes: nomePartesGravar,
+      ctwa_candidatos: ctwaCandidatos,
     };
   }
 
@@ -3552,6 +3607,10 @@ Deno.serve(async (req) => {
     const igRelacionadas = (lista.tools ?? []).filter((t: any) =>
       /instagram|identity|actor|page/i.test(String(t?.name ?? "") + " " + String(t?.description ?? "")),
     );
+    const waRelacionadas = (lista.tools ?? []).filter((t: any) =>
+      /whatsapp|waba|phone_number|account_pages|create_adset|update_adset/i
+        .test(String(t?.name ?? "") + " " + String(t?.description ?? "")),
+    );
     return json({
       ok: lista.ok && !!tool,
       modo: "sonda_pipeboard_update_adset",
@@ -3560,6 +3619,11 @@ Deno.serve(async (req) => {
       update_adset: tool,
       tool_names: nomes,
       tools_instagram_relacionadas: igRelacionadas,
+      tools_whatsapp_relacionadas: waRelacionadas.map((t: any) => ({
+        name: t?.name,
+        description: String(t?.description ?? "").slice(0, 220),
+        leitura: /^(get_|list_|search_|estimate_|resolve_|check_|compute_|bulk_get_|fetch$)/.test(String(t?.name ?? "")),
+      })),
       erro: lista.erro ?? null,
       mcp_chamador: auth.chamador,
     });
@@ -4282,6 +4346,28 @@ Deno.serve(async (req) => {
         exec = await escreverAd(driver, conta, pl.path, bodyFinal, String(creativeId), pbToken);
       } else {
         exec = await escreverCriacao(driver, acao, conta, pl.path, bodyFinal, pbToken);
+        const cands = Array.isArray(pl.ctwa_candidatos) ? pl.ctwa_candidatos as CandidatoPromotedCtwa[] : [];
+        if (
+          !exec.id &&
+          (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") &&
+          ehRecusaWhatsappNaoLigado(exec.body) &&
+          cands.length
+        ) {
+          const tentativasWa: unknown[] = [{ label: "primeiro", status: exec.status, body: exec.body }];
+          for (const c of cands) {
+            const po = JSON.stringify(c.promoted);
+            if (po === bodyFinal.promoted_object) continue;
+            const bodyTry = { ...bodyFinal, promoted_object: po };
+            exec = await escreverCriacao(driver, acao, conta, pl.path, bodyTry, pbToken);
+            tentativasWa.push({ label: c.label, status: exec.status, body: exec.body, promoted: c.promoted });
+            if (exec.id && (exec.status === 200 || exec.ok === true) && !exec.erro) {
+              bodyFinal.promoted_object = po;
+              (exec as any).ctwa_tentativas = tentativasWa;
+              break;
+            }
+          }
+          if (!exec.id) (exec as any).ctwa_tentativas = tentativasWa;
+        }
       }
       const novoId = exec.id;
       const sucesso = !!novoId && !exec.erro && (exec.status === 200 || exec.ok === true);
