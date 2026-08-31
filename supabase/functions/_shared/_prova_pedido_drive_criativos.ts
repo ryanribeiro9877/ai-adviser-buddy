@@ -5,6 +5,8 @@ import {
   deaccPedido,
   inferirMeioDeProduto,
   inferirMeioDrive,
+  itemDriveDoMeio,
+  parseMeioDriveArg,
   pastaFormatoIgnorada,
   pedidoExigeInventarioDrive,
   pedidoSoReelsVideos,
@@ -60,11 +62,11 @@ assert(chat.includes("pedidoExigeInventarioDrive"), "chat importa detector Drive
 assert(job.includes("pedidoExigeInventarioDrive"), "job importa detector Drive");
 assert(job.includes("FOCO_CRIATIVOS_DRIVE"), "job tem foco Drive forcado");
 assert(job.includes("inventario Drive (nao overview de campanha)"), "job forca plano Drive");
-assert(job.includes("job-v4.7"), "job versao 4.7");
+assert(job.includes("job-v4.11"), "job versao 4.11");
 assert(job.includes("v4.4"), "job ainda tem conserto Drive v4.4");
 assert(chat.includes("MSG_NUDGE_DRIVE"), "chat tem nudge se nao coletar Drive");
 assert(chat.includes("R1-DRIVE"), "chat R1-DRIVE");
-assert(chat.includes("chat-v28.73"), "chat versao 28.73");
+assert(chat.includes("chat-v28.78"), "chat versao 28.78");
 assert(chat.includes("get_slate_da_conversa"), "chat expoe slate duravel");
 assert(pedidoUsaSlateExistente(
   "vamos iniciar com o conjunto 1, de acordo com sua analise e definicao dos 8 videos que selecionou, gere legendas para cada um deles",
@@ -74,6 +76,18 @@ assert(!pedidoExigeInventarioDrive(
 ), "nao forca Drive em pedido de legendas do slate");
 assert(inferirMeioDeProduto("imovel") === "la_felicita", "produto imovel e La Felicita");
 assert(inferirMeioDeProduto("juridico_whatsapp") === "juridico", "produto juridico");
+assert(inferirMeioDeProduto("sistema ocular") === "sistema_ocular", "produto ocular");
+assert(inferirMeioDrive("criativos do Sistema Ocular no drive") === "sistema_ocular", "pedido ocular");
+assert(inferirMeioDrive("pasta VISTTA") === "sistema_ocular", "pedido VISTTA");
+assert(parseMeioDriveArg("vistta") === "sistema_ocular", "arg vistta");
+assert(itemDriveDoMeio(
+  { pasta_monitorada: "COHAPM Sistema Ocular · VISTTA", meio: "sistema_ocular" },
+  "sistema_ocular",
+), "item ocular casa");
+assert(!itemDriveDoMeio(
+  { pasta_monitorada: "COHAPM Sistema Ocular · VISTTA", meio: "sistema_ocular" },
+  "juridico",
+), "item ocular nao entra no recorte juridico");
 assert(!job.includes('nome: "criativos", foco: FOCO_CRIATIVOS_OVERVIEW') || job.includes("pedidoExigeInventarioDrive(raw)"), "overview magro nao captura Drive");
 
 console.log("ok pedido_drive_criativos");

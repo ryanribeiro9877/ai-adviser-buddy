@@ -13,7 +13,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { bodyOpenRouter, resolverChamadaLlm } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
-import { inferirMeioDeProduto, inferirMeioDrive, type MeioDrive } from "../_shared/pedido_drive_criativos.ts";
+import { inferirMeioDeProduto, inferirMeioDrive, parseMeioDriveArg, type MeioDrive } from "../_shared/pedido_drive_criativos.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -34,6 +34,22 @@ const FALLBACK_LA_FELICITA = {
     "Voz do nucleo Juridico (conta de luz, cobranca, emprestimo abusivo)",
     "CET, consignado CLT, margem, correspondente bancario, Legal e Viver",
     "Promessa juridica ou urgencia falsa",
+  ],
+};
+
+const FALLBACK_SISTEMA_OCULAR = {
+  marca_nome: "Sistema Ocular / VISTTA (COHAPM)",
+  tom: "claro, confiavel e humano; fala de cuidar da visao sem alarmismo nem jargao medico inventado",
+  persona: "quem busca atendimento ocular de qualidade e quer conhecer o empreendimento Sistema Ocular",
+  dos: [
+    "Abrir pelo cuidado com a visao, acolhimento e clareza do servico",
+    "Beneficio concreto sem inventar procedimento, preco, resultado clinico ou especialidade",
+    "CTA: conhecer o Sistema Ocular / VISTTA — sem misturar Juridico nem La Felicità",
+  ],
+  donts: [
+    "Voz do nucleo Juridico (conta de luz, cobranca, emprestimo) ou copy residencial La Felicità",
+    "Promessa medica, cura, resultado clinico garantido ou urgencia falsa de saude",
+    "CET, consignado CLT, Legal e Viver",
   ],
 };
 
@@ -123,9 +139,8 @@ Deno.serve(async (req) => {
     }, 400);
   }
 
-  const meioArg = String(body?.meio ?? "").trim().toLowerCase();
   const meio: MeioDrive | null =
-    (meioArg === "la_felicita" || meioArg === "juridico" ? meioArg : null)
+    parseMeioDriveArg(body?.meio)
     || inferirMeioDeProduto(produto)
     || inferirMeioDrive(`${produto} ${objetivo}`);
 
@@ -203,8 +218,22 @@ Deno.serve(async (req) => {
     ].join("\n");
   }
 
+  if (meio === "sistema_ocular" && (!brandBloco || /juridico|felicita/i.test(marcaNome))) {
+    marcaNome = FALLBACK_SISTEMA_OCULAR.marca_nome;
+    linhasProduto = ["saude_ocular", "oftalmologia", "sistema_ocular", "vistta"];
+    brandBloco = [
+      `\n=== IDENTIDADE DE MARCA (Sistema Ocular / VISTTA — editorial; nao usar Juridico nem La Felicità) ===`,
+      `Tom: ${FALLBACK_SISTEMA_OCULAR.tom}`,
+      `Persona: ${FALLBACK_SISTEMA_OCULAR.persona}`,
+      `FACA:\n${FALLBACK_SISTEMA_OCULAR.dos.map((d) => `- ${d}`).join("\n")}`,
+      `NAO FACA:\n${FALLBACK_SISTEMA_OCULAR.donts.map((d) => `- ${d}`).join("\n")}`,
+      `Linhas de produto: ${linhasProduto.join(", ")}`,
+    ].join("\n");
+  }
+
   if (!produto) {
     if (meio === "la_felicita") produto = "imovel";
+    else if (meio === "sistema_ocular") produto = "saude_ocular";
     else produto = linhasProduto[0] ? String(linhasProduto[0]) : "";
   }
   if (!produto) {
@@ -222,12 +251,16 @@ Deno.serve(async (req) => {
     ? `4) CET — o CET (ou referencia ao CET da oferta) MORA NA LEGENDA DA PUBLICACAO (FIN-04 v4). Preferencia da casa quando NAO ha taxa oficial: "consulte o CET na sua simulacao". Isso E suficiente. NUNCA invente percentual.`
     : meio === "la_felicita"
     ? `4) FECHO — CTA conhecer o La Felicità / ver o empreendimento. NUNCA invente CET, consignado, conta de luz, cobranca, emprestimo ou copy do nucleo Juridico.`
+    : meio === "sistema_ocular"
+    ? `4) FECHO — CTA conhecer o Sistema Ocular / VISTTA. NUNCA invente resultado clinico, preco, CET, copy Juridico ou La Felicità.`
     : `4) FECHO — CTA + canal oficial (WhatsApp/juridico). NUNCA invente CET, consignado CLT, margem disponivel, correspondente bancario ou "Legal e Viver".`;
 
   const regrasDuras = ehCredito
     ? `- Proibido: garantia de aprovacao, "sem consulta", "100% aprovado", dinheiro "gratis", omitir risco de credito.`
     : meio === "la_felicita"
     ? `- Proibido: voz Juridico (conta de luz, cobranca, emprestimo); inventar preco/metragem/financiamento; CET/CLT.`
+    : meio === "sistema_ocular"
+    ? `- Proibido: voz Juridico ou La Felicità; promessa medica/cura; inventar procedimento, preco ou resultado clinico; CET/CLT.`
     : `- Proibido: inventar credito/CLT/CET; prometer resultado juridico garantido; direcionar a numero de terceiro nao identificado.`;
 
   const sys = `Voce e redator de legendas de Meta Ads para ${marcaNome}.

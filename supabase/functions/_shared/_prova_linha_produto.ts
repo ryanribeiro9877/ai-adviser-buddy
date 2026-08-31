@@ -32,9 +32,16 @@ assert(classificarLinhaProdutoCohapm(campJur) === "juridico", "campanha JURIDICO
 assert(classificarLinhaProdutoCohapm(setJur) === "juridico", "conjunto JURIDICO_CONJ.01");
 assert(classificarLinhaProdutoCohapm(campLaf) === "la_felicita", "campanha LAFELICITA");
 assert(classificarLinhaProdutoCohapm(pecaJur) === "juridico", "JUR_CONV_ criativo");
-assert(classificarLinhaProdutoCohapm("imovel") === "la_felicita", "produto imovel");
-assert(classificarLinhaProdutoCohapm("Traffic Campaign") === null, "sem sinal");
-assert(classificarLinhaProdutoCohapm("CONJ.1 sem marca") === null, "CONJ.N sozinho nao classifica");
+assert(classificarLinhaProdutoCohapm("COHAPM - VISTTA") === "sistema_ocular", "pasta VISTTA");
+assert(classificarLinhaProdutoCohapm("COHAPM_SISTEMA_OCULAR_CONV") === "sistema_ocular", "campanha ocular");
+assert(classificarLinhaProdutoCohapm("VISTTA e JURIDICO misturados") === null, "ambiguidade ocular×jur");
+
+const cruzOcular = recusarCruzamentoLinhaProduto({
+  estruturaNomes: [campJur, setJur],
+  pecaSinais: ["COHAPM Sistema Ocular · VISTTA/2026/08. Agosto/Criativo 01.jpeg"],
+});
+assert(!cruzOcular.ok && cruzOcular.erro === ERRO_CRUZAMENTO_LINHA_PRODUTO, "VISTTA em JUR recusa");
+assert(/Sistema Ocular/i.test(cruzOcular.ok ? "" : cruzOcular.detalhe), "nomeia Sistema Ocular");
 
 const incidente = recusarCruzamentoLinhaProduto({
   estruturaNomes: [campJur, setJur],

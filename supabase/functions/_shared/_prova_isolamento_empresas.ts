@@ -100,13 +100,14 @@ assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&
     chat.includes("PERGUNTA") &&
-    chat.includes("chat-v28.73") &&
+    chat.includes("chat-v28.78") &&
+    chat.includes("sistema_ocular") &&
     chat.includes("instagram_nao_vinculado") &&
     chat.includes("nome_trocado_pelo_padrao_estruturado") &&
     chat.includes("recusaFalsaMoldeTrafego") &&
     chat.includes("orcamento_parece_centavos") &&
     /instagram vincul/i.test(chat),
-  "traffic-chat v28.66: Instagram + molde + orcamento em reais",
+  "traffic-chat v28.78: Instagram + molde + orcamento em reais + Sistema Ocular",
 );
 assert(
   chat.includes("empresaEhCredito(companyId)") &&

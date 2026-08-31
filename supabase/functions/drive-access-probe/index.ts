@@ -152,6 +152,7 @@ Deno.serve(async (req) => {
       const n = nome.toLowerCase();
       if (/jur[ií]dico|jur\b/.test(n)) return "COHAPM_JURIDICO_hint";
       if (/felicit|lafelicita|\blf\b/.test(n)) return "COHAPM_LA_FELICITA_hint";
+      if (/vistta|ocular|oftalm/.test(n)) return "COHAPM_SISTEMA_OCULAR_hint";
       if (/legal|viver|junho|julho/.test(n)) return "LEGAL_hint";
       return "outro";
     };
@@ -183,7 +184,7 @@ Deno.serve(async (req) => {
       },
       testes_folder_ids: testes,
       nota:
-        "Pastas so entram no sistema apos INSERT em drive_pastas_monitoradas com company_id correto. COHAPM Juridico e La Felicita devem ser DUAS linhas separadas (mesmo company_id COHAPM, folder_id distintos).",
+        "Pastas so entram no sistema apos INSERT em drive_pastas_monitoradas com company_id correto. COHAPM Juridico, La Felicita e Sistema Ocular (VISTTA) devem ser linhas SEPARADAS (mesmo company_id COHAPM, folder_id distintos).",
     });
   } catch (e) {
     return json({ ok: false, versao: VERSAO, erro: String((e as any)?.message ?? e) }, 500);

@@ -1,6 +1,6 @@
 // supabase/functions/_shared/geo_preset_juridico.ts
 // Preset geográfico OBRIGATÓRIO — SOMENTE meio Jurídico da COHAPM (Salvador–BA).
-// La Felicità NÃO herda. Legal é Viver NÃO herda.
+// La Felicità e Sistema Ocular/VISTTA NÃO herdam. Legal é Viver NÃO herda.
 // Fonte canônica de nomes: tabela geo_targeting_presets (+ espelho em BAIRROS_CANONICOS_*).
 
 import { COMPANY_COHAPM } from "./meta_company_tokens.ts";
@@ -13,7 +13,11 @@ import {
 
 export const MEIO_JURIDICO = "juridico" as const;
 export const MEIO_LA_FELICITA = "la_felicita" as const;
-export type MeioCohapmGeo = typeof MEIO_JURIDICO | typeof MEIO_LA_FELICITA;
+export const MEIO_SISTEMA_OCULAR = "sistema_ocular" as const;
+export type MeioCohapmGeo =
+  | typeof MEIO_JURIDICO
+  | typeof MEIO_LA_FELICITA
+  | typeof MEIO_SISTEMA_OCULAR;
 
 export const GEO_PRESET_CITY = "Salvador";
 export const GEO_PRESET_REGION = "Bahia";
@@ -171,7 +175,7 @@ export function companyElegivelPresetGeoJuridico(companyId: string | null | unde
 
 /**
  * Detecta meio COHAPM a partir de nomes (campanha/conjunto/molde) e texto livre.
- * La Felicità tem prioridade de isolamento: se LF e JUR misturados → null (não aplica preset).
+ * Sinais mistos (LF+JUR, VISTTA+JUR, etc.) → null (não aplica preset).
  */
 export function detectarMeioCohapm(
   ...sinais: Array<string | null | undefined>
@@ -182,6 +186,12 @@ export function detectarMeioCohapm(
     .join(" || ");
   if (!raw.trim()) return null;
   const n = stripAccents(raw).toLowerCase();
+
+  const oc =
+    /vistta/.test(n) ||
+    /sistema[\s_-]*ocular/.test(n) ||
+    /\bocular\b/.test(n) ||
+    /oftalm/.test(n);
 
   const lf =
     /la[\s_-]*felicita/.test(n) ||
@@ -202,9 +212,11 @@ export function detectarMeioCohapm(
     /cj_inss/.test(n) ||
     /coop_social_juridico/.test(n);
 
-  if (lf && jur) return null;
-  if (lf) return MEIO_LA_FELICITA;
-  if (jur) return MEIO_JURIDICO;
+  const hits: MeioCohapmGeo[] = [];
+  if (oc) hits.push(MEIO_SISTEMA_OCULAR);
+  if (lf) hits.push(MEIO_LA_FELICITA);
+  if (jur) hits.push(MEIO_JURIDICO);
+  if (hits.length === 1) return hits[0];
   return null;
 }
 
@@ -226,12 +238,20 @@ export function meioExplicitoDoParams(
   ) {
     return MEIO_LA_FELICITA;
   }
+  if (
+    m === "sistema_ocular" ||
+    m === "sistemaocular" ||
+    m === "ocular" ||
+    m === "vistta"
+  ) {
+    return MEIO_SISTEMA_OCULAR;
+  }
   return null;
 }
 
 /**
- * Resolve meio para o gate de geo. Só retorna juridico/la_felicita em COHAPM.
- * Prioridade: params.meio explícito > sinais de nome.
+ * Resolve meio para o gate de geo. COHAPM: juridico | la_felicita | sistema_ocular.
+ * Preset de bairros só aplica quando o meio é jurídico.
  */
 export function resolverMeioGeoCohapm(
   companyId: string | null | undefined,

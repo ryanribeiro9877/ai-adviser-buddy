@@ -333,8 +333,12 @@ export function pecasDoConjunto(pecas: PecaSlate[], n: number): PecaSlate[] {
 }
 
 /** Linhas de produto que compartilham a empresa COHAPM. Nao misturar. */
-export type LinhaProdutoCohapm = "juridico" | "la_felicita";
+export type LinhaProdutoCohapm = "juridico" | "la_felicita" | "sistema_ocular";
 export const ERRO_CRUZAMENTO_LINHA_PRODUTO = "cruzamento_linha_produto";
+
+function textoTemSistemaOcularLinha(n: string): boolean {
+  return /vistta/.test(n) || /sistema[\s_-]*ocular/.test(n) || /\bocular\b/.test(n) || /oftalm/.test(n);
+}
 
 export function classificarLinhaProdutoCohapm(
   ...sinais: Array<string | null | undefined>
@@ -344,6 +348,8 @@ export function classificarLinhaProdutoCohapm(
     .map((s) => deacc(String(s)).toLowerCase())
     .join(" || ");
   if (!n.trim()) return null;
+
+  const oc = textoTemSistemaOcularLinha(n);
 
   const lf =
     /la[\s_-]*felicita/.test(n) ||
@@ -364,20 +370,28 @@ export function classificarLinhaProdutoCohapm(
     /cj_inss/.test(n) ||
     /coop_social_juridico/.test(n);
 
-  if (lf && jur) return null;
-  if (lf) return "la_felicita";
-  if (jur) return "juridico";
+  const hits: LinhaProdutoCohapm[] = [];
+  if (oc) hits.push("sistema_ocular");
+  if (lf) hits.push("la_felicita");
+  if (jur) hits.push("juridico");
+  if (hits.length === 1) return hits[0];
   return null;
 }
 
 function rotuloLinhaProduto(l: LinhaProdutoCohapm): string {
-  return l === "la_felicita" ? "La Felicità" : "Jurídico";
+  if (l === "la_felicita") return "La Felicità";
+  if (l === "sistema_ocular") return "Sistema Ocular (VISTTA)";
+  return "Jurídico";
 }
 
 function hintDestinoLinha(l: LinhaProdutoCohapm): string {
-  return l === "la_felicita"
-    ? "a campanha COHAPM_LAFELICITA_* (ou equivalente) e o conjunto La Felicità do mesmo CONJ.N — nunca COHAPM_JURIDICO_* / JURIDICO_CONJ"
-    : "a campanha COHAPM_JURIDICO_* e o conjunto JURIDICO_CONJ.* — nunca LAFELICITA / LAF / FELICITA";
+  if (l === "la_felicita") {
+    return "a campanha COHAPM_LAFELICITA_* (ou equivalente) e o conjunto La Felicità do mesmo CONJ.N — nunca COHAPM_JURIDICO_* / JURIDICO_CONJ nem VISTTA / Sistema Ocular";
+  }
+  if (l === "sistema_ocular") {
+    return "a campanha COHAPM_SISTEMA_OCULAR_* / COHAPM_VISTTA_* e o conjunto do mesmo empreendimento — nunca JURIDICO nem LAFELICITA";
+  }
+  return "a campanha COHAPM_JURIDICO_* e o conjunto JURIDICO_CONJ.* — nunca LAFELICITA / LAF / FELICITA nem VISTTA / Sistema Ocular";
 }
 
 export type RecusaCruzamentoLinhaProduto =
@@ -408,7 +422,7 @@ export function recusarCruzamentoLinhaProduto(opts: {
     peca,
     detalhe:
       `ERRO GRAVE (nao e aviso): peca de ${rotuloLinhaProduto(peca)} no destino de ${rotuloLinhaProduto(dest)}. ` +
-      `Misturar as duas linhas da COHAPM e falta operacional grave — o card NAO pode ser emitido nem aplicado no Gerenciador. ` +
+      `Misturar linhas distintas da COHAPM e falta operacional grave — o card NAO pode ser emitido nem aplicado no Gerenciador. ` +
       `Destino escolhido: ${destTxt}. Peca/slate: ${pecaTxt}. ` +
       `Reemitir SOMENTE em ${hintDestinoLinha(peca)}.`,
   };

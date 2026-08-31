@@ -1,4 +1,6 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.10)
+// supabase/functions/traffic-agent-job/index.ts (v4.11)
+// v4.11 (31/08/2026) - COHAPM Sistema Ocular / VISTTA: terceiro meio no Drive
+//   (juridico | la_felicita | sistema_ocular). Visao classifica pelo meio da pasta.
 // v4.10 (27/08/2026) - Devolucao DETERMINISTICA se desempenho nao chamou get_detalhe_anuncios;
 //   nao marca FALHO apos redo que ja coletou; sintese nao pede nova pergunta.
 // v4.9 (27/08/2026) - LEITURA COMPLETA: detalhamento de campanha forca desempenho+criativos,
@@ -249,6 +251,7 @@ import {
   conjuntoNomeDoMeioLaFelicita,
   inferirMeioDeProduto,
   inferirMeioDrive,
+  parseMeioDriveArg,
   injetarArgsDrive,
   pastaFormatoDoPedido,
   pedidoExigeInventarioDrive,
@@ -1235,10 +1238,9 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
         p_dias: Number(args?.dias ?? 7),
       });
       case "ler_brand_identity": {
-        const meioArg = String(args?.meio ?? "").trim().toLowerCase();
-        const meio = (meioArg === "la_felicita" || meioArg === "juridico")
-          ? meioArg
-          : (inferirMeioDrive(String(ctx.pedido ?? "")) || inferirMeioDeProduto(String(ctx.pedido ?? "")));
+        const meio = parseMeioDriveArg(args?.meio)
+          ?? inferirMeioDrive(String(ctx.pedido ?? ""))
+          ?? inferirMeioDeProduto(String(ctx.pedido ?? ""));
         const rpc: Record<string, unknown> = { p_company_id: ctx.companyId };
         if (meio) rpc.p_meio = meio;
         return await t_rpc("ler_brand_identity", rpc);
@@ -1379,8 +1381,8 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
 // Schemas (subset do v27.1)
 const DEF: Record<string, any> = {
   get_analise_visual_drive: { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Leitura instantanea - nao repete a visao. Se total_analisados < inventario, pecas novas ainda nao passaram pela visao: declare, nao invente.", parameters: { type: "object", properties: {} } } },
-  get_drive_criativos: { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, tamanho, data de cada arquivo, com resumo por formato e por eixo. SEM thumbnail (estoura o teto). Pode vir recortado por meio=la_felicita|juridico e formatos Reels/Videos. Pode vir truncado: leia aviso_corte e nunca trate item omitido como inexistente. LIMITE: video e analisado por nome+caminho, nao pelo conteudo interno.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"], description: "Recorte de marca/pasta monitorada." }, formatos: { type: "array", items: { type: "string" }, description: "Ex.: Reels, Videos. Ignora Adesivo/Brutos/Cards." } } } } },
-  get_acervo_para_anuncio: { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA do acervo Drive. Devolve inventario_global do RECORTE quando meio/formatos (ou o pedido) restringem. inventario_global_empresa e o total da empresa - NAO cite como videos La Felicita. Em lote/mix chame SEM produto primeiro. apta=true so = pronta pra publicar agora; NAO use para afirmar escassez. NAO use get_criativos_conteudo.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional; em lote deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true (leitura total)." }, meio: { type: "string", enum: ["la_felicita", "juridico"] }, formatos: { type: "array", items: { type: "string" } } } } } },
+  get_drive_criativos: { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, tamanho, data de cada arquivo, com resumo por formato e por eixo. SEM thumbnail (estoura o teto). Pode vir recortado por meio=la_felicita|juridico e formatos Reels/Videos. Pode vir truncado: leia aviso_corte e nunca trate item omitido como inexistente. LIMITE: video e analisado por nome+caminho, nao pelo conteudo interno.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"], description: "Recorte de marca/pasta monitorada." }, formatos: { type: "array", items: { type: "string" }, description: "Ex.: Reels, Videos. Ignora Adesivo/Brutos/Cards." } } } } },
+  get_acervo_para_anuncio: { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA do acervo Drive. Devolve inventario_global do RECORTE quando meio/formatos (ou o pedido) restringem. inventario_global_empresa e o total da empresa - NAO cite como videos La Felicita. Em lote/mix chame SEM produto primeiro. apta=true so = pronta pra publicar agora; NAO use para afirmar escassez. NAO use get_criativos_conteudo.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional; em lote deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true (leitura total)." }, meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   upload_midia: { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive para a biblioteca Meta (adimages/advideos) e grava meta_image_hash ou meta_video_id. USE quando na_biblioteca_da_meta=false. NAO cria anuncio. LOTE: suba TODAS as pecas fora da biblioteca; NAO invente teto de 5/hora. Idempotente. TETO = Meta: video <= 4 GB, imagem <= 8 MB. Envio em partes; se em_andamento, chame de novo o mesmo drive_file_id. Video: so considere pronta se pronto=true.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, account_id: { type: "string" } }, required: ["drive_file_id"] } } },
   get_overview: { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real), gasto/resultados 7d, dias_com_dado.", parameters: { type: "object", properties: {} } } },
   get_alerts: { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema.", parameters: { type: "object", properties: {} } } },
@@ -1395,7 +1397,7 @@ const DEF: Record<string, any> = {
   diagnosticar_custo: { type: "function", function: { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id do job e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e pos-clique fica fora do escopo.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   avaliar_fadiga: { type: "function", function: { name: "avaliar_fadiga", description: "Avalia se a peca cansou, teve queda sem saturacao, frequencia alta antes da queda ou nenhum sinal. Exige company_id do job e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e nao deriva a frequencia deduplicada de 30 dias.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   casar_criativo_performance: { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca Drive com anuncios criados pelo sistema e metricas da janela + amostra_pequena. Filtros opcionais: drive_file_id, ad_external_id, dias.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer" } } } } },
-  ler_brand_identity: { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: identidade de marca vigente. COHAPM: passe meio=la_felicita ou juridico. Sem meio a RPC prefere juridico. La Felicita NAO herda voz Juridico.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico"] } } } } },
+  ler_brand_identity: { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: identidade de marca vigente. COHAPM: passe meio=la_felicita ou juridico. Sem meio a RPC prefere juridico. La Felicita NAO herda voz Juridico.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"] } } } } },
   computar_perfil_vencedor: { type: "function", function: { name: "computar_perfil_vencedor", description: "ESP-34: computa e VERSIONA o perfil do vencedor do company_id do job (regua evaluate_winners/ESP-01: >=30 resultados e >=30 gasto, custo <= teto_vigente*0,80; procedencia da peca ESP-33). Grava nova versao (dedup no mesmo dia salvo forcar). Nao substitui get_recommendations nem aprovacao humana; vencedor mora em ESCALA (ESP-39).", parameters: { type: "object", properties: { dias: { type: "integer" }, forcar: { type: "boolean" } } } } },
   ler_perfil_vencedor: { type: "function", function: { name: "ler_perfil_vencedor", description: "ESP-34: le a ultima versao (ou versao especifica) do perfil do vencedor ja computado para o company_id do job: vencedores, padroes, criterio, procedencia e lacunas. Leitura pura; se nunca computado, orienta chamar computar_perfil_vencedor.", parameters: { type: "object", properties: { versao: { type: "integer" } } } } },
   score_de_prontidao: { type: "function", function: { name: "score_de_prontidao", description: "ESP-38: score read-only 0-100 de prontidao do company_id do job para propor/executar anuncios: config (25), integracao viva (25), postura (20), brand (15), destino (10), driver (5). Devolve nivel (bloqueado|parcial|operacional|pronto), checks com evidencia/lacuna, bloqueios e recomendacoes. Nao altera nada nem substitui gates por pedido.", parameters: { type: "object", properties: {} } } },
@@ -1461,7 +1463,7 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   criativos_drive: {
     tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "ler_brand_identity", "get_conhecimento"],
     maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 8, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 3, ler_brand_identity: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
-    missao: "CRIATIVOS NOVOS NO DRIVE: leitura NESTA rodada. Historico nao substitui inventario. Se La Felicita, meio=la_felicita e so Reels/Videos. inventario_global da empresa NAO e videos La Felicita. PROIBIDO get_criativos_conteudo (anuncios ja no ar). Cite nome+pasta+drive_file_id. Nunca invente arquivo. Agosto reservado ao CONJ.4 nao entra em CONJ.1-3.",
+    missao: "CRIATIVOS NOVOS NO DRIVE: leitura NESTA rodada. Historico nao substitui inventario. COHAPM: isole meio=juridico | la_felicita | sistema_ocular (VISTTA). inventario_global da empresa NAO e o recorte de um empreendimento. PROIBIDO get_criativos_conteudo (anuncios ja no ar). Cite nome+pasta+drive_file_id. Nunca invente arquivo.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],
@@ -2234,7 +2236,13 @@ async function baixarThumb(url: string, fileId?: string): Promise<{ b64: string;
 // 31/07 julgadas 2h11 ANTES do deploy que trouxe a taxonomia do gestor (educacao financeira e
 // seguranca), com zero pecas nesses dois temas.
 const BASE_PADRAO = "thumbnail";
-type OpcoesVisao = { base?: string; somenteNomes?: string[]; limite?: number; somenteImagens?: boolean };
+type OpcoesVisao = {
+  base?: string;
+  somenteNomes?: string[];
+  limite?: number;
+  somenteImagens?: boolean;
+  meio?: string | null;
+};
 
 // v2.7 (04/08/2026) - QUADROS DA META. O Drive entrega UMA miniatura por arquivo e nao aceita
 // offset de tempo; extrair quadro do mp4 no runtime da edge nao existe (isolate V8 sem shell,
@@ -2272,6 +2280,35 @@ async function quadrosDaMeta(videoId: string, mcpKey: string) {
     descartados_por_peso: todos.length - sobreviventes.length, escolhidos };
 }
 
+function visaoPorMeioCohapm(meio: string | null | undefined): { introVideo: string; introImg: string; produtos: string } {
+  const m = String(meio ?? "").trim().toLowerCase();
+  if (m === "sistema_ocular") {
+    return {
+      introVideo:
+        "Voce analisa um VIDEO de anuncio a partir de QUADROS extraidos ao longo dele (ordem cronologica). A operacao e COHAPM — empreendimento SISTEMA OCULAR / marca VISTTA (saude ocular). NAO e nucleo juridico WhatsApp, NAO e residencial La Felicita, NAO e credito consignado.",
+      introImg:
+        "Voce analisa criativos de anuncio para COHAPM Sistema Ocular / VISTTA (saude ocular). NAO e juridico WA, NAO e La Felicita, NAO e consignado CLT.",
+      produtos: "saude_ocular, oftalmologia, clinica, hospital, vistta, checkup_visual, indeterminado",
+    };
+  }
+  if (m === "la_felicita") {
+    return {
+      introVideo:
+        "Voce analisa um VIDEO de anuncio a partir de QUADROS extraidos ao longo dele (ordem cronologica). A operacao e COHAPM — empreendimento residencial LA FELICITA. NAO e nucleo juridico WhatsApp, NAO e Sistema Ocular/VISTTA, NAO e credito consignado.",
+      introImg:
+        "Voce analisa criativos de anuncio para COHAPM La Felicita (residencial). NAO e juridico WA, NAO e Sistema Ocular, NAO e consignado CLT.",
+      produtos: "habitacional, residencial, lazer, condominio, indeterminado",
+    };
+  }
+  return {
+    introVideo:
+      "Voce analisa um VIDEO de anuncio a partir de QUADROS extraidos ao longo dele (ordem cronologica). A operacao e COHAPM (cooperativa habitacional / nucleo juridico WhatsApp) — NAO e credito consignado. Temas esperados: juridico, conta de luz, cobranca indevida, emprestimo abusivo, direitos do cooperado. NUNCA classifique como consignado CLT so por padrao.",
+    introImg:
+      "Voce analisa criativos de anuncio para COHAPM (cooperativa / juridico WA), NAO credito consignado. Temas: juridico, conta de luz, cobranca indevida, emprestimo abusivo. NUNCA force classificacao CLT.",
+    produtos: "juridico, conta_de_luz, cobranca_indevida, emprestimo_abusivo, habitacional, indeterminado",
+  };
+}
+
 async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey?: string }, prazo: () => number, tel: any, opts: OpcoesVisao = {}) {
   const base = String(opts.base ?? BASE_PADRAO).trim() || BASE_PADRAO;
   const nomeSub = "analise_visual_drive";
@@ -2284,7 +2321,7 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
     `Voce analisa criativos de anuncio para operacao de credito consignado CLT. Universo: consignado CLT, educacao financeira e dicas de seguranca — aproveitaveis.`;
   const promptImgNaoCredito =
     `Voce analisa criativos de anuncio para COHAPM (cooperativa / juridico WA), NAO credito consignado. Temas: juridico, conta de luz, cobranca indevida, emprestimo abusivo. NUNCA force classificacao CLT.`;
-  const inv = await t_drive_criativos(ctx.companyId);
+  const inv = await t_drive_criativos(ctx.companyId, opts.meio ? { args: { meio: opts.meio } } : undefined);
   if ((inv as any)?.erro) return { nome: nomeSub, relatorio: `LACUNAS: inventario do Drive indisponivel (${(inv as any).erro}) - nenhuma analise visual feita nesta rodada.`, completo: false };
   const arquivos: any[] = (inv as any).arquivos ?? [];
 
@@ -2353,8 +2390,9 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
         indices_usados: imagens.map((x) => x.indice) });
       if (!imagens.length) { falhasThumb++; continue; }
 
+      const vis = visaoPorMeioCohapm(arq.meio);
       const content: any[] = [{ type: "text", text:
-        `${ehCreditoVisao ? promptVideoCredito : promptVideoNaoCredito} Devolve UM objeto JSON para o video inteiro. Campos: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : "juridico, conta_de_luz, cobranca_indevida, emprestimo_abusivo, habitacional, indeterminado"}); confianca ("alta"|"media"|"baixa"); quadro_que_sustenta (o numero do quadro, de 1 a ${imagens.length}, que sustenta a conclusao); texto_visivel (transcreva o texto legivel somando os quadros, sem repetir); menciona_taxa_prazo_ou_valor (true/false) e qual_valor (o trecho, ou vazio); quadros_divergem (true/false) e o_que_diverge (uma frase, ou vazio); riscos_compliance (promessa enganosa, urgencia falsa, ausencia de identificacao — so o que estiver VISIVEL); aproveitavel: "sim" se alinhado ao universo da marca e sem risco visivel, "nao" se produto claramente fora do universo ou risco claro, "incerto" se os quadros nao permitem afirmar; motivo (uma frase). LIMITE REAL: voce ve ${imagens.length} quadros, NAO o video - nao ha audio. "indeterminado" e "incerto" sao legitimos. Responda APENAS JSON: {"produto_detectado":"...","confianca":"...","quadro_que_sustenta":1,"texto_visivel":"...","menciona_taxa_prazo_ou_valor":false,"qual_valor":"","quadros_divergem":false,"o_que_diverge":"","riscos_compliance":"","aproveitavel":"sim|nao|incerto","motivo":"..."}` +
+        `${ehCreditoVisao ? promptVideoCredito : vis.introVideo} Devolve UM objeto JSON para o video inteiro. Campos: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : vis.produtos}); confianca ("alta"|"media"|"baixa"); quadro_que_sustenta (o numero do quadro, de 1 a ${imagens.length}, que sustenta a conclusao); texto_visivel (transcreva o texto legivel somando os quadros, sem repetir); menciona_taxa_prazo_ou_valor (true/false) e qual_valor (o trecho, ou vazio); quadros_divergem (true/false) e o_que_diverge (uma frase, ou vazio); riscos_compliance (promessa enganosa, urgencia falsa, ausencia de identificacao — so o que estiver VISIVEL); aproveitavel: "sim" se alinhado ao universo da marca e sem risco visivel, "nao" se produto claramente fora do universo ou risco claro, "incerto" se os quadros nao permitem afirmar; motivo (uma frase). LIMITE REAL: voce ve ${imagens.length} quadros, NAO o video - nao ha audio. "indeterminado" e "incerto" sao legitimos. Responda APENAS JSON: {"produto_detectado":"...","confianca":"...","quadro_que_sustenta":1,"texto_visivel":"...","menciona_taxa_prazo_ou_valor":false,"qual_valor":"","quadros_divergem":false,"o_que_diverge":"","riscos_compliance":"","aproveitavel":"sim|nao|incerto","motivo":"..."}` +
         `\nArquivo: ${arq.nome} (pasta: ${arq.caminho})` }];
       for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
       const r = await chamarLLM([{ role: "user", content }], { maxTokens: 1500, reasoning: REASONING_OFF, tipo: "visao" });
@@ -2395,44 +2433,52 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
       if (th) imagens.push({ arq, b64: th.b64, mime: th.mime }); else falhasThumb++;
     }
     if (!imagens.length) continue;
-    const content: any[] = [{ type: "text", text:
-      `${ehCreditoVisao ? promptImgCredito : promptImgNaoCredito} Para CADA imagem, na ordem, devolva um item JSON. Criterios: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : "juridico, conta_de_luz, cobranca_indevida, emprestimo_abusivo, habitacional, indeterminado"}); texto_visivel; riscos_compliance (so o VISIVEL); aproveitavel: "sim"|"nao"|"incerto"; motivo. Voce ve UM FRAME — na duvida, "incerto". Responda APENAS JSON: {"itens":[{"nome":"...","produto_detectado":"...","texto_visivel":"...","riscos_compliance":"...","aproveitavel":"sim|nao|incerto","motivo":"..."}]}` + `\nArquivos nesta ordem: ${imagens.map((x) => `${x.arq.nome} (pasta: ${x.arq.caminho})`).join(" | ")}` }];
-    for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
-    const r = await chamarLLM([{ role: "user", content }], { maxTokens: 2500, reasoning: REASONING_OFF, tipo: "visao" });
-    if (r.erro) continue;
-    const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
-    const itens = Array.isArray(bruto?.itens) ? bruto.itens : [];
-    for (let k = 0; k < imagens.length; k++) {
-      const arq = imagens[k].arq; const it = itens[k] ?? {};
-      const aprov = ["sim", "nao", "incerto"].includes(String(it?.aproveitavel)) ? String(it.aproveitavel) : "incerto";
-      const { error: eUp } = await supa.from("drive_midia_analises").upsert({
-        company_id: ctx.companyId, drive_file_id: String(arq.id ?? arq.nome), drive_modified_time: arq.modificado_em ?? "",
-        base_da_analise: base,
-        nome: arq.nome, caminho: arq.caminho, formato_pasta: arq.formato_pasta, eixo_pasta: arq.eixo_pasta, mime: arq.tipo,
-        pasta_monitorada: arq.pasta_monitorada ?? null,
-        meio: arq.meio ?? null,
-        produto_detectado: String(it?.produto_detectado ?? "indeterminado").slice(0, 120),
-        texto_visivel: String(it?.texto_visivel ?? "").slice(0, 800),
-        riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
-        aproveitavel: aprov, motivo: String(it?.motivo ?? "sem motivo").slice(0, 400),
-        aprovado_pelo_gestor: false,
-        modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
-        // v2.6: o onConflict TEM de citar as tres colunas da uq_drive_analise. A versao anterior
-        // citava (drive_file_id, drive_modified_time) e esse indice de 2 colunas NAO EXISTE MAIS -
-        // toda gravacao falharia com 42P10, e o erro era descartado: `analisados++` acontecia de
-        // qualquer jeito e a telemetria diria "analisado". Falha silenciosa, achada antes de rodar.
-      }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
-      if (eUp) { falhasGravacao++; continue; }
-      analisados++;
+    const porMeio = new Map<string, typeof imagens>();
+    for (const im of imagens) {
+      const k = String(im.arq.meio ?? "") || "_";
+      const arr = porMeio.get(k) ?? [];
+      arr.push(im);
+      porMeio.set(k, arr);
+    }
+    for (const [meioK, grupo] of porMeio) {
+      const vis = visaoPorMeioCohapm(meioK === "_" ? null : meioK);
+      const content: any[] = [{ type: "text", text:
+        `${ehCreditoVisao ? promptImgCredito : vis.introImg} Para CADA imagem, na ordem, devolva um item JSON. Criterios: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : vis.produtos}); texto_visivel; riscos_compliance (so o VISIVEL); aproveitavel: "sim"|"nao"|"incerto"; motivo. Voce ve UM FRAME — na duvida, "incerto". Responda APENAS JSON: {"itens":[{"nome":"...","produto_detectado":"...","texto_visivel":"...","riscos_compliance":"...","aproveitavel":"sim|nao|incerto","motivo":"..."}]}` + `\nArquivos nesta ordem: ${grupo.map((x) => `${x.arq.nome} (pasta: ${x.arq.caminho})`).join(" | ")}` }];
+      for (const im of grupo) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
+      const r = await chamarLLM([{ role: "user", content }], { maxTokens: 2500, reasoning: REASONING_OFF, tipo: "visao" });
+      if (r.erro) continue;
+      const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
+      const itens = Array.isArray(bruto?.itens) ? bruto.itens : [];
+      for (let k = 0; k < grupo.length; k++) {
+        const arq = grupo[k].arq; const it = itens[k] ?? {};
+        const aprov = ["sim", "nao", "incerto"].includes(String(it?.aproveitavel)) ? String(it.aproveitavel) : "incerto";
+        const { error: eUp } = await supa.from("drive_midia_analises").upsert({
+          company_id: ctx.companyId, drive_file_id: String(arq.id ?? arq.nome), drive_modified_time: arq.modificado_em ?? "",
+          base_da_analise: base,
+          nome: arq.nome, caminho: arq.caminho, formato_pasta: arq.formato_pasta, eixo_pasta: arq.eixo_pasta, mime: arq.tipo,
+          pasta_monitorada: arq.pasta_monitorada ?? null,
+          meio: arq.meio ?? null,
+          produto_detectado: String(it?.produto_detectado ?? "indeterminado").slice(0, 120),
+          texto_visivel: String(it?.texto_visivel ?? "").slice(0, 800),
+          riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
+          aproveitavel: aprov, motivo: String(it?.motivo ?? "sem motivo").slice(0, 400),
+          aprovado_pelo_gestor: false,
+          modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
+        }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
+        if (eUp) { falhasGravacao++; continue; }
+        analisados++;
+      }
     }
   }
 
   // relatorio = estado ACUMULADO da tabela (inclui rodadas anteriores) NA BASE DESTA RODADA.
   // v2.6: sem o filtro por base, o relatorio somaria o veredito de 31/07 com o novo e a contagem
   // de cobertura passaria do total - duas leituras da mesma peca nao sao duas pecas.
-  const { data: tudo } = await supa.from("drive_midia_analises")
+  let qCobertura = supa.from("drive_midia_analises")
     .select("nome, caminho, formato_pasta, eixo_pasta, produto_detectado, aproveitavel, motivo, riscos_compliance")
-    .eq("company_id", ctx.companyId).eq("base_da_analise", base).order("caminho");
+    .eq("company_id", ctx.companyId).eq("base_da_analise", base);
+  if (opts.meio) qCobertura = qCobertura.eq("meio", opts.meio);
+  const { data: tudo } = await qCobertura.order("caminho");
   const linhas = (tudo ?? []).map((t2: any) =>
     `- [${t2.aproveitavel.toUpperCase()}] ${t2.caminho}/${t2.nome} | produto: ${t2.produto_detectado} | ${t2.motivo}${t2.riscos_compliance ? " | risco: " + t2.riscos_compliance : ""}`).join("\n");
   const cobertura = (tudo ?? []).length;
@@ -2640,7 +2686,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.10";
+  tel.versao = "job-v4.11";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -2909,11 +2955,13 @@ Deno.serve(async (req) => {
     // v2.6: base e recorte pelo body. Default 'thumbnail' para o cron das 08:45 nao regredir.
     const baseW = String(body?.base_da_analise ?? BASE_PADRAO).trim() || BASE_PADRAO;
     const nomesW: string[] = Array.isArray(body?.somente_nomes) ? body.somente_nomes.map((x: unknown) => String(x)) : [];
+    const meioW = parseMeioDriveArg(body?.meio);
     const opts: OpcoesVisao = {
       base: baseW,
       somenteNomes: nomesW.length ? nomesW : undefined,
       limite: body?.limite !== undefined ? Number(body.limite) : undefined,
       somenteImagens: body?.somente_imagens === true,
+      meio: meioW,
     };
     const { data: planoW } = await supa.rpc("drive_plano_de_varredura", { p_company_id: companyId, p_base_desejada: baseW });
     const nPastas = Array.isArray((planoW as any)?.pastas_ativas) ? (planoW as any).pastas_ativas.length : 0;
@@ -2923,8 +2971,8 @@ Deno.serve(async (req) => {
     const r = await rodarAnaliseVisual("varredura automatica do Drive",
       { companyId, mcpKey: String(cfg?.api_key ?? "") }, prazoW, telW, opts);
     const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0, falhas_gravacao: 0 };
-    return json({ ok: true, modo: "drive_watch", versao: "job-v2.9.1",
-      base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, limite: opts.limite ?? null },
+    return json({ ok: true, modo: "drive_watch", versao: "job-v4.11",
+      base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, limite: opts.limite ?? null, meio: meioW },
       pastas_ativas: nPastas, pastas_desativadas: nDesativadas,
       pecas_novas_analisadas: v.analisados_nesta_rodada,
       cobertura_acumulada: v.cobertura_acumulada, total_com_miniatura: v.total,

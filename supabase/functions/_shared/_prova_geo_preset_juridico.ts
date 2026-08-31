@@ -29,6 +29,10 @@ assert(detectarMeioCohapm("LF_TOFU_SSA") === "la_felicita", "LF_");
 assert(detectarMeioCohapm("[SALT] [LF | CONV | OBRA]") === "la_felicita", "SALT LF");
 assert(detectarMeioCohapm("JURIDICO e LA FELICITA misturados") === null, "ambiguidade");
 assert(detectarMeioCohapm("Traffic Campaign") === null, "sem sinal");
+assert(detectarMeioCohapm("COHAPM - VISTTA") === "sistema_ocular", "pasta VISTTA");
+assert(detectarMeioCohapm("COHAPM_SISTEMA_OCULAR_CONV") === "sistema_ocular", "campanha ocular");
+assert(!deveAplicarPresetGeoJuridico(COMPANY_COHAPM, "sistema_ocular"), "ocular nao herda geo JUR");
+assert(detectarMeioCohapm("VISTTA e JURIDICO") === null, "ambiguidade ocular×jur");
 
 assert(meioExplicitoDoParams({ meio: "juridico" }) === "juridico", "meio explicito");
 assert(meioExplicitoDoParams({ meio: "la_felicita" }) === "la_felicita", "meio lf");

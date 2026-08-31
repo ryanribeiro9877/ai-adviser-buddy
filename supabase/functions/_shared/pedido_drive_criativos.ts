@@ -2,7 +2,25 @@
 // Separado do overview de campanhas: "análise completa de criativos das pastas" NÃO é
 // visão geral de gasto/CTR. Histórico da conversa não substitui coleta nesta rodada.
 
-export type MeioDrive = "la_felicita" | "juridico";
+export const MEIOS_DRIVE = ["la_felicita", "juridico", "sistema_ocular"] as const;
+export type MeioDrive = (typeof MEIOS_DRIVE)[number];
+
+export function parseMeioDriveArg(raw: unknown): MeioDrive | null {
+  const m = deaccPedido(String(raw ?? "")).trim().replace(/\s+/g, "_");
+  if (!m) return null;
+  if (m === "la_felicita" || m === "lafelicita" || m === "lf") return "la_felicita";
+  if (m === "juridico" || m === "jur") return "juridico";
+  if (m === "sistema_ocular" || m === "sistemaocular" || m === "ocular" || m === "vistta") {
+    return "sistema_ocular";
+  }
+  return null;
+}
+
+/** Pasta/marca VISTTA = empreendimento Sistema Ocular (nao e Juridico nem La Felicita). */
+export function textoTemSistemaOcular(p: string): boolean {
+  const n = deaccPedido(p);
+  return /vistta/.test(n) || /sistema[\s_-]*ocular/.test(n) || /\bocular\b/.test(n) || /oftalm/.test(n);
+}
 
 export type RecorteDrive = {
   meio?: MeioDrive | null;
@@ -26,6 +44,7 @@ export function pedidoUsaSlateExistente(pedido: string): boolean {
 export function inferirMeioDeProduto(produto: string): MeioDrive | null {
   const p = deaccPedido(produto);
   if (!p) return null;
+  if (textoTemSistemaOcular(p)) return "sistema_ocular";
   if (/imovel|residencial|felicita|la_felicita|\blaf\b|morar|condominio/.test(p)) return "la_felicita";
   if (/juridico|conta_de_luz|cobranca|emprestimo_abusivo/.test(p)) return "juridico";
   return null;
@@ -46,11 +65,15 @@ export function pedidoExigeInventarioDrive(pedido: string): boolean {
 
 export function inferirMeioDrive(pedido: string): MeioDrive | null {
   const p = deaccPedido(pedido);
+  const oc = textoTemSistemaOcular(p);
   const lf = /\bla\s*felicita|\blafelicita|\bfelicita|\bconj\.?\s*[1-4]_laf|\blaf_/.test(p)
-    || (/\blf\b/.test(p) && !/\bjuridico\b/.test(p));
+    || (/\blf\b/.test(p) && !/\bjuridico\b/.test(p) && !oc);
   const jur = /\bjuridico\b/.test(p);
-  if (lf) return "la_felicita";
-  if (jur) return "juridico";
+  const hits: MeioDrive[] = [];
+  if (oc) hits.push("sistema_ocular");
+  if (lf) hits.push("la_felicita");
+  if (jur) hits.push("juridico");
+  if (hits.length === 1) return hits[0];
   return null;
 }
 
@@ -64,10 +87,7 @@ export function pedidoSoReelsVideos(pedido: string): boolean {
 }
 
 export function recorteDriveDoPedido(pedido: string, args?: Record<string, unknown> | null): RecorteDrive {
-  const meioArg = String(args?.meio ?? "").trim().toLowerCase();
-  const meio: MeioDrive | null = meioArg === "la_felicita" || meioArg === "juridico"
-    ? meioArg
-    : inferirMeioDrive(pedido);
+  const meio: MeioDrive | null = parseMeioDriveArg(args?.meio) ?? inferirMeioDrive(pedido);
   const formatos = args?.formatos ?? args?.pastas_formato;
   const soPorArg = Array.isArray(formatos)
     && formatos.map((x) => deaccPedido(String(x))).some((x) => x === "reels" || x === "videos");
@@ -95,8 +115,15 @@ export function itemDriveDoMeio(
   const blob = deaccPedido(
     [item.meio, item.caminho, item.arquivo, item.pasta, item.pasta_monitorada].map((x) => String(x ?? "")).join(" "),
   );
-  if (meio === "la_felicita") return /felicit|la_felicita|\blaf\b/.test(blob);
-  if (meio === "juridico") return /juridic/.test(blob) && !/felicit/.test(blob);
+  if (meio === "sistema_ocular") {
+    return textoTemSistemaOcular(blob);
+  }
+  if (meio === "la_felicita") {
+    return /felicit|la_felicita|\blaf\b/.test(blob) && !textoTemSistemaOcular(blob);
+  }
+  if (meio === "juridico") {
+    return /juridic/.test(blob) && !/felicit/.test(blob) && !textoTemSistemaOcular(blob);
+  }
   return true;
 }
 
@@ -228,11 +255,13 @@ export function conjuntoNomeDoMeioLaFelicita(nome: string): boolean {
 
 export const FOCO_CRIATIVOS_DRIVE =
   "Colete o inventario do Drive NESTA rodada (get_drive_criativos e get_acervo_para_anuncio). " +
-  "Se o pedido for La Felicita, passe meio=la_felicita. Se pediu so Reels e Videos, ignore Adesivo/Brutos/Cards. " +
+  "COHAPM tem TRES meios: juridico, la_felicita, sistema_ocular (pasta VISTTA / Sistema Ocular). " +
+  "Se o pedido for La Felicita, passe meio=la_felicita. Se for Sistema Ocular/VISTTA, meio=sistema_ocular. " +
+  "Se pediu so Reels e Videos, ignore Adesivo/Brutos/Cards. " +
   "PROIBIDO usar get_criativos_conteudo (anuncios ja no ar) como substituto das pastas. " +
-  "inventario_global da empresa NAO e 'videos La Felicita' — isole o meio. " +
+  "inventario_global da empresa NAO e o recorte de um empreendimento — isole o meio. " +
   "Liste nome + pasta + drive_file_id. Se aviso_corte, recorte por mes/pasta; nao diga que a pasta nao existe. " +
-  "Agosto (se pedido exclusivo do CONJ.4) nao entra em CONJ.1-3. Nao invente nome de arquivo.";
+  "Agosto (se pedido exclusivo do CONJ.4 La Felicita) nao entra em CONJ.1-3. Nao invente nome de arquivo.";
 
 export const FOCO_ESTRUTURA_CONJUNTOS_DRIVE =
   "Leia get_estrutura_conjuntos dos conjuntos citados (CONJ.1 a CONJ.4 / nomes LAF). " +

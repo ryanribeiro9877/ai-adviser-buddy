@@ -147,6 +147,16 @@ describe("cruzamento linha produto COHAPM", () => {
   const campLaf = "COHAPM_LAFELICITA_CONV_AGO26";
   const setLaf = "LAFELICITA_CONJ.01 - DESCOBERTA";
 
+  it("classifica VISTTA/Sistema Ocular e recusa cruzamento com Juridico", () => {
+    expect(classificarLinhaProdutoCohapm("COHAPM - VISTTA")).toBe("sistema_ocular");
+    expect(classificarLinhaProdutoCohapm("COHAPM_SISTEMA_OCULAR_CONV")).toBe("sistema_ocular");
+    const r = recusarCruzamentoLinhaProduto({
+      estruturaNomes: [campJur, setJur],
+      pecaSinais: ["COHAPM Sistema Ocular · VISTTA/2026/08. Agosto/Criativo 01.jpeg"],
+    });
+    expect(r.ok).toBe(false);
+  });
+
   it("recusa peca La Felicità em conjunto Jurídico (incidente 25/08)", () => {
     expect(classificarLinhaProdutoCohapm(pecaLaf)).toBe("la_felicita");
     const r = recusarCruzamentoLinhaProduto({

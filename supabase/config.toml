@@ -110,3 +110,7 @@ verify_jwt = false
 # 29/08/2026 — inspect/register de numeros WABA (Cloud API). Auth na edge (x-mcp-key).
 [functions.waba-phone-connect]
 verify_jwt = false
+
+# 31/08/2026 — sonda Drive (SA + pastas compartilhadas). Auth na edge (x-mcp-key).
+[functions.drive-access-probe]
+verify_jwt = false
