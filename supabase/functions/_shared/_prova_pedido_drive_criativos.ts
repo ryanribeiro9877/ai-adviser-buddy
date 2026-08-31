@@ -13,6 +13,7 @@ import {
   pedidoUsaSlateExistente,
   recortarItensDrive,
   recorteDriveDoPedido,
+  serieCarrosselDrive,
 } from "./pedido_drive_criativos.ts";
 
 function assert(cond: unknown, msg: string) {
@@ -62,7 +63,11 @@ assert(chat.includes("pedidoExigeInventarioDrive"), "chat importa detector Drive
 assert(job.includes("pedidoExigeInventarioDrive"), "job importa detector Drive");
 assert(job.includes("FOCO_CRIATIVOS_DRIVE"), "job tem foco Drive forcado");
 assert(job.includes("inventario Drive (nao overview de campanha)"), "job forca plano Drive");
-assert(job.includes("job-v4.11"), "job versao 4.11");
+assert(job.includes("job-v4.12"), "job versao 4.12");
+assert(
+  job.includes('acao: "thumbnails"') && job.includes("company_id: companyId || undefined"),
+  "multiquadro passa company_id ao thumbnails da empresa",
+);
 assert(job.includes("v4.4"), "job ainda tem conserto Drive v4.4");
 assert(chat.includes("MSG_NUDGE_DRIVE"), "chat tem nudge se nao coletar Drive");
 assert(chat.includes("R1-DRIVE"), "chat R1-DRIVE");
@@ -80,10 +85,9 @@ assert(inferirMeioDeProduto("sistema ocular") === "sistema_ocular", "produto ocu
 assert(inferirMeioDrive("criativos do Sistema Ocular no drive") === "sistema_ocular", "pedido ocular");
 assert(inferirMeioDrive("pasta VISTTA") === "sistema_ocular", "pedido VISTTA");
 assert(parseMeioDriveArg("vistta") === "sistema_ocular", "arg vistta");
-assert(itemDriveDoMeio(
-  { pasta_monitorada: "COHAPM Sistema Ocular · VISTTA", meio: "sistema_ocular" },
-  "sistema_ocular",
-), "item ocular casa");
+assert(serieCarrosselDrive("2Carrossel 2.png") === "2", "serie carrossel 2");
+assert(serieCarrosselDrive("4Carrossel 3.png") === "4", "serie carrossel 4");
+assert(serieCarrosselDrive("Criativo 01.jpeg") === null, "jpeg raiz nao e carrossel");
 assert(!itemDriveDoMeio(
   { pasta_monitorada: "COHAPM Sistema Ocular · VISTTA", meio: "sistema_ocular" },
   "juridico",

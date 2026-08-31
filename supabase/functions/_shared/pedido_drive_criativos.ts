@@ -107,6 +107,13 @@ export function pastaFormatoIgnorada(nome: string): boolean {
   return /^(adesivo|adesivos|brutos|cards|card)$/.test(n);
 }
 
+/** "2Carrossel 1.png" / "3Carrossel 3.png" → "2" / "3". Slides do mesmo numero sao UM peca. */
+export function serieCarrosselDrive(nome: string): string | null {
+  const n = deaccPedido(nome).trim();
+  const m = n.match(/^(\d+)\s*carrossel\b/);
+  return m ? m[1] : null;
+}
+
 export function itemDriveDoMeio(
   item: { caminho?: unknown; arquivo?: unknown; pasta?: unknown; meio?: unknown; pasta_monitorada?: unknown },
   meio: MeioDrive | null | undefined,

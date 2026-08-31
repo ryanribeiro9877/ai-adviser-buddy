@@ -1,5 +1,6 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.11)
-// v4.11 (31/08/2026) - COHAPM Sistema Ocular / VISTTA: terceiro meio no Drive
+// supabase/functions/traffic-agent-job/index.ts (v4.12)
+// v4.12 (31/08/2026) - Sistema Ocular: carrossel lido em conjunto + criterio ocular
+//   (armacao/preco do plano nao e incerto). Videos incertos sobem a multiquadro.
 //   (juridico | la_felicita | sistema_ocular). Visao classifica pelo meio da pasta.
 // v4.10 (27/08/2026) - Devolucao DETERMINISTICA se desempenho nao chamou get_detalhe_anuncios;
 //   nao marca FALHO apos redo que ja coletou; sintese nao pede nova pergunta.
@@ -257,6 +258,7 @@ import {
   pedidoExigeInventarioDrive,
   raizDriveDoMeio,
   recorteDriveDoPedido,
+  serieCarrosselDrive,
 } from "../_shared/pedido_drive_criativos.ts";
 import { ehPedidoDetalhamentoCampanha, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
 import {
@@ -2228,6 +2230,33 @@ async function baixarThumb(url: string, fileId?: string): Promise<{ b64: string;
   return null;
 }
 
+function bytesParaB64(u: Uint8Array): string {
+  let bin = ""; const CH = 0x8000;
+  for (let i = 0; i < u.length; i += CH) bin += String.fromCharCode.apply(null, u.subarray(i, i + CH) as any);
+  return btoa(bin);
+}
+
+/** PNG/JPEG original do Drive (nao a miniatura). Carrossel precisa do slide inteiro. */
+async function baixarArquivoImagemDrive(fileId: string): Promise<{ b64: string; mime: string } | null> {
+  const id = String(fileId ?? "").trim();
+  if (!id) return null;
+  try {
+    const token = await driveToken();
+    const r = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?alt=media&supportsAllDrives=true`,
+      { headers: { authorization: `Bearer ${token}` } },
+    );
+    if (!r.ok) return null;
+    const mime = r.headers.get("content-type") ?? "image/png";
+    if (!String(mime).startsWith("image/")) return null;
+    const u = new Uint8Array(await r.arrayBuffer());
+    if (u.length < 64 || u.length > 1_800_000) return null;
+    return { b64: bytesParaB64(u), mime };
+  } catch {
+    return null;
+  }
+}
+
 // v2.6 (04/08/2026) - BASE DA ANALISE NO CONTRATO. A chave de drive_midia_analises passou a ser
 // (drive_file_id, drive_modified_time, base_da_analise): reanalise com base DIFERENTE cria linha
 // nova e o veredito antigo permanece. Convencao do nome: "<evidencia>/criterio-<versao do prompt>"
@@ -2239,6 +2268,7 @@ const BASE_PADRAO = "thumbnail";
 type OpcoesVisao = {
   base?: string;
   somenteNomes?: string[];
+  somenteIds?: string[];
   limite?: number;
   somenteImagens?: boolean;
   meio?: string | null;
@@ -2256,10 +2286,15 @@ type OpcoesVisao = {
 const QUADROS_POR_VIDEO = 5;
 const PESO_MINIMO_DA_MEDIANA = 0.40;
 
-async function quadrosDaMeta(videoId: string, mcpKey: string) {
+async function quadrosDaMeta(videoId: string, mcpKey: string, companyId?: string) {
   const r = await fetch(`${SUPABASE_URL}/functions/v1/upload-midia`, {
     method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
-    body: JSON.stringify({ acao: "thumbnails", video_id: videoId, medir_todos: true }),
+    body: JSON.stringify({
+      acao: "thumbnails",
+      video_id: videoId,
+      medir_todos: true,
+      company_id: companyId || undefined,
+    }),
   });
   const t = await r.text();
   let j: any; try { j = JSON.parse(t); } catch { return { erro: `thumbnails falhou (${r.status})` }; }
@@ -2283,12 +2318,19 @@ async function quadrosDaMeta(videoId: string, mcpKey: string) {
 function visaoPorMeioCohapm(meio: string | null | undefined): { introVideo: string; introImg: string; produtos: string } {
   const m = String(meio ?? "").trim().toLowerCase();
   if (m === "sistema_ocular") {
+    const criterioOcular =
+      " Universo: saude ocular, oftalmologia, clinica, oculos, lentes, plano/combo de troca anual, cooperativa de visao, VISTTA." +
+      " Marcas de armacao (Ray-Ban, Vogue, Prada, Armani, Emporio) DENTRO de oferta de oculos/plano/combo SAO do universo — nao marque incerto so por marca de terceiro." +
+      " Preco de mensalidade (R$ 39,90 / R$ 79) e a oferta do plano, nao produto fora." +
+      " incerto SO se o quadro nao mostra conteudo (preto, logo isolado sem oferta) ou se e outro empreendimento (juridico, imovel, consignado).";
     return {
       introVideo:
-        "Voce analisa um VIDEO de anuncio a partir de QUADROS extraidos ao longo dele (ordem cronologica). A operacao e COHAPM — empreendimento SISTEMA OCULAR / marca VISTTA (saude ocular). NAO e nucleo juridico WhatsApp, NAO e residencial La Felicita, NAO e credito consignado.",
+        "Voce analisa um VIDEO de anuncio a partir de QUADROS extraidos ao longo dele (ordem cronologica). A operacao e COHAPM — empreendimento SISTEMA OCULAR / marca VISTTA (saude ocular). NAO e nucleo juridico WhatsApp, NAO e residencial La Felicita, NAO e credito consignado." +
+        criterioOcular,
       introImg:
-        "Voce analisa criativos de anuncio para COHAPM Sistema Ocular / VISTTA (saude ocular). NAO e juridico WA, NAO e La Felicita, NAO e consignado CLT.",
-      produtos: "saude_ocular, oftalmologia, clinica, hospital, vistta, checkup_visual, indeterminado",
+        "Voce analisa criativos de anuncio para COHAPM Sistema Ocular / VISTTA (saude ocular). NAO e juridico WA, NAO e La Felicita, NAO e consignado CLT." +
+        criterioOcular,
+      produtos: "saude_ocular, oftalmologia, clinica, hospital, vistta, checkup_visual, oculos, lentes, plano_oculos, indeterminado",
     };
   }
   if (m === "la_felicita") {
@@ -2339,19 +2381,21 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
   // miniatura com critério novo gastaria visão para continuar vendo um quadro - o video espera a
   // rota de quadros. `somenteNomes` e `limite` servem ao aceite parcial: provar em 5 antes de 48.
   const alvoNomes = (opts.somenteNomes ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean);
-  // v2.9: o recorte por TIPO entra AQUI, antes do corte por `limite`. Na v2.8 a base multiquadro
-  // filtrava video dentro do laco, depois do slice(0, limite): com limite 12 os 12 primeiros
-  // pendentes eram imagens, todas foram puladas e a corrida devolveu 0 analisadas em 5s. Nao
-  // quebrou nada e nao gravou nada errado - simplesmente nao fez, e so a telemetria nova
-  // (multiquadro: [] com falhas 0) tornou isso visivel em vez de parecer "nada a fazer".
+  const alvoIds = (opts.somenteIds ?? []).map((n) => String(n).trim()).filter(Boolean);
   const soVideo = base.startsWith("multiquadro");
+  const modoCarrossel = base.startsWith("carrossel_conjunto");
   const pendentes = arquivos.filter((a: any) => {
-    if (!a.thumbnail) return false;
+    if (!modoCarrossel && !a.thumbnail) return false;
     if (jaFeito.has(`${a.id ?? a.nome}|${a.modificado_em ?? ""}`)) return false;
     const ehVideo = String(a.tipo ?? "").startsWith("video/");
     if (opts.somenteImagens && ehVideo) return false;
     if (soVideo && !ehVideo) return false;
     if (alvoNomes.length && !alvoNomes.includes(String(a.nome ?? "").trim().toLowerCase())) return false;
+    if (alvoIds.length && !alvoIds.includes(String(a.id ?? ""))) return false;
+    if (modoCarrossel) {
+      if (!String(a.tipo ?? "").startsWith("image/")) return false;
+      if (!serieCarrosselDrive(String(a.nome ?? "")) && !/carrossel/i.test(String(a.caminho ?? ""))) return false;
+    }
     return true;
   });
   const semThumb = arquivos.filter((a: any) => !a.thumbnail);
@@ -2377,7 +2421,7 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
       const videoId = up?.meta_video_id ? String(up.meta_video_id) : "";
       if (!videoId) { semVideoId.push(String(arq.nome ?? arq.id)); continue; }
 
-      const q: any = await quadrosDaMeta(videoId, ctx.mcpKey);
+      const q: any = await quadrosDaMeta(videoId, ctx.mcpKey, ctx.companyId);
       if (q.erro) { falhasThumb++; detalheQuadros.push({ nome: arq.nome, erro: q.erro }); continue; }
       const imagens: { b64: string; mime: string; indice: number }[] = [];
       for (const esc of q.escolhidos ?? []) {
@@ -2424,7 +2468,58 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
     }
   }
 
-  for (let i = 0; !modoMultiquadro && i < fila.length; i += VISAO_LOTE) {
+  if (modoCarrossel) {
+    const grupos = new Map<string, any[]>();
+    for (const arq of fila) {
+      const serie = serieCarrosselDrive(String(arq.nome ?? "")) ?? `avulso:${arq.nome}`;
+      const arr = grupos.get(serie) ?? [];
+      arr.push(arq);
+      grupos.set(serie, arr);
+    }
+    for (const [serie, arqs] of grupos) {
+      if (prazo() < VISAO_MIN_PRAZO_MS) break;
+      arqs.sort((a: any, b: any) => String(a.nome ?? "").localeCompare(String(b.nome ?? ""), "pt", { numeric: true }));
+      const imagens: { arq: any; b64: string; mime: string }[] = [];
+      for (const arq of arqs) {
+        const full = await baixarArquivoImagemDrive(String(arq.id ?? ""));
+        const th = full ?? await baixarThumb(String(arq.thumbnail ?? ""), String(arq.id ?? ""));
+        if (th) imagens.push({ arq, b64: th.b64, mime: th.mime });
+        else falhasThumb++;
+      }
+      if (!imagens.length) continue;
+      const vis = visaoPorMeioCohapm(imagens[0].arq.meio);
+      const content: any[] = [{ type: "text", text:
+        `${ehCreditoVisao ? promptImgCredito : vis.introImg} Estas imagens sao os slides de UM carrossel (serie ${serie}), na ORDEM. Leia o CONJUNTO: hook no 1o, prova no meio, preco/CTA no ultimo. Um slide so com preco e aproveitavel=sim se o conjunto e oferta de plano ocular/oculos da cooperativa. Para CADA slide, na ordem, devolva um item JSON. Criterios: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : vis.produtos}); texto_visivel; riscos_compliance (so o VISIVEL); aproveitavel: "sim"|"nao"|"incerto"; motivo. Responda APENAS JSON: {"itens":[{"nome":"...","produto_detectado":"...","texto_visivel":"...","riscos_compliance":"...","aproveitavel":"sim|nao|incerto","motivo":"..."}]}` +
+        `\nSlides nesta ordem: ${imagens.map((x) => x.arq.nome).join(" | ")}` }];
+      for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
+      const r = await chamarLLM([{ role: "user", content }], { maxTokens: 2500, reasoning: REASONING_OFF, tipo: "visao" });
+      if (r.erro) continue;
+      const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
+      const itens = Array.isArray(bruto?.itens) ? bruto.itens : [];
+      for (let k = 0; k < imagens.length; k++) {
+        const arq = imagens[k].arq; const it = itens[k] ?? {};
+        const aprov = ["sim", "nao", "incerto"].includes(String(it?.aproveitavel)) ? String(it.aproveitavel) : "incerto";
+        const { error: eUp } = await supa.from("drive_midia_analises").upsert({
+          company_id: ctx.companyId, drive_file_id: String(arq.id ?? arq.nome), drive_modified_time: arq.modificado_em ?? "",
+          base_da_analise: base,
+          nome: arq.nome, caminho: arq.caminho, formato_pasta: arq.formato_pasta, eixo_pasta: arq.eixo_pasta, mime: arq.tipo,
+          pasta_monitorada: arq.pasta_monitorada ?? null,
+          meio: arq.meio ?? null,
+          produto_detectado: String(it?.produto_detectado ?? "indeterminado").slice(0, 120),
+          texto_visivel: String(it?.texto_visivel ?? "").slice(0, 800),
+          riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
+          aproveitavel: aprov,
+          motivo: `carrossel ${serie} (${imagens.length} slides em conjunto). ${String(it?.motivo ?? "sem motivo")}`.slice(0, 400),
+          aprovado_pelo_gestor: false,
+          modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
+        }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
+        if (eUp) { falhasGravacao++; continue; }
+        analisados++;
+      }
+    }
+  }
+
+  for (let i = 0; !modoMultiquadro && !modoCarrossel && i < fila.length; i += VISAO_LOTE) {
     if (prazo() < VISAO_MIN_PRAZO_MS) break;
     const lote = fila.slice(i, i + VISAO_LOTE);
     const imagens: { arq: any; b64: string; mime: string }[] = [];
@@ -2482,7 +2577,14 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
   const linhas = (tudo ?? []).map((t2: any) =>
     `- [${t2.aproveitavel.toUpperCase()}] ${t2.caminho}/${t2.nome} | produto: ${t2.produto_detectado} | ${t2.motivo}${t2.riscos_compliance ? " | risco: " + t2.riscos_compliance : ""}`).join("\n");
   const cobertura = (tudo ?? []).length;
-  const totalComThumb = arquivos.filter((a: any) => a.thumbnail).length;
+  const totalComThumb = arquivos.filter((a: any) => {
+    if (modoCarrossel) {
+      return String(a.tipo ?? "").startsWith("image/") &&
+        (!!serieCarrosselDrive(String(a.nome ?? "")) || /carrossel/i.test(String(a.caminho ?? "")));
+    }
+    if (opts.somenteIds?.length) return opts.somenteIds.includes(String(a.id ?? ""));
+    return !!a.thumbnail;
+  }).length;
   const rel = `ANALISE VISUAL DAS MIDIAS DO DRIVE (persistida em banco; base desta leitura: ${base} - se a base cita "thumbnail", de video se ve UM frame, nunca o interior)\n` +
     `Cobertura acumulada NESTA BASE: ${cobertura} de ${totalComThumb} arquivos com miniatura (${arquivos.length} no inventario; ${semThumb.length} sem miniatura disponivel). Nesta rodada: ${analisados} analisados, ${falhasThumb} miniaturas falharam, ${falhasGravacao} falharam ao gravar.\n` +
     (emBaseMaisRasa ? `${emBaseMaisRasa} peca(s) tem leitura em base mais rasa e estao sendo reavaliadas nesta base - o veredito anterior NAO foi apagado, continua no banco sob a base antiga.\n` : "") +
@@ -2686,7 +2788,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.11";
+  tel.versao = "job-v4.12";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -2955,10 +3057,12 @@ Deno.serve(async (req) => {
     // v2.6: base e recorte pelo body. Default 'thumbnail' para o cron das 08:45 nao regredir.
     const baseW = String(body?.base_da_analise ?? BASE_PADRAO).trim() || BASE_PADRAO;
     const nomesW: string[] = Array.isArray(body?.somente_nomes) ? body.somente_nomes.map((x: unknown) => String(x)) : [];
+    const idsW: string[] = Array.isArray(body?.somente_ids) ? body.somente_ids.map((x: unknown) => String(x)) : [];
     const meioW = parseMeioDriveArg(body?.meio);
     const opts: OpcoesVisao = {
       base: baseW,
       somenteNomes: nomesW.length ? nomesW : undefined,
+      somenteIds: idsW.length ? idsW : undefined,
       limite: body?.limite !== undefined ? Number(body.limite) : undefined,
       somenteImagens: body?.somente_imagens === true,
       meio: meioW,
@@ -2971,8 +3075,8 @@ Deno.serve(async (req) => {
     const r = await rodarAnaliseVisual("varredura automatica do Drive",
       { companyId, mcpKey: String(cfg?.api_key ?? "") }, prazoW, telW, opts);
     const v = telW.visao ?? { analisados_nesta_rodada: 0, cobertura_acumulada: null, total: null, falhas_thumb: 0, falhas_gravacao: 0 };
-    return json({ ok: true, modo: "drive_watch", versao: "job-v4.11",
-      base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, limite: opts.limite ?? null, meio: meioW },
+    return json({ ok: true, modo: "drive_watch", versao: "job-v4.12",
+      base_da_analise: baseW, recorte: { somente_imagens: !!opts.somenteImagens, somente_nomes: nomesW, somente_ids: idsW, limite: opts.limite ?? null, meio: meioW },
       pastas_ativas: nPastas, pastas_desativadas: nDesativadas,
       pecas_novas_analisadas: v.analisados_nesta_rodada,
       cobertura_acumulada: v.cobertura_acumulada, total_com_miniatura: v.total,
