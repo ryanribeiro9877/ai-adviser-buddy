@@ -37,6 +37,11 @@ import { Markdown } from "@/components/markdown";
 import { JobProgressCard } from "@/components/job-progress-card";
 import { replyLoteComLegendas, replyLoteCriativoIncompleto } from "@/lib/lote-criativo";
 import { ehPedidoUploadLote, ehUploadLoteCurto, replyLeituraIncompleta } from "@/lib/intencao-turno";
+import {
+  esperaGravacaoAposErroHttp,
+  statusDeErroInvoke,
+  turnoSincronoOrfao,
+} from "@/lib/chat-http-erro";
 import { ActionCard, decideApproval, reexecutarApproval, type Approval, type Decision } from "@/components/action-card";
 import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
@@ -369,6 +374,9 @@ export function OperacaoChat() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  const [falhaHttpTurno, setFalhaHttpTurno] = useState<{ convId: string; texto: string } | null>(
+    null,
+  );
   const [attachments, setAttachments] = useState<PendingFile[]>([]);
   // Mensagem otimista do usuário, presa à conversa em que foi enviada.
   const [pending, setPending] = useState<{
@@ -724,6 +732,7 @@ export function OperacaoChat() {
     if (!reenvio) setInput("");
     setInterrupted(false);
     setJob(null);
+    setFalhaHttpTurno(null);
     setPending({
       convId: convIdAtSend,
       text,
@@ -797,11 +806,19 @@ export function OperacaoChat() {
         },
       });
       if (error) {
-        // 504 do gateway: a edge pode ter gravado (ou ainda estar gravando). Se já temos
-        // conversation_id, espera a resposta no banco antes de declarar falha.
+        // 504: a edge pode ainda estar gravando. 502 rápido (este incidente: ~10s):
+        // a função já devolveu — esperar 45s só martela REST (ERR_CONNECTION_CLOSED).
         let recovered = false;
         if (convIdAtSend) {
-          recovered = await waitAssistantAfterUser(convIdAtSend, text, sentAtMs);
+          recovered = await waitAssistantAfterUser(
+            convIdAtSend,
+            text,
+            sentAtMs,
+            esperaGravacaoAposErroHttp({
+              status: statusDeErroInvoke(error),
+              elapsedMs: Date.now() - sentAtMs,
+            }),
+          );
         }
         if (recovered && convIdAtSend) {
           clearAttachments();
@@ -843,6 +860,7 @@ export function OperacaoChat() {
         } catch {
           /* corpo não-JSON */
         }
+        if (convIdAtSend) setFalhaHttpTurno({ convId: convIdAtSend, texto: text });
         toast.error(msg);
         if (!reenvio) setInput(text);
         setPending(null);
@@ -941,6 +959,7 @@ export function OperacaoChat() {
       const pareceTimeout =
         /FunctionsHttpError|504|Gateway Timeout|Failed to fetch|AbortError|timed out|timeout/i.test(msg) ||
         /non-2xx|Edge Function/i.test(msg);
+      if (convIdAtSend) setFalhaHttpTurno({ convId: convIdAtSend, texto: text });
       toast.error(
         pareceTimeout
           ? "A resposta demorou demais; use Continuar ou peça de novo os cards restantes."
@@ -1101,8 +1120,19 @@ export function OperacaoChat() {
     ultimaMsg && ultimaMsg.role === "user"
       ? agora - new Date(ultimaMsg.created_at).getTime()
       : null;
-  const processandoAtiva = idadeAtiva !== null && idadeAtiva < TIMEOUT_TURNO_MS;
-  const falhouAtiva = idadeAtiva !== null && idadeAtiva >= TIMEOUT_TURNO_MS;
+  const httpFalhouNesta =
+    !!falhaHttpTurno &&
+    falhaHttpTurno.convId === activeId &&
+    ultimaMsg?.role === "user" &&
+    (ultimaMsg.content ?? "").trim() === falhaHttpTurno.texto.trim();
+  const orfaoSincrono = turnoSincronoOrfao({
+    lastRole: ultimaMsg?.role,
+    idadeMs: idadeAtiva,
+    httpFalhou: httpFalhouNesta,
+    timeoutMs: TIMEOUT_TURNO_MS,
+  });
+  const processandoAtiva = orfaoSincrono.processando;
+  const falhouAtiva = orfaoSincrono.falhou;
   // Sem resposta do assistente depois da última pergunta: é o que delimita até quando faz
   // sentido mostrar o desfecho de um job. Chegou resposta, o card sai de cena.
   const aguardandoResposta = idadeAtiva !== null;
@@ -1362,11 +1392,9 @@ export function OperacaoChat() {
                 <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3">
                   <div className="text-sm font-medium">A resposta não chegou</div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    A pergunta foi enviada há mais de 2 minutos e o turno não foi concluído
-                    (o servidor corta perto desse orçamento; o gateway da plataforma fica em
-                    torno de 2,5 min). Nada foi perdido: reenviar refaz a pergunta nesta mesma
-                    conversa — para dicas da Meta, uma pergunta só sobre isso costuma responder
-                    mais rápido.
+                    {httpFalhouNesta
+                      ? "O servidor encerrou este turno sem concluir (falha temporária). Nada foi perdido: reenviar refaz a pergunta nesta mesma conversa."
+                      : "A pergunta foi enviada há mais de 2 minutos e o turno não foi concluído (o servidor corta perto desse orçamento; o gateway da plataforma fica em torno de 2,5 min). Nada foi perdido: reenviar refaz a pergunta nesta mesma conversa — para dicas da Meta, uma pergunta só sobre isso costuma responder mais rápido."}
                   </p>
                   <Button
                     size="sm"

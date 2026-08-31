@@ -8,6 +8,7 @@ import {
   ehUploadLoteCurto,
   ehPedidoDetalhamentoCampanha,
   replyLeituraIncompleta,
+  objetivoDoFio,
 } from "./intencao-turno";
 
 describe("ehPerguntaDeLeitura", () => {
@@ -110,5 +111,34 @@ describe("replyLeituraIncompleta", () => {
         "O detalhamento dos anúncios de ambos os conjuntos — nome, status, gasto, impressões, alcance, cliques, CTR, engajamentos, formulários, custo e destino — não foi lido nesta rodada. Também não foi possível confirmar nesta resposta.",
       ),
     ).toBe(true);
+  });
+});
+
+describe("objetivoDoFio", () => {
+  const criar =
+    "preciso criar uma nova campanha dentro da meta focada no sistema ocular, quero seguir o padrão das duas campanhas WA que estão ativas";
+  const quatroConjuntos =
+    "serão 4 conjuntos abrangendo 4 números respectivamente onde seria:\nconjunto1 - 7199189-4229\nconjunto2 - 7199185-8107";
+
+  it("junta follow-up de conjuntos/numeros ao criar campanha do turno anterior", () => {
+    const composto = objetivoDoFio(quatroConjuntos, [criar]);
+    expect(composto).toContain("criar uma nova campanha");
+    expect(composto).toContain("4 conjuntos");
+    expect(ehPedidoDeAto(composto)).toBe(true);
+    expect(ehPedidoEmitirConjunto(composto)).toBe(true);
+  });
+
+  it("nao junta pergunta de leitura", () => {
+    expect(objetivoDoFio("qual o gasto de ontem?", [criar])).toBe("qual o gasto de ontem?");
+  });
+
+  it("nao junta ok vazio de assunto", () => {
+    expect(objetivoDoFio("ok, pode seguir", [criar])).toBe("ok, pode seguir");
+  });
+
+  it("pedido com verbo de ato fica como esta", () => {
+    expect(objetivoDoFio("emita os 3 cards do conjunto 2", [criar])).toBe(
+      "emita os 3 cards do conjunto 2",
+    );
   });
 });

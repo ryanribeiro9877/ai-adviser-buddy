@@ -26,6 +26,28 @@ export function ehPedidoEmitirConjunto(pedido: string): boolean {
   return ehPedidoDeAto(pedido) && /\bconjuntos?\b/.test(t);
 }
 
+const RE_CONTINUA_ATO_FIO =
+  /\b(conjunto|campanha|anuncio|numeros?|whatsapp|waba|telefone|wa\.me)\b/;
+
+/**
+ * Follow-up sem verbo de ato ("serao 4 conjuntos, numeros...") continua o criar/emitir
+ * do turno anterior. Sem isto o sincrono trata a fala como Q&A curto.
+ */
+export function objetivoDoFio(atual: string, anteriores: string[]): string {
+  const cur = String(atual ?? "").trim();
+  if (!cur) return cur;
+  if (ehPedidoDeAto(cur) || ehPerguntaDeLeitura(cur)) return cur;
+  const prev = (anteriores ?? [])
+    .map((s) => String(s ?? "").trim())
+    .filter(Boolean)
+    .slice(-2);
+  if (!prev.length) return cur;
+  const composto = `${prev.join("\n")}\n${cur}`;
+  if (!ehPedidoDeAto(composto)) return cur;
+  if (!RE_CONTINUA_ATO_FIO.test(deacc(cur.toLowerCase()))) return cur;
+  return composto;
+}
+
 /**
  * Recusa inventada: pede molde de trafego ou desvio para ENGAGEMENT.
  * Nao e clarificacao legitima — sem_molde vale para OUTCOME_TRAFFIC.

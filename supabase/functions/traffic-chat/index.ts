@@ -674,7 +674,7 @@ import {
   idInstagramDeParams,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
-import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
 import { tDetalheAnuncios, DEF_GET_DETALHE_ANUNCIOS, casarCampanhas, escolherCampanhaUnica, janelaDetalhe } from "../_shared/leitura_desempenho.ts";
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
 import {
@@ -793,7 +793,10 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.78";
+const VERSAO = "chat-v28.79";
+const REPLY_MODELO_FALHOU =
+  "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
+  "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_LEITURA = 6;
@@ -6125,6 +6128,12 @@ Deno.serve(async (req) => {
   //   - demais assistentes longas: cabeca, com aviso.
   // Todo corte se DECLARA ao modelo - corte silencioso e proibido (licao do cortarLista).
   const cronologico = (hist ?? []).reverse();
+  if (!ehRetomada) {
+    const usersPrev = cronologico
+      .filter((m: { role?: string }) => m.role === "user")
+      .map((m: { content?: string }) => String(m.content ?? ""));
+    objetivoOriginal = objetivoDoFio(message, usersPrev);
+  }
   let ultimoAssistantIdx = -1, ultimoUserIdx = -1;
   for (let i = cronologico.length - 1; i >= 0; i--) {
     if (ultimoAssistantIdx < 0 && cronologico[i].role === "assistant") ultimoAssistantIdx = i;
@@ -6513,7 +6522,18 @@ Deno.serve(async (req) => {
       finishReason = String(r.erro);
       break;
     }
-    if (r.erro) return json({ error: r.erro, detail: r.detalhe }, 502);
+    // v28.79: depois da pergunta gravada, 502 HTTP deixa o turno orfao (UI "Analisando"
+    // ate 2 min + ERR_CONNECTION_CLOSED no REST). Quebra o loop e persiste prosa.
+    if (r.erro) {
+      console.error(JSON.stringify({
+        versao: VERSAO, evento: "openrouter_falhou_apos_pergunta",
+        erro: r.erro, detalhe: String(r.detalhe ?? "").slice(0, 240),
+        convId, ms: decorrido(),
+      }));
+      deadlineTools = true;
+      finishReason = String(r.erro);
+      break;
+    }
     const parsed = r.parsed;
     tokensIn += Number(parsed?.usage?.prompt_tokens ?? 0);
     tokensOut += Number(parsed?.usage?.completion_tokens ?? 0);
@@ -6521,7 +6541,14 @@ Deno.serve(async (req) => {
     modeloRoteado = modeloEfetivoDaResposta(parsed, modeloRoteado);
     finishReason = String(parsed?.choices?.[0]?.finish_reason ?? "");
     const msg = parsed?.choices?.[0]?.message;
-    if (!msg) return json({ error: "openrouter_empty" }, 502);
+    if (!msg) {
+      console.error(JSON.stringify({
+        versao: VERSAO, evento: "openrouter_empty_apos_pergunta", convId, ms: decorrido(),
+      }));
+      deadlineTools = true;
+      finishReason = "openrouter_empty";
+      break;
+    }
     if (msg.tool_calls?.length) {
       // v18: o modelo pode emitir texto E tool_calls na MESMA mensagem. Antes esse texto
       // entrava no historico enviado ao modelo mas nunca chegava ao usuario.
@@ -6621,7 +6648,12 @@ Deno.serve(async (req) => {
           continue;
         }
         (ctx as { restanteMs?: number }).restanteMs = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
-        const result = await runTool(tc.function?.name, args, ctx);
+        let result: unknown;
+        try {
+          result = await runTool(tc.function?.name, args, ctx);
+        } catch (e) {
+          result = { erro: String((e as { message?: string })?.message ?? e).slice(0, 200) };
+        }
         toolsUsed.push({ tool: tc.function?.name, args });
         // v28.11: um unico corte, usado nos dois destinos - o que o modelo le e o que fica
         // gravado sao literalmente a mesma string.
@@ -6715,7 +6747,7 @@ Deno.serve(async (req) => {
     break;
   }
 
-  if (!reply && !atalhoMetaDicas) {
+  if (!reply && !atalhoMetaDicas && !/openrouter/.test(String(finishReason))) {
     messages.push({ role: "user", content: deadlineTools
       ? "PARE de usar ferramentas: o tempo de coleta desta janela acabou. Com os dados JA coletados, escreva o que couber. O sistema continua sozinho no proximo bloco o que faltou. NAO peca ao gestor para reenviar a pergunta. NAO escreva que o item ficou para a proxima."
       : "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes. O sistema continua o que faltar. Nao responda que nao conseguiu." });
@@ -6848,7 +6880,8 @@ Deno.serve(async (req) => {
       ? uploadIncompleto
       : (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas || leituraIncompleta || detalheSemTool)
   );
-  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && (
+  const falhaModeloSemColeta = /openrouter/.test(String(finishReason)) && toolsUsed.length === 0;
+  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && !falhaModeloSemColeta && (
     deadlineSemConteudo ||
     (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas)) ||
     uploadIncompleto ||
@@ -6959,7 +6992,10 @@ Deno.serve(async (req) => {
     } else if (!replyTrim) {
       // Ultimo segmento ou sem trabalho retomavel: ainda assim NAO use o texto antigo
       // de "Peça de novo…" em pedido de ato — diga o que falta com o que ja tem.
-      if (pedidoUploadTurno) {
+      if (/openrouter/.test(String(finishReason))) {
+        reply = REPLY_MODELO_FALHOU;
+        finishReason = String(finishReason) + "+prosa_modelo_falhou";
+      } else if (pedidoUploadTurno) {
         const prosaUp = prosaContinuandoUpload(relUpload);
         reply = anexarRelatorioUpload(prosaUp, relUpload);
         if (!String(reply).trim()) {
