@@ -4,9 +4,10 @@
 // payload nao usa o formato que a Graph reconhece (conjuntos JUR/LF que entregam
 // gravam 12 digitos 55+DDD+8, nao o 13 com o 9 extra do celular BR) e, quando
 // existe, whats_app_business_phone_number_id.
-// get_waba_status e inventario Cloud/ON_PREMISE + CTWA ja em anuncios — nao e o
-// dropdown da Pagina. Pipeboard create_adset e escrita: agentes usam
-// criar_conjunto_a_partir_de, nao ler_pipeboard.
+// get_whatsapp_da_pagina lista Graph/WABA/ad_sets — NAO e o seletor visual do
+// Gerenciador. casou_na_api=false nao autoriza recusar o conjunto (prova Ads
+// Manager 01/09/2026: CONJ.1 Destino manual +55 71 9189-4229 na Pagina Cohapm).
+// Pipeboard create_adset e escrita: agentes usam criar_conjunto_a_partir_de.
 
 import { criarGraphClient, type GraphClient } from "./instagram_anuncios.ts";
 import {
@@ -309,11 +310,15 @@ function promoted(
   return out;
 }
 
-function displayGerenciadorBr(digits: string): string | null {
+export function formatDisplayWhatsAppGerenciador(digits: string): string | null {
   const d = digits.startsWith("55") ? digits.slice(2) : digits;
   if (d.length === 10) return `+55 ${d.slice(0, 2)} ${d.slice(2, 6)}-${d.slice(6)}`;
   if (d.length === 11) return `+55 ${d.slice(0, 2)} ${d.slice(2, 7)}-${d.slice(7)}`;
   return null;
+}
+
+function displayGerenciadorBr(digits: string): string | null {
+  return formatDisplayWhatsAppGerenciador(digits);
 }
 
 function chavePromoted(p: PromotedObjectCtwa, dest: string): string {
@@ -421,9 +426,9 @@ export async function resolverWhatsAppCtwa(opts: {
   let aviso: string | null = null;
   if (!match) {
     aviso =
-      "Numero nao aparece no inventario API da Pagina (Graph/WABA/conjuntos). " +
-      "O Gerenciador pode lista-lo mesmo assim — o create tenta o formato 55+DDD+8 (sem o 9 extra) " +
-      "e as demais variantes. Nao use um numero de outra linha (Juridico/La Felicita) no lugar.";
+      "Inventario Graph/WABA pode omitir numeros que o Gerenciador lista no Destino manual. " +
+      "Isso NAO autoriza recusar o conjunto. Create usa MESSAGING_MESSENGER_WHATSAPP + display. " +
+      "Nao substitua por numero Juridico/La Felicita.";
   } else if (!match.phone_number_id) {
     aviso =
       "Numero casou com um ja visto na conta, mas sem whats_app_business_phone_number_id. " +
@@ -475,6 +480,8 @@ export async function toolGetWhatsAppDaPagina(opts: {
   const pedido = opts.numero != null && String(opts.numero).trim() ? opts.numero : null;
   const match = pedido ? casarNumeroWhatsApp(pedido, listed.numeros) : null;
   const canonico = pedido ? preferidoWhatsAppParaAds(pedido) : null;
+  const display = canonico ? (formatDisplayWhatsAppGerenciador(canonico) || canonico) : null;
+  const parecer = pedido ? parecerPedidoWhatsAppConjunto(pedido) : null;
   return {
     ok: true,
     page_id: listed.page_id,
@@ -487,12 +494,17 @@ export async function toolGetWhatsAppDaPagina(opts: {
     })),
     total: listed.numeros.length,
     erros_graph: listed.erros,
+    inventario_graph_nao_e_o_seletor_do_gerenciador: true,
     pedido: pedido
       ? {
         bruto: String(pedido),
         variantes: variantesDigitosWhatsAppBr(pedido),
-        canonico_para_conjunto: canonico,
+        canonico_para_conjunto: display || canonico,
+        display_gerenciador: display,
+        destination_type: DESTINO_MANUAL_MESSENGER_WHATSAPP,
         casou_na_api: !!match,
+        pode_usar_no_conjunto: parecer?.pode_usar_no_conjunto ?? false,
+        recusar: false,
         match: match
           ? {
             display: match.display,
@@ -503,13 +515,38 @@ export async function toolGetWhatsAppDaPagina(opts: {
           : null,
       }
       : null,
+    parecer,
     como_associar_no_conjunto:
-      "Destino MANUAL (nao automatico): destination_type=WHATSAPP (so WA, padrao JUR/LF) ou MESSAGING_MESSENGER_WHATSAPP (Messenger+WhatsApp do Gerenciador). " +
-      "O numero vai em promoted_object — Meta nao escolhe a linha. Escrita = criar_conjunto_a_partir_de. " +
-      "Passe params.whatsapp_phone_number = digitos_para_ads. Nao misture numero Juridico em VISTTA.",
+      "EMITIR criar_conjunto_a_partir_de agora. Destino MANUAL = MESSAGING_MESSENGER_WHATSAPP + display_gerenciador. " +
+      "casou_na_api=false NAO e recusa: o seletor do Gerenciador lista numeros que Graph/WABA omitem. " +
+      "01/09/2026 CONJ.1 teste Cohapm comprovou +55 71 9189-4229 no Destino manual. Nao misture Juridico em VISTTA.",
     pipeboard:
       "get_account_pages e leitura (ler_pipeboard). create_adset e escrita bloqueada em ler_pipeboard — o card de conjunto e o caminho.",
     distinto_de_get_waba_status:
-      "get_waba_status e inventario Cloud/ON_PREMISE + CTWA ja em anuncios. Esta tool e o que a Pagina/conta expoe para habilitar o numero no conjunto (o dropdown do Gerenciador).",
+      "get_waba_status e inventario Cloud/ON_PREMISE. Esta tool NAO e o seletor visual do Gerenciador; ausencia aqui nao autoriza recusar o conjunto.",
+  };
+}
+
+/** Pedido com digitos validos = pode criar conjunto. Graph omitir o numero nao recusa. */
+export function parecerPedidoWhatsAppConjunto(pedido: unknown): {
+  pode_usar_no_conjunto: boolean;
+  recusar: false;
+  display_gerenciador: string | null;
+  destination_type: string;
+  whatsapp_phone_number: string | null;
+  decisao: string;
+} {
+  const preferido = preferidoWhatsAppParaAds(pedido);
+  const display = preferido ? (formatDisplayWhatsAppGerenciador(preferido) || preferido) : null;
+  return {
+    pode_usar_no_conjunto: !!preferido,
+    recusar: false,
+    display_gerenciador: display,
+    destination_type: DESTINO_MANUAL_MESSENGER_WHATSAPP,
+    whatsapp_phone_number: display,
+    decisao:
+      "EMITIR ou reexecutar o card. casou_na_api=false NAO significa fora do seletor. " +
+      "Gestor comprovou Destino manual na Pagina Cohapm (CONJ.1 +55 71 9189-4229). " +
+      "PROIBIDO recusar conjunto VISTTA ou pedir para habilitar numero na Pagina.",
   };
 }

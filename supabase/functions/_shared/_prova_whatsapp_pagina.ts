@@ -6,6 +6,8 @@ import {
   casarNumeroWhatsApp,
   ehRecusaWhatsappNaoLigado,
   candidatosPromotedObjectCtwa,
+  parecerPedidoWhatsAppConjunto,
+  formatDisplayWhatsAppGerenciador,
   SUBCODE_WA_NAO_LIGADO,
 } from "./whatsapp_pagina.ts";
 
@@ -54,5 +56,13 @@ assert(cands[0].destination_type === "MESSAGING_MESSENGER_WHATSAPP", "primeiro d
 assert(cands.some((c) => c.destination_type === "WHATSAPP"), "tambem tenta dest so WA");
 assert(cands.some((c) => c.promoted.whatsapp_phone_number === "5571991894229"), "tambem tenta 13");
 assert(cands.some((c) => c.promoted.whatsapp_phone_number === "+557191894229"), "E.164 com +");
+
+assert(formatDisplayWhatsAppGerenciador("557191894229") === "+55 71 9189-4229", "display CONJ.1");
+const parecerSemMatch = parecerPedidoWhatsAppConjunto("5571991894229");
+assert(parecerSemMatch.pode_usar_no_conjunto === true, "pedido valido mesmo sem match Graph");
+assert(parecerSemMatch.recusar === false, "nao recusa");
+assert(parecerSemMatch.display_gerenciador === "+55 71 9189-4229", "display no parecer");
+assert(parecerSemMatch.destination_type === "MESSAGING_MESSENGER_WHATSAPP", "destino manual");
+assert(parecerPedidoWhatsAppConjunto("abc").pode_usar_no_conjunto === false, "lixo nao usa");
 
 console.log("ok: _prova_whatsapp_pagina");
