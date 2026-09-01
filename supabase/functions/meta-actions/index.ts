@@ -1,4 +1,8 @@
-// supabase/functions/meta-actions/index.ts (v5.60)
+// supabase/functions/meta-actions/index.ts (v5.61)
+// v5.61 (01/09/2026) - APPLY RECUSAVA OCULOS VISTTA COMO SE FOSSE PECAS DE JURIDICO. A
+//   guarda lia a legenda ("WhatsApp oficial do Juridico") junto com o nome
+//   AD_CONJ.2_APENAS_OCULOS_3 e mandava reemitir em campanha JURIDICO. Identidade da peca
+//   nao inclui prosa; copy vazada e voz_linha_errada.
 // v5.60 (01/09/2026) - RENOMEAR SO EXISTIA PARA CAMPANHA, E AINDA TRAVADO EM UM DRIVER. Dois
 //   anuncios do CONJ.2_VISTTA nasceram com o NOME DO CONJUNTO no lugar do nome do criativo, e a
 //   unica saida oferecida ao gestor foi "renomeie na mao no Gerenciador" — porque nao havia

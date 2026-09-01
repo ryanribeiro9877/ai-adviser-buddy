@@ -357,9 +357,65 @@ export function pecasDoConjunto(pecas: PecaSlate[], n: number): PecaSlate[] {
 /** Linhas de produto que compartilham a empresa COHAPM. Nao misturar. */
 export type LinhaProdutoCohapm = "juridico" | "la_felicita" | "sistema_ocular";
 export const ERRO_CRUZAMENTO_LINHA_PRODUTO = "cruzamento_linha_produto";
+export const ERRO_VOZ_LINHA_ERRADA = "voz_linha_errada";
 
 function textoTemSistemaOcularLinha(n: string): boolean {
-  return /vistta/.test(n) || /sistema[\s_-]*ocular/.test(n) || /\bocular\b/.test(n) || /oftalm/.test(n);
+  return /vistta/.test(n) ||
+    /sistema[\s_-]*ocular/.test(n) ||
+    /\bocular\b/.test(n) ||
+    /oftalm/.test(n) ||
+    /oculos/.test(n);
+}
+
+function linhasProdutoNoTexto(
+  ...sinais: Array<string | null | undefined>
+): LinhaProdutoCohapm[] {
+  const n = sinais
+    .filter((s) => s != null && String(s).trim())
+    .map((s) => deacc(String(s)).toLowerCase())
+    .join(" || ");
+  if (!n.trim()) return [];
+  const hits: LinhaProdutoCohapm[] = [];
+  if (textoTemSistemaOcularLinha(n)) hits.push("sistema_ocular");
+  if (
+    /la[\s_-]*felicita/.test(n) ||
+    /lafelicita/.test(n) ||
+    /_laf_/.test(n) ||
+    /(^|[^a-z0-9])laf([^a-z0-9]|$)/.test(n) ||
+    /\blaf_/.test(n) ||
+    /(^|[^a-z0-9])lf([^a-z0-9]|$)/.test(n) ||
+    /_lf_/.test(n) ||
+    /\bimovel\b/.test(n) ||
+    /\bresidencial\b/.test(n)
+  ) {
+    hits.push("la_felicita");
+  }
+  if (
+    /juridico/.test(n) ||
+    /(^|[^a-z0-9])jur([^a-z0-9]|$)/.test(n) ||
+    /_jur_/.test(n) ||
+    /\bjur_/.test(n) ||
+    /cj_inss/.test(n) ||
+    /coop_social_juridico/.test(n)
+  ) {
+    hits.push("juridico");
+  }
+  return hits;
+}
+
+/**
+ * Prosa de anuncio (legenda/CTA), nao nome de objeto. Sem isso, "WhatsApp oficial do
+ * Juridico" dentro de uma peca AD_CONJ.2_APENAS_OCULOS_* classifica a peca INTEIRA como
+ * Juridico e a guarda manda mudar a campanha VISTTA — o inverso do conserto certo.
+ * Medido 01/09/2026 no card 2e7b9e23 (CONJ.2 OCULOS_3).
+ */
+export function ehProsaDeLegenda(s: string): boolean {
+  const t = String(s ?? "").trim();
+  if (!t) return false;
+  if (t.length >= 80) return true;
+  const palavras = t.split(/\s+/).filter(Boolean).length;
+  if (palavras >= 12 && /[?.!]/.test(t)) return true;
+  return /whatsapp oficial/i.test(t) || /fale com nossa equipe/i.test(t);
 }
 
 /**
@@ -370,39 +426,8 @@ function textoTemSistemaOcularLinha(n: string): boolean {
 export function classificarLinhaProdutoCohapm(
   ...sinais: Array<string | null | undefined>
 ): LinhaProdutoCohapm | null {
-  const n = sinais
-    .filter((s) => s != null && String(s).trim())
-    .map((s) => deacc(String(s)).toLowerCase())
-    .join(" || ");
-  if (!n.trim()) return null;
-
-  const oc = textoTemSistemaOcularLinha(n);
-
-  const lf =
-    /la[\s_-]*felicita/.test(n) ||
-    /lafelicita/.test(n) ||
-    /_laf_/.test(n) ||
-    /(^|[^a-z0-9])laf([^a-z0-9]|$)/.test(n) ||
-    /\blaf_/.test(n) ||
-    /(^|[^a-z0-9])lf([^a-z0-9]|$)/.test(n) ||
-    /_lf_/.test(n) ||
-    /\bimovel\b/.test(n) ||
-    /\bresidencial\b/.test(n);
-
-  const jur =
-    /juridico/.test(n) ||
-    /(^|[^a-z0-9])jur([^a-z0-9]|$)/.test(n) ||
-    /_jur_/.test(n) ||
-    /\bjur_/.test(n) ||
-    /cj_inss/.test(n) ||
-    /coop_social_juridico/.test(n);
-
-  const hits: LinhaProdutoCohapm[] = [];
-  if (oc) hits.push("sistema_ocular");
-  if (lf) hits.push("la_felicita");
-  if (jur) hits.push("juridico");
-  if (hits.length === 1) return hits[0];
-  return null;
+  const hits = linhasProdutoNoTexto(...sinais);
+  return hits.length === 1 ? hits[0] : null;
 }
 
 function rotuloLinhaProduto(l: LinhaProdutoCohapm): string {
@@ -425,38 +450,76 @@ export type RecusaCruzamentoLinhaProduto =
   | { ok: true; dest: LinhaProdutoCohapm | null; peca: LinhaProdutoCohapm | null }
   | {
     ok: false;
-    erro: typeof ERRO_CRUZAMENTO_LINHA_PRODUTO;
+    erro: typeof ERRO_CRUZAMENTO_LINHA_PRODUTO | typeof ERRO_VOZ_LINHA_ERRADA;
     detalhe: string;
     dest: LinhaProdutoCohapm;
-    peca: LinhaProdutoCohapm;
+    peca: LinhaProdutoCohapm | null;
   };
 
 /**
- * Hard block: campanha/conjunto de uma linha × peca/slate/nome da outra.
- * So recusa quando OS DOIS lados classificam e divergem — sinal incompleto nao inventa recusa.
+ * Hard block em dois casos distintos — misturar os dois e o defeito de 01/09/2026:
+ *
+ * (1) IDENTIDADE da peca (nome/pasta/meio) numa campanha/conjunto de outra linha.
+ *     Aí sim: reemitir no destino da peca.
+ * (2) LEGENDA/CTA de outra linha numa peca cujo nome JA casa com o destino.
+ *     Aí o destino esta certo; a copy e que vazou (ex.: "WhatsApp oficial do Juridico"
+ *     em AD_CONJ.2_APENAS_OCULOS_3 na campanha VISTTA). Reescrever a copy, nao mudar
+ *     a campanha. Prosa longa nao entra na identidade da peca.
+ *
+ * So recusa cruzamento de identidade quando OS DOIS lados classificam e divergem.
  */
 export function recusarCruzamentoLinhaProduto(opts: {
   estruturaNomes: Array<string | null | undefined>;
   pecaSinais: Array<string | null | undefined>;
 }): RecusaCruzamentoLinhaProduto {
+  const identidade: Array<string | null | undefined> = [];
+  const copy: string[] = [];
+  for (const s of opts.pecaSinais) {
+    if (s == null || !String(s).trim()) continue;
+    if (ehProsaDeLegenda(String(s))) copy.push(String(s));
+    else identidade.push(s);
+  }
   const dest = classificarLinhaProdutoCohapm(...opts.estruturaNomes);
-  const peca = classificarLinhaProdutoCohapm(...opts.pecaSinais);
-  if (!dest || !peca || dest === peca) return { ok: true, dest, peca };
+  const peca = classificarLinhaProdutoCohapm(...identidade);
   const destTxt = opts.estruturaNomes.map((s) => String(s ?? "").trim()).filter(Boolean).join(" / ") ||
     "(sem nome)";
   const pecaTxt = opts.pecaSinais.map((s) => String(s ?? "").trim()).filter(Boolean).slice(0, 6).join(" / ") ||
     "(sem nome)";
-  return {
-    ok: false,
-    erro: ERRO_CRUZAMENTO_LINHA_PRODUTO,
-    dest,
-    peca,
-    detalhe:
-      `ERRO GRAVE (nao e aviso): peca de ${rotuloLinhaProduto(peca)} no destino de ${rotuloLinhaProduto(dest)}. ` +
-      `Misturar linhas distintas da COHAPM e falta operacional grave — o card NAO pode ser emitido nem aplicado no Gerenciador. ` +
-      `Destino escolhido: ${destTxt}. Peca/slate: ${pecaTxt}. ` +
-      `Reemitir SOMENTE em ${hintDestinoLinha(peca)}.`,
-  };
+
+  if (dest && peca && dest !== peca) {
+    return {
+      ok: false,
+      erro: ERRO_CRUZAMENTO_LINHA_PRODUTO,
+      dest,
+      peca,
+      detalhe:
+        `ERRO GRAVE (nao e aviso): peca de ${rotuloLinhaProduto(peca)} no destino de ${rotuloLinhaProduto(dest)}. ` +
+        `Misturar linhas distintas da COHAPM e falta operacional grave — o card NAO pode ser emitido nem aplicado no Gerenciador. ` +
+        `Destino escolhido: ${destTxt}. Peca/slate: ${pecaTxt}. ` +
+        `Reemitir SOMENTE em ${hintDestinoLinha(peca)}.`,
+    };
+  }
+
+  if (dest) {
+    const vozesCopy = linhasProdutoNoTexto(...copy);
+    const vazou = vozesCopy.filter((v) => v !== dest);
+    if (vazou.length) {
+      const voz = vazou[0];
+      return {
+        ok: false,
+        erro: ERRO_VOZ_LINHA_ERRADA,
+        dest,
+        peca,
+        detalhe:
+          `ERRO GRAVE (nao e aviso): a LEGENDA usa voz de ${rotuloLinhaProduto(voz)} num destino de ${rotuloLinhaProduto(dest)}. ` +
+          `O destino esta CERTO — NAO mude a campanha para ${rotuloLinhaProduto(voz)}. ` +
+          `Reescreva a copy na voz de ${rotuloLinhaProduto(dest)} (sem "WhatsApp oficial do Juridico", direitos, cobranca, La Felicita). ` +
+          `Depois reemita o card na MESMA campanha/conjunto. Destino: ${destTxt}.`,
+      };
+    }
+  }
+
+  return { ok: true, dest, peca };
 }
 
 /**
@@ -545,7 +608,9 @@ export function escolherConjuntosDaMesmaLinha<T extends { name?: string | null }
   pecaSinais: Array<string | null | undefined>,
   campanhaDe: (row: T) => string | null | undefined,
 ): T[] {
-  const peca = classificarLinhaProdutoCohapm(...pecaSinais);
+  const peca = classificarLinhaProdutoCohapm(
+    ...pecaSinais.filter((s) => s != null && !ehProsaDeLegenda(String(s))),
+  );
   if (!peca) return hits;
   return hits.filter((h) =>
     classificarLinhaProdutoCohapm(String(h.name ?? ""), campanhaDe(h)) === peca

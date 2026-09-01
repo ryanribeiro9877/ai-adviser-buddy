@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   ERRO_CONJUNTO_ERRADO,
   ERRO_CRUZAMENTO_LINHA_PRODUTO,
+  ERRO_VOZ_LINHA_ERRADA,
   classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
   escolherConjuntosDaMesmaLinha,
@@ -176,6 +177,21 @@ describe("cruzamento linha produto COHAPM", () => {
       pecaSinais: ["JUR_CONV_CONJ03_AD01_Emprestimo_Pessoal_LEVA02"],
     });
     expect(r.ok).toBe(false);
+  });
+
+  it("legenda Juridico em peca APENAS_OCULOS/VISTTA e voz errada, nao troca de campanha", () => {
+    expect(classificarLinhaProdutoCohapm("AD_CONJ.2_APENAS_OCULOS_3")).toBe("sistema_ocular");
+    const caption =
+      "Você tem sentido vista cansada ou dor de cabeça no fim do dia? Acompanhar a saúde dos olhos com exames regulares previne problemas graves. Toque no botão abaixo e fale com nossa equipe pelo WhatsApp oficial do Jurídico COHAPM.";
+    const r = recusarCruzamentoLinhaProduto({
+      estruturaNomes: ["COHAPM_VISTTA_CONV_WA_SET26", "CONJ.2_VISTTA_WA_7199185-8107"],
+      pecaSinais: ["AD_CONJ.2_APENAS_OCULOS_3", caption],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.erro).toBe(ERRO_VOZ_LINHA_ERRADA);
+      expect(r.detalhe).toMatch(/NAO mude a campanha/);
+    }
   });
 
   it("nao escolhe JURIDICO_CONJ.01 mais novo para peca LAF", () => {

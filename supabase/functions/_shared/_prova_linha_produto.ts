@@ -4,10 +4,12 @@
 import {
   ERRO_CONJUNTO_ERRADO,
   ERRO_CRUZAMENTO_LINHA_PRODUTO,
+  ERRO_VOZ_LINHA_ERRADA,
   classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
   conjuntoVivoParaDestino,
   desempateDeConjunto,
+  ehProsaDeLegenda,
   escolherConjuntosDaMesmaLinha,
   escolherConjuntosPorNumeroELinha,
   numeroConjuntoDaFala,
@@ -37,6 +39,34 @@ assert(classificarLinhaProdutoCohapm(pecaJur) === "juridico", "JUR_CONV_ criativ
 assert(classificarLinhaProdutoCohapm("COHAPM - VISTTA") === "sistema_ocular", "pasta VISTTA");
 assert(classificarLinhaProdutoCohapm("COHAPM_SISTEMA_OCULAR_CONV") === "sistema_ocular", "campanha ocular");
 assert(classificarLinhaProdutoCohapm("VISTTA e JURIDICO misturados") === null, "ambiguidade ocular×jur");
+assert(classificarLinhaProdutoCohapm("AD_CONJ.2_APENAS_OCULOS_3") === "sistema_ocular", "oculos no nome e Sistema Ocular");
+
+const captionJurVazada =
+  "Você tem sentido vista cansada ou dor de cabeça no fim do dia? Acompanhar a saúde dos olhos com exames regulares previne problemas graves e mantém sua qualidade de vida em dia. Não deixe o cuidado com a sua visão para depois. Toque no botão abaixo e fale com nossa equipe pelo WhatsApp oficial do Jurídico COHAPM para receber orientações informativas sobre seus direitos e atendimentos..";
+assert(ehProsaDeLegenda(captionJurVazada), "legenda longa e prosa, nao nome");
+assert(!ehProsaDeLegenda("AD_CONJ.2_APENAS_OCULOS_3"), "nome de criativo nao e prosa");
+assert(!ehProsaDeLegenda("1WEyQ3PwF5i21Yx9WJVJSCI9Bo7cmsKuU"), "drive_file_id nao e prosa");
+
+const cardOculos3 = recusarCruzamentoLinhaProduto({
+  estruturaNomes: ["COHAPM_VISTTA_CONV_WA_SET26", "CONJ.2_VISTTA_WA_7199185-8107"],
+  pecaSinais: [
+    "AD_CONJ.2_APENAS_OCULOS_3",
+    "1WEyQ3PwF5i21Yx9WJVJSCI9Bo7cmsKuU",
+    captionJurVazada,
+  ],
+});
+assert(!cardOculos3.ok && cardOculos3.erro === ERRO_VOZ_LINHA_ERRADA, "copy Juridico em VISTTA e voz, nao cruzamento de peca");
+assert(/NAO mude a campanha/i.test(cardOculos3.ok ? "" : cardOculos3.detalhe), "nao manda mudar a campanha");
+assert(!/Reemitir SOMENTE em a campanha COHAPM_JURIDICO/i.test(cardOculos3.ok ? "" : cardOculos3.detalhe), "nao aponta JURIDICO como destino");
+
+const copyVisttaOk = recusarCruzamentoLinhaProduto({
+  estruturaNomes: ["COHAPM_VISTTA_CONV_WA_SET26", "CONJ.2_VISTTA_WA_7199185-8107"],
+  pecaSinais: [
+    "AD_CONJ.2_APENAS_OCULOS_3",
+    "Toque no link e venha conhecer o Sistema Ocular VISTTA.",
+  ],
+});
+assert(copyVisttaOk.ok, "copy VISTTA em destino VISTTA passa");
 
 const cruzOcular = recusarCruzamentoLinhaProduto({
   estruturaNomes: [campJur, setJur],

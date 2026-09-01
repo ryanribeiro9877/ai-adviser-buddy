@@ -1,4 +1,10 @@
-// supabase/functions/traffic-chat/index.ts (v28.92)
+// supabase/functions/traffic-chat/index.ts (v28.93)
+// v28.93 (01/09/2026) - A GUARDA DE LINHA LEU A LEGENDA E MANDOU MUDAR A CAMPANHA. Card
+//   AD_CONJ.2_APENAS_OCULOS_3 na campanha VISTTA falhou no apply porque a copy dizia
+//   "WhatsApp oficial do Juridico COHAPM". A peca e de oculos; o destino estava certo.
+//   A guarda juntou nome+legenda, classificou a peca como Juridico e mandou reemitir em
+//   COHAPM_JURIDICO_*. Prosa nao e identidade: copy vazada vira voz_linha_errada (reescreva
+//   a copy, mesma campanha). APENAS_OCULOS passa a classificar como Sistema Ocular.
 // v28.92 (01/09/2026) - A FERRAMENTA EXISTIA E O ALVO ERA INALCANCAVEL. Meia hora depois de
 //   renomear_criativo entrar no ar, o mesmo pedido voltou a terminar em "renomeie na mao no
 //   Gerenciador" — por dois motivos que se somavam.
@@ -730,7 +736,6 @@ import {
   ehNomeCompostoEstruturado,
   ehSentinelaSemMolde,
   ERRO_CONJUNTO_ERRADO,
-  ERRO_CRUZAMENTO_LINHA_PRODUTO,
   extrairLinksWaMePorConjunto,
   extrairNomesCriativoDaFala,
   extrairSlateDaFala,
@@ -872,7 +877,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.92";
+const VERSAO = "chat-v28.93";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -2038,7 +2043,7 @@ function recusaCruzamentoCohapm(
   if (companyId !== COMPANY_COHAPM) return null;
   const r = recusarCruzamentoLinhaProduto({ estruturaNomes, pecaSinais });
   if (r.ok) return null;
-  return { erro: ERRO_CRUZAMENTO_LINHA_PRODUTO, detalhe: r.detalhe };
+  return { erro: r.erro, detalhe: r.detalhe };
 }
 
 function recusaConjuntoNumero(
@@ -5557,7 +5562,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 - GEO/BAIRROS NO CRIAR_CONJUNTO: HA campo. Use buscar_geolocalizacao (lotes <=40). No propose: params.bairros ou params.geo_locations. Presets em geo_targeting_presets sao POR empresa+meio; outra empresa/meio NAO herda. NUNCA diga que falta campo de bairros.
 - WHATSAPP / NUMEROS DE PE (21/08/2026): pergunta sobre numero operacional, de pe, qual WA linkar, WABA, qualidade/tier OU isolamento Juridico vs La Felicita OBRIGA get_waba_status (meio=juridico|la_felicita quando o pedido recortar). get_estrutura_conjuntos / get_criativos_conteudo so mostram destino wa.me do anuncio (Click-to-WA) — NAO substituem. Separe sempre: (1) WABA Cloud/ON_PREMISE — de_pe so CONNECTED; (2) CTWA — inventario; de_pe so IN_ACTIVE_ADS. NUNCA peca escolher so entre CTWA como se fossem os unicos. Conjunto ACTIVE sob campanha PAUSED = entregando=false (nao esta no ar). COHAPM: isole JUR vs LF.
 - WHATSAPP NO CONJUNTO (01/09/2026 v28.85): destino MANUAL so WhatsApp — destination_type=WHATSAPP. Messenger OFF. PROIBIDO MESSAGING_MESSENGER_WHATSAPP e destino automatico. whatsapp_phone_number vai em DIGITOS (55+DDD+8); o display "+55 71 9189-4229" e so para o texto do card — no promoted_object ele e invalido. PROIBIDO numero Juridico em VISTTA.
-- CRUZAMENTO DE LINHA COHAPM (31/08/2026) E ERRO GRAVE, NAO AVISO: as linhas compartilham a empresa mas NUNCA a campanha. Tres meios: Juridico (JUR_…, JURIDICO_CONJ, meio=juridico), La Felicità (CONJ.1_LAF_…, COHAPM_LAFELICITA_*, meio=la_felicita/imovel) e Sistema Ocular / VISTTA (pasta COHAPM - VISTTA, meio=sistema_ocular). Peca de um empreendimento so vai para campanha/conjunto do mesmo. Colocar video La Felicità em JURIDICO_CONJ ou peca VISTTA em LAF e falta operacional grave. O sistema RECUSA o card.
+- CRUZAMENTO DE LINHA COHAPM (31/08/2026) E ERRO GRAVE, NAO AVISO: as linhas compartilham a empresa mas NUNCA a campanha. Tres meios: Juridico (JUR_…, JURIDICO_CONJ, meio=juridico), La Felicità (CONJ.1_LAF_…, COHAPM_LAFELICITA_*, meio=la_felicita/imovel) e Sistema Ocular / VISTTA (pasta COHAPM - VISTTA, AD_*_APENAS_OCULOS_*, meio=sistema_ocular). Peca de um empreendimento so vai para campanha/conjunto do mesmo. Colocar video La Felicità em JURIDICO_CONJ ou peca VISTTA em LAF e falta operacional grave. O sistema RECUSA o card (cruzamento_linha_produto). Se o NOME da peca ja e da linha certa (AD_CONJ.2_APENAS_OCULOS_*) e so a LEGENDA vazou voz de outra (ex. "WhatsApp oficial do Juridico"), o erro e voz_linha_errada: reescreva a copy na voz do destino e reemita na MESMA campanha — NAO mude para JURIDICO.
 - CONJ.N NO NOME BASTA (25/08/2026): params.conjunto_destino = o NOME (CONJ.1_LAF_8CRIATIVOS_JUN/JUL26, CONJ.1, CONJ.01). Barra ou nao (JUN/JUL vs JUNJUL) e CONJ.1 vs CONJ.01 sao o mesmo numero. PROIBIDO pedir ao gestor o ID numerico da Meta / Graph. Resolva com get_estrutura_conjuntos ou o slate. CONJ.1 NUNCA cai no CONJ.4 (mais novo da linha La Felicità). Se o numero do destino ≠ CONJ.N do pedido/slate/peca, o sistema RECUSA (ERRO GRAVE) — nao emita card.
 - DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations SO se quiser a fila INTERNA de custo). Cite SEMPRE o veredito interno — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta. get_recommendations NAO e o badge do Ads Manager. Se get_meta_dicas vier vazio apos sync e o gestor apontar badge na UI, diga a assimetria documentada pela Meta (API pode listar menos que Ads Manager) — nao invente o texto da dica.
 - Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.
