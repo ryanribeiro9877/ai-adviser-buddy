@@ -1,4 +1,12 @@
-// supabase/functions/meta-actions/index.ts (v5.59)
+// supabase/functions/meta-actions/index.ts (v5.60)
+// v5.60 (01/09/2026) - RENOMEAR SO EXISTIA PARA CAMPANHA, E AINDA TRAVADO EM UM DRIVER. Dois
+//   anuncios do CONJ.2_VISTTA nasceram com o NOME DO CONJUNTO no lugar do nome do criativo, e a
+//   unica saida oferecida ao gestor foi "renomeie na mao no Gerenciador" — porque nao havia
+//   renomear_conjunto nem renomear_criativo. Renomear e a mesma escrita nos tres niveis (POST
+//   /{id} com `name`), entao as duas acoes entram pelo caminho generico que ja existia, com
+//   espelho de nome em ad_sets/ads igual ao de campaigns. Junto cai a trava de driver: a
+//   exigencia de pipeboard em renomear_campanha vinha de como a ferramenta foi introduzida, nao
+//   de limite da Meta, e em 01/09 ela recusou um rename legitimo com driver_nao_suporta_acao.
 // v5.59 (01/09/2026) - ANUNCIO CTWA MORRIA EM UM PATCH QUE NAO PRECISAVA EXISTIR. Os dois
 //   cards de anuncio do CONJ.1_VISTTA (14:00) falharam em update_adset_promoted_object com
 //   OAuthException #1 pela graph — com o conjunto JA gravado certo pelo pipeboard no create.
@@ -487,9 +495,13 @@ const EXECUTAVEIS = [
   "ativar_conjunto",
   "alterar_orcamento",
   "renomear_campanha",
+  "renomear_conjunto",
+  "renomear_criativo",
   "alterar_categoria_especial_campanha",
   "ajustar_posicionamentos_do_conjunto",
 ];
+/** Renomear e a mesma escrita nos tres niveis: o campo `name` do objeto que ja existe. */
+const RENOMEACOES = ["renomear_campanha", "renomear_conjunto", "renomear_criativo"];
 const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
@@ -727,11 +739,11 @@ async function escreverUpdate(
   pbToken: string,
   opts?: { dry_run?: boolean },
 ): Promise<ResultadoEscrita> {
-  // Contrato: renomear campanha usa o update_campaign nativo do Pipeboard, sem fallback Graph.
-  if (acao === "renomear_campanha" && driver !== "pipeboard") {
-    return { status: 409, body: { erro: "renomear_campanha_exige_pipeboard", driver_recebido: driver },
-      id: alvoExt, driver, erro: "renomear_campanha_exige_pipeboard", ok: false };
-  }
+  // v5.60: renomear_campanha era travada em pipeboard aqui. A trava nasceu de como a ferramenta
+  // foi introduzida (update_campaign nativo do Pipeboard), nao de limite da Meta: renomear e
+  // POST /{id} com `name`, que a Graph faz nos tres niveis, pelo mesmo caminho generico abaixo.
+  // A trava virou parede — 01/09/2026 ela recusou renomear campanha da COHAPM com
+  // driver_nao_suporta_acao ate abrirem override em driver_por_acao. Agora os dois drivers valem.
   if (driver !== "pipeboard") {
     const exec = await g(`/${alvoExt}`, "POST", post);
     return {
@@ -757,7 +769,8 @@ async function escreverUpdate(
     acao === "alterar_orcamento" ||
     acao === "ajustar_posicionamentos_do_conjunto" ||
     acao === "pausar_conjunto" ||
-    acao === "ativar_conjunto"
+    acao === "ativar_conjunto" ||
+    acao === "renomear_conjunto"
   ) {
     tool = "update_adset";
   }
@@ -4941,7 +4954,7 @@ Deno.serve(async (req) => {
     if (acao === "ativar_criativo" || acao === "ativar_campanha" || acao === "ativar_conjunto") {
       post = { status: "ACTIVE" };
     }
-    if (acao === "renomear_campanha") {
+    if (RENOMEACOES.includes(acao)) {
       const novoNome = String(r.payload?.novo_nome ?? "").trim();
       if (!novoNome) {
         resultados.push({ id: r.id, acao, resultado: "falha", motivo: "novo_nome ausente/vazio", driver_escrita: driver });
@@ -4951,12 +4964,6 @@ Deno.serve(async (req) => {
         continue;
       }
       // Nome livre: novo_nome e a fonte da verdade. nome_partes e metadado opcional.
-      if (driver !== "pipeboard") {
-        const motivo = `renomear_campanha_exige_pipeboard (driver atual: ${driver})`;
-        await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao, driver_escrita: driver });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
-        continue;
-      }
       post = { name: novoNome };
     }
     if (acao === "alterar_categoria_especial_campanha") {
@@ -5215,18 +5222,25 @@ Deno.serve(async (req) => {
               : "NAO consegui olhar o objeto na Graph depois da escrita. Isto NAO afirma que a alteracao falhou - nada foi concluido sobre o valor.",
         });
       }
-      // ESPELHO DO NOME (renomear_campanha): a escrita muda o nome na Meta, mas ate aqui o espelho
-      // campaigns.name seguia afirmando o nome ANTIGO - o agente leu esse valor stale e errou duas
-      // vezes. As outras acoes desta executora nao mexem no nome; a reconciliacao periodica so
-      // sincronizava status. Fonte de autoridade: o nome LIDO de volta na Graph (depois.body.name,
-      // conferido); sem leitura, o nome pedido (post.name) - mesma precedencia do espelhar() de
-      // criacao. Falha de espelho vai para o audit, nao derruba a execucao (o objeto na Meta ja mudou).
-      if (acao === "renomear_campanha") {
+      // ESPELHO DO NOME: a escrita muda o nome na Meta, mas ate aqui o espelho seguia afirmando o
+      // nome ANTIGO - o agente leu esse valor stale e errou duas vezes. As outras acoes desta
+      // executora nao mexem no nome; a reconciliacao periodica so sincronizava status. Fonte de
+      // autoridade: o nome LIDO de volta na Graph (depois.body.name, conferido); sem leitura, o
+      // nome pedido (post.name) - mesma precedencia do espelhar() de criacao. Falha de espelho vai
+      // para o audit, nao derruba a execucao (o objeto na Meta ja mudou).
+      // v5.60: vale para os tres niveis. Conjunto e anuncio renomeados sem espelho deixariam o
+      // mesmo rastro stale que motivou este bloco no nivel de campanha.
+      if (RENOMEACOES.includes(acao)) {
+        const tabelaDoNome = acao === "renomear_campanha"
+          ? "campaigns"
+          : acao === "renomear_conjunto"
+          ? "ad_sets"
+          : "ads";
         const nomeGraph = (depois.body as any)?.name;
         const nomeEspelho = String(nomeGraph ?? post?.name ?? "").trim();
         if (nomeEspelho) {
           const { error: erroEspelho } = await supa
-            .from("campaigns")
+            .from(tabelaDoNome)
             .update({ name: nomeEspelho })
             .eq("provider", "meta_ads")
             .eq("external_id", alvoExt);
@@ -5239,13 +5253,14 @@ Deno.serve(async (req) => {
               acao,
               alvo_external_id: alvoExt,
               campo: "name",
+              tabela: tabelaDoNome,
               valor_espelhado: nomeEspelho,
               fonte: nomeGraph != null ? "graph (conferido)" : "nome pedido (graph nao relida)",
               reconciliacao_estado: reconciliacao?.estado ?? null,
               erro: erroEspelho?.message ?? null,
               nota: erroEspelho
-                ? "FALHA ao espelhar campaigns.name - o nome na Meta mudou mas o espelho local segue defasado ate a proxima reconciliacao"
-                : "campaigns.name sincronizado com a Meta apos renomear_campanha bem-sucedido",
+                ? `FALHA ao espelhar ${tabelaDoNome}.name - o nome na Meta mudou mas o espelho local segue defasado ate a proxima reconciliacao`
+                : `${tabelaDoNome}.name sincronizado com a Meta apos ${acao} bem-sucedido`,
             },
           );
         }

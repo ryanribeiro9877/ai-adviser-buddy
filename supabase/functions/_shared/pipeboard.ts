@@ -537,10 +537,12 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
     case "ajustar_posicionamentos_do_conjunto":
     case "pausar_conjunto":
     case "ativar_conjunto":
+    case "renomear_conjunto":
       return "conjunto";
     case "criar_anuncio_a_partir_de":
     case "pausar_criativo":
     case "ativar_criativo":
+    case "renomear_criativo":
       return "anuncio";
     default:
       return null;
