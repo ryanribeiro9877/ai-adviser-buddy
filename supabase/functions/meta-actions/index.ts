@@ -1,4 +1,8 @@
-// supabase/functions/meta-actions/index.ts (v5.56)
+// supabase/functions/meta-actions/index.ts (v5.57)
+// v5.57 (01/09/2026) - CTWA: promoted_object so com DIGITOS (o display "+55 71 9189-4229"
+//   ia no payload e era invalido) e falha 1487246 vira diagnostico de ativo faltando
+//   no card, em vez da frase crua da Meta. Auditoria 11:49 provou que os 4 formatos
+//   (12, 13, +E.164, display) recusam igual: os numeros VISTTA nao estao em WABA alguma.
 // v5.56 (01/09/2026) - CTWA Messenger OFF: destination_type=WHATSAPP so (JUR/LF).
 //   Gestor exclui campanha de teste do Gerenciador; criar 100% pelo agente.
 // v5.55 (01/09/2026) - Destino MANUAL do Gerenciador na 1a tentativa:
@@ -357,6 +361,7 @@ import {
 } from "../_shared/meta_company_tokens.ts";
 import {
   candidatosPromotedObjectCtwa,
+  diagnosticoRecusaWhatsApp,
   ehRecusaWhatsappNaoLigado,
   listarWhatsAppDaPagina,
   resolverWhatsAppCtwa,
@@ -3674,7 +3679,8 @@ Deno.serve(async (req) => {
       })),
       nota:
         "Destino MANUAL = WHATSAPP (Messenger OFF). Destino AUTOMATICO = Meta escolhe o canal — nao usamos. " +
-        "1487246 = numero sem vinculo Graph, mesmo se o Gerenciador lista.",
+        "promoted_object.whatsapp_phone_number e DIGITO; display so em texto humano. " +
+        "1487246 = numero fora das WABAs da conta: o Gerenciador lista numero so da Pagina, a Marketing API nao aceita.",
       mcp_chamador: auth.chamador,
     });
   }
@@ -4403,6 +4409,9 @@ Deno.serve(async (req) => {
       // executed_at null + varredura. Em pipeboard, se a resposta nao trouxer id, nao
       // marcamos sucesso — a proxima corrida pode conferir na Graph se o objeto nasceu.
       let exec: ResultadoEscrita;
+      // Preenchido so quando a Meta recusa o numero CTWA em todos os formatos: o card
+      // precisa dizer QUAL ativo falta, nao repetir a frase crua da Meta.
+      let diagCtwa: string | null = null;
       if (acao === "criar_anuncio_a_partir_de") {
         const creativeId =
           creativeCriado ??
@@ -4450,7 +4459,23 @@ Deno.serve(async (req) => {
               break;
             }
           }
-          if (!exec.id) (exec as any).ctwa_tentativas = tentativasWa;
+          if (!exec.id) {
+            (exec as any).ctwa_tentativas = tentativasWa;
+            const promotedPedido = (() => {
+              try {
+                return JSON.parse(String(bodyFinal.promoted_object ?? "{}"));
+              } catch {
+                return {};
+              }
+            })();
+            diagCtwa = diagnosticoRecusaWhatsApp({
+              numero: promotedPedido?.whatsapp_phone_number ?? pl.whatsapp_phone_number,
+              temIdWaba: cands.some((c) => !!c.promoted.whats_app_business_phone_number_id),
+              formatosTentados: tentativasWa
+                .map((t) => String((t as any)?.label ?? ""))
+                .filter(Boolean),
+            });
+          }
         }
       }
       const novoId = exec.id;
@@ -4487,6 +4512,9 @@ Deno.serve(async (req) => {
           criado_em: pl.path,
           body_enviado: bodyFinal,
           adcreative_criado: creativeCriado,
+          ...(diagCtwa && !sucesso
+            ? { motivo: "whatsapp_fora_das_wabas_da_conta", detalhe: diagCtwa }
+            : {}),
           resposta: exec,
           // Objeto so quando a leitura deu certo; a resposta crua da Graph (inclusive envelope de
           // erro) fica em reconciliacao.lido, sem se disfarcar de objeto.

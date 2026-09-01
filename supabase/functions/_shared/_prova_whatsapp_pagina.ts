@@ -7,6 +7,7 @@ import {
   ehRecusaWhatsappNaoLigado,
   candidatosPromotedObjectCtwa,
   parecerPedidoWhatsAppConjunto,
+  diagnosticoRecusaWhatsApp,
   formatDisplayWhatsAppGerenciador,
   SUBCODE_WA_NAO_LIGADO,
 } from "./whatsapp_pagina.ts";
@@ -51,18 +52,42 @@ const cands = candidatosPromotedObjectCtwa({
     fontes: ["page"],
   },
 });
-assert(cands[0].promoted.whatsapp_phone_number === "+55 71 9189-4229", "primeiro e o display do Gerenciador");
+// A recusa 1487246 de 01/09 veio com "+55 71 9189-4229" no promoted_object: display
+// nunca entra no payload, so digitos.
+assert(cands[0].promoted.whatsapp_phone_number === "557191894229", "primeiro e o 12 digitos");
 assert(cands[0].destination_type === "WHATSAPP", "primeiro destino so WhatsApp");
 assert(cands.every((c) => c.destination_type === "WHATSAPP"), "nenhum Messenger no retry");
+assert(
+  cands.every((c) => /^\+?\d+$/.test(c.promoted.whatsapp_phone_number)),
+  "nenhum candidato leva display formatado",
+);
 assert(cands.some((c) => c.promoted.whatsapp_phone_number === "5571991894229"), "tambem tenta 13");
 assert(cands.some((c) => c.promoted.whatsapp_phone_number === "+557191894229"), "E.164 com +");
 
 assert(formatDisplayWhatsAppGerenciador("557191894229") === "+55 71 9189-4229", "display CONJ.1");
+
+// Sem match no inventario a API recusa: o parecer nao pode prometer o conjunto.
 const parecerSemMatch = parecerPedidoWhatsAppConjunto("5571991894229");
-assert(parecerSemMatch.pode_usar_no_conjunto === true, "pedido valido mesmo sem match Graph");
-assert(parecerSemMatch.recusar === false, "nao recusa");
-assert(parecerSemMatch.display_gerenciador === "+55 71 9189-4229", "display no parecer");
+assert(parecerSemMatch.pode_usar_no_conjunto === false, "sem WABA nao promete conjunto");
+assert(parecerSemMatch.e_ativo_whatsapp_da_conta === false, "nao e ativo da conta");
+assert(parecerSemMatch.whatsapp_phone_number === "557191894229", "parecer devolve digitos");
+assert(parecerSemMatch.display_gerenciador === "+55 71 9189-4229", "display separado do payload");
 assert(parecerSemMatch.destination_type === "WHATSAPP", "destino so WA");
+
+const parecerComMatch = parecerPedidoWhatsAppConjunto("5571991894229", match);
+assert(parecerComMatch.pode_usar_no_conjunto === true, "ativo da conta pode emitir");
+assert(
+  parecerComMatch.whats_app_business_phone_number_id === "1282892438232205",
+  "parecer leva o id da WABA",
+);
 assert(parecerPedidoWhatsAppConjunto("abc").pode_usar_no_conjunto === false, "lixo nao usa");
+
+const diag = diagnosticoRecusaWhatsApp({
+  numero: "5571991894229",
+  temIdWaba: false,
+  formatosTentados: ["wa_12", "wa_plus"],
+});
+assert(diag.includes("+55 71 9189-4229"), "diagnostico nomeia o numero");
+assert(/WhatsApp Manager/.test(diag), "diagnostico diz onde resolver");
 
 console.log("ok: _prova_whatsapp_pagina");
