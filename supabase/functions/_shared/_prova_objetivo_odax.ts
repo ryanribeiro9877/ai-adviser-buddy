@@ -73,11 +73,16 @@ const msg = defaultsConjuntoMensagens("1095196357012756", { whatsapp_phone_numbe
 assert(!("erro" in msg), "mensagens ok");
 if (!("erro" in msg)) {
   assert(msg.optimization_goal === "CONVERSATIONS", "opt conv");
-  assert(msg.destination_type === "MESSAGING_MESSENGER_WHATSAPP", "dest manual Messenger+WA");
+  assert(msg.destination_type === "WHATSAPP", "dest so WA Messenger OFF");
   assert(msg.billing_event === "IMPRESSIONS", "billing msg");
   assert(msg.promoted_object.page_id === "1095196357012756", "page msg");
   assert(msg.promoted_object.whatsapp_phone_number === "5571991088073", "WA no promoted");
 }
+const msgMessengerOff = defaultsConjuntoMensagens("1095196357012756", {
+  whatsapp_phone_number: "5571991088073",
+  destination_type: "MESSAGING_MESSENGER_WHATSAPP",
+});
+assert(!("erro" in msgMessengerOff) && msgMessengerOff.destination_type === "WHATSAPP", "Messenger pedido vira so WA");
 
 assert(ehPedidoMensagens({ optimization_goal: "CONVERSATIONS" }) === true, "pedido conv");
 assert(ehPedidoMensagens({ nome: "COHAPM_JURIDICO_CONV_LEVA01" }) === true, "nome conv");

@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.55)
+// supabase/functions/meta-actions/index.ts (v5.56)
+// v5.56 (01/09/2026) - CTWA Messenger OFF: destination_type=WHATSAPP so (JUR/LF).
+//   Gestor exclui campanha de teste do Gerenciador; criar 100% pelo agente.
 // v5.55 (01/09/2026) - Destino MANUAL do Gerenciador na 1a tentativa:
 //   MESSAGING_MESSENGER_WHATSAPP + numero +55 71 9189-4229 (dropdown). CONJ.1 teste
 //   no Ads Manager mostrou Messenger+WhatsApp; a API ia so WHATSAPP e levava 1487246.
@@ -3671,8 +3673,8 @@ Deno.serve(async (req) => {
         candidatos: candidatosPromotedObjectCtwa({ pageId, pedido: n, match: null }).slice(0, 6),
       })),
       nota:
-        "Destino MANUAL = WHATSAPP (so WA) ou MESSAGING_MESSENGER_WHATSAPP (Messenger+WA). " +
-        "Destino AUTOMATICO = Meta escolhe o canal — nao usamos. 1487246 = numero sem vinculo Graph, mesmo se o Gerenciador lista.",
+        "Destino MANUAL = WHATSAPP (Messenger OFF). Destino AUTOMATICO = Meta escolhe o canal — nao usamos. " +
+        "1487246 = numero sem vinculo Graph, mesmo se o Gerenciador lista.",
       mcp_chamador: auth.chamador,
     });
   }

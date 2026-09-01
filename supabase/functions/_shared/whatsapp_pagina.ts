@@ -326,9 +326,8 @@ function chavePromoted(p: PromotedObjectCtwa, dest: string): string {
 }
 
 /**
- * Destino MANUAL: WHATSAPP (so WhatsApp, como JUR/LF) e MESSAGING_MESSENGER_WHATSAPP
- * (Messenger+WhatsApp, dropdown Destino manual do Gerenciador).
- * Nunca emite o destino automatico (Meta escolhe o canal).
+ * Destino MANUAL so WhatsApp (JUR/LF). Messenger fica OFF —
+ * nao emite MESSAGING_MESSENGER_WHATSAPP nem destino automatico.
  */
 export function candidatosPromotedObjectCtwa(opts: {
   pageId: string;
@@ -369,21 +368,18 @@ export function candidatosPromotedObjectCtwa(opts: {
 
   const preferidoDisplay = displayGerenciadorBr(preferido);
   const originalDisplay = displayGerenciadorBr(original);
-  // Ordem = Gerenciador Destino manual (Messenger+WA + display) primeiro.
-  push("manual_display", preferidoDisplay || preferido, ids[0] ?? null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
-  push("manual_display_sem_id", preferidoDisplay || preferido, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
-  push("manual_12", preferido, ids[0] ?? null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
-  push("manual_12_sem_id", preferido, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
-  push("manual_plus", /^\d+$/.test(preferido) ? `+${preferido}` : preferido, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
-  push("wa_12", preferido, ids[0] ?? null, DESTINO_MANUAL_WHATSAPP);
-  push("wa_12_sem_id", preferido, null, DESTINO_MANUAL_WHATSAPP);
+  const dest = DESTINO_MANUAL_WHATSAPP;
+  push("wa_display", preferidoDisplay || preferido, ids[0] ?? null, dest);
+  push("wa_display_sem_id", preferidoDisplay || preferido, null, dest);
+  push("wa_12", preferido, ids[0] ?? null, dest);
+  push("wa_12_sem_id", preferido, null, dest);
+  push("wa_plus", /^\d+$/.test(preferido) ? `+${preferido}` : preferido, null, dest);
   if (original && original !== preferido) {
-    push("manual_orig", originalDisplay || original, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
-    push("wa_orig", original, null, DESTINO_MANUAL_WHATSAPP);
+    push("wa_orig_display", originalDisplay || original, null, dest);
+    push("wa_orig", original, null, dest);
   }
   for (const d of digitList) {
-    push(`manual:${d}`, d, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
-    push(`wa:${d}`, d, null, DESTINO_MANUAL_WHATSAPP);
+    push(`wa:${d}`, d, null, dest);
   }
   return out.slice(0, 12);
 }
@@ -427,7 +423,7 @@ export async function resolverWhatsAppCtwa(opts: {
   if (!match) {
     aviso =
       "Inventario Graph/WABA pode omitir numeros que o Gerenciador lista no Destino manual. " +
-      "Isso NAO autoriza recusar o conjunto. Create usa MESSAGING_MESSENGER_WHATSAPP + display. " +
+      "Isso NAO autoriza recusar o conjunto. Create usa destination_type=WHATSAPP (Messenger OFF) + display. " +
       "Nao substitua por numero Juridico/La Felicita.";
   } else if (!match.phone_number_id) {
     aviso =
@@ -501,7 +497,7 @@ export async function toolGetWhatsAppDaPagina(opts: {
         variantes: variantesDigitosWhatsAppBr(pedido),
         canonico_para_conjunto: display || canonico,
         display_gerenciador: display,
-        destination_type: DESTINO_MANUAL_MESSENGER_WHATSAPP,
+        destination_type: DESTINO_MANUAL_WHATSAPP,
         casou_na_api: !!match,
         pode_usar_no_conjunto: parecer?.pode_usar_no_conjunto ?? false,
         recusar: false,
@@ -517,7 +513,7 @@ export async function toolGetWhatsAppDaPagina(opts: {
       : null,
     parecer,
     como_associar_no_conjunto:
-      "EMITIR criar_conjunto_a_partir_de agora. Destino MANUAL = MESSAGING_MESSENGER_WHATSAPP + display_gerenciador. " +
+      "EMITIR criar_conjunto_a_partir_de agora. Destino MANUAL = WHATSAPP (Messenger OFF) + display_gerenciador. " +
       "casou_na_api=false NAO e recusa: o seletor do Gerenciador lista numeros que Graph/WABA omitem. " +
       "01/09/2026 CONJ.1 teste Cohapm comprovou +55 71 9189-4229 no Destino manual. Nao misture Juridico em VISTTA.",
     pipeboard:
@@ -542,11 +538,11 @@ export function parecerPedidoWhatsAppConjunto(pedido: unknown): {
     pode_usar_no_conjunto: !!preferido,
     recusar: false,
     display_gerenciador: display,
-    destination_type: DESTINO_MANUAL_MESSENGER_WHATSAPP,
+    destination_type: DESTINO_MANUAL_WHATSAPP,
     whatsapp_phone_number: display,
     decisao:
       "EMITIR ou reexecutar o card. casou_na_api=false NAO significa fora do seletor. " +
       "Gestor comprovou Destino manual na Pagina Cohapm (CONJ.1 +55 71 9189-4229). " +
-      "PROIBIDO recusar conjunto VISTTA ou pedir para habilitar numero na Pagina.",
+      "PROIBIDO Messenger (MESSAGING_MESSENGER_WHATSAPP). PROIBIDO recusar conjunto VISTTA.",
   };
 }

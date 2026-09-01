@@ -371,30 +371,20 @@ export function defaultsConjuntoMensagens(
   }
 
   const destPedida = normalizarChave(opts?.destination_type);
-  // Destino AUTOMATICO (Meta escolhe IG/Messenger/WhatsApp) nao e o que o gestor pede.
-  // Forca destino MANUAL WhatsApp-only. Messenger+WhatsApp manual e MESSAGING_MESSENGER_WHATSAPP.
-  let dest: string | null = null;
-  if (!destPedida || destPedida === "MESSAGING_MESSENGER_WHATSAPP") {
-    dest = "MESSAGING_MESSENGER_WHATSAPP";
-  } else if (destPedida === "WHATSAPP") {
-    dest = "WHATSAPP";
-  } else if (destPedida === "MESSAGING_INSTAGRAM_DIRECT_WHATSAPP") {
-    dest = "MESSAGING_INSTAGRAM_DIRECT_WHATSAPP";
-  } else if (destPedida === "MESSAGING_INSTAGRAM_DIRECT_MESSENGER_WHATSAPP") {
-    dest = "WHATSAPP";
-  } else if (destPedida.includes("WHATSAPP")) {
-    dest = "WHATSAPP";
-  } else if (destPedida === "MESSENGER" || destPedida === "INSTAGRAM_DIRECT") {
-    dest = destPedida;
-  }
-  if (!dest) {
+  // Gestor 01/09/2026: Messenger OFF. Destino MANUAL so WhatsApp (JUR/LF).
+  // Nunca MESSAGING_MESSENGER_WHATSAPP nem destino automatico (Meta escolhe o canal).
+  if (
+    destPedida === "ON_POST" || destPedida === "ON_PAGE" ||
+    destPedida === "ON_EVENT" || destPedida === "ON_VIDEO"
+  ) {
     return {
       erro: "destination_type_invalido_para_mensagens",
       detalhe:
-        `Para familia mensagens use destination_type=WHATSAPP (padrao), MESSENGER ou INSTAGRAM_DIRECT. Recebi "${destPedida}". ` +
+        `Para familia mensagens use destination_type=WHATSAPP. Recebi "${destPedida}". ` +
         `ON_POST/ON_PAGE sao de engajamento social, nao de conversa.`,
     };
   }
+  const dest = "WHATSAPP";
 
   const optPedida = normalizarChave(opts?.optimization_goal);
   const opt = !optPedida || optPedida === "CONVERSATIONS" ? "CONVERSATIONS" : optPedida;
