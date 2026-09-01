@@ -1,4 +1,13 @@
-// supabase/functions/traffic-chat/index.ts (v28.87)
+// supabase/functions/traffic-chat/index.ts (v28.88)
+// v28.88 (01/09/2026) - CARD INVENTADO NO MEIO DE CARD REAL. Nos anuncios do CONJ.3_VISTTA
+//   a resposta publicou uma tabela de 6 cards com 4 approval_id reais e 2 inventados
+//   (b7c8d92f… e c9e7f3a2…, que nunca existiram em approval_requests). O gestor ficou sem
+//   AD_CONJ.3_APENAS_OCULOS_1 e _2 achando que estavam na fila — e as rodadas seguintes
+//   pularam esses dois porque o proprio modelo os dava por emitidos. O guarda de claim
+//   falhou duas vezes: desistia no `cards.length > 0` (mistura de real com inventado nunca
+//   era lida) e a frase publicada, "Cards 1 e 2 Emitidos", nao casava com a expressao.
+//   Agora a checagem e por UUID e roda SEMPRE: id citado que nenhuma ferramenta devolveu
+//   nesta conversa e inventado, a linha sai da resposta e o aviso nomeia quais foram.
 // v28.87 (01/09/2026) - Dois travamentos medidos nos anuncios do CONJ.1_VISTTA:
 //   (a) conjunto ARQUIVADO disputava nome com o vivo e gerava conjunto_destino_ambiguo
 //       eterno — arquivado sai do pool, e duplicata na MESMA campanha passa a pedir
@@ -645,7 +654,11 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import { situacaoDoCard } from "../_shared/aprovacoes.ts";
+import {
+  approvalIdsInventados,
+  avisoDeCardInventado,
+  situacaoDoCard,
+} from "../_shared/aprovacoes.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import {
   conferirOrcamentoReais,
@@ -819,7 +832,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.87";
+const VERSAO = "chat-v28.88";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -5833,8 +5846,10 @@ const RE_CONTINUACAO = /^sua resposta anterior foi cortada|^\[continuacao automa
 /** Placeholders que o modelo usa no lugar de omitir target_name em criar_campanha. */
 const RE_TARGET_PLACEHOLDER = /^(composto|nome[_\s-]?composto|novo[_\s-]?nome|campanha(\s+nova)?|nova|n\/a|na|—|-|\.|\*)$/i;
 /** Claim de EMISSAO NESTA rodada — nao casa "pendente/aguardando" de card JA na fila. */
+// "Cards 1 e 2 Emitidos" (CONJ.3, 01/09/2026) passava batido: entre "Cards" e "Emitidos"
+// vinha a numeracao, e nenhuma alternativa cobria isso.
 const RE_CLAIM_CARD_EMITIDO =
-  /##\s*cards?\s+(re)?emitid|\bcards?\s+(foram\s+)?(re)?emitid|\bos\s+dois\s+(primeiros\s+)?cards?\s+foram\s+emitid|\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)\b|\bpedido\s+de\s+aprova[cç][aã]o\s+(foi\s+)?(emitido|registrado)\b/i;
+  /##\s*cards?\s+(re)?emitid|\bcards?\s+(foram\s+)?(re)?emitid|\bcards?\s+\d+(\s*(e|,|a|-|ate|até)\s*\d+)*\s+(foram\s+)?(re)?emitid|\bos\s+dois\s+(primeiros\s+)?cards?\s+foram\s+emitid|\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)\b|\bpedido\s+de\s+aprova[cç][aã]o\s+(foi\s+)?(emitido|registrado)\b/i;
 
 type TurnCheckpoint = {
   v: 1;
@@ -5937,10 +5952,35 @@ function sanitizarClaimEmitSemCard(
   reply: string,
   cards: CardInfo[],
   toolResults: { tool?: string; retorno?: any; erro?: string }[],
-  opts?: { perguntaLeitura?: boolean },
+  opts?: { perguntaLeitura?: boolean; cardsDoTurno?: Array<{ approval_id?: unknown }> | null },
 ): { reply: string; reescreveu: boolean } {
   const raw = String(reply ?? "").trim();
-  if (!raw || cards.length > 0) return { reply: raw, reescreveu: false };
+  if (!raw) return { reply: raw, reescreveu: false };
+
+  // v28.88: UUID inventado e verificado SEMPRE, inclusive com card real na rodada — a
+  // mistura de verdadeiro com inventado (CONJ.3, 01/09/2026) escapava no `cards.length > 0`
+  // logo abaixo, e a tabela publicada mandava o gestor esperar anuncio que ninguem pediu.
+  const inventados = approvalIdsInventados(raw, {
+    cardsDaRodada: cards,
+    cardsDoTurno: opts?.cardsDoTurno ?? null,
+    retornosDeFerramenta: toolResults,
+  });
+  if (inventados.length) {
+    const aviso = avisoDeCardInventado(
+      inventados,
+      cards.map((c) => String(c.approval_id ?? "")).filter(Boolean),
+    );
+    // Tira as LINHAS que carregam o id inventado (linha de tabela, item de lista) em vez de
+    // apagar a resposta: o que veio de ferramenta na mesma resposta continua valendo.
+    const semInventado = raw
+      .split("\n")
+      .filter((l) => !inventados.some((u) => l.toLowerCase().includes(u)))
+      .join("\n")
+      .trim();
+    return { reply: semInventado ? `${aviso}\n\n${semInventado}` : aviso, reescreveu: true };
+  }
+
+  if (cards.length > 0) return { reply: raw, reescreveu: false };
   if (opts?.perguntaLeitura) return { reply: raw, reescreveu: false };
   const leuFila = toolResults.some((t) => String(t.tool ?? "") === "get_aprovacoes");
   const tentouPropose = toolResults.some((t) => String(t.tool ?? "") === "propose_action");
@@ -6907,6 +6947,7 @@ Deno.serve(async (req) => {
   // v28.40: HARD — claim de "card emitido" sem actionCards e mentira; reescreve.
   const claimSan = sanitizarClaimEmitSemCard(String(reply ?? ""), actionCards, toolResults, {
     perguntaLeitura: ehPerguntaDeLeitura(objetivoOriginal),
+    cardsDoTurno: turnCheckpoint?.cards ?? null,
   });
   if (claimSan.reescreveu) {
     reply = claimSan.reply;

@@ -335,3 +335,77 @@ export function traduzirFalha(
       `Texto devolvido, sem interpretacao: ${texto.slice(0, 300)}`,
   };
 }
+
+// ==================== APPROVAL_ID CITADO QUE NENHUMA FERRAMENTA DEVOLVEU ====================
+// O DEFEITO QUE ISTO CONSERTA (medido 01/09/2026, anuncios do CONJ.3_VISTTA):
+// a resposta trouxe uma tabela de 6 cards em que 4 approval_id eram reais (fba683b5…,
+// dd151a44…, 7a3c6518…, f54be98f…) e 2 eram inventados (b7c8d92f…, c9e7f3a2…). Os dois
+// inventados nunca existiram em approval_requests, e o gestor ficou sem os anuncios
+// AD_CONJ.3_APENAS_OCULOS_1 e _2 achando que estavam na fila.
+//
+// A checagem que existia era por FRASE e falhava duas vezes no mesmo caso:
+//   (a) ela desistia logo no inicio quando a rodada tinha QUALQUER card real, entao mistura
+//       de verdadeiro com inventado passava sem ninguem ler o texto;
+//   (b) a frase publicada era "Cards 1 e 2 Emitidos", que a expressao de claim nao casava.
+// Continuar remendando frase e perder a corrida contra a redacao do modelo. UUID nao:
+// ou a ferramenta devolveu aquele identificador nesta conversa, ou ele foi inventado.
+//
+// Fonte de verdade = o que VOLTOU de ferramenta: cards emitidos agora, cards dos segmentos
+// anteriores do mesmo turno e qualquer id presente no retorno das tools (get_aprovacoes
+// citando card pendente e legitimo). O que sobra nao existe.
+const RE_UUID_CARD = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+export function approvalIdsInventados(
+  texto: string,
+  reais: {
+    cardsDaRodada?: Array<{ approval_id?: unknown }> | null;
+    cardsDoTurno?: Array<{ approval_id?: unknown }> | null;
+    retornosDeFerramenta?: Array<{ retorno?: unknown }> | null;
+  },
+): string[] {
+  const citados = [
+    ...new Set((String(texto ?? "").match(RE_UUID_CARD) ?? []).map((u) => u.toLowerCase())),
+  ];
+  if (!citados.length) return [];
+
+  const conhecidos = new Set<string>();
+  const anotar = (v: unknown) => {
+    const s = String(v ?? "").toLowerCase();
+    for (const u of s.match(RE_UUID_CARD) ?? []) conhecidos.add(u);
+  };
+  for (const c of reais.cardsDaRodada ?? []) anotar(c?.approval_id);
+  for (const c of reais.cardsDoTurno ?? []) anotar(c?.approval_id);
+  for (const t of reais.retornosDeFerramenta ?? []) {
+    const r = t?.retorno;
+    if (r == null) continue;
+    if (typeof r === "string") {
+      anotar(r);
+      continue;
+    }
+    // Retorno de tool e objeto; serializar e a unica forma de achar id em qualquer nivel.
+    try {
+      anotar(JSON.stringify(r));
+    } catch {
+      // Ciclo ou BigInt: ignora essa tool em vez de derrubar a checagem inteira.
+    }
+  }
+
+  return citados.filter((u) => !conhecidos.has(u));
+}
+
+/**
+ * Texto de correcao quando o modelo citou card que nao existe. Nomeia os inventados e diz o
+ * que de fato saiu, porque "algo esta errado" sem a lista deixa o gestor sem saber o que
+ * repedir — foi exatamente o que faltou no CONJ.3.
+ */
+export function avisoDeCardInventado(inventados: string[], reaisDaRodada: string[]): string {
+  const plural = inventados.length > 1;
+  return `**${plural ? "Esses identificadores nao existem" : "Esse identificador nao existe"}: ` +
+    `${inventados.join(", ")}.** Nenhuma ferramenta devolveu ${plural ? "eles" : "ele"}, ` +
+    `entao ${plural ? "esses cards nao estao" : "esse card nao esta"} na fila e o que ` +
+    `${plural ? "eles diziam representar nao foi pedido" : "ele dizia representar nao foi pedido"}. ` +
+    (reaisDaRodada.length
+      ? `Cards realmente emitidos nesta rodada: ${reaisDaRodada.join(", ")}. `
+      : `Nenhum card foi emitido nesta rodada. `) +
+    `Peca a emissao do que faltou e confira em get_aprovacoes antes de aprovar.`;
+}
