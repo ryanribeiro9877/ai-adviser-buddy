@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v28.81)
+// supabase/functions/traffic-chat/index.ts (v28.82)
+// v28.82 (01/09/2026) - CTWA Destino manual = MESSAGING_MESSENGER_WHATSAPP (Messenger+WA)
+//   + numero no formato do dropdown (+55 71 9189-4229). Gerenciador CONJ.1 teste.
 // v28.81 (01/09/2026) - CTWA destino MANUAL (WHATSAPP ou Messenger+WA). Nao automatico.
 // v28.80 (31/08/2026) - WhatsApp da Pagina para CTWA: get_whatsapp_da_pagina (Graph ao vivo)
 //   e canonicalize 55+DDD+8 + phone_number_id no card de conjunto. Meta 1487246 nos
@@ -800,7 +802,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.81";
+const VERSAO = "chat-v28.82";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -3002,7 +3004,7 @@ async function t_propose_criacao(
         ? (String(params?.optimization_goal ?? "").trim() || (familiaEfetiva === "reconhecimento" ? "REACH" : "POST_ENGAGEMENT"))
         : (String(params?.optimization_goal ?? "").trim() || null),
       destination_type: mensagensEfetivo
-        ? (String(params?.destination_type ?? "").trim() || "WHATSAPP")
+        ? (String(params?.destination_type ?? "").trim() || "MESSAGING_MESSENGER_WHATSAPP")
         : socialEfetivo
         ? (familiaEfetiva === "reconhecimento" ? null : "ON_POST")
         : (String(params?.destination_type ?? "").trim() || null),
@@ -5386,7 +5388,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 - LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, get_waba_status, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
 - GEO/BAIRROS NO CRIAR_CONJUNTO: HA campo. Use buscar_geolocalizacao (lotes <=40). No propose: params.bairros ou params.geo_locations. Presets em geo_targeting_presets sao POR empresa+meio; outra empresa/meio NAO herda. NUNCA diga que falta campo de bairros.
 - WHATSAPP / NUMEROS DE PE (21/08/2026): pergunta sobre numero operacional, de pe, qual WA linkar, WABA, qualidade/tier OU isolamento Juridico vs La Felicita OBRIGA get_waba_status (meio=juridico|la_felicita quando o pedido recortar). get_estrutura_conjuntos / get_criativos_conteudo so mostram destino wa.me do anuncio (Click-to-WA) — NAO substituem. Separe sempre: (1) WABA Cloud/ON_PREMISE — de_pe so CONNECTED; (2) CTWA — inventario; de_pe so IN_ACTIVE_ADS. NUNCA peca escolher so entre CTWA como se fossem os unicos. Conjunto ACTIVE sob campanha PAUSED = entregando=false (nao esta no ar). COHAPM: isole JUR vs LF.
-- WHATSAPP NO CONJUNTO / DROPDOWN DA PAGINA (01/09/2026 v28.81): destino MANUAL. Nao use destino automatico (Meta escolhe o canal). destination_type=WHATSAPP (so WA, padrao) ou MESSAGING_MESSENGER_WHATSAPP (Messenger+WhatsApp, como o Gerenciador). O NUMERO vai em promoted_object — o executor tenta 12/13 digitos, E.164 com + e as duas dest types se a Meta recusar 1487246. Tool get_whatsapp_da_pagina(numero=...). PROIBIDO dizer que falta ferramenta. PROIBIDO numero Juridico em VISTTA/Ocular ou La Felicita. Se o card falhou 1487246, peca reexecutar.
+- WHATSAPP NO CONJUNTO (01/09/2026 v28.82): copie o Gerenciador. Destino MANUAL = Messenger + WhatsApp (destination_type=MESSAGING_MESSENGER_WHATSAPP) e o numero do dropdown no formato +55 71 9189-4229. NAO use destino automatico. NAO use so WHATSAPP se o gestor marcou Messenger+WhatsApp. get_whatsapp_da_pagina(numero=...). PROIBIDO numero Juridico em VISTTA. Se o card falhou 1487246, peca reexecutar — o executor agora manda o mesmo destino do Gerenciador na primeira tentativa.
 - CRUZAMENTO DE LINHA COHAPM (31/08/2026) E ERRO GRAVE, NAO AVISO: as linhas compartilham a empresa mas NUNCA a campanha. Tres meios: Juridico (JUR_…, JURIDICO_CONJ, meio=juridico), La Felicità (CONJ.1_LAF_…, COHAPM_LAFELICITA_*, meio=la_felicita/imovel) e Sistema Ocular / VISTTA (pasta COHAPM - VISTTA, meio=sistema_ocular). Peca de um empreendimento so vai para campanha/conjunto do mesmo. Colocar video La Felicità em JURIDICO_CONJ ou peca VISTTA em LAF e falta operacional grave. O sistema RECUSA o card.
 - CONJ.N NO NOME BASTA (25/08/2026): params.conjunto_destino = o NOME (CONJ.1_LAF_8CRIATIVOS_JUN/JUL26, CONJ.1, CONJ.01). Barra ou nao (JUN/JUL vs JUNJUL) e CONJ.1 vs CONJ.01 sao o mesmo numero. PROIBIDO pedir ao gestor o ID numerico da Meta / Graph. Resolva com get_estrutura_conjuntos ou o slate. CONJ.1 NUNCA cai no CONJ.4 (mais novo da linha La Felicità). Se o numero do destino ≠ CONJ.N do pedido/slate/peca, o sistema RECUSA (ERRO GRAVE) — nao emita card.
 - DICAS / RECOMENDACOES DA META NOS ANUNCIOS (20/08/2026): se o gestor perguntar se a Meta emitiu recomendacao, dica, boost ou opportunity score nos anuncios/campanhas/conjuntos, chame get_meta_dicas (e get_recommendations SO se quiser a fila INTERNA de custo). Cite SEMPRE o veredito interno — e PROIBIDO repetir a dica da Meta como se fosse nossa. NAO abra listar_ferramentas_pipeboard nem ler_pipeboard para essa pergunta. get_recommendations NAO e o badge do Ads Manager. Se get_meta_dicas vier vazio apos sync e o gestor apontar badge na UI, diga a assimetria documentada pela Meta (API pode listar menos que Ads Manager) — nao invente o texto da dica.
@@ -5552,9 +5554,9 @@ engajamento: POST_ENGAGEMENT + destination_type=ON_POST + promoted_object={page_
 reconhecimento: REACH + page_id. NUNCA misture REACH como goal de campanha OUTCOME_ENGAGEMENT.
 EXCECAO CONJUNTO MENSAGENS / CTWA: conversas WhatsApp NAO sao impulsão de
 post. Campanha OUTCOME_ENGAGEMENT (ou tag CONV/MESSAGES/WHATSAPP) + conjunto com
-familia_objetivo=mensagens OU optimization_goal=CONVERSATIONS → destino MANUAL:
-destination_type=WHATSAPP (so WA) ou MESSAGING_MESSENGER_WHATSAPP (Messenger+WA do Gerenciador).
-PROIBIDO destino automatico. promoted_object={page_id, whatsapp_phone_number 55+DDD+8, phone id se conhecido}.
+familia_objetivo=mensagens OU optimization_goal=CONVERSATIONS → destino MANUAL do Gerenciador:
+destination_type=MESSAGING_MESSENGER_WHATSAPP (Messenger+WhatsApp) e whatsapp_phone_number no
+formato do dropdown (+55 71 9189-4229). Fallback WHATSAPP so-WA. PROIBIDO destino automatico.
 Antes de emitir, chame get_whatsapp_da_pagina(numero=...) — e o dropdown da Pagina, nao get_waba_status.
 O criativo usa WHATSAPP_MESSAGE + api.whatsapp.com/send (nao CONTACT_US + wa.me). Pode usar target_name=sem_molde.
 EXCECAO TRAFEGO + LINK wa.me: se o gestor pedir destino WEBSITE / LANDING_PAGE_VIEWS

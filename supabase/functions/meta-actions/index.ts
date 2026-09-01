@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.54)
+// supabase/functions/meta-actions/index.ts (v5.55)
+// v5.55 (01/09/2026) - Destino MANUAL do Gerenciador na 1a tentativa:
+//   MESSAGING_MESSENGER_WHATSAPP + numero +55 71 9189-4229 (dropdown). CONJ.1 teste
+//   no Ads Manager mostrou Messenger+WhatsApp; a API ia so WHATSAPP e levava 1487246.
 // v5.54 (01/09/2026) - CTWA destino MANUAL: tenta WHATSAPP e MESSAGING_MESSENGER_WHATSAPP
 //   (Messenger+WhatsApp do Gerenciador), E.164 com +, smart_pse_enabled=false. Nao usa
 //   destino automatico. Cards VISTTA 07:41 ainda 1487246 apos 12/13 digitos.
@@ -3639,6 +3642,12 @@ Deno.serve(async (req) => {
     const laf3 = await g(
       `/120249788962200182?fields=id,name,status,destination_type,optimization_goal,promoted_object`,
     );
+    const recentes = await g(
+      `/act_1622612945584817/adsets?fields=id,name,created_time,status,effective_status,destination_type,optimization_goal,promoted_object,campaign{id,name,objective,created_time}&limit=40`,
+    );
+    const listaRecentes = Array.isArray((recentes.body as any)?.data) ? (recentes.body as any).data : [];
+    const hoje = listaRecentes.filter((s: any) => String(s?.created_time ?? "").startsWith("2026-09-01"));
+    const conj1 = listaRecentes.filter((s: any) => /conj\.?\s*1|CONJ\.1/i.test(String(s?.name ?? "")));
     const pedidos = Array.isArray(body?.numeros)
       ? (body.numeros as unknown[]).map((x) => String(x))
       : ["557191894229", "557191858107", "557192649576", "557191887731"];
@@ -3654,6 +3663,9 @@ Deno.serve(async (req) => {
       inventario: listed,
       conjunto_jur_que_entrega: jur.body,
       conjunto_laf3_sem_phone_id: laf3.body,
+      adsets_criados_hoje: hoje,
+      adsets_nome_conj1: conj1.slice(0, 8),
+      adsets_recentes_http: recentes.status,
       pedidos_vistta: pedidos.map((n) => ({
         pedido: n,
         candidatos: candidatosPromotedObjectCtwa({ pageId, pedido: n, match: null }).slice(0, 6),

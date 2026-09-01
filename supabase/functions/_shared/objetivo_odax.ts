@@ -374,10 +374,10 @@ export function defaultsConjuntoMensagens(
   // Destino AUTOMATICO (Meta escolhe IG/Messenger/WhatsApp) nao e o que o gestor pede.
   // Forca destino MANUAL WhatsApp-only. Messenger+WhatsApp manual e MESSAGING_MESSENGER_WHATSAPP.
   let dest: string | null = null;
-  if (!destPedida || destPedida === "WHATSAPP") {
-    dest = "WHATSAPP";
-  } else if (destPedida === "MESSAGING_MESSENGER_WHATSAPP") {
+  if (!destPedida || destPedida === "MESSAGING_MESSENGER_WHATSAPP") {
     dest = "MESSAGING_MESSENGER_WHATSAPP";
+  } else if (destPedida === "WHATSAPP") {
+    dest = "WHATSAPP";
   } else if (destPedida === "MESSAGING_INSTAGRAM_DIRECT_WHATSAPP") {
     dest = "MESSAGING_INSTAGRAM_DIRECT_WHATSAPP";
   } else if (destPedida === "MESSAGING_INSTAGRAM_DIRECT_MESSENGER_WHATSAPP") {

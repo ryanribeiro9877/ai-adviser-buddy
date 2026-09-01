@@ -49,11 +49,10 @@ const cands = candidatosPromotedObjectCtwa({
     fontes: ["page"],
   },
 });
-assert(cands[0].promoted.whatsapp_phone_number === "557191894229", "primeiro candidato 12");
-assert(cands[0].promoted.whats_app_business_phone_number_id === "1282892438232205", "id no primeiro");
-assert(cands[0].destination_type === "WHATSAPP", "primeiro destino manual WA");
-assert(cands.some((c) => c.destination_type === "MESSAGING_MESSENGER_WHATSAPP"), "tambem tenta dest manual Messenger+WA");
-assert(cands.some((c) => c.promoted.whatsapp_phone_number === "5571991894229" && !c.promoted.whats_app_business_phone_number_id), "tambem tenta 13 sem id");
+assert(cands[0].promoted.whatsapp_phone_number === "+55 71 9189-4229", "primeiro e o display do Gerenciador");
+assert(cands[0].destination_type === "MESSAGING_MESSENGER_WHATSAPP", "primeiro destino manual Messenger+WA");
+assert(cands.some((c) => c.destination_type === "WHATSAPP"), "tambem tenta dest so WA");
+assert(cands.some((c) => c.promoted.whatsapp_phone_number === "5571991894229"), "tambem tenta 13");
 assert(cands.some((c) => c.promoted.whatsapp_phone_number === "+557191894229"), "E.164 com +");
 
 console.log("ok: _prova_whatsapp_pagina");

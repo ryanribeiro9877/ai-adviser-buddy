@@ -309,6 +309,13 @@ function promoted(
   return out;
 }
 
+function displayGerenciadorBr(digits: string): string | null {
+  const d = digits.startsWith("55") ? digits.slice(2) : digits;
+  if (d.length === 10) return `+55 ${d.slice(0, 2)} ${d.slice(2, 6)}-${d.slice(6)}`;
+  if (d.length === 11) return `+55 ${d.slice(0, 2)} ${d.slice(2, 7)}-${d.slice(7)}`;
+  return null;
+}
+
 function chavePromoted(p: PromotedObjectCtwa, dest: string): string {
   return `${dest}|${p.whatsapp_phone_number}|${p.whats_app_business_phone_number_id ?? ""}|${p.smart_pse_enabled === false ? "pse0" : ""}`;
 }
@@ -338,19 +345,6 @@ export function candidatosPromotedObjectCtwa(opts: {
     ...variantesDigitosWhatsAppBr(opts.pedido).filter((v) => v.startsWith("55")),
   ].filter((d, i, arr) => d && arr.indexOf(d) === i);
 
-  const forms: Array<{ label: string; number: string }> = [];
-  const seenForm = new Set<string>();
-  const addForm = (label: string, number: string) => {
-    if (!number || seenForm.has(number)) return;
-    seenForm.add(number);
-    forms.push({ label, number });
-  };
-  for (const d of digitList) {
-    addForm(d, d);
-    if (/^\d+$/.test(d)) addForm(`plus:${d}`, `+${d}`);
-  }
-
-  const dests = [DESTINO_MANUAL_WHATSAPP, DESTINO_MANUAL_MESSENGER_WHATSAPP];
   const out: CandidatoPromotedCtwa[] = [];
   const seen = new Set<string>();
   const push = (
@@ -368,14 +362,25 @@ export function candidatosPromotedObjectCtwa(opts: {
     out.push({ label, promoted: p, destination_type: dest });
   };
 
-  for (const dest of dests) {
-    for (const f of forms) {
-      for (const id of ids) push(`com_id:${dest}:${f.label}`, f.number, id, dest);
-      push(`sem_id:${dest}:${f.label}`, f.number, null, dest);
-      push(`pse:${dest}:${f.label}`, f.number, ids[0] ?? null, dest, true);
-    }
+  const preferidoDisplay = displayGerenciadorBr(preferido);
+  const originalDisplay = displayGerenciadorBr(original);
+  // Ordem = Gerenciador Destino manual (Messenger+WA + display) primeiro.
+  push("manual_display", preferidoDisplay || preferido, ids[0] ?? null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
+  push("manual_display_sem_id", preferidoDisplay || preferido, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
+  push("manual_12", preferido, ids[0] ?? null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
+  push("manual_12_sem_id", preferido, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
+  push("manual_plus", /^\d+$/.test(preferido) ? `+${preferido}` : preferido, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
+  push("wa_12", preferido, ids[0] ?? null, DESTINO_MANUAL_WHATSAPP);
+  push("wa_12_sem_id", preferido, null, DESTINO_MANUAL_WHATSAPP);
+  if (original && original !== preferido) {
+    push("manual_orig", originalDisplay || original, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
+    push("wa_orig", original, null, DESTINO_MANUAL_WHATSAPP);
   }
-  return out.slice(0, 14);
+  for (const d of digitList) {
+    push(`manual:${d}`, d, null, DESTINO_MANUAL_MESSENGER_WHATSAPP);
+    push(`wa:${d}`, d, null, DESTINO_MANUAL_WHATSAPP);
+  }
+  return out.slice(0, 12);
 }
 
 export async function resolverWhatsAppCtwa(opts: {
