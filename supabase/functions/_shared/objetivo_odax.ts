@@ -371,12 +371,22 @@ export function defaultsConjuntoMensagens(
   }
 
   const destPedida = normalizarChave(opts?.destination_type);
-  const dest =
-    !destPedida || destPedida === "WHATSAPP" || destPedida.includes("WHATSAPP")
-      ? "WHATSAPP"
-      : destPedida === "MESSENGER" || destPedida === "INSTAGRAM_DIRECT"
-      ? destPedida
-      : null;
+  // Destino AUTOMATICO (Meta escolhe IG/Messenger/WhatsApp) nao e o que o gestor pede.
+  // Forca destino MANUAL WhatsApp-only. Messenger+WhatsApp manual e MESSAGING_MESSENGER_WHATSAPP.
+  let dest: string | null = null;
+  if (!destPedida || destPedida === "WHATSAPP") {
+    dest = "WHATSAPP";
+  } else if (destPedida === "MESSAGING_MESSENGER_WHATSAPP") {
+    dest = "MESSAGING_MESSENGER_WHATSAPP";
+  } else if (destPedida === "MESSAGING_INSTAGRAM_DIRECT_WHATSAPP") {
+    dest = "MESSAGING_INSTAGRAM_DIRECT_WHATSAPP";
+  } else if (destPedida === "MESSAGING_INSTAGRAM_DIRECT_MESSENGER_WHATSAPP") {
+    dest = "WHATSAPP";
+  } else if (destPedida.includes("WHATSAPP")) {
+    dest = "WHATSAPP";
+  } else if (destPedida === "MESSENGER" || destPedida === "INSTAGRAM_DIRECT") {
+    dest = destPedida;
+  }
   if (!dest) {
     return {
       erro: "destination_type_invalido_para_mensagens",
@@ -400,7 +410,7 @@ export function defaultsConjuntoMensagens(
   const waDigits = waRaw.replace(/\D/g, "");
   // Medido 22/08/2026 (JUR_CONV): conjunto WHATSAPP sem whatsapp_phone_number + criativo
   // CONTACT_US/wa.me → "Criativo invalido para o objetivo". LF CONV que entrega traz o numero.
-  if (dest === "WHATSAPP" && waDigits.length < 10) {
+  if (String(dest).includes("WHATSAPP") && waDigits.length < 10) {
     return {
       erro: "whatsapp_phone_number_obrigatorio_para_mensagens",
       detalhe:

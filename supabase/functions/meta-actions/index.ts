@@ -1,4 +1,7 @@
-// supabase/functions/meta-actions/index.ts (v5.53)
+// supabase/functions/meta-actions/index.ts (v5.54)
+// v5.54 (01/09/2026) - CTWA destino MANUAL: tenta WHATSAPP e MESSAGING_MESSENGER_WHATSAPP
+//   (Messenger+WhatsApp do Gerenciador), E.164 com +, smart_pse_enabled=false. Nao usa
+//   destino automatico. Cards VISTTA 07:41 ainda 1487246 apos 12/13 digitos.
 // v5.53 (31/08/2026) - CTWA: resolver WhatsApp da Pagina (formato 55+DDD+8 +
 //   whats_app_business_phone_number_id) e retry em Meta 1487246. Cards VISTTA
 //   falhavam com "number is not linked" enquanto o Gerenciador listava o numero.
@@ -350,6 +353,7 @@ import {
 import {
   candidatosPromotedObjectCtwa,
   ehRecusaWhatsappNaoLigado,
+  listarWhatsAppDaPagina,
   resolverWhatsAppCtwa,
   type CandidatoPromotedCtwa,
 } from "../_shared/whatsapp_pagina.ts";
@@ -1995,6 +1999,7 @@ export async function montarCriacao(
               casou_na_api: !!resolvido.match,
               candidatos: resolvido.candidatos.length,
               aviso: resolvido.aviso,
+              destino: resolvido.candidatos[0]?.destination_type ?? defs.destination_type,
             },
           };
         }
@@ -2014,6 +2019,9 @@ export async function montarCriacao(
         body.destination_type = defs.destination_type;
       } else {
         delete body.destination_type;
+      }
+      if (mensagensTopo && ctwaCandidatos[0]?.destination_type) {
+        body.destination_type = ctwaCandidatos[0].destination_type;
       }
       // v5.36: molde LF CONV pode trazer LOWEST_COST_WITH_BID_CAP / COST_CAP sem bid_amount
       // (ou bid_amount que a Graph nao devolve na leitura). Meta 2490487. Padrao da casa:
@@ -3597,6 +3605,68 @@ Deno.serve(async (req) => {
     });
   }
 
+  // Sonda SOMENTE LEITURA: inventario Graph da Pagina vs conjuntos CTWA que entregam.
+  // Nao cria conjunto, nao envia SMS, nao chama page_whatsapp_number_verification.
+  if (body?.modo === "sonda_whatsapp_pagina") {
+    const companyId = String(body?.company_id ?? COMPANY_COHAPM).trim();
+    const pageId = String(body?.page_id ?? "105656372312257").trim();
+    const ativ = ativarTokenEmpresa(companyId);
+    if (!ativ.ok) return json({ error: ativ.motivo }, 400);
+    const wabaTok = tokenWabaPorCompanyId(companyId);
+    const gAds = criarGraphClient(TOKEN);
+    const gWaba = wabaTok ? criarGraphClient(wabaTok.token) : null;
+    const listed = await listarWhatsAppDaPagina({
+      gAds,
+      gWaba,
+      pageId,
+      companyId,
+      businessId: businessIdPorCompanyId(companyId),
+      supa,
+    });
+    const pageMeta = await g(`/${pageId}?metadata=1`);
+    const fields = (pageMeta.body as any)?.metadata?.fields ?? (pageMeta.body as any)?.data ?? [];
+    const camposWa = (Array.isArray(fields) ? fields : [])
+      .map((f: any) => String(f?.name ?? f ?? ""))
+      .filter((n: string) => /whatsapp|phone|messag/i.test(n))
+      .slice(0, 80);
+    const pageLive = await g(
+      `/${pageId}?fields=id,name,whatsapp_number,whatsapp_numbers,has_whatsapp_number,has_whatsapp_business_number,whatsapp_business_account`,
+    );
+    const wabasPage = await g(
+      `/${pageId}/whatsapp_business_accounts?fields=id,name,phone_numbers{id,display_phone_number,verified_name,status,platform_type}&limit=25`,
+    );
+    const jur = await g(
+      `/120249788959090182?fields=id,name,status,destination_type,optimization_goal,promoted_object,campaign{id,name,objective}`,
+    );
+    const laf3 = await g(
+      `/120249788962200182?fields=id,name,status,destination_type,optimization_goal,promoted_object`,
+    );
+    const pedidos = Array.isArray(body?.numeros)
+      ? (body.numeros as unknown[]).map((x) => String(x))
+      : ["557191894229", "557191858107", "557192649576", "557191887731"];
+    return json({
+      ok: true,
+      modo: "sonda_whatsapp_pagina",
+      somente_leitura: true,
+      page_id: pageId,
+      page_live: pageLive.body,
+      page_http: pageLive.status,
+      campos_whatsapp_na_pagina: camposWa,
+      wabas_da_pagina: wabasPage.body,
+      inventario: listed,
+      conjunto_jur_que_entrega: jur.body,
+      conjunto_laf3_sem_phone_id: laf3.body,
+      pedidos_vistta: pedidos.map((n) => ({
+        pedido: n,
+        candidatos: candidatosPromotedObjectCtwa({ pageId, pedido: n, match: null }).slice(0, 6),
+      })),
+      nota:
+        "Destino MANUAL = WHATSAPP (so WA) ou MESSAGING_MESSENGER_WHATSAPP (Messenger+WA). " +
+        "Destino AUTOMATICO = Meta escolhe o canal — nao usamos. 1487246 = numero sem vinculo Graph, mesmo se o Gerenciador lista.",
+      mcp_chamador: auth.chamador,
+    });
+  }
+
   // Sonda SOMENTE LEITURA: prova o schema que o driver Pipeboard realmente expoe antes de
   // declarar uma nova escrita suportada. tools/list nao chama update_adset nem toca a Meta.
   if (body?.modo === "sonda_pipeboard_update_adset") {
@@ -4356,12 +4426,14 @@ Deno.serve(async (req) => {
           const tentativasWa: unknown[] = [{ label: "primeiro", status: exec.status, body: exec.body }];
           for (const c of cands) {
             const po = JSON.stringify(c.promoted);
-            if (po === bodyFinal.promoted_object) continue;
-            const bodyTry = { ...bodyFinal, promoted_object: po };
+            const dest = String(c.destination_type ?? bodyFinal.destination_type ?? "WHATSAPP");
+            if (po === bodyFinal.promoted_object && dest === String(bodyFinal.destination_type ?? "")) continue;
+            const bodyTry = { ...bodyFinal, promoted_object: po, destination_type: dest };
             exec = await escreverCriacao(driver, acao, conta, pl.path, bodyTry, pbToken);
-            tentativasWa.push({ label: c.label, status: exec.status, body: exec.body, promoted: c.promoted });
+            tentativasWa.push({ label: c.label, status: exec.status, body: exec.body, promoted: c.promoted, destination_type: dest });
             if (exec.id && (exec.status === 200 || exec.ok === true) && !exec.erro) {
               bodyFinal.promoted_object = po;
+              bodyFinal.destination_type = dest;
               (exec as any).ctwa_tentativas = tentativasWa;
               break;
             }

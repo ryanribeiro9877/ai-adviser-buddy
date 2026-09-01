@@ -18,6 +18,13 @@ import {
 export const SUBCODE_WA_NAO_LIGADO = 1487246;
 export const SUBCODE_PAGINA_SEM_WA = 2446886;
 
+/** Destino MANUAL WhatsApp-only (conjuntos JUR/LF que entregam). Meta nao escolhe o canal. */
+export const DESTINO_MANUAL_WHATSAPP = "WHATSAPP";
+/** Destino MANUAL Messenger + WhatsApp (dropdown do Gerenciador com as duas caixas). */
+export const DESTINO_MANUAL_MESSENGER_WHATSAPP = "MESSAGING_MESSENGER_WHATSAPP";
+/** Destino AUTOMATICO (Meta escolhe entre IG/Messenger/WhatsApp). Nao usamos. */
+export const DESTINO_AUTOMATICO_MENSAGENS = "MESSAGING_INSTAGRAM_DIRECT_MESSENGER_WHATSAPP";
+
 export type WhatsAppPaginaNumero = {
   display: string | null;
   digitos: string;
@@ -29,11 +36,14 @@ export type PromotedObjectCtwa = {
   page_id: string;
   whatsapp_phone_number: string;
   whats_app_business_phone_number_id?: string;
+  /** Presente nos conjuntos CTWA que entregam (leitura Graph). */
+  smart_pse_enabled?: boolean;
 };
 
 export type CandidatoPromotedCtwa = {
   label: string;
   promoted: PromotedObjectCtwa;
+  destination_type: string;
 };
 
 export function soDigitosWa(raw: unknown): string {
@@ -211,6 +221,14 @@ export async function listarWhatsAppDaPagina(opts: {
           fonte: "page.whatsapp_number",
         });
       }
+      const extraNums = await getSafe(opts.gAds, `/${pageId}?fields=whatsapp_numbers`);
+      if (!extraNums.erro) {
+        const raw = extraNums.body?.whatsapp_numbers;
+        ingestPhones(
+          Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : [],
+          "page.whatsapp_numbers",
+        );
+      }
       const waba = page.body?.whatsapp_business_account;
       const wabaId = waba?.id != null ? String(waba.id) : "";
       if (wabaId) {
@@ -225,7 +243,7 @@ export async function listarWhatsAppDaPagina(opts: {
 
     const wabasPage = await getSafe(
       opts.gAds,
-      `/${pageId}/whatsapp_business_accounts?fields=id,name,phone_numbers{id,display_phone_number,verified_name,status}&limit=25`,
+      `/${pageId}/whatsapp_business_accounts?fields=id,name,phone_numbers{id,display_phone_number,verified_name,status,platform_type}&limit=25`,
     );
     if (wabasPage.erro) erros.push(`page_wabas:${wabasPage.erro}`);
     else {
@@ -300,19 +318,26 @@ export async function listarWhatsAppDaPagina(opts: {
 
 function promoted(
   pageId: string,
-  digits: string,
+  number: string,
   phoneId?: string | null,
+  opts?: { smartPse?: boolean },
 ): PromotedObjectCtwa {
-  const out: PromotedObjectCtwa = { page_id: pageId, whatsapp_phone_number: digits };
+  const out: PromotedObjectCtwa = { page_id: pageId, whatsapp_phone_number: number };
   const id = phoneIdValido(phoneId);
   if (id) out.whats_app_business_phone_number_id = id;
+  if (opts?.smartPse === true) out.smart_pse_enabled = false;
   return out;
 }
 
-function chavePromoted(p: PromotedObjectCtwa): string {
-  return `${p.whatsapp_phone_number}|${p.whats_app_business_phone_number_id ?? ""}`;
+function chavePromoted(p: PromotedObjectCtwa, dest: string): string {
+  return `${dest}|${p.whatsapp_phone_number}|${p.whats_app_business_phone_number_id ?? ""}|${p.smart_pse_enabled === false ? "pse0" : ""}`;
 }
 
+/**
+ * Destino MANUAL: WHATSAPP (so WhatsApp, como JUR/LF) e MESSAGING_MESSENGER_WHATSAPP
+ * (Messenger+WhatsApp, dropdown Destino manual do Gerenciador).
+ * Nunca emite o destino automatico (Meta escolhe o canal).
+ */
 export function candidatosPromotedObjectCtwa(opts: {
   pageId: string;
   pedido: unknown;
@@ -333,22 +358,44 @@ export function candidatosPromotedObjectCtwa(opts: {
     ...variantesDigitosWhatsAppBr(opts.pedido).filter((v) => v.startsWith("55")),
   ].filter((d, i, arr) => d && arr.indexOf(d) === i);
 
+  const forms: Array<{ label: string; number: string }> = [];
+  const seenForm = new Set<string>();
+  const addForm = (label: string, number: string) => {
+    if (!number || seenForm.has(number)) return;
+    seenForm.add(number);
+    forms.push({ label, number });
+  };
+  for (const d of digitList) {
+    addForm(d, d);
+    if (/^\d+$/.test(d)) addForm(`plus:${d}`, `+${d}`);
+  }
+
+  const dests = [DESTINO_MANUAL_WHATSAPP, DESTINO_MANUAL_MESSENGER_WHATSAPP];
   const out: CandidatoPromotedCtwa[] = [];
   const seen = new Set<string>();
-  const push = (label: string, digits: string, id?: string | null) => {
-    if (!pageId || !digits) return;
-    const p = promoted(pageId, digits, id);
-    const k = chavePromoted(p);
+  const push = (
+    label: string,
+    number: string,
+    id: string | null | undefined,
+    dest: string,
+    smartPse?: boolean,
+  ) => {
+    if (!pageId || !number) return;
+    const p = promoted(pageId, number, id, { smartPse });
+    const k = chavePromoted(p, dest);
     if (seen.has(k)) return;
     seen.add(k);
-    out.push({ label, promoted: p });
+    out.push({ label, promoted: p, destination_type: dest });
   };
 
-  for (const d of digitList) {
-    for (const id of ids) push(`com_id:${d}`, d, id);
-    push(`sem_id:${d}`, d, null);
+  for (const dest of dests) {
+    for (const f of forms) {
+      for (const id of ids) push(`com_id:${dest}:${f.label}`, f.number, id, dest);
+      push(`sem_id:${dest}:${f.label}`, f.number, null, dest);
+      push(`pse:${dest}:${f.label}`, f.number, ids[0] ?? null, dest, true);
+    }
   }
-  return out;
+  return out.slice(0, 14);
 }
 
 export async function resolverWhatsAppCtwa(opts: {
@@ -472,9 +519,9 @@ export async function toolGetWhatsAppDaPagina(opts: {
       }
       : null,
     como_associar_no_conjunto:
-      "Escrita = propose_action criar_conjunto_a_partir_de (nao ler_pipeboard create_adset). " +
-      "Passe params.whatsapp_phone_number = digitos_para_ads do match (ou canonico_para_conjunto). " +
-      "Se houver whats_app_business_phone_number_id, passe tambem. O executor tenta as variantes se a Meta recusar 1487246.",
+      "Destino MANUAL (nao automatico): destination_type=WHATSAPP (so WA, padrao JUR/LF) ou MESSAGING_MESSENGER_WHATSAPP (Messenger+WhatsApp do Gerenciador). " +
+      "O numero vai em promoted_object — Meta nao escolhe a linha. Escrita = criar_conjunto_a_partir_de. " +
+      "Passe params.whatsapp_phone_number = digitos_para_ads. Nao misture numero Juridico em VISTTA.",
     pipeboard:
       "get_account_pages e leitura (ler_pipeboard). create_adset e escrita bloqueada em ler_pipeboard — o card de conjunto e o caminho.",
     distinto_de_get_waba_status:
