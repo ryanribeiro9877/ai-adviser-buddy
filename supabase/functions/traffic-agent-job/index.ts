@@ -1,4 +1,7 @@
 // supabase/functions/traffic-agent-job/index.ts (v4.15)
+// v4.16 (01/09/2026) - CTWA cria pelo pipeboard: casou_na_api=false NAO impede o
+//   conjunto (graph 1487246 as 11:49, pipeboard criou o 120249829825270182 as 12:46
+//   com o mesmo payload). Especialista para de pedir vinculo de WABA.
 // v4.15 (01/09/2026) - casou_na_api=false = numero fora das WABAs da conta e a
 //   Marketing API recusa 1487246; especialista relata em vez de prometer conjunto.
 // v4.14 (01/09/2026) - get_whatsapp_da_pagina NAO e o seletor do Gerenciador;
@@ -591,7 +594,7 @@ function classificarCapacidade(pergunta: string): Capacidade {
           { nome: "desempenho_campanhas", foco: FOCO_DESEMPENHO_OVERVIEW },
           { nome: "criativos", foco: FOCO_CRIATIVOS_OVERVIEW },
           pedeWaba
-            ? { nome: "whatsapp_waba", foco: "get_waba_status com meio se o pedido for Juridico/La Felicita. get_whatsapp_da_pagina diz se o numero e ativo da conta; casou_na_api=false = API recusa 1487246. Separe WABA Cloud/ON_PREMISE (CONNECTED=de pe) de CTWA inventario (IN_ADS nao e de pe). Declare DISCONNECTED. Nao diga que so ha wa.me dos anuncios." }
+            ? { nome: "whatsapp_waba", foco: "get_waba_status com meio se o pedido for Juridico/La Felicita. get_whatsapp_da_pagina diz se o numero e ativo da conta; casou_na_api=false NAO impede conjunto (pipeboard cria). Separe WABA Cloud/ON_PREMISE (CONNECTED=de pe) de CTWA inventario (IN_ADS nao e de pe). Declare DISCONNECTED. Nao diga que so ha wa.me dos anuncios." }
             : { nome: "alertas_recomendacoes", foco: FOCO_ALERTAS_OVERVIEW },
         ]
       : undefined;
@@ -1434,7 +1437,7 @@ const DEF: Record<string, any> = {
   check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL). COHAPM: cruzamento Juridico × La Felicità REPROVA (ERRO GRAVE).", parameters: { type: "object", properties: { legenda: { type: "string" }, campanha: { type: "string" }, conjunto: { type: "string" }, nome_criativo: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda"] } } },
   get_conhecimento: { type: "function", function: { name: "get_conhecimento", description: "Base tecnica: politicas Meta, metricas, otimizacao, criativo. Use 'secao' p/ temas extensos.", parameters: { type: "object", properties: { tema: { type: "string" }, secao: { type: "string" } }, required: ["tema"] } } },
   get_waba_status: { type: "function", function: { name: "get_waba_status", description: "INVENTARIO WHATSAPP da empresa (RPC get_waba_phones). SEMPRE use quando perguntarem numero de pe, qual WA linkar, WABA, Cloud, qualidade/tier, Juridico vs La Felicita. Devolve DUAS listas: waba_cloud_on_premise (CLOUD_API+ON_PREMISE+null; de_pe=CONNECTED; qualidade/tier) e click_to_whatsapp_inventario (destino wa.me; de_pe so IN_ACTIVE_ADS). NUNCA trate CTWA IN_ADS como de pe nem como unico candidato. Filtro meio=juridico|la_felicita|financeiro|outro. NAO decide emissao de conjunto CTWA.", parameters: { type: "object", properties: { meio: { type: "string", description: "Opcional: juridico | la_felicita | financeiro | outro" } } } } },
-  get_whatsapp_da_pagina: { type: "function", function: { name: "get_whatsapp_da_pagina", description: "LEITURA Graph/WABA/conjuntos: diz se o numero e ativo WhatsApp da conta. casou_na_api=false = numero fora das WABAs, e a Marketing API recusa 1487246 em qualquer formato (medido 01/09/2026) mesmo o Gerenciador listando no Destino manual. Distinto de get_waba_status. Escrita no conjunto e no chat sincrono (criar_conjunto), nao neste job.", parameters: { type: "object", properties: { numero: { type: "string" } } } } },
+  get_whatsapp_da_pagina: { type: "function", function: { name: "get_whatsapp_da_pagina", description: "LEITURA Graph/WABA/conjuntos: diz se o numero e ativo WhatsApp da conta. casou_na_api=false = numero fora das WABAs, e isso NAO impede o conjunto: o create sai pelo driver pipeboard, que cria numero ligado so a Pagina (01/09/2026 — graph 1487246, pipeboard criou o 120249829825270182 com o mesmo payload). Distinto de get_waba_status. Escrita no conjunto e no chat sincrono (criar_conjunto), nao neste job.", parameters: { type: "object", properties: { numero: { type: "string" } } } } },
   get_waba_template_insights: { type: "function", function: { name: "get_waba_template_insights", description: "Insights por TEMPLATE WhatsApp numa janela: envios, entregues, leituras, cliques e taxa de clique. Detalhe por numero ainda nao e coletado (declarado no retorno).", parameters: { type: "object", properties: { days: { type: "number", description: "janela em dias (default 30)" } } } } },
 };
 
@@ -1465,7 +1468,7 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   whatsapp_waba: {
     tools: ["get_waba_status", "get_whatsapp_da_pagina", "get_waba_template_insights", "get_conhecimento"],
     maxPorTool: { get_waba_status: 2, get_whatsapp_da_pagina: 2, get_waba_template_insights: 2, get_conhecimento: 1 }, maxToolsTotal: 6,
-    missao: "CANAL WHATSAPP: chame get_waba_status (meio=juridico/la_felicita se recortar) E get_whatsapp_da_pagina quando o pedido for conjunto CTWA. casou_na_api=false = numero fora das WABAs da conta: a API recusa 1487246, diga isso em vez de prometer o conjunto. Separe WABA Cloud/ON_PREMISE (CONNECTED=de pe; DISCONNECTED=declare) de CTWA inventario (IN_ADS nao e de pe). NUNCA diga que so ha os numeros wa.me dos anuncios se a lista WABA veio no retorno. Templates so se o foco pedir.",
+    missao: "CANAL WHATSAPP: chame get_waba_status (meio=juridico/la_felicita se recortar) E get_whatsapp_da_pagina quando o pedido for conjunto CTWA. casou_na_api=false = numero fora das WABAs da conta, o que NAO impede o conjunto: o driver pipeboard cria (medido 01/09/2026). PROIBIDO pedir vinculo de WABA. Separe WABA Cloud/ON_PREMISE (CONNECTED=de pe; DISCONNECTED=declare) de CTWA inventario (IN_ADS nao e de pe). NUNCA diga que so ha os numeros wa.me dos anuncios se a lista WABA veio no retorno. Templates so se o foco pedir.",
   },
   alertas_recomendacoes: {
     tools: ["get_alerts", "get_recommendations", "get_meta_dicas", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest"],
@@ -2802,7 +2805,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.15";
+  tel.versao = "job-v4.16";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,

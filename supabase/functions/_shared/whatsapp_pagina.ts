@@ -5,11 +5,14 @@
 // celular BR) e, quando existe, whats_app_business_phone_number_id. Mandar
 // "+55 71 9189-4229" no payload e invalido — o display so vale para texto humano.
 //
-// 1487246 medido em 01/09/2026 (VISTTA CONJ.1-4): a recusa NAO e de formato. Os
-// quatro formatos (12, 13, +E.164, display) foram tentados e recusados igual. Os
-// numeros nao existem em nenhuma WABA da conta, e todo conjunto CTWA que a API
-// aceitou usa numero que esta no inventario. O Gerenciador oferece numeros ligados
-// so a Pagina; a Marketing API exige o numero como ativo WhatsApp do Business.
+// 1487246 e do DRIVER, nao do numero. Comparacao controlada de 01/09/2026 com o
+// mesmo promoted_object {page_id:105656372312257, whatsapp_phone_number:"557191894229"},
+// mesmo destination_type=WHATSAPP e mesmo optimization_goal=CONVERSATIONS:
+//   11:49 driver graph     -> HTTP 400 / 1487246 (tentou tambem +557191894229 e 13 digitos)
+//   12:46 driver pipeboard -> conjunto 120249829825270182 criado e reconciliado
+// Os numeros VISTTA nao estao em WABA alguma e o Pipeboard cria assim mesmo, entao
+// casou_na_api=false NAO e motivo de recusa: e so informacao de inventario. Conjunto
+// CTWA sai por driver_por_acao.criar_conjunto_a_partir_de=pipeboard.
 // Pipeboard create_adset e escrita: agentes usam criar_conjunto_a_partir_de.
 
 import { criarGraphClient, type GraphClient } from "./instagram_anuncios.ts";
@@ -428,9 +431,9 @@ export async function resolverWhatsAppCtwa(opts: {
   let aviso: string | null = null;
   if (!match) {
     aviso =
-      "Numero fora de qualquer WABA da conta. O create vai tentar todos os formatos em digitos, " +
-      "mas a Marketing API costuma recusar 1487246 nesse caso (o Destino manual do Gerenciador usa " +
-      "caminho proprio da Meta). Nao substitua por numero Juridico/La Felicita.";
+      "Numero fora de qualquer WABA da conta — informativo, nao impedimento. O create sai pelo driver " +
+      "pipeboard, que aceita numero ligado so a Pagina (01/09/2026: graph 1487246, pipeboard criou). " +
+      "Se o driver desta acao for graph, espere 1487246. Nao substitua por numero Juridico/La Felicita.";
   } else if (!match.phone_number_id) {
     aviso =
       "Numero casou com um ja visto na conta, mas sem whats_app_business_phone_number_id. " +
@@ -520,23 +523,24 @@ export async function toolGetWhatsAppDaPagina(opts: {
     como_associar_no_conjunto:
       "Destino MANUAL = WHATSAPP (Messenger OFF) e whatsapp_phone_number em DIGITOS (55+DDD+8). " +
       "O display (+55 71 9189-4229) e so para o texto do card — no promoted_object ele e invalido. " +
-      "casou_na_api=true: EMITA. casou_na_api=false: a API recusa 1487246 (medido 01/09/2026 nos quatro " +
-      "conjuntos VISTTA, nos formatos 12, 13, +E.164 e display); diga isso ao gestor em vez de prometer o conjunto. " +
-      "Nao misture Juridico em VISTTA.",
+      "EMITA com casou_na_api true OU false: quem cria e o driver pipeboard, que aceita numero ligado " +
+      "so a Pagina (01/09/2026 — graph recusou 1487246 e pipeboard criou o 120249829825270182 com o " +
+      "mesmo payload). casou_na_api=false e inventario, nao impedimento. Nao misture Juridico em VISTTA.",
     pipeboard:
       "get_account_pages e leitura (ler_pipeboard). create_adset e escrita bloqueada em ler_pipeboard — o card de conjunto e o caminho.",
     distinto_de_get_waba_status:
       "get_waba_status e inventario Cloud/ON_PREMISE. Esta tool cobre Pagina + WABAs do Business; " +
-      "o seletor do Gerenciador ainda pode mostrar numero so da Pagina, que a Marketing API nao aceita.",
+      "numero que so aparece no seletor da Pagina continua criavel pelo driver pipeboard.",
   };
 }
 
 /**
  * Parecer honesto sobre o numero antes de emitir o card.
  *
- * Digitos validos permitem montar o payload, mas quem decide se a Marketing API
- * aceita e o inventario: sem o numero em alguma WABA da conta a criacao volta
- * 1487246 em todos os formatos (medido 01/09/2026 nos quatro conjuntos VISTTA).
+ * Numero valido basta para emitir: o create do conjunto CTWA depende do DRIVER, e o
+ * Pipeboard cria mesmo com numero fora das WABAs (medido 01/09/2026 — graph recusou
+ * 1487246 e pipeboard criou o 120249829825270182 com o mesmo payload). Por isso
+ * `e_ativo_whatsapp_da_conta` e informativo e nao trava `pode_usar_no_conjunto`.
  * `whatsapp_phone_number` sai em digitos; `display_gerenciador` e so para texto.
  */
 export function parecerPedidoWhatsAppConjunto(
@@ -555,7 +559,7 @@ export function parecerPedidoWhatsAppConjunto(
   const display = preferido ? (formatDisplayWhatsAppGerenciador(preferido) || preferido) : null;
   const ativo = !!match;
   return {
-    pode_usar_no_conjunto: !!preferido && ativo,
+    pode_usar_no_conjunto: !!preferido,
     e_ativo_whatsapp_da_conta: ativo,
     display_gerenciador: display,
     destination_type: DESTINO_MANUAL_WHATSAPP,
@@ -565,30 +569,43 @@ export function parecerPedidoWhatsAppConjunto(
       ? "Numero invalido: informe DDI+DDD+numero."
       : ativo
       ? "EMITIR criar_conjunto_a_partir_de: destination_type=WHATSAPP (Messenger OFF) e whatsapp_phone_number em digitos."
-      : "NAO prometa que vai criar. O numero nao esta em nenhuma WABA da conta, e a Marketing API " +
-        "recusa 1487246 em qualquer formato (12, 13, +E.164 e display ja foram testados em 01/09/2026). " +
-        "O seletor do Gerenciador aceita porque usa caminho proprio da Meta. " +
-        "Diga ao gestor: vincular o numero a uma WABA do Business (WhatsApp Manager) libera a API; " +
-        "sem isso, so criando o conjunto no Gerenciador. Nao substitua por numero Juridico/La Felicita.",
+      : "EMITIR mesmo assim. O numero nao aparece nas WABAs da conta, e isso e so inventario: " +
+        "o create sai por driver pipeboard, que cria numero ligado so a Pagina (medido 01/09/2026 — " +
+        "graph recusou 1487246 e pipeboard criou o conjunto 120249829825270182 com o mesmo payload). " +
+        "NAO peca vinculo de WABA nem mande o gestor para o Gerenciador. " +
+        "Nao substitua por numero Juridico/La Felicita.",
   };
 }
 
-/** Texto de falha do card quando a Meta devolve 1487246/2446886 no create do conjunto. */
+/**
+ * Texto de falha do card quando a Meta devolve 1487246/2446886 no create do conjunto.
+ *
+ * A primeira pergunta e o DRIVER, nao o numero: em 01/09/2026 o mesmo promoted_object
+ * que o graph recusou (1487246, tres formatos de digitos) o Pipeboard criou. Mandar o
+ * gestor mexer em WABA quando o que falta e trocar o driver custa dias de campanha.
+ */
 export function diagnosticoRecusaWhatsApp(opts: {
   numero: unknown;
   temIdWaba: boolean;
   formatosTentados: string[];
+  driver?: string | null;
 }): string {
   const display = formatDisplayWhatsAppGerenciador(preferidoWhatsAppParaAds(opts.numero)) ??
     String(opts.numero ?? "");
+  const driver = String(opts.driver ?? "").toLowerCase();
+  if (driver && driver !== "pipeboard") {
+    return `A Meta recusou ${display} no driver ${driver} (1487246). Isso e esperado: em 01/09/2026 o ` +
+      `MESMO payload recusado pelo graph foi aceito pelo Pipeboard, que criou o conjunto ` +
+      `120249829825270182. Aponte driver_por_acao.criar_conjunto_a_partir_de para pipeboard ` +
+      `nesta empresa e mande o card de novo — nao ha nada a corrigir no numero.`;
+  }
   if (opts.temIdWaba) {
-    return `A Meta recusou ${display} mesmo com whats_app_business_phone_number_id. ` +
+    return `O Pipeboard recusou ${display} mesmo com whats_app_business_phone_number_id. ` +
       `Formatos tentados: ${opts.formatosTentados.join(", ")}. ` +
       `Confira no WhatsApp Manager se a WABA continua vinculada a conta de anuncios.`;
   }
-  return `${display} nao esta em nenhuma WhatsApp Business Account desta conta, entao a Marketing API ` +
-    `recusa (1487246) em todos os formatos — tentei ${opts.formatosTentados.join(", ")}. ` +
-    `O Gerenciador oferece o numero porque ele esta ligado a Pagina, mas esse caminho nao existe na API. ` +
-    `Para criar pelo agente: vincule o numero a uma WABA do Business no WhatsApp Manager. ` +
-    `Enquanto isso, so o Gerenciador cria este conjunto.`;
+  return `O Pipeboard recusou ${display} (1487246) nos formatos ${opts.formatosTentados.join(", ")}. ` +
+    `Como o Pipeboard costuma aceitar numero ligado so a Pagina, o mais provavel e que o numero tenha ` +
+    `saido do seletor da Pagina Cohapm ou que a conexao Pipeboard da conta tenha caido. ` +
+    `Confira os dois antes de mexer em WABA.`;
 }

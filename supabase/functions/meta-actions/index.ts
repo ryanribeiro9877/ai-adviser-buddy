@@ -1,8 +1,12 @@
-// supabase/functions/meta-actions/index.ts (v5.57)
+// supabase/functions/meta-actions/index.ts (v5.58)
+// v5.58 (01/09/2026) - CTWA 1487246 e do DRIVER. Comparacao controlada: mesmo
+//   promoted_object {page_id:105656372312257, whatsapp_phone_number:"557191894229"},
+//   mesmo destination_type=WHATSAPP, mesmo CONVERSATIONS — graph deu 400/1487246 as
+//   11:49 e pipeboard criou o conjunto 120249829825270182 as 12:46. O diagnostico do
+//   card agora aponta o driver (era mandar o gestor mexer em WABA a toa).
 // v5.57 (01/09/2026) - CTWA: promoted_object so com DIGITOS (o display "+55 71 9189-4229"
-//   ia no payload e era invalido) e falha 1487246 vira diagnostico de ativo faltando
-//   no card, em vez da frase crua da Meta. Auditoria 11:49 provou que os 4 formatos
-//   (12, 13, +E.164, display) recusam igual: os numeros VISTTA nao estao em WABA alguma.
+//   ia no payload e era invalido) e falha 1487246 vira diagnostico no card, em vez da
+//   frase crua da Meta.
 // v5.56 (01/09/2026) - CTWA Messenger OFF: destination_type=WHATSAPP so (JUR/LF).
 //   Gestor exclui campanha de teste do Gerenciador; criar 100% pelo agente.
 // v5.55 (01/09/2026) - Destino MANUAL do Gerenciador na 1a tentativa:
@@ -3680,7 +3684,8 @@ Deno.serve(async (req) => {
       nota:
         "Destino MANUAL = WHATSAPP (Messenger OFF). Destino AUTOMATICO = Meta escolhe o canal — nao usamos. " +
         "promoted_object.whatsapp_phone_number e DIGITO; display so em texto humano. " +
-        "1487246 = numero fora das WABAs da conta: o Gerenciador lista numero so da Pagina, a Marketing API nao aceita.",
+        "1487246 = driver errado, nao numero errado: graph recusa numero ligado so a Pagina e o pipeboard cria " +
+        "(01/09/2026, mesmo payload). Conjunto CTWA sai por driver_por_acao.criar_conjunto_a_partir_de=pipeboard.",
       mcp_chamador: auth.chamador,
     });
   }
@@ -4468,13 +4473,14 @@ Deno.serve(async (req) => {
                 return {};
               }
             })();
-            diagCtwa = diagnosticoRecusaWhatsApp({
-              numero: promotedPedido?.whatsapp_phone_number ?? pl.whatsapp_phone_number,
-              temIdWaba: cands.some((c) => !!c.promoted.whats_app_business_phone_number_id),
-              formatosTentados: tentativasWa
-                .map((t) => String((t as any)?.label ?? ""))
-                .filter(Boolean),
-            });
+          diagCtwa = diagnosticoRecusaWhatsApp({
+            numero: promotedPedido?.whatsapp_phone_number ?? pl.whatsapp_phone_number,
+            temIdWaba: cands.some((c) => !!c.promoted.whats_app_business_phone_number_id),
+            formatosTentados: tentativasWa
+              .map((t) => String((t as any)?.label ?? ""))
+              .filter(Boolean),
+            driver,
+          });
           }
         }
       }

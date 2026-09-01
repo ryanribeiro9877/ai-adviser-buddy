@@ -66,10 +66,13 @@ assert(cands.some((c) => c.promoted.whatsapp_phone_number === "+557191894229"), 
 
 assert(formatDisplayWhatsAppGerenciador("557191894229") === "+55 71 9189-4229", "display CONJ.1");
 
-// Sem match no inventario a API recusa: o parecer nao pode prometer o conjunto.
+// Numero fora das WABAs AINDA emite: quem cria e o driver pipeboard (01/09/2026, o
+// mesmo payload que o graph recusou criou o conjunto 120249829825270182). Travar aqui
+// faria o agente recusar pedido que funciona.
 const parecerSemMatch = parecerPedidoWhatsAppConjunto("5571991894229");
-assert(parecerSemMatch.pode_usar_no_conjunto === false, "sem WABA nao promete conjunto");
-assert(parecerSemMatch.e_ativo_whatsapp_da_conta === false, "nao e ativo da conta");
+assert(parecerSemMatch.pode_usar_no_conjunto === true, "sem WABA ainda emite (pipeboard cria)");
+assert(parecerSemMatch.e_ativo_whatsapp_da_conta === false, "mas nao e ativo da conta");
+assert(!/WhatsApp Manager/.test(parecerSemMatch.decisao), "nao manda vincular WABA");
 assert(parecerSemMatch.whatsapp_phone_number === "557191894229", "parecer devolve digitos");
 assert(parecerSemMatch.display_gerenciador === "+55 71 9189-4229", "display separado do payload");
 assert(parecerSemMatch.destination_type === "WHATSAPP", "destino so WA");
@@ -82,12 +85,24 @@ assert(
 );
 assert(parecerPedidoWhatsAppConjunto("abc").pode_usar_no_conjunto === false, "lixo nao usa");
 
-const diag = diagnosticoRecusaWhatsApp({
+// Falhou no graph: o card tem que apontar o DRIVER, nao mandar mexer em WABA.
+const diagGraph = diagnosticoRecusaWhatsApp({
   numero: "5571991894229",
   temIdWaba: false,
   formatosTentados: ["wa_12", "wa_plus"],
+  driver: "graph",
 });
-assert(diag.includes("+55 71 9189-4229"), "diagnostico nomeia o numero");
-assert(/WhatsApp Manager/.test(diag), "diagnostico diz onde resolver");
+assert(diagGraph.includes("+55 71 9189-4229"), "diagnostico nomeia o numero");
+assert(/pipeboard/i.test(diagGraph), "diagnostico manda trocar o driver");
+assert(!/WhatsApp Manager/.test(diagGraph), "graph nao vira pedido de WABA");
+
+// Falhou ate no pipeboard: ai sim o problema e do ativo/conexao.
+const diagPb = diagnosticoRecusaWhatsApp({
+  numero: "5571991894229",
+  temIdWaba: false,
+  formatosTentados: ["wa_12"],
+  driver: "pipeboard",
+});
+assert(/Pipeboard recusou/.test(diagPb), "pipeboard recusando e outra historia");
 
 console.log("ok: _prova_whatsapp_pagina");
