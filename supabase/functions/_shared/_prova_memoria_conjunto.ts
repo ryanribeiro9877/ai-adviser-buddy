@@ -7,6 +7,7 @@ import {
   extrairNomesCriativoDaFala,
   extrairSlateDaFala,
   nomeCompostoForaDeEscopoTrafego,
+  pareceApprovalIdEmVezDeDrive,
   pecasDoConjunto,
   temSlateNoTexto,
 } from "./memoria_conjunto.ts";
@@ -81,5 +82,48 @@ assert(c1.some((p) => p.drive_file_id === "1gs0uF34wD3h4KRrknI5mcZ_Q32iod-tn"), 
 assert(c1.some((p) => p.nome.includes("Gourmet")), "gourmet no conj1");
 assert(c1.every((p) => /conhecer o La Felicit/i.test(String(p.cta ?? ""))), "cta conj1");
 assert(pecasDoConjunto(slate, 2).length === 1, "conj2 um video");
+
+// ===== approval_id entrando no lugar do drive_file_id (slate do VISTTA, 01/09/2026) =====
+// Os 9 valores que de fato sujaram conversation_slate, todos cauda de um approval_id.
+for (
+  const lixo of [
+    "19-4a55-b16f-45c3f2b89c2d",
+    "161c4d-a485-41d5-8db9-3d767be56976",
+    "17-0d0c-451b-ac6f-d0a9cfed777f",
+    "1cf413-fd3e-4fc6-bd9c-ec9302e40407",
+    "16619-8a44-4d57-a1f8-1b7896b63714",
+    "10f6-0865-4d6f-ad16-227e42c023b3",
+    "15-402a-9c1f-a8f3e1b5c9d2",
+    "151a44-18d7-491c-bc61-1a4f3ef743f3",
+    "18-76a7-4cf9-8c48-780cff8a7099",
+  ]
+) {
+  assert(pareceApprovalIdEmVezDeDrive(lixo), `deixou passar approval_id: ${lixo}`);
+}
+
+// Os ids de Drive REAIS da mesma conversa — inclusive os que tem hifen, que uma regra
+// ingenua de "tem hifen = invalido" derrubaria.
+for (
+  const bom of [
+    "1lmOkIVH1LUck_sXyeR23HnPn70gD_2uV",
+    "1ncp2yv-Jtwse150Lz2bGnrraCJs-JOoh",
+    "1-i4AgqTDwcZw_W4Vw-iedv52NYNutPkU",
+    "1OnXG-f9MNVYP5582hByWYb5bnquKvmOg",
+    "1CWC-JwBm_aIiEfwf1RKHNoTcard0bMjX",
+    "15THl76qsL__XJkEF0H1uyeiHLWmGGojt",
+    "1WEyQ3PwF5i21Yx9WJVJSCI9Bo7cmsKuU",
+    "1irTnZ7pGEHJCxnPC8BI9PMjDTfdAqEF4",
+    "12VfWYmLfmdfLsBaZgax9PEqjKNa9Tfhs",
+    "1gs0uF34wD3h4KRrknI5mcZ_Q32iod-tn",
+  ]
+) {
+  assert(!pareceApprovalIdEmVezDeDrive(bom), `recusou id de Drive legitimo: ${bom}`);
+}
+
+// approval_id inteiro tambem cai — foi assim que o valor nasceu antes de ser truncado.
+assert(
+  pareceApprovalIdEmVezDeDrive("b7c8d92f-4e15-402a-9c1f-a8f3e1b5c9d2"),
+  "deixou passar approval_id completo",
+);
 
 console.log("ok: _prova_memoria_conjunto");

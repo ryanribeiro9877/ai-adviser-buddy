@@ -718,6 +718,7 @@ import {
   numeroConjuntoDeSinais,
   numeroConjuntoDoNome,
   pareceNomeDePecaNaoMolde,
+  pareceApprovalIdEmVezDeDrive,
   pecaChaveDoSlate,
   recusarConjuntoErrado,
   recusarCruzamentoLinhaProduto,
@@ -4549,6 +4550,19 @@ async function t_registrar_peca_da_conversa(
   const conjunto = Number(args?.conjunto ?? 0);
   if (!drive || !nome || conjunto < 1) {
     return { erro: "peca_incompleta", detalhe: "Informe conjunto, drive_file_id e nome." };
+  }
+  // v28.90: em 01/09/2026 o slate desta conversa recebeu 9 pecas cujo drive_file_id era
+  // PEDACO de approval_id ("15-402a-9c1f-a8f3e1b5c9d2", de b7c8d92f-4e15-402a-…) e cujo
+  // angulo era "📋 Pendente" — o modelo copiou as colunas da propria tabela de cards para
+  // dentro dos argumentos. Como o upsert e por peca_chave, o lixo SOBRESCREVEU o id real e
+  // o slate, que e a lista contratual das pecas, passou a apontar para nada.
+  if (pareceApprovalIdEmVezDeDrive(drive)) {
+    return {
+      erro: "drive_file_id_invalido",
+      detalhe:
+        `"${drive}" tem cauda de UUID, entao e approval_id ou pedaco dele — nao id do Drive. ` +
+        `Pegue o drive_file_id em get_acervo_para_anuncio ou get_slate_da_conversa e registre de novo.`,
+    };
   }
   const peca: PecaSlate = {
     conjunto,

@@ -249,6 +249,24 @@ export function temSlateNoTexto(s: string): boolean {
   return /conj(?:unto)?\.?\s*0*[1-9]/i.test(t) && RE_DRIVE_ID.test(t) && /\.mp4/i.test(t);
 }
 
+/**
+ * O que chegou como drive_file_id e, na verdade, approval_id (ou um pedaco dele).
+ *
+ * O DEFEITO QUE ISTO CONSERTA (01/09/2026): o slate da conversa do VISTTA recebeu 9 pecas com
+ * drive_file_id do tipo "15-402a-9c1f-a8f3e1b5c9d2" — cauda de b7c8d92f-4e15-402a-9c1f-… — e
+ * angulo "📋 Pendente". O modelo copiou colunas da propria tabela de cards para dentro dos
+ * argumentos da tool. Como o upsert e por peca_chave, o lixo SOBRESCREVEU o id real: o slate,
+ * que e a lista contratual das pecas, passou a apontar para nada.
+ *
+ * Hifen sozinho nao serve de sinal — "1-i4AgqTDwcZw_W4Vw-iedv52NYNutPkU" e id de Drive real.
+ * Comprimento tambem nao: um dos lixos tinha 34 caracteres. O que separa os dois mundos e a
+ * CAUDA de UUID (hex4-hex4-hex12 no fim): casa nos 9 lixos medidos e em nenhum dos 16 ids
+ * reais da mesma conversa, porque id de Drive tem letra fora do hexa e grupos de outro tamanho.
+ */
+export function pareceApprovalIdEmVezDeDrive(driveFileId: string): boolean {
+  return /-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(driveFileId ?? "").trim());
+}
+
 export function pecaChaveDoSlate(p: { conjunto: number; nome: string; drive_file_id: string }): string {
   const slug = String(p.nome ?? "")
     .replace(/\.[a-z0-9]+$/i, "")
