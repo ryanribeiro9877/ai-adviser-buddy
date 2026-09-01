@@ -207,38 +207,18 @@ export async function listarWhatsAppDaPagina(opts: {
   };
 
   if (pageId) {
-    const page = await getSafe(
-      opts.gAds,
-      `/${pageId}?fields=id,name,whatsapp_number,whatsapp_business_account,has_whatsapp_number,has_whatsapp_business_number`,
-    );
+    const page = await getSafe(opts.gAds, `/${pageId}?fields=id,name`);
     if (page.erro) erros.push(`page:${page.erro}`);
-    else {
-      pageNome = page.body?.name != null ? String(page.body.name) : null;
-      if (page.body?.whatsapp_number) {
-        mergeNumero(mapa, {
-          display: String(page.body.whatsapp_number),
-          digitos: soDigitosWa(page.body.whatsapp_number),
-          fonte: "page.whatsapp_number",
-        });
-      }
-      const extraNums = await getSafe(opts.gAds, `/${pageId}?fields=whatsapp_numbers`);
-      if (!extraNums.erro) {
-        const raw = extraNums.body?.whatsapp_numbers;
-        ingestPhones(
-          Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : [],
-          "page.whatsapp_numbers",
-        );
-      }
-      const waba = page.body?.whatsapp_business_account;
-      const wabaId = waba?.id != null ? String(waba.id) : "";
-      if (wabaId) {
-        const ph = await getSafe(
-          opts.gWaba ?? opts.gAds,
-          `/${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name,status,platform_type&limit=50`,
-        );
-        if (ph.erro) erros.push(`waba_page:${ph.erro}`);
-        else ingestPhones(ph.body?.data ?? [], "page.whatsapp_business_account");
-      }
+    else pageNome = page.body?.name != null ? String(page.body.name) : null;
+
+    const pageWa = await getSafe(opts.gAds, `/${pageId}?fields=whatsapp_number,has_whatsapp_number`);
+    if (pageWa.erro) erros.push(`page_wa:${pageWa.erro}`);
+    else if (pageWa.body?.whatsapp_number) {
+      mergeNumero(mapa, {
+        display: String(pageWa.body.whatsapp_number),
+        digitos: soDigitosWa(pageWa.body.whatsapp_number),
+        fonte: "page.whatsapp_number",
+      });
     }
 
     const wabasPage = await getSafe(

@@ -3629,9 +3629,7 @@ Deno.serve(async (req) => {
       .map((f: any) => String(f?.name ?? f ?? ""))
       .filter((n: string) => /whatsapp|phone|messag/i.test(n))
       .slice(0, 80);
-    const pageLive = await g(
-      `/${pageId}?fields=id,name,whatsapp_number,whatsapp_numbers,has_whatsapp_number,has_whatsapp_business_number,whatsapp_business_account`,
-    );
+    const pageLive = await g(`/${pageId}?fields=id,name,whatsapp_number,has_whatsapp_number`);
     const wabasPage = await g(
       `/${pageId}/whatsapp_business_accounts?fields=id,name,phone_numbers{id,display_phone_number,verified_name,status,platform_type}&limit=25`,
     );
