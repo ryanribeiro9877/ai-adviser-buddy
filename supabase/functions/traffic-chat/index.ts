@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v28.86)
+// supabase/functions/traffic-chat/index.ts (v28.87)
+// v28.87 (01/09/2026) - Dois travamentos medidos nos anuncios do CONJ.1_VISTTA:
+//   (a) conjunto ARQUIVADO disputava nome com o vivo e gerava conjunto_destino_ambiguo
+//       eterno — arquivado sai do pool, e duplicata na MESMA campanha passa a pedir
+//       conjunto_destino_external_id (campanha_destino nao desempata, era beco sem saida);
+//   (b) peca ja na biblioteca chegava so com meta_video_id e caia em
+//       anuncio_molde_nao_encontrado — agora vale como peca nova e o drive_file_id e
+//       recuperado do media_uploads (id desconhecido recusa, nao inventa).
 // v28.86 (01/09/2026) - CTWA cria pelo PIPEBOARD. Comparacao controlada desmentiu a
 //   v28.85: mesmo promoted_object em digitos, graph deu 1487246 as 11:49 e pipeboard
 //   criou o conjunto 120249829825270182 as 12:46. casou_na_api=false volta a ser so
@@ -662,6 +669,8 @@ import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto }
 import {
   classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
+  conjuntoVivoParaDestino,
+  desempateDeConjunto,
   escolherConjuntosDaMesmaLinha,
   escolherConjuntosPorNumeroELinha,
   escolherNomeCriativoTravado,
@@ -810,7 +819,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.86";
+const VERSAO = "chat-v28.87";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -3252,10 +3261,11 @@ async function t_propose_criacao(
     const linksConversa = extrairLinksWaMePorConjunto(falaConv.blob);
     // CONJ.N + linha: nunca o conjunto mais novo da mesma linha (CONJ.1 ↛ CONJ.4).
     if (!conjuntoDestinoParam && nConjuntoPedido) {
-      const { data: setsAlias } = await supa
+      const { data: setsAliasRaw } = await supa
         .from("ad_sets")
-        .select("external_id,name,campaign_id,created_at,destination_type")
+        .select("external_id,name,campaign_id,created_at,destination_type,status")
         .eq("company_id", companyId);
+      const setsAlias = (setsAliasRaw ?? []).filter(conjuntoVivoParaDestino);
       const { data: campsAlias } = await supa
         .from("campaigns")
         .select("id,name")
@@ -3285,8 +3295,10 @@ async function t_propose_criacao(
       } else if (pool.length > 1) {
         return {
           erro: "conjunto_destino_ambiguo",
-          detalhe:
-            `Ha ${pool.length} conjuntos CONJ.${nConjuntoPedido} da mesma linha. Informe params.campanha_destino (nome). Nao peca ID Graph.`,
+          detalhe: desempateDeConjunto(
+            `Ha ${pool.length} conjuntos CONJ.${nConjuntoPedido} da mesma linha.`,
+            pool,
+          ),
           candidatos: pool.slice(0, 8).map((s: any) => ({
             nome: s.name,
             external_id: s.external_id,
@@ -3342,15 +3354,48 @@ async function t_propose_criacao(
     const childAttachmentsRaw = Array.isArray(params?.child_attachments) ? params.child_attachments : null;
     const temCarrossel = !!(childAttachmentsRaw && childAttachmentsRaw.length >= 2);
     const metaImageHashEarly = String(params?.meta_image_hash ?? "").trim();
+    // v28.87: peca JA na biblioteca chega so com meta_video_id (upload_midia devolveu o id e
+    // o drive_file_id ficou para tras). Sem contar esse sinal, a rota caia em
+    // anuncio_molde_nao_encontrado procurando um anuncio chamado como o CONJUNTO — foi o loop
+    // medido em 01/09/2026 nos 6 anuncios do CONJ.1_VISTTA.
+    const metaVideoIdEarly = String(params?.meta_video_id ?? "").trim();
+    // Recuperar o drive_file_id pelo meta_video_id faz o resto do fluxo (checagem de
+    // biblioteca, status de processamento, montagem do card) funcionar igual ao caminho
+    // normal — e valida o id contra media_uploads em vez de confiar num numero do modelo,
+    // que a doutrina proibe inventar.
+    if (!driveFileId && metaVideoIdEarly && !temCarrossel) {
+      const { data: upVid } = await supa.from("media_uploads")
+        .select("drive_file_id")
+        .eq("company_id", companyId)
+        .eq("meta_video_id", metaVideoIdEarly)
+        .eq("status", "enviado")
+        .order("enviado_em", { ascending: false })
+        .limit(1).maybeSingle();
+      const recuperado = String((upVid as any)?.drive_file_id ?? "").trim();
+      if (recuperado) {
+        driveFileId = recuperado;
+        params.drive_file_id = recuperado;
+      } else {
+        return {
+          erro: "meta_video_id_desconhecido",
+          detalhe:
+            `meta_video_id=${metaVideoIdEarly} nao aparece em media_uploads desta empresa como enviado. ` +
+            `NAO emiti o card: id de video nao se inventa nem se copia de outra conta.`,
+          instrucao:
+            "Pegue o id pelo retorno de upload_midia da peca certa, ou mande params.drive_file_id " +
+            "que o codigo resolve o video sozinho.",
+        };
+      }
+    }
     // ESP-35: peca nova pode omitir molde (target_name vazio / "sem_molde" / params.sem_molde).
     // v28.60: video/chave do slate + drive_file_id NAO e molde — nao recusar anuncio_molde_nao_encontrado.
-    let semMolde = !!(driveFileId || temCarrossel || metaImageHashEarly) && (
+    let semMolde = !!(driveFileId || temCarrossel || metaImageHashEarly || metaVideoIdEarly) && (
       ehFlagSemMolde(params?.sem_molde) ||
       !nomeAlvo ||
       pareceNomeDePecaNaoMolde(nomeAlvo) ||
       ehSentinelaSemMolde(nomeAlvo)
     );
-    if (!semMolde && !nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar (ou 'sem_molde' + drive_file_id / child_attachments / meta_image_hash para peca nova sem herdar molde)" };
+    if (!semMolde && !nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar (ou 'sem_molde' + drive_file_id / meta_video_id / child_attachments / meta_image_hash para peca nova sem herdar molde)" };
     if (!conjuntoDestino && !nConjuntoPedido) {
       return {
         erro:
@@ -3365,7 +3410,9 @@ async function t_propose_criacao(
         ?? (anuncios ?? []).find((x) => String(x.external_id ?? "") === String(nomeAlvo))
         ?? (anuncios ?? []).find((x) => String(x.creative_id ?? "") === String(nomeAlvo))
         ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
-      if (!molde && driveFileId) {
+      if (!molde && (driveFileId || metaVideoIdEarly || metaImageHashEarly)) {
+        // Tem midia propria: nao existe molde a procurar. v28.87 inclui a peca que ja subiu
+        // para a biblioteca (meta_video_id) — antes so drive_file_id salvava daqui.
         semMolde = true;
       } else if (!molde) {
         const pareceIdMeta = /^\d{10,}$/.test(String(nomeAlvo));
@@ -3392,7 +3439,9 @@ async function t_propose_criacao(
       if (molde && !molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
     }
 
-    const { data: sets } = await supa.from("ad_sets").select("id,name,external_id,campaign_id,destination_type,optimization_goal,promoted_object,created_at").eq("company_id", companyId);
+    const { data: setsRaw } = await supa.from("ad_sets").select("id,name,external_id,campaign_id,destination_type,optimization_goal,promoted_object,created_at,status").eq("company_id", companyId);
+    // Arquivado nao disputa nome com objeto vivo (v28.87).
+    const sets = (setsRaw ?? []).filter(conjuntoVivoParaDestino);
     const { data: campsAll } = await supa.from("campaigns").select("id,name,external_id,objective").eq("company_id", companyId);
     const campanhaHint = String(
       params?.campanha_destino ?? params?.campanha_destino_external_id ?? params?.campanha_destino_nome ?? "",
@@ -3433,8 +3482,10 @@ async function t_propose_criacao(
         else {
           return {
             erro: "conjunto_destino_ambiguo",
-            detalhe:
-              `Ha ${poolNome.length} conjuntos para '${conjuntoDestino}'. Informe params.campanha_destino (nome). Nao peca ID Graph.`,
+            detalhe: desempateDeConjunto(
+              `Ha ${poolNome.length} conjuntos para '${conjuntoDestino}'.`,
+              poolNome,
+            ),
             candidatos: poolNome.slice(0, 8).map((s: any) => {
               const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
               return {
@@ -3471,8 +3522,7 @@ async function t_propose_criacao(
       } else {
         return {
           erro: "conjunto_destino_ambiguo",
-          detalhe:
-            `Ha ${pool.length} conjuntos CONJ.${nConjuntoPedido}. Informe params.campanha_destino (nome).`,
+          detalhe: desempateDeConjunto(`Ha ${pool.length} conjuntos CONJ.${nConjuntoPedido}.`, pool),
           candidatos: pool.slice(0, 8).map((s: any) => {
             const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
             return { nome: s.name, external_id: s.external_id, campanha: camp?.name ?? null };

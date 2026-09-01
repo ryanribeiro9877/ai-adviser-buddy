@@ -441,6 +441,43 @@ export function recusarCruzamentoLinhaProduto(opts: {
   };
 }
 
+/**
+ * Conjunto arquivado/apagado NAO e destino de anuncio — ele so cria ambiguidade de nome.
+ *
+ * Medido 01/09/2026: o gestor arquivou a duplicata CONJ.1_VISTTA (120249829825270182) e
+ * ficou preso em conjunto_destino_ambiguo por horas, porque o espelho listava as duas
+ * como candidatas. Nome repetido e normal na conta; nome repetido entre um objeto vivo e
+ * um arquivado nao e ambiguidade nenhuma.
+ */
+export function conjuntoVivoParaDestino(row: { status?: unknown } | null | undefined): boolean {
+  const st = String((row as { status?: unknown })?.status ?? "").trim().toUpperCase();
+  return st !== "ARCHIVED" && st !== "DELETED";
+}
+
+/**
+ * Instrucao de desempate honesta quando sobram varios conjuntos com o mesmo nome.
+ *
+ * Mandar "informe params.campanha_destino" quando as duplicatas estao na MESMA campanha
+ * e um beco sem saida: o agente reenvia com a campanha, cai no mesmo erro e entra em loop
+ * (medido 01/09/2026 nos anuncios do CONJ.1_VISTTA). Nesse caso o unico desempate real e
+ * o external_id, entao e ele que tem que ser pedido.
+ */
+export function desempateDeConjunto(
+  prefixo: string,
+  pool: Array<{ campaign_id?: unknown; external_id?: unknown }>,
+): string {
+  const campanhas = new Set(pool.map((s) => String(s?.campaign_id ?? "")));
+  const ids = pool.map((s) => String(s?.external_id ?? "")).filter(Boolean).slice(0, 8);
+  if (campanhas.size <= 1) {
+    return `${prefixo} Estao TODOS na mesma campanha, entao params.campanha_destino NAO desempata — ` +
+      `nao reenvie com ela. Escolha um external_id de candidatos e mande em ` +
+      `params.conjunto_destino_external_id (${ids.join(" ou ")}). ` +
+      `Se um deles for duplicata que o gestor arquivou, peca a ele qual fica.`;
+  }
+  return `${prefixo} Informe params.campanha_destino (nome). ` +
+    `Se ainda empatar dentro da mesma campanha, use params.conjunto_destino_external_id.`;
+}
+
 /** Auto-pick de CONJ.N: so conjuntos cuja campanha/nome e da mesma linha da peca. */
 export function escolherConjuntosDaMesmaLinha<T extends { name?: string | null }>(
   hits: T[],

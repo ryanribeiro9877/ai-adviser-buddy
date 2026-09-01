@@ -6,6 +6,8 @@ import {
   ERRO_CRUZAMENTO_LINHA_PRODUTO,
   classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
+  conjuntoVivoParaDestino,
+  desempateDeConjunto,
   escolherConjuntosDaMesmaLinha,
   escolherConjuntosPorNumeroELinha,
   numeroConjuntoDaFala,
@@ -160,5 +162,34 @@ assert(/PROIBIDO pedir ao gestor o ID numerico da Meta/.test(chat), "nao pede ID
 assert(meta.includes("recusarConjuntoErrado"), "apply recusa CONJ.N errado");
 assert(job.includes("recusarConjuntoErrado"), "job recusa CONJ.N errado");
 assert(mcp.includes("recusarConjuntoErrado"), "mcp recusa CONJ.N errado");
+
+// 01/09/2026: duplicata arquivada travou os anuncios do CONJ.1_VISTTA por horas.
+// Arquivado nao e candidato, e duplicata na MESMA campanha nao se desempata por campanha.
+assert(conjuntoVivoParaDestino({ status: "ACTIVE" }), "ACTIVE e destino valido");
+assert(conjuntoVivoParaDestino({ status: "PAUSED" }), "PAUSED ainda recebe anuncio");
+assert(conjuntoVivoParaDestino({}), "status ausente nao some do pool");
+assert(!conjuntoVivoParaDestino({ status: "ARCHIVED" }), "ARCHIVED fora do pool");
+assert(!conjuntoVivoParaDestino({ status: "archived" }), "case nao muda o veredito");
+assert(!conjuntoVivoParaDestino({ status: "DELETED" }), "DELETED fora do pool");
+
+const mesmaCamp = desempateDeConjunto("Ha 2 conjuntos.", [
+  { campaign_id: "c1", external_id: "120249829825270182" },
+  { campaign_id: "c1", external_id: "120249830986060182" },
+]);
+assert(/NAO desempata/.test(mesmaCamp), "mesma campanha: campanha_destino nao resolve");
+assert(/conjunto_destino_external_id/.test(mesmaCamp), "pede o id, que e o unico desempate");
+assert(/120249830986060182/.test(mesmaCamp), "lista os ids para escolher");
+
+const campsDiferentes = desempateDeConjunto("Ha 2 conjuntos.", [
+  { campaign_id: "c1", external_id: "1" },
+  { campaign_id: "c2", external_id: "2" },
+]);
+assert(/params\.campanha_destino/.test(campsDiferentes), "campanhas distintas: pedir a campanha");
+assert(!/NAO desempata/.test(campsDiferentes), "nao contradiz quando a campanha resolve");
+
+assert(chat.includes("conjuntoVivoParaDestino"), "chat filtra conjunto arquivado");
+assert(chat.includes("desempateDeConjunto"), "chat usa o desempate honesto");
+assert(chat.includes("metaVideoIdEarly"), "peca ja na biblioteca dispensa molde");
+assert(chat.includes("meta_video_id_desconhecido"), "meta_video_id e validado no espelho");
 
 console.log("ok: _prova_linha_produto");

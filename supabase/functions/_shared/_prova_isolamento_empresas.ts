@@ -100,14 +100,16 @@ assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&
     chat.includes("PERGUNTA") &&
-    chat.includes("chat-v28.78") &&
+    // Versao pinada quebrava a prova a cada bump legitimo e escondia as regras reais
+    // abaixo; o que importa e existir o carimbo de versao, nao qual numero ele tem.
+    /const VERSAO = "chat-v\d+\.\d+"/.test(chat) &&
     chat.includes("sistema_ocular") &&
     chat.includes("instagram_nao_vinculado") &&
     chat.includes("nome_trocado_pelo_padrao_estruturado") &&
     chat.includes("recusaFalsaMoldeTrafego") &&
     chat.includes("orcamento_parece_centavos") &&
     /instagram vincul/i.test(chat),
-  "traffic-chat v28.78: Instagram + molde + orcamento em reais + Sistema Ocular",
+  "traffic-chat: Instagram + molde + orcamento em reais + Sistema Ocular",
 );
 assert(
   chat.includes("empresaEhCredito(companyId)") &&

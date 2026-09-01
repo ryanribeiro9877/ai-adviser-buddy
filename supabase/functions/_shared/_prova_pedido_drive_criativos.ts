@@ -63,7 +63,9 @@ assert(chat.includes("pedidoExigeInventarioDrive"), "chat importa detector Drive
 assert(job.includes("pedidoExigeInventarioDrive"), "job importa detector Drive");
 assert(job.includes("FOCO_CRIATIVOS_DRIVE"), "job tem foco Drive forcado");
 assert(job.includes("inventario Drive (nao overview de campanha)"), "job forca plano Drive");
-assert(job.includes("job-v4.12"), "job versao 4.12");
+// Pinar o numero exato quebrava a prova a cada bump legitimo; o que ela precisa
+// garantir e que o job continua carimbando versao.
+assert(/job-v\d+\.\d+/.test(job), "job carimba versao");
 assert(
   job.includes('acao: "thumbnails"') && job.includes("company_id: companyId || undefined"),
   "multiquadro passa company_id ao thumbnails da empresa",
@@ -71,7 +73,7 @@ assert(
 assert(job.includes("v4.4"), "job ainda tem conserto Drive v4.4");
 assert(chat.includes("MSG_NUDGE_DRIVE"), "chat tem nudge se nao coletar Drive");
 assert(chat.includes("R1-DRIVE"), "chat R1-DRIVE");
-assert(chat.includes("chat-v28.78"), "chat versao 28.78");
+assert(/chat-v\d+\.\d+/.test(chat), "chat carimba versao");
 assert(chat.includes("get_slate_da_conversa"), "chat expoe slate duravel");
 assert(pedidoUsaSlateExistente(
   "vamos iniciar com o conjunto 1, de acordo com sua analise e definicao dos 8 videos que selecionou, gere legendas para cada um deles",
