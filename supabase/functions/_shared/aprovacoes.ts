@@ -359,7 +359,13 @@ export function traduzirFalha(
 //
 // Por isso a checagem local so PRE-SELECIONA: o que ela nao reconhece vira candidato, e
 // quem decide e o banco (approvalIdsInexistentes). Sem consulta, nao ha veredito.
-const RE_UUID_CARD = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+// Casa o FORMATO 8-4-4-4-12 com qualquer alfanumerico, nao so hexadecimal. O modelo inventa
+// id fora do hexa: "6d3b9f5e-7c0a-52b4-d0e9-3g6f8e4d7b3g" e "7e4c0g6f-8d1b-63c5-e1f0-4h7g9f5e8c4h"
+// foram publicados como cards de pausa do CONJ.2 em 01/09/2026, e a versao so-hexa nem os via.
+// UUID real e subconjunto disto, entao nada verdadeiro deixa de ser reconhecido.
+const RE_UUID_CARD = /[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{12}/gi;
+/** approval_id real e sempre UUID hexadecimal. Fora disso, nao ha o que consultar. */
+const RE_UUID_VALIDO = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Ids citados no texto que NAO vieram de ferramenta nesta rodada. Sao apenas CANDIDATOS a
@@ -418,17 +424,24 @@ export async function approvalIdsInexistentes(
 ): Promise<string[]> {
   const ids = [...new Set(candidatos.map((c) => String(c ?? "").toLowerCase()).filter(Boolean))];
   if (!ids.length || !ctx.companyId) return [];
+
+  // Id fora do hexadecimal nao precisa (nem pode) ir ao banco: a coluna e uuid e a consulta
+  // estouraria, caindo no catch abaixo e absolvendo justamente o caso mais obvio de invencao.
+  const consultaveis = ids.filter((id) => RE_UUID_VALIDO.test(id));
+  const malformados = ids.filter((id) => !RE_UUID_VALIDO.test(id));
+  if (!consultaveis.length) return malformados;
+
   let achados: Array<{ id?: unknown }> | null = null;
   try {
-    achados = await ctx.buscar(ids);
+    achados = await ctx.buscar(consultaveis);
   } catch {
-    return [];
+    return malformados;
   }
-  if (achados == null) return [];
+  if (achados == null) return malformados;
   const existentes = new Set(
     achados.map((r) => String(r?.id ?? "").toLowerCase()).filter(Boolean),
   );
-  return ids.filter((id) => !existentes.has(id));
+  return [...malformados, ...consultaveis.filter((id) => !existentes.has(id))];
 }
 
 /**

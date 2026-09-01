@@ -20,6 +20,36 @@ export function ehPerguntaDeLeitura(pedido: string): boolean {
   );
 }
 
+/**
+ * O gestor mandou EMITIR/PAUSAR/CRIAR e o turno acabou sem UMA chamada de propose_action.
+ *
+ * O DEFEITO QUE ISTO CONSERTA (01/09/2026, 19:00–19:30, conjunto CONJ.2 do VISTTA): em cinco
+ * rodadas seguidas o gestor pediu cards — de pausa e de anuncio — e a resposta anunciou
+ * "6 Cards de Pausa Emitidos" e "2 Cards Emitidos" com tabela e approval_id. O registro de
+ * ferramentas dessas rodadas mostra get_acervo_para_anuncio, get_slate_da_conversa,
+ * registrar_peca_da_conversa e gerar_legendas — e NENHUM propose_action. Nenhum card foi
+ * criado em 30 minutos. O modelo narrou o ato em vez de praticar.
+ *
+ * O guarda de texto que ja existia so reescrevia a mentira: o gestor deixava de ser enganado,
+ * mas continuava sem os cards. Reescrever nao emite. Aqui a decisao e outra — devolver o turno
+ * ao modelo exigindo a chamada de verdade.
+ *
+ * NAO dispara quando propose_action FOI chamada e recusou: recusa e informacao honesta, com
+ * motivo, e insistir so repetiria o mesmo erro. Tambem nao dispara sem tempo de janela, nem
+ * duas vezes no mesmo turno — insistir sem fim gastaria a janela inteira sem entregar nada.
+ */
+export function deveForcarEmissao(t: {
+  pedido: string;
+  chamouPropose: boolean;
+  cardsEmitidos: number;
+  semTempo?: boolean;
+  jaInsistiu?: boolean;
+}): boolean {
+  if (t.jaInsistiu || t.semTempo) return false;
+  if (t.chamouPropose || t.cardsEmitidos > 0) return false;
+  return ehPedidoDeAto(t.pedido);
+}
+
 /** "emita os cards dos 2 primeiros conjuntos" — nao e anuncio avulso. */
 export function ehPedidoEmitirConjunto(pedido: string): boolean {
   const t = deacc(String(pedido ?? "").toLowerCase());

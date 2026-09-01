@@ -173,4 +173,55 @@ const EXISTE_MAS_NAO_VEIO_DE_TOOL = "7a3c6518-76a7-4cf9-8c48-780cff8a7099";
   ok(veredito.length === 0, "acusou sem empresa para recortar a consulta");
 }
 
+// ===== ID FORA DO HEXA: os cards de pausa do CONJ.2 (01/09/2026, 19:10) =====
+// "6d3b9f5e-7c0a-52b4-d0e9-3g6f8e4d7b3g" tem 'g' — nao e UUID. A versao so-hexa nem enxergava.
+const FORA_DO_HEXA = [
+  "6d3b9f5e-7c0a-52b4-d0e9-3g6f8e4d7b3g",
+  "7e4c0g6f-8d1b-63c5-e1f0-4h7g9f5e8c4h",
+];
+
+// 14) O formato invalido e reconhecido como citacao de card.
+{
+  const achados = approvalIdsInventados(
+    `| 4 | ${FORA_DO_HEXA[0]} | AD_CONJ.2_APENAS_OCULOS_4 |`,
+    { cardsDaRodada: [], cardsDoTurno: null, retornosDeFerramenta: null },
+  );
+  ok(achados.length === 1, "id fora do hexa passou despercebido");
+}
+
+// 15) Ele e condenado SEM ir ao banco — consulta em coluna uuid estouraria e o catch
+//     acabaria absolvendo justo o caso mais obvio de invencao.
+{
+  let foiAoBanco = false;
+  const veredito = await approvalIdsInexistentes(FORA_DO_HEXA, {
+    companyId: "57f755b9-c23d-4f58-a488-8173d697c010",
+    buscar: async () => {
+      foiAoBanco = true;
+      throw new Error("invalid input syntax for type uuid");
+    },
+  });
+  ok(veredito.length === 2, `malformado absolvido: ${veredito.join(", ")}`);
+  ok(!foiAoBanco, "levou id nao-uuid para a consulta");
+}
+
+// 16) Mistura de malformado com uuid real: um cai, o outro fica, e a consulta so recebe o valido.
+{
+  let recebidos: string[] = [];
+  const veredito = await approvalIdsInexistentes(
+    [FORA_DO_HEXA[0], EXISTE_MAS_NAO_VEIO_DE_TOOL],
+    {
+      companyId: "57f755b9-c23d-4f58-a488-8173d697c010",
+      buscar: async (ids) => {
+        recebidos = ids;
+        return [{ id: EXISTE_MAS_NAO_VEIO_DE_TOOL }];
+      },
+    },
+  );
+  ok(veredito.length === 1 && veredito[0] === FORA_DO_HEXA[0], "mistura resolvida errado");
+  ok(
+    recebidos.length === 1 && recebidos[0] === EXISTE_MAS_NAO_VEIO_DE_TOOL,
+    "consulta recebeu id que nao e uuid",
+  );
+}
+
 console.log("ok: _prova_card_inventado");

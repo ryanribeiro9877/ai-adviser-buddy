@@ -1,4 +1,14 @@
-// supabase/functions/traffic-chat/index.ts (v28.89)
+// supabase/functions/traffic-chat/index.ts (v28.90)
+// v28.90 (01/09/2026) - O AGENTE NARRAVA O ATO EM VEZ DE PRATICAR. Das 19:00 as 19:30, cinco
+//   rodadas seguidas do CONJ.2_VISTTA anunciaram "6 Cards de Pausa Emitidos" e "2 Cards
+//   Emitidos", com tabela e approval_id. O tool_calls dessas mensagens mostra acervo, slate,
+//   registrar_peca e gerar_legendas — e NENHUM propose_action. Zero cards em meia hora.
+//   O guarda de texto so reescrevia a mentira: o gestor parava de ser enganado e continuava
+//   sem os cards. Reescrever nao emite. Agora, quando o gestor pede ato e o turno vai fechar
+//   sem uma unica chamada de propose_action, o turno VOLTA ao modelo exigindo a chamada
+//   (uma insistencia; nao insiste se a ferramenta ja foi chamada e recusou, nem sem janela).
+//   Junto: o id inventado nao precisa ser hexadecimal para ser pego — "…-3g6f8e4d7b3g" foi
+//   publicado como card e a expressao so-hexa nem o via.
 // v28.89 (01/09/2026) - O GUARDA DA v28.88 ACUSOU CARD VERDADEIRO. Vinte minutos depois de
 //   subir, ele marcou 7a3c6518… e f54be98f… como inexistentes: sao os cards _5 e _6 do
 //   CONJ.3, criados as 18:15, que o modelo citou de memoria sem rechamar tool. "Nenhuma
@@ -720,7 +730,7 @@ import {
   idInstagramDeParams,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
-import { ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
+import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
 import { tDetalheAnuncios, DEF_GET_DETALHE_ANUNCIOS, casarCampanhas, escolherCampanhaUnica, janelaDetalhe } from "../_shared/leitura_desempenho.ts";
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
 import {
@@ -840,7 +850,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.89";
+const VERSAO = "chat-v28.90";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -878,6 +888,17 @@ const MSG_NUDGE_SLATE =
   "Inventario Drive (N videos da pasta) NAO e o slate e NAO apaga a selecao. " +
   "Use os drive_file_ids do store. PROIBIDO pedir ao gestor para re-colar. " +
   "PROIBIDO recusar porque o acervo 'nao traz o slate'. Chame gerar_legendas por peca agora.";
+const MSG_NUDGE_EMITIR_DE_FATO =
+  "[CORRECAO DO SISTEMA — nao e o gestor] O gestor pediu um ATO (emitir/pausar/criar) e este " +
+  "turno terminou SEM nenhuma chamada de propose_action. Logo, NAO existe card nenhum: o que " +
+  "voce escreveu descreve um ato que nao aconteceu. Tabela de cards, approval_id, 'pendente', " +
+  "'em emissao' e 'continuando automaticamente' sao FALSOS enquanto a ferramenta nao devolver " +
+  "o identificador — approval_id voce NUNCA escreve de cabeca, so copia do retorno da tool. " +
+  "AGORA, nesta rodada: chame propose_action de verdade, uma chamada por item pedido, ate 2 por " +
+  "bloco, com os dados ja levantados nesta conversa (conjunto, criativo, legenda, numero). " +
+  "Para desligar anuncio publicado a acao e pausar_criativo (target_name = nome do anuncio); " +
+  "excluir nao existe. Se algum item nao puder virar card, emita os que podem e diga em UMA " +
+  "linha, sem tabela, qual ficou de fora e por que.";
 const MSG_NUDGE_LEGENDAS =
   "[CORRECAO DO SISTEMA — nao e o gestor] gerar_legendas NAO esta 'indisponivel' como desculpa para parar. " +
   "Chame gerar_legendas de novo (produto=imovel, meio=la_felicita, drive_file_id de cada peca do SLATE). " +
@@ -6494,6 +6515,7 @@ Deno.serve(async (req) => {
   let nudgesUpload = 0;
   let nudgesSlate = 0;
   let nudgesLegendas = 0;
+  let nudgesEmitir = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
   const pedidoUploadTurno = ehPedidoUploadLote(objetivoOriginal);
   const nPendentesCp = (turnCheckpoint?.pendentes_upload ?? []).length;
@@ -6935,6 +6957,23 @@ Deno.serve(async (req) => {
         finishReason = String(finishReason || "stop") + "+nudge_upload";
         continue;
       }
+    }
+    // v28.90: pediu ato e o turno vai fechar sem UMA chamada de propose_action. Reescrever a
+    // prosa nao cria card; devolver o turno exigindo a chamada, sim.
+    if (
+      deveForcarEmissao({
+        pedido: objetivoOriginal,
+        chamouPropose: toolsIncluemPropose(toolsUsed),
+        cardsEmitidos: actionCards.length,
+        semTempo: deadlineTools,
+        jaInsistiu: nudgesEmitir > 0,
+      })
+    ) {
+      nudgesEmitir++;
+      messages.push({ role: "assistant", content: reply || "(sem texto)" });
+      messages.push({ role: "user", content: MSG_NUDGE_EMITIR_DE_FATO });
+      finishReason = String(finishReason || "stop") + "+nudge_emitir";
+      continue;
     }
     break;
   }
