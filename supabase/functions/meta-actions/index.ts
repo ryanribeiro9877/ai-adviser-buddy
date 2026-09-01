@@ -1,4 +1,11 @@
-// supabase/functions/meta-actions/index.ts (v5.58)
+// supabase/functions/meta-actions/index.ts (v5.59)
+// v5.59 (01/09/2026) - ANUNCIO CTWA MORRIA EM UM PATCH QUE NAO PRECISAVA EXISTIR. Os dois
+//   cards de anuncio do CONJ.1_VISTTA (14:00) falharam em update_adset_promoted_object com
+//   OAuthException #1 pela graph — com o conjunto JA gravado certo pelo pipeboard no create.
+//   Agora le promoted_object antes: se ja bate (page_id + digitos, tolerando o 9 extra),
+//   nao escreve nada. Se precisar mesmo escrever e a graph recusar, tenta pipeboard
+//   update_adset — mesma razao do create (numero que so existe na Pagina). So aborta o card
+//   se os dois falharem, porque numero errado no conjunto manda a conversa pro lugar errado.
 // v5.58 (01/09/2026) - CTWA 1487246 e do DRIVER. Comparacao controlada: mesmo
 //   promoted_object {page_id:105656372312257, whatsapp_phone_number:"557191894229"},
 //   mesmo destination_type=WHATSAPP, mesmo CONVERSATIONS — graph deu 400/1487246 as
@@ -369,6 +376,7 @@ import {
   ehRecusaWhatsappNaoLigado,
   listarWhatsAppDaPagina,
   resolverWhatsAppCtwa,
+  variantesDigitosWhatsAppBr,
   type CandidatoPromotedCtwa,
 } from "../_shared/whatsapp_pagina.ts";
 import {
@@ -4341,37 +4349,68 @@ Deno.serve(async (req) => {
         | null
         | undefined;
       if (patchCtwa?.adset_id && patchCtwa.whatsapp_phone_number && patchCtwa.page_id) {
-        const po = JSON.stringify({
+        const alvoPo = {
           page_id: String(patchCtwa.page_id),
           whatsapp_phone_number: String(patchCtwa.whatsapp_phone_number),
-        });
-        const up = await g(`/${patchCtwa.adset_id}`, "POST", { promoted_object: po });
-        if (up.status !== 200) {
-          await audit(r.company_id, sistema, "meta_action_failed", r.id, {
-            motivo: "falha ao gravar whatsapp_phone_number no conjunto CTWA",
-            etapa: "update_adset_promoted_object",
-            resposta: up,
-            acao,
-            driver_escrita: driver,
+        };
+        // v5.59: NAO reescrever o que ja esta certo. Conjunto CTWA nascido pelo Pipeboard
+        // ja tem o numero, e o PATCH da Graph em promoted_object devolve OAuthException #1
+        // nesses conjuntos (medido 01/09/2026 nos anuncios do CONJ.1_VISTTA: os dois cards
+        // morreram aqui com o conjunto ja correto). Ler antes de escrever resolve o caso
+        // comum sem nenhuma escrita.
+        const lidoPo = await g(`/${patchCtwa.adset_id}?fields=promoted_object`);
+        const poAtual = (lidoPo.body as any)?.promoted_object ?? null;
+        const variantesAlvo = new Set(variantesDigitosWhatsAppBr(alvoPo.whatsapp_phone_number));
+        const digitosAtuais = String(poAtual?.whatsapp_phone_number ?? "").replace(/\D/g, "");
+        const jaCerto = !!poAtual &&
+          String(poAtual.page_id ?? "") === alvoPo.page_id &&
+          !!digitosAtuais &&
+          (digitosAtuais === alvoPo.whatsapp_phone_number || variantesAlvo.has(digitosAtuais));
+
+        if (!jaCerto) {
+          let up = await g(`/${patchCtwa.adset_id}`, "POST", {
+            promoted_object: JSON.stringify(alvoPo),
           });
-          resultados.push({
-            id: r.id,
-            acao,
-            resultado: "falha_meta",
-            etapa: "adset_promoted_object",
-            driver_escrita: driver,
-            detalhe: up.body,
-          });
-          continue;
+          let viaPipeboard: unknown = null;
+          // A Graph nao escreve numero que existe so na Pagina — foi assim que o create do
+          // conjunto caiu em 1487246 e so o Pipeboard passou. Mesmo remedio aqui.
+          if (up.status !== 200 && pbToken) {
+            const pb = await pipeboardCall(
+              "update_adset",
+              { adset_id: String(patchCtwa.adset_id), promoted_object: alvoPo },
+              pbToken,
+            );
+            viaPipeboard = pb;
+            if (pb.ok || pb.status === 200) up = { status: 200, body: pb };
+          }
+          if (up.status !== 200) {
+            await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+              motivo: "falha ao gravar whatsapp_phone_number no conjunto CTWA",
+              etapa: "update_adset_promoted_object",
+              promoted_object_atual: poAtual,
+              promoted_object_pedido: alvoPo,
+              resposta: up,
+              tentativa_pipeboard: viaPipeboard,
+              acao,
+              driver_escrita: driver,
+            });
+            resultados.push({
+              id: r.id,
+              acao,
+              resultado: "falha_meta",
+              etapa: "adset_promoted_object",
+              driver_escrita: driver,
+              detalhe: up.body,
+            });
+            continue;
+          }
         }
+        // Espelho fica com o que a Meta tem de fato: quando ja estava certo, o valor lido
+        // (a criacao nao espelhava promoted_object e a coluna ficava nula); quando foi
+        // preciso escrever, o valor gravado.
         await supa
           .from("ad_sets")
-          .update({
-            promoted_object: {
-              page_id: String(patchCtwa.page_id),
-              whatsapp_phone_number: String(patchCtwa.whatsapp_phone_number),
-            },
-          })
+          .update({ promoted_object: jaCerto ? poAtual : alvoPo })
           .eq("company_id", r.company_id)
           .eq("external_id", String(patchCtwa.adset_id));
       }

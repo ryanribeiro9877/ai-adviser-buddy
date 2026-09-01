@@ -512,7 +512,13 @@ export type NivelMeta = "campanha" | "conjunto" | "anuncio";
 const CAMPOS_DE_RECONCILIACAO: Record<NivelMeta, string> = {
   campanha:
     "id,name,status,effective_status,objective,special_ad_categories,buying_type,daily_budget,lifetime_budget",
-  conjunto: "id,name,status,effective_status,daily_budget,campaign_id,bid_strategy,targeting",
+  // promoted_object/destination_type/optimization_goal entram na LEITURA (nao na comparacao):
+  // um conjunto CTWA sem whatsapp_phone_number nao entrega, e ate 01/09/2026 a conferencia nem
+  // relia o campo — o numero sumiria em silencio. Ficam fora de CAMPOS_COMPARAVEIS de proposito:
+  // o pedido manda JSON string e a Graph devolve objeto, o mesmo descasamento que ja tira
+  // targeting da comparacao. Quem exige o numero certo e o executor, antes de criar o anuncio.
+  conjunto:
+    "id,name,status,effective_status,daily_budget,campaign_id,bid_strategy,targeting,promoted_object,destination_type,optimization_goal",
   anuncio: "id,name,status,effective_status,adset_id,creative{id}",
 };
 
