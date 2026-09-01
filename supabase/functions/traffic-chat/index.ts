@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v28.88)
+// supabase/functions/traffic-chat/index.ts (v28.89)
+// v28.89 (01/09/2026) - O GUARDA DA v28.88 ACUSOU CARD VERDADEIRO. Vinte minutos depois de
+//   subir, ele marcou 7a3c6518… e f54be98f… como inexistentes: sao os cards _5 e _6 do
+//   CONJ.3, criados as 18:15, que o modelo citou de memoria sem rechamar tool. "Nenhuma
+//   ferramenta devolveu nesta rodada" nunca foi prova de inexistencia. Agora a checagem
+//   local so PRE-SELECIONA candidatos e o veredito vem de approval_requests (consulta por
+//   id, filtrada pela empresa). Consulta que falha = nenhuma acusacao: derrubar card real
+//   custa o mesmo que deixar passar o falso.
 // v28.88 (01/09/2026) - CARD INVENTADO NO MEIO DE CARD REAL. Nos anuncios do CONJ.3_VISTTA
 //   a resposta publicou uma tabela de 6 cards com 4 approval_id reais e 2 inventados
 //   (b7c8d92f… e c9e7f3a2…, que nunca existiram em approval_requests). O gestor ficou sem
@@ -655,6 +662,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import {
+  approvalIdsInexistentes,
   approvalIdsInventados,
   avisoDeCardInventado,
   situacaoDoCard,
@@ -832,7 +840,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.88";
+const VERSAO = "chat-v28.89";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -5948,23 +5956,42 @@ function toolsIncluemPropose(tools: { tool?: string }[]): boolean {
  * v28.40: HARD STOP — se a prosa afirma "card emitido" sem approval_id real em
  * actionCards, reescreve. Doutrina sozinha nao bastou (incidente IMPULSAO 20/08).
  */
-function sanitizarClaimEmitSemCard(
+async function sanitizarClaimEmitSemCard(
   reply: string,
   cards: CardInfo[],
   toolResults: { tool?: string; retorno?: any; erro?: string }[],
-  opts?: { perguntaLeitura?: boolean; cardsDoTurno?: Array<{ approval_id?: unknown }> | null },
-): { reply: string; reescreveu: boolean } {
+  opts?: {
+    perguntaLeitura?: boolean;
+    cardsDoTurno?: Array<{ approval_id?: unknown }> | null;
+    companyId?: string;
+  },
+): Promise<{ reply: string; reescreveu: boolean }> {
   const raw = String(reply ?? "").trim();
   if (!raw) return { reply: raw, reescreveu: false };
 
   // v28.88: UUID inventado e verificado SEMPRE, inclusive com card real na rodada — a
   // mistura de verdadeiro com inventado (CONJ.3, 01/09/2026) escapava no `cards.length > 0`
   // logo abaixo, e a tabela publicada mandava o gestor esperar anuncio que ninguem pediu.
-  const inventados = approvalIdsInventados(raw, {
+  // v28.89: quem nao veio de tool nesta rodada e so CANDIDATO; o banco da o veredito.
+  const candidatos = approvalIdsInventados(raw, {
     cardsDaRodada: cards,
     cardsDoTurno: opts?.cardsDoTurno ?? null,
     retornosDeFerramenta: toolResults,
   });
+  const inventados = candidatos.length && opts?.companyId
+    ? await approvalIdsInexistentes(candidatos, {
+      companyId: opts.companyId,
+      buscar: async (ids) => {
+        const { data, error } = await supa
+          .from("approval_requests")
+          .select("id")
+          .eq("company_id", opts.companyId as string)
+          .in("id", ids);
+        if (error) throw new Error(error.message);
+        return data ?? [];
+      },
+    })
+    : [];
   if (inventados.length) {
     const aviso = avisoDeCardInventado(
       inventados,
@@ -6945,9 +6972,10 @@ Deno.serve(async (req) => {
   }
 
   // v28.40: HARD — claim de "card emitido" sem actionCards e mentira; reescreve.
-  const claimSan = sanitizarClaimEmitSemCard(String(reply ?? ""), actionCards, toolResults, {
+  const claimSan = await sanitizarClaimEmitSemCard(String(reply ?? ""), actionCards, toolResults, {
     perguntaLeitura: ehPerguntaDeLeitura(objetivoOriginal),
     cardsDoTurno: turnCheckpoint?.cards ?? null,
+    companyId: company.id,
   });
   if (claimSan.reescreveu) {
     reply = claimSan.reply;

@@ -2,7 +2,11 @@
 // resposta misturou 4 approval_id reais com 2 inventados na mesma tabela e o guarda por
 // frase nao viu nada. Roda com: deno run supabase/functions/_shared/_prova_card_inventado.ts
 
-import { approvalIdsInventados, avisoDeCardInventado } from "./aprovacoes.ts";
+import {
+  approvalIdsInexistentes,
+  approvalIdsInventados,
+  avisoDeCardInventado,
+} from "./aprovacoes.ts";
 
 function ok(cond: boolean, msg: string) {
   if (!cond) {
@@ -111,6 +115,62 @@ const textoDoIncidente = `
 {
   const aviso = avisoDeCardInventado([INVENTADOS[0]], []);
   ok(/Nenhum card foi emitido nesta rodada/.test(aviso), "aviso nao declara rodada vazia");
+}
+
+// ===== VEREDITO NO BANCO: o falso positivo que a v28.88 produziu =====
+// Cards _5 e _6 do CONJ.3 existem desde as 18:15. O modelo os citou de memoria, sem
+// rechamar tool, e a checagem local os apontou como inventados. So o banco desempata.
+const EXISTE_MAS_NAO_VEIO_DE_TOOL = "7a3c6518-76a7-4cf9-8c48-780cff8a7099";
+
+// 9) Candidato que EXISTE no banco nao pode ser acusado.
+{
+  const veredito = await approvalIdsInexistentes([EXISTE_MAS_NAO_VEIO_DE_TOOL], {
+    companyId: "57f755b9-c23d-4f58-a488-8173d697c010",
+    buscar: async (ids) => ids.map((id) => ({ id })),
+  });
+  ok(veredito.length === 0, `card real acusado de inventado: ${veredito.join(", ")}`);
+}
+
+// 10) Candidato que NAO existe no banco e acusado.
+{
+  const veredito = await approvalIdsInexistentes([INVENTADOS[0]], {
+    companyId: "57f755b9-c23d-4f58-a488-8173d697c010",
+    buscar: async () => [],
+  });
+  ok(veredito.length === 1, "card inexistente passou pelo veredito do banco");
+}
+
+// 11) Mistura: o real fica, o inventado cai.
+{
+  const veredito = await approvalIdsInexistentes(
+    [EXISTE_MAS_NAO_VEIO_DE_TOOL, INVENTADOS[0]],
+    {
+      companyId: "57f755b9-c23d-4f58-a488-8173d697c010",
+      buscar: async () => [{ id: EXISTE_MAS_NAO_VEIO_DE_TOOL }],
+    },
+  );
+  ok(veredito.length === 1 && veredito[0] === INVENTADOS[0], "mistura resolvida errado");
+}
+
+// 12) Consulta que FALHA nao acusa ninguem — sem leitura nao ha veredito.
+{
+  const veredito = await approvalIdsInexistentes([INVENTADOS[0]], {
+    companyId: "57f755b9-c23d-4f58-a488-8173d697c010",
+    buscar: async () => {
+      throw new Error("timeout");
+    },
+  });
+  ok(veredito.length === 0, "consulta falha virou acusacao");
+}
+
+// 13) Sem empresa resolvida tambem nao ha acusacao (card de outra empresa nao serve de alibi,
+//     e sem empresa a consulta nao tem recorte).
+{
+  const veredito = await approvalIdsInexistentes([INVENTADOS[0]], {
+    companyId: "",
+    buscar: async () => [],
+  });
+  ok(veredito.length === 0, "acusou sem empresa para recortar a consulta");
 }
 
 console.log("ok: _prova_card_inventado");

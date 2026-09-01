@@ -350,11 +350,21 @@ export function traduzirFalha(
 // Continuar remendando frase e perder a corrida contra a redacao do modelo. UUID nao:
 // ou a ferramenta devolveu aquele identificador nesta conversa, ou ele foi inventado.
 //
-// Fonte de verdade = o que VOLTOU de ferramenta: cards emitidos agora, cards dos segmentos
-// anteriores do mesmo turno e qualquer id presente no retorno das tools (get_aprovacoes
-// citando card pendente e legitimo). O que sobra nao existe.
+// CUIDADO COM O INVERSO — acusar card VERDADEIRO e tao caro quanto deixar passar o falso.
+// A primeira versao desta checagem (01/09/2026, 15:30) tratava "nenhuma ferramenta devolveu
+// NESTA rodada" como prova de inexistencia, e 20 minutos depois acusou 7a3c6518… e
+// f54be98f… — dois cards do CONJ.3 que existem desde as 18:15. O modelo os citou de
+// memoria da conversa, sem rechamar tool, e o guarda chamou de invencao. Nao ter sido
+// devolvido agora NAO e o mesmo que nao existir.
+//
+// Por isso a checagem local so PRE-SELECIONA: o que ela nao reconhece vira candidato, e
+// quem decide e o banco (approvalIdsInexistentes). Sem consulta, nao ha veredito.
 const RE_UUID_CARD = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 
+/**
+ * Ids citados no texto que NAO vieram de ferramenta nesta rodada. Sao apenas CANDIDATOS a
+ * invencao: podem ser cards reais lembrados da conversa. Confirme com approvalIdsInexistentes.
+ */
 export function approvalIdsInventados(
   texto: string,
   reais: {
@@ -391,6 +401,34 @@ export function approvalIdsInventados(
   }
 
   return citados.filter((u) => !conhecidos.has(u));
+}
+
+/**
+ * Veredito final: dos candidatos, quais NAO existem em approval_requests desta empresa.
+ * Consulta por id (chave primaria) e filtra por empresa — card de outra empresa nao serve
+ * de alibi. Se a consulta falhar, devolve lista VAZIA: sem leitura nao ha acusacao, porque
+ * marcar card real como inventado quebra a operacao tanto quanto o contrario.
+ */
+export async function approvalIdsInexistentes(
+  candidatos: string[],
+  ctx: {
+    companyId: string;
+    buscar: (ids: string[]) => Promise<Array<{ id?: unknown }> | null>;
+  },
+): Promise<string[]> {
+  const ids = [...new Set(candidatos.map((c) => String(c ?? "").toLowerCase()).filter(Boolean))];
+  if (!ids.length || !ctx.companyId) return [];
+  let achados: Array<{ id?: unknown }> | null = null;
+  try {
+    achados = await ctx.buscar(ids);
+  } catch {
+    return [];
+  }
+  if (achados == null) return [];
+  const existentes = new Set(
+    achados.map((r) => String(r?.id ?? "").toLowerCase()).filter(Boolean),
+  );
+  return ids.filter((id) => !existentes.has(id));
 }
 
 /**
