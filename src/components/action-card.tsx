@@ -78,6 +78,8 @@ const ACTION_META: Record<string, { icon: typeof Pause }> = {
   escalar_duplicar: { icon: TrendingUp },
   alterar_orcamento: { icon: DollarSign },
   renomear_campanha: { icon: Pencil },
+  renomear_conjunto: { icon: Pencil },
+  renomear_criativo: { icon: Pencil },
   registrar_veredito_peca: { icon: ShieldCheck },
   criar_campanha: { icon: Plus },
   criar_conjunto_a_partir_de: { icon: Plus },

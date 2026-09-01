@@ -16,6 +16,8 @@ const TITULO_POR_ACAO: Record<string, string> = {
   ativar_conjunto: "Card de ativar conjunto",
   alterar_orcamento: "Card de alterar orçamento",
   renomear_campanha: "Card de renomear campanha",
+  renomear_conjunto: "Card de renomear conjunto",
+  renomear_criativo: "Card de renomear criativo",
   alterar_categoria_especial_campanha: "Card de alterar categoria especial",
   vincular_instagram_dos_anuncios: "Card de vincular Instagram",
   registrar_veredito_peca: "Card de veredito de compliance",
@@ -85,13 +87,19 @@ export function previaDoCardAprovacao(
       criativo: campo(payload, "nome_novo") ?? criativo ?? undefined,
     };
   }
-  if (acao === "pausar_conjunto" || acao === "ativar_conjunto" || acao === "ajustar_posicionamentos_do_conjunto") {
+  if (
+    acao === "pausar_conjunto" || acao === "ativar_conjunto" ||
+    acao === "ajustar_posicionamentos_do_conjunto" || acao === "renomear_conjunto"
+  ) {
     return { conjunto: campo(payload, "target_name") ?? conjunto ?? undefined };
   }
   if (acao === "pausar_campanha" || acao === "ativar_campanha" || acao === "renomear_campanha" || acao === "alterar_orcamento" || acao === "alterar_categoria_especial_campanha") {
     return { campanha: campo(payload, "target_name", "novo_nome") ?? campanha ?? undefined };
   }
-  if (acao === "pausar_criativo" || acao === "ativar_criativo" || acao === "escalar_criativo") {
+  if (
+    acao === "pausar_criativo" || acao === "ativar_criativo" ||
+    acao === "escalar_criativo" || acao === "renomear_criativo"
+  ) {
     return { criativo: campo(payload, "target_name") ?? criativo ?? undefined };
   }
   if (acao === "vincular_instagram_dos_anuncios") {
