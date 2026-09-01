@@ -1,4 +1,16 @@
-// supabase/functions/traffic-chat/index.ts (v28.91)
+// supabase/functions/traffic-chat/index.ts (v28.92)
+// v28.92 (01/09/2026) - A FERRAMENTA EXISTIA E O ALVO ERA INALCANCAVEL. Meia hora depois de
+//   renomear_criativo entrar no ar, o mesmo pedido voltou a terminar em "renomeie na mao no
+//   Gerenciador" — por dois motivos que se somavam.
+//   (1) O enum de action_type do schema da tool nunca foi atualizado: listava renomear_campanha
+//       e parava ali. ativar_campanha/ativar_conjunto/ativar_criativo tambem estavam de fora,
+//       ligados na VALID desde sempre e invisiveis para o modelo. Enum e contrato; descricao
+//       nao supre enum.
+//   (2) O alvo do card so podia ser apontado por NOME. Os dois anuncios do CONJ.2_VISTTA tem a
+//       MESMA string de nome, entao "peca o NOME COMPLETO EXATO" era um pedido sem resposta
+//       possivel — nenhum nome separa homonimos. Agora params.alvo_external_id aponta o objeto
+//       pelo id da Meta, e o desempate passa a devolver os ids candidatos em vez de mandar o
+//       gestor para o Gerenciador.
 // v28.91 (01/09/2026) - RENOMEAR SO EXISTIA PARA CAMPANHA, E O AGENTE MANDAVA O GESTOR FAZER NA
 //   MAO. Dois anuncios do CONJ.2_VISTTA nasceram com o NOME DO CONJUNTO no lugar do nome do
 //   criativo. O agente achou os dois, soube dizer o nome certo de cada um e fechou com "nao
@@ -709,6 +721,7 @@ import {
   classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
   conjuntoVivoParaDestino,
+  desempateDeAlvoDoCard,
   desempateDeConjunto,
   escolherConjuntosDaMesmaLinha,
   escolherConjuntosPorNumeroELinha,
@@ -859,7 +872,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.91";
+const VERSAO = "chat-v28.92";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -2177,29 +2190,52 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     action === "pausar_conjunto" ||
     action === "ativar_conjunto" ||
     action === "renomear_conjunto";
-  let matches: { id: string; name: string; external_id?: string }[] = [];
+  // v28.92: alvo tambem pode vir por external_id. Sem isso, dois objetos de nome IDENTICO sao
+  // inalcancaveis: o desempate por nome nao tem resposta possivel.
+  const alvoExtPedido = String(
+    params?.alvo_external_id ?? params?.target_external_id ?? params?.external_id ?? "",
+  ).trim();
+  let universo: { id: string; name: string; external_id?: string }[] = [];
   if (isAd) {
     const { data: camps } = await supa.from("campaigns").select("id").eq("company_id", companyId).eq("status", "active");
     const campIds = (camps ?? []).map((c) => c.id);
     const { data: ads } = await supa.from("ads").select("id,name,external_id,campaign_id").eq("company_id", companyId);
-    matches = (ads ?? []).filter((a) => campIds.includes(a.campaign_id) && norm(a.name).includes(needle));
+    // Com external_id o gestor JA apontou o objeto; exigir campanha ativa so esconderia o alvo.
+    universo = (ads ?? []).filter((a) => !!alvoExtPedido || campIds.includes(a.campaign_id));
   } else if (isAdset) {
     const { data: adsets } = await supa
       .from("ad_sets")
       .select("id,name,external_id")
       .eq("company_id", companyId)
       .eq("provider", "meta_ads");
-    matches = (adsets ?? []).filter((a) => norm(a.name).includes(needle));
+    universo = adsets ?? [];
   } else {
     const { data: camps } = await supa.from("campaigns").select("id,name,external_id").eq("company_id", companyId);
-    matches = (camps ?? []).filter((c) => norm(c.name).includes(needle));
+    universo = camps ?? [];
   }
-  if (!matches.length) return { erro: `nenhum alvo contendo '${targetLike}'. NAO invente: pergunte o nome correto.` };
-  let alvo = matches[0];
-  if (matches.length > 1) {
-    const exact = matches.filter((m) => norm(m.name) === needle);
-    if (exact.length === 1) alvo = exact[0];
-    else return { ambiguo: true, opcoes: matches.slice(0, 6).map((m) => m.name), instrucao: "peca o NOME COMPLETO EXATO" };
+
+  let alvo: { id: string; name: string; external_id?: string };
+  if (alvoExtPedido) {
+    const achado = universo.find((m) => String(m.external_id ?? "").trim() === alvoExtPedido);
+    if (!achado) {
+      return {
+        erro: "alvo_external_id_nao_encontrado",
+        detalhe:
+          `Nenhum objeto desta empresa com external_id '${alvoExtPedido}' no nivel de ${
+            isAd ? "anuncio" : isAdset ? "conjunto" : "campanha"
+          }. Confira o id (get_estrutura_conjuntos / get_criativos_conteudo) — NAO invente outro.`,
+      };
+    }
+    alvo = achado;
+  } else {
+    const matches = universo.filter((m) => norm(m.name).includes(needle));
+    if (!matches.length) return { erro: `nenhum alvo contendo '${targetLike}'. NAO invente: pergunte o nome correto.` };
+    alvo = matches[0];
+    if (matches.length > 1) {
+      const exact = matches.filter((m) => norm(m.name) === needle);
+      if (exact.length === 1) alvo = exact[0];
+      else return desempateDeAlvoDoCard(matches);
+    }
   }
 
   // ESP-24: guarda do unico conjunto entregando — se pausar este zera entrega, nao emite card.
@@ -4906,7 +4942,7 @@ const TOOLS = [
   { type: "function", function: { name: "alterar_categoria_especial", description: "Emite CARD DE APROVACAO para alterar ou REMOVER special_ad_categories de uma campanha JA CRIADA. Passe special_ad_categories=[] para remover. NAO diga que falta ferramenta. Leia antes com get_campaign_detail ou auditar_compliance_financeira.", parameters: { type: "object", properties: { campanha_atual: { type: "string" }, special_ad_categories: { type: "array", items: { type: "string" } }, categorias_atuais: { type: "array", items: { type: "string" } }, justificativa: { type: "string" } }, required: ["campanha_atual", "special_ad_categories"] } } },
   { type: "function", function: { name: "get_instagram_dos_anuncios", description: "LEITURA AO VIVO na Graph: Instagram de CADA anuncio da campanha (conjuntos ACTIVE e PAUSED). Devolve handle quando a Meta expoe, id, classificacao coop_cohapm|cohapm|outro|sem_vinculo|id_sem_handle. NAO presuma pelo perfil unico da conta. SO a campanha La Felicità em trabalho (COHAPM_LAFELICITA_CONV_*). Juridico e SALT ficam de fora. Use ANTES de afirmar vinculo ou de emitir alteracao.", parameters: { type: "object", properties: { campanha: { type: "string", description: "Nome da campanha (ex.: COHAPM_LAFELICITA_CONV_AGO26)." } }, required: ["campanha"] } } },
   { type: "function", function: { name: "vincular_instagram_dos_anuncios", description: "Emite CARD DE APROVACAO para vincular o Instagram oficial @cohapm em TODOS os anuncios da campanha em trabalho que ainda nao o usam (conjuntos ativos E pausados). NAO executa na hora. NAO ativa conjunto pausado. NAO toca outras campanhas. Le a Graph na hora da proposta. Aprovacao = novo criativo + republica o anuncio com o mesmo status.", parameters: { type: "object", properties: { campanha: { type: "string", description: "Nome da campanha (ex.: COHAPM_LAFELICITA_CONV_AGO26)." }, justificativa: { type: "string" } }, required: ["campanha"] } } },
-  { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha, renomear_conjunto, renomear_criativo e alterar_categoria_especial_campanha. RENOMEAR existe nos TRES niveis (campanha/conjunto/anuncio) e pede params.novo_nome; target_name e o nome ATUAL do objeto. Nunca mande o gestor renomear na mao no Gerenciador: emita o card. EXCLUIR nao existe em nenhum nivel — para tirar do ar use pausar_*. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (qualquer familia, inclusive trafego/website). Molde NAO e obrigatorio para criar do zero. Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal. PROIBIDO recusar criar_conjunto por falta de molde (trafego, social ou mensagens). Tudo que e criado nasce ACTIVE. COHAPM ERRO GRAVE: peca La Felicità (_LAF_ / CONJ.1_LAF / FELICITA) NUNCA em campanha/conjunto JURIDICO, e peca Juridico NUNCA em LAFELICITA. O sistema RECUSA o card — nao e aviso. criar_anuncio: params.conjunto_destino e o NOME com CONJ.N (CONJ.1_LAF_… / CONJ.1 / CONJ.01). PROIBIDO pedir ID numerico da Meta. CONJ.1 nunca e o CONJ.4 mais novo da linha.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "escalar_criativo", "pausar_campanha", "pausar_conjunto", "alterar_orcamento", "renomear_campanha", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "vincular_instagram_dos_anuncios", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
+  { type: "function", function: { name: "propose_action", description: "SO use se o gestor pediu EXPLICITAMENTE emitir/criar/pausar/ativar (verbo de ato). PERGUNTA ('o anuncio tem o mesmo link?', 'antes da aprovacao', 'consulte o resultado') = get_aprovacoes / get_estrutura_conjuntos / get_criativos_conteudo — NAO esta tool. Cria PEDIDO DE APROVACAO (ActionCard). NAO executa nada: o card fica PENDENTE, so um administrador aprova, e expira em 24h se nao for decidido. Exige sempre justificativa, metrica_sucesso e reversa. ACOES SOBRE OBJETOS: pausar_criativo, ativar_criativo, escalar_criativo, pausar_campanha, ativar_campanha, pausar_conjunto, ativar_conjunto, alterar_orcamento, ajustar_posicionamentos_do_conjunto, renomear_campanha, renomear_conjunto, renomear_criativo e alterar_categoria_especial_campanha. RENOMEAR existe nos TRES niveis (campanha/conjunto/anuncio) e pede params.novo_nome; target_name e o nome ATUAL do objeto. Nunca mande o gestor renomear na mao no Gerenciador: emita o card. EXCLUIR nao existe em nenhum nivel — para tirar do ar use pausar_*. ALVO POR ID: quando dois objetos tem o MESMO nome, target_name nao desempata e pedir o nome exato e beco sem saida — mande params.alvo_external_id (o id da Meta) e o card sai. Vale para qualquer acao sobre objeto, nao so renomear. pausar_conjunto: target_name e o CONJUNTO (ad set); a guarda do unico conjunto entregando bloqueia o card se pausar este zerar entrega (decidir_sobre_conjunto). ATIVAR e PAUSAR nos tres niveis (campanha/conjunto/criativo) via card: ativar_campanha, ativar_conjunto, ativar_criativo e os pausar_*. Criacao (criar_campanha / criar_conjunto / criar_anuncio / escalar_duplicar) nasce ACTIVE na aprovacao. Para ajustar_posicionamentos_do_conjunto (acao CORRETIVA de conjunto antigo/de teste), target_name e o conjunto e params.formato_midia e obrigatorio (video|imagem); o sistema deriva as incompatibilidades pelo formato. VIDEO aplica o padrao manual observado nos 3 conjuntos de video ACTIVE (publisher_platforms=[facebook] + 8 facebook_positions, sem facebook.right_hand_column); IMAGEM nao exclui nada. A escrita so ocorre depois da aprovacao e e relida/reconciliada pela Graph. ACOES DE CRIACAO: criar_campanha, criar_conjunto_a_partir_de, criar_anuncio_a_partir_de, escalar_duplicar. NOMENCLATURA: NOME LIVRE e contrato quando ja foi falado nesta conversa — params.nome_novo = o string EXATO (ex. JUR_CONV_CONJ03_AD01_…). PROIBIDO trocar por [MARCA][CANAL][WA][LEADS]…. Padrao estruturado so se NINGUEM falou nome. criar_anuncio: Instagram vinculated obrigatorio (auto-fill da config; recusa instagram_nao_vinculado). WEBSITE+LPV nao carrega WA/LEADS. Nao recuse string livre. ESP-39 (negocio): preferivel testes e vencedores/escala em campanhas SEPARADAS — nao forca o formato do nome. escalar_duplicar (ESP-25/39): target_name = conjunto a escalar; so emite se avaliar_escala.apto_a_escalar; orcamento travado em +20% da RPC; NAO fica em campanha TESTE — se o molde esta em TESTE, informe params.campanha_destino de uma campanha ESCALA; targeting herdado; nasce ACTIVE; NAO edita o original. Anuncios nao sao copiados neste card. Para criar_conjunto_a_partir_de: target_name = nome EXATO do conjunto molde OU 'sem_molde' (qualquer familia, inclusive trafego/website). Molde NAO e obrigatorio para criar do zero. Molde OFFSITE_CONVERSIONS e ACEITO em engajamento — so empresta targeting; executor grava POST_ENGAGEMENT + page_id. Params: plataformas_publicacao (default facebook+instagram), formato_midia_previsto quando Facebook, objetivo_tag/familia_objetivo/page_id/optimization_goal. PROIBIDO recusar criar_conjunto por falta de molde (trafego, social ou mensagens). Tudo que e criado nasce ACTIVE. COHAPM ERRO GRAVE: peca La Felicità (_LAF_ / CONJ.1_LAF / FELICITA) NUNCA em campanha/conjunto JURIDICO, e peca Juridico NUNCA em LAFELICITA. O sistema RECUSA o card — nao e aviso. criar_anuncio: params.conjunto_destino e o NOME com CONJ.N (CONJ.1_LAF_… / CONJ.1 / CONJ.01). PROIBIDO pedir ID numerico da Meta. CONJ.1 nunca e o CONJ.4 mais novo da linha.", parameters: { type: "object", properties: { action_type: { type: "string", enum: ["pausar_criativo", "ativar_criativo", "escalar_criativo", "pausar_campanha", "ativar_campanha", "pausar_conjunto", "ativar_conjunto", "alterar_orcamento", "renomear_campanha", "renomear_conjunto", "renomear_criativo", "alterar_categoria_especial_campanha", "ajustar_posicionamentos_do_conjunto", "vincular_instagram_dos_anuncios", "criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"] }, target_name: { type: "string" }, justificativa: { type: "string" }, mecanismo: { type: "string" }, metrica_sucesso: { type: "string" }, janela_leitura: { type: "string" }, reversa: { type: "string" }, risco: { type: "string" }, params: { type: "object", description: "alvo_external_id: id da Meta do objeto alvo — use quando o nome nao for unico. Nome livre: nome / nome_novo / novo_nome. Padrao estruturado (marca/canal/…) so se quiser sugestao. Escala: campanha_destino se origem TESTE. Criacao de conjunto: plataformas_publicacao; formato_midia_previsto quando Facebook; engajamento: sem_molde ou molde qualquer + familia_objetivo/page_id/optimization_goal; GEO OPCIONAL: params.bairros (keys Meta) OU params.geo_locations (neighborhoods/cities). Nomes -> keys via buscar_geolocalizacao (lotes de 40). Demais campos da acao." } }, required: ["action_type", "target_name", "justificativa", "metrica_sucesso", "reversa"] } } },
   { type: "function", function: { name: "gerar_legendas", description: "ESP-37 MOTOR DE LEGENDA: gera exatamente 3 variantes Hook→Beneficio/prova→CTA (CET/FIN-04 so credito). NAO cria anuncio. Grava em conversation_legendas. La Felicita: produto=imovel + meio=la_felicita + drive_file_id do SLATE (get_slate_da_conversa). NAO use voz Juridico. Se a tool falhar, NAO diga indisponivel — escreva as 3 no tom certo e registre. VOCE preenche referencias. Nao invente CLT/CET para COHAPM.", parameters: { type: "object", properties: { produto: { type: "string", description: "Ex.: imovel / la_felicita (residencial) ou juridico_whatsapp (COHAPM Juridico) ou consignado_clt (Legal). SEM default CLT." }, objetivo: { type: "string", description: "O que a legenda deve comunicar (obrigatorio)." }, eixo: { type: "string", description: "Sinonimo de objetivo." }, meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"], description: "Voz da marca. La Felicita = la_felicita." }, drive_file_id: { type: "string", description: "Peca do Drive (do slate)." }, peca_chave: { type: "string", description: "Chave estavel. Default = drive_file_id ou objetivo." }, referencias: { type: "array", items: { type: "string" }, description: "Ate 5 legendas de referencia (estilo)." } }, required: ["objetivo"] } } },
   { type: "function", function: { name: "get_legendas_da_conversa", description: "MEMORIA DURAVEL de legendas desta conversa (conversation_legendas). Devolve texto INTEGRAL por peca_chave/drive_file_id. OBRIGATORIO chamar ANTES de dizer que legenda 'nao existe' / 'texto integral nao disponivel' ou de pedir ao gestor para colar copy. Se a peca esta aqui, use o texto — nunca invente amnesia.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, drive_file_id: { type: "string" } } } } },
   { type: "function", function: { name: "registrar_legenda_da_conversa", description: "Grava/atualiza UMA legenda no store duravel desta conversa. Use quando voce propuser copy no chat SEM passar por gerar_legendas (ex.: slate de impulsão com legenda editorial), ou para marcar a variante selecionada pelo gestor. peca_chave estavel (carrossel_2, card_capa_1, …) + legenda integral. Com drive_file_id quando houver.", parameters: { type: "object", properties: { peca_chave: { type: "string" }, legenda: { type: "string" }, drive_file_id: { type: "string" }, variante_indice: { type: "number" }, selecionada: { type: "boolean" }, objetivo: { type: "string" } }, required: ["peca_chave", "legenda"] } } },

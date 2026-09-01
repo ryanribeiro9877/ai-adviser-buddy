@@ -1,5 +1,6 @@
 // deno run supabase/functions/_shared/_prova_memoria_conjunto.ts
 import {
+  desempateDeAlvoDoCard,
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
   ehNomeCompostoEstruturado,
@@ -125,5 +126,47 @@ assert(
   pareceApprovalIdEmVezDeDrive("b7c8d92f-4e15-402a-9c1f-a8f3e1b5c9d2"),
   "deixou passar approval_id completo",
 );
+
+// DESEMPATE DO ALVO DO CARD. Caso real de 01/09/2026: os dois anuncios do CONJ.2_VISTTA
+// nasceram com a MESMA string de nome, o resolvedor acusou ambiguidade e o agente concluiu
+// que so restava renomear na mao no Gerenciador.
+{
+  const homonimos = desempateDeAlvoDoCard([
+    { name: "CONJ.2_VISTTA_WA_7199185-8107", external_id: "120249836422310182" },
+    { name: "CONJ.2_VISTTA_WA_7199185-8107", external_id: "120249836423210182" },
+  ]);
+  assert(homonimos.ambiguo === true, "homonimos deveriam seguir ambiguos");
+  assert(
+    !/nome completo exato/i.test(homonimos.instrucao) ||
+      /NAO desempata/i.test(homonimos.instrucao),
+    "com nomes iguais nao pode pedir o nome exato como saida",
+  );
+  assert(
+    homonimos.instrucao.includes("params.alvo_external_id"),
+    "nao ofereceu o unico desempate possivel (external_id)",
+  );
+  for (const id of ["120249836422310182", "120249836423210182"]) {
+    assert(homonimos.instrucao.includes(id), `nao mostrou o id candidato ${id}`);
+  }
+  assert(
+    /nao mande ninguem renomear no Gerenciador/i.test(homonimos.instrucao),
+    "a instrucao tem de fechar a porta do Gerenciador, que foi a saida que o agente tomou",
+  );
+  assert(
+    homonimos.opcoes.every((o) => o.external_id),
+    "cada opcao precisa vir com o external_id, senao o agente nao tem o que reenviar",
+  );
+}
+
+// Nomes DIFERENTES que casaram pelo mesmo prefixo: aqui o nome exato ainda resolve, e
+// continuar oferecendo o id e um atalho legitimo.
+{
+  const prefixo = desempateDeAlvoDoCard([
+    { name: "AD_CONJ.2_APENAS_OCULOS_1", external_id: "120249835610520182" },
+    { name: "AD_CONJ.2_APENAS_OCULOS_2", external_id: "120249835456290182" },
+  ]);
+  assert(/nome completo exato/i.test(prefixo.instrucao), "com nomes distintos o nome exato serve");
+  assert(prefixo.instrucao.includes("params.alvo_external_id"), "o id devia seguir disponivel");
+}
 
 console.log("ok: _prova_memoria_conjunto");

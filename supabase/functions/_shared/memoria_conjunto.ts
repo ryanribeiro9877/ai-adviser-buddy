@@ -496,6 +496,49 @@ export function desempateDeConjunto(
     `Se ainda empatar dentro da mesma campanha, use params.conjunto_destino_external_id.`;
 }
 
+/**
+ * Desempate do ALVO de um card (propose_action) quando o nome nao distingue.
+ *
+ * "peca o NOME COMPLETO EXATO" resolve prefixo ambiguo, mas e beco sem saida quando dois
+ * objetos tem a MESMA string: nao existe nome que o gestor possa digitar que separe os dois.
+ * Foi o que travou o rename dos dois anuncios homonimos do CONJ.2_VISTTA em 01/09/2026 — os
+ * dois nasceram chamados "CONJ.2_VISTTA_WA_7199185-8107", o resolvedor acusou ambiguidade e o
+ * agente concluiu que so restava renomear na mao no Gerenciador. Com nomes iguais o unico
+ * desempate real e o external_id, entao e ele que tem que ser pedido.
+ */
+export function desempateDeAlvoDoCard(
+  candidatos: Array<{ name?: unknown; external_id?: unknown }>,
+): {
+  ambiguo: true;
+  opcoes: Array<{ nome: string; external_id: string }>;
+  instrucao: string;
+} {
+  const opcoes = candidatos.slice(0, 6).map((c) => ({
+    nome: String(c?.name ?? ""),
+    external_id: String(c?.external_id ?? ""),
+  }));
+  const nomes = new Set(opcoes.map((o) => o.nome.trim().toLowerCase()));
+  const ids = opcoes.map((o) => o.external_id).filter(Boolean);
+  if (nomes.size <= 1) {
+    return {
+      ambiguo: true,
+      opcoes,
+      instrucao:
+        `Os candidatos tem o MESMO nome, entao pedir "o nome completo exato" NAO desempata — ` +
+        `nao repita esse pedido ao gestor e nao mande ninguem renomear no Gerenciador. ` +
+        `Reemita o card com params.alvo_external_id (${ids.join(" ou ")}). ` +
+        `Se nao souber qual e qual, mostre a lista com os ids ao gestor e pergunte.`,
+    };
+  }
+  return {
+    ambiguo: true,
+    opcoes,
+    instrucao:
+      `Reemita com o NOME COMPLETO EXATO de um dos candidatos, ou aponte pelo id em ` +
+      `params.alvo_external_id (${ids.join(" ou ")}).`,
+  };
+}
+
 /** Auto-pick de CONJ.N: so conjuntos cuja campanha/nome e da mesma linha da peca. */
 export function escolherConjuntosDaMesmaLinha<T extends { name?: string | null }>(
   hits: T[],
