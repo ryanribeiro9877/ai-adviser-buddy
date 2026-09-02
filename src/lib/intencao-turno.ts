@@ -149,6 +149,37 @@ export function ehPedidoDetalhamentoCampanha(pedido: string): boolean {
 }
 
 /**
+ * "de qual pasta do Drive sao os anuncios do CONJ.N?" — leitura de ORIGEM,
+ * nao inventario de pecas novas e nao ato de emitir.
+ *
+ * Medido 02/09/2026: o pedido do CONJ.1 VISTTA foi tratado como inventario
+ * (get_drive_criativos vazio + chute de 2.mp4) e 5 de 6 anuncios sairam
+ * "sem vinculo" embora os cards de criacao tivessem pasta e drive_file_id.
+ */
+export function ehPedidoOrigemDriveDosAnuncios(pedido: string): boolean {
+  const raw = String(pedido ?? "").trim();
+  if (!raw || ehPedidoDeAto(raw)) return false;
+  const p = deacc(raw.toLowerCase());
+  const anuncioOuConj =
+    /\b(anuncios?|criativos?)\b/.test(p) &&
+    (/\bconj(?:unto)?s?\b/.test(p) || /\bregistrad/.test(p) || /\b(no ar|de pe|ativos?)\b/.test(p));
+  const pasta =
+    /\b(qual pasta|quais pastas|pasta do drive|pastas do drive|pertencem a qual|de qual pasta|origem.{0,40}drive|vinculo.{0,40}drive|drive_file_id)\b/.test(p);
+  if (/\bselecion/.test(p) && /\b(video|peca|arquivo)\b/.test(p) && !/\b(qual pasta|pertencem|registrad)\b/.test(p)) {
+    return false;
+  }
+  return anuncioOuConj && pasta;
+}
+
+/** Leitura que cruza anuncio no ar × peca do Drive — nao cabe no Luna mais barato. */
+export function ehPedidoLeituraCruzada(pedido: string): boolean {
+  if (ehPedidoOrigemDriveDosAnuncios(pedido)) return true;
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  return /\b(casar|cruzar|vincular|associar|de onde veio|origem da peca)\b/.test(p)
+    && /\b(drive|anuncio|criativo|conjunto)\b/.test(p);
+}
+
+/**
  * Relatorio de leitura que declara lacuna ou pede nova pergunta —
  * o sistema deve continuar o bloco, nao encerrar o turno.
  */
@@ -163,7 +194,11 @@ export function replyLeituraIncompleta(texto: string): boolean {
     || /o levantamento veio incompleto/.test(t)
     || /serie diaria.{0,400}nao (disponivel|retornada|lida)/.test(t)
     || /detalhamento (dos anuncios|por anuncio).{0,400}nao (foi |foram )?(lid|retorn)/.test(t)
-    || /consulta nao realizada nesta rodada/.test(t);
+    || /consulta nao realizada nesta rodada/.test(t)
+    || /sem vinculo (rastreavel|registrado)/.test(t)
+    || /nao ha evidencia suficiente/.test(t)
+    || /nao rastreavel no cadastro/.test(t)
+    || /drive_file_id necessario/.test(t);
   const pedeEco =
     /envie (novamente|de novo) (uma )?(nova )?pergunta/.test(t)
     || /manda(r)? enviar novamente/.test(t)

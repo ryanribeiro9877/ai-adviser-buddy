@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v28.94)
+// supabase/functions/traffic-chat/index.ts (v28.95)
+// v28.95 (02/09/2026) - ORIGEM DRIVE DOS ANUNCIOS. Pedido "qual pasta do Drive
+//   dos anuncios do CONJ.1" saiu com 5 de 6 "sem vinculo": (1) o pedido foi
+//   tratado como inventario (get_drive_criativos vazio porque VISTTA tem
+//   2026/08. Agosto antes de Reels); (2) casar AND chute de 2.mp4 zerou o par
+//   real (10.mp4); (3) teto default=2 do casar cortou o resto. Tool
+//   origem_drive_dos_anuncios le os cards; casar faz fallback pelo ad_id;
+//   varredura desce ano/mes; continuacao se a prosa declarar lacuna.
 // v28.94 (02/09/2026) - DELETED/ARCHIVED SAEM DA MEMORIA OPERACIONAL. Na pergunta
 //   "quais conjuntos ativos e quais anuncios ativos neles" da VISTTA, o agente
 //   somou 29 DELETED + 11 CAMPAIGN_PAUSED = 40 "registrados" e misturou exclusos
@@ -766,8 +773,9 @@ import {
   idInstagramDeParams,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
-import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
+import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
 import { tDetalheAnuncios, DEF_GET_DETALHE_ANUNCIOS, casarCampanhas, escolherCampanhaUnica, janelaDetalhe } from "../_shared/leitura_desempenho.ts";
+import { DEF_ORIGEM_DRIVE_DOS_ANUNCIOS, tOrigemDriveDosAnuncios, tCasarCriativoPerformance } from "../_shared/origem_drive_anuncios.ts";
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
 import {
   aplicarRecorteAcervo,
@@ -778,7 +786,7 @@ import {
   inferirMeioDrive,
   parseMeioDriveArg,
   injetarArgsDrive,
-  pastaFormatoDoPedido,
+  deveDescerPastaDrive,
   pedidoExigeInventarioDrive,
   pedidoUsaSlateExistente,
   raizDriveDoMeio,
@@ -858,6 +866,8 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   get_instagram_dos_anuncios: 3,
   get_whatsapp_da_pagina: 2,
   get_detalhe_anuncios: 6,
+  origem_drive_dos_anuncios: 3,
+  casar_criativo_performance: 6,
   get_campaign_detail: 4,
   get_ads_ranking: 4,
   vincular_instagram_dos_anuncios: 2,
@@ -886,7 +896,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.94";
+const VERSAO = "chat-v28.95";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -913,6 +923,13 @@ const MSG_NUDGE_DRIVE =
   "PROIBIDO substituir por get_criativos_conteudo (anuncios ja no ar, LF_A_AD01…). " +
   "Historico e bloco [RETORNOS...] NAO valem como inventario de arquivos — a pasta pode ter mudado. " +
   "Liste nome + pasta + drive_file_id. Nao invente arquivo. Nao peca o gestor para colar o inventario.";
+const MSG_NUDGE_ORIGEM =
+  "[CORRECAO DO SISTEMA — nao e o gestor] Pedido: pasta do Drive dos ANUNCIOS JA NO AR. " +
+  "OBRIGATORIO NESTE TURNO: chame origem_drive_dos_anuncios (conjunto + name_like da campanha). " +
+  "Fonte = card criar_anuncio_a_partir_de (drive_file_id) + pasta da peca. " +
+  "PROIBIDO chute AD_…_2 → 2.mp4. PROIBIDO 'sem vinculo' sem essa tool. " +
+  "casar_criativo_performance e plano B: passe SO ad_external_id, nunca invente drive_file_id. " +
+  "Nao substitua por inventario de pecas novas.";
 const MSG_NUDGE_UPLOAD_BASE =
   "[CORRECAO DO SISTEMA — nao e o gestor] Pedido: subir TODOS os faltantes para a biblioteca. " +
   "NAO pare no meio. NAO invente teto de 5 acoes/hora. NAO peca o gestor para repetir " +
@@ -4959,7 +4976,7 @@ const TOOLS = [
   { type: "function", function: { name: "registrar_veredito_peca_em_revisao", description: "PROPOE veredito de compliance em pecas_em_revisao emitindo um CARD DE APROVACAO. Voce NAO decide e NAO libera nada: a peca continua impedida e so muda quando um administrador aprovar o card na tela. A assinatura gravada sera a de QUEM APROVAR, resolvida por auth.users - o nome que voce passar em veredito_por entra apenas como autor_sugerido e nao tem valor de decisao. Valores: liberado_como_esta (se aprovado, desliga bloqueia_uso), ajustar_peca ou nao_usar (mantem o bloqueio). Ja existindo proposta pendente para a peca, a chamada e recusada. Ao responder, diga que emitiu proposta e que a decisao e do responsavel - nunca diga que a peca foi liberada. Nao faca UPDATE a mao.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, veredito: { type: "string", enum: ["liberado_como_esta", "ajustar_peca", "nao_usar"] }, veredito_por: { type: "string", description: "Opcional: quem pediu o veredito (ex.: Roberto). Registro informativo, NAO assinatura." }, nota: { type: "string", description: "Opcional: condicao ou justificativa que acompanha a proposta." } }, required: ["drive_file_id", "veredito"] } } },
   { type: "function", function: { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id da conversa e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e problema depois do clique e apenas apontado porque esta fora do escopo.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   { type: "function", function: { name: "avaliar_fadiga", description: "Avalia se uma peca cansou, teve queda sem saturacao, esta com frequencia alta antes da queda ou nao tem sinal de fadiga. Exige company_id da conversa e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e declara que frequencia deduplicada de 30 dias nao pode ser derivada das linhas diarias.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
-  { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca do Drive com os anuncios criados PELO SISTEMA a partir dela e devolve metricas da janela (gasto, formularios, conversas, custo/formulario) + amostra_pequena (<20 resultados). Passe drive_file_id e/ou ad_external_id; sem filtro lista os pares existentes da empresa. Anuncios feitos so no Gerenciador NAO entram (lacuna declarada). Use ANTES de julgar peca do acervo por performance; ranking medio isolado nao prescreve pausa. Para fadiga, chame avaliar_fadiga com o ad_external_id devolvido.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer", description: "Janela em dias (default 7)." } } } } },
+  { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca do Drive com os anuncios criados PELO SISTEMA a partir dela e devolve metricas da janela (gasto, formularios, conversas, custo/formulario) + amostra_pequena (<20 resultados). Passe drive_file_id e/ou ad_external_id; sem filtro lista os pares existentes da empresa. Se os DOIS filtros zerarem, a tool reconsulta SO pelo anuncio e devolve o par real (nao trate vazio como 'sem origem'). Anuncios feitos so no Gerenciador NAO entram (lacuna declarada). PARA PERGUNTA DE PASTA DO CONJUNTO use origem_drive_dos_anuncios — uma chamada cobre todos os anuncios. Use ANTES de julgar peca do acervo por performance; ranking medio isolado nao prescreve pausa.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer", description: "Janela em dias (default 7)." } } } } },
   { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: le a identidade de marca VIGENTE. COHAPM tem TRES vozes: meio=juridico vs meio=la_felicita vs meio=sistema_ocular (VISTTA). Campanha/produto La Felicità ou imovel: passe meio=la_felicita. Sistema Ocular/VISTTA: meio=sistema_ocular. NUNCA use copy Juridico nas outras linhas. Sem meio, a RPC prefere juridico. gerar_legendas consome automaticamente quando produto/meio vem certo.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"], description: "Recorte de voz. Obrigatorio em COHAPM quando o pedido recorta um empreendimento." } } } } },
   { type: "function", function: { name: "score_de_prontidao", description: "ESP-38: score read-only 0-100 de prontidao da empresa da conversa para propor/executar anuncios, agregando sinais que ja existem: config de execucao (25), integracao Meta viva (25), postura de criacao/pode_executar_acao (20), brand_identity (15), destino_por_produto (10) e driver resolvivel (5). Devolve nivel (bloqueado|parcial|operacional|pronto), checks itemizados com evidencia/lacuna, bloqueios duros e recomendacoes. Use quando o usuario pergunta 'estamos prontos?/por que nao consigo criar anuncio?/o que falta'. NAO altera nada e NAO substitui os gates por pedido (validar_pedido_contra_contrato / pedido_de_anuncio_completo).", parameters: { type: "object", properties: {} } } },
   { type: "function", function: { name: "saude_dos_tokens", description: "ESP-30: saude dos tokens Meta (ads/waba) da empresa da conversa por METADADO gravado (meta_tokens): por token devolve dias para expirar, dias para o fim do data_access, escopos faltando vs o esperado do papel e veredito (ok|expira_em_breve|expirado|data_access_expirado|escopo_incompleto|invalido). Use quando o usuario pergunta 'o token vai vencer?/temos permissao pra X?/por que parou de coletar'. Leitura pura: le o ultimo estado do meta-token-monitor, NAO chama a Graph e NUNCA expoe o valor do token. Complementa saude_das_integracoes (entrega) e bm-monitor (status/cobranca da conta).", parameters: { type: "object", properties: {} } } },
@@ -4975,6 +4992,7 @@ const TOOLS = [
   { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando perguntarem maior alcance. Recorte com name_like ou campaign_id (ID Meta). Passe date_from/date_to da janela. PROIBIDO dizer alcance indisponivel sem chamar isto. Custo medio sozinho NAO autoriza pausa (Breakdown Effect).", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, date_from: { type: "string" }, date_to: { type: "string" }, name_like: { type: "string" }, campaign_id: { type: "string" } } } } },
   { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria de UMA campanha (nome OU campaign_id Meta), com totais do periodo. Passe date_from/date_to quando o gestor der a janela. Inclui special_ad_categories da CAMPANHA. Cada dia e os totais trazem: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, CTR/CPC/CPM. DUAS BASES DE CLIQUE - NUNCA misture. Dia sem linha = coleta D-1 ainda nao chegou, nao entrega zero. NAO substitui get_detalhe_anuncios (serie por anuncio/conjunto).", parameters: { type: "object", properties: { name_like: { type: "string" }, campaign_id: { type: "string" }, date_from: { type: "string" }, date_to: { type: "string" } } } } },
   DEF_GET_DETALHE_ANUNCIOS,
+  DEF_ORIGEM_DRIVE_DOS_ANUNCIOS,
   { type: "function", function: { name: "auditar_compliance_financeira", description: "Auditoria de categoria especial + regras financeiras de UMA campanha e seus anuncios. Devolve special_ad_categories do espelho, se e financeira, lista de anuncios (status/CTA/destino/criado_pelo_sistema), alertas de segmentacao (idade/genero/LAL) e as regras ativas FIN/LGL/CRI. Use quando o gestor perguntar se anuncios respeitam finanças/categoria especial/regras da Meta. NAO diga que o campo nao existe: esta tool e get_campaign_detail leem. Complemente com get_conhecimento(tema=compliance) e check_compliance nas legendas. Confirmacao ao vivo: ler_pipeboard get_campaign_details.", parameters: { type: "object", properties: { name_like: { type: "string", description: "Nome (ou trecho) da campanha" } }, required: ["name_like"] } } },
   { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido. Pode vir recortado por meio/formatos do pedido. USE quando o gestor pedir para classificar pecas da pasta. Se total_analisados < inventario, ha pecas novas sem analise.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"] }, formatos: { type: "array", items: { type: "string" } } } } } },
   { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, data — SEM thumbnail. Recorte com meio=la_felicita|juridico e formatos Reels/Videos. Use para LISTAR o que existe na pasta. NAO substitui por get_criativos_conteudo (anuncios ja no ar). LIMITES: nao le conteudo interno de video.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"] }, formatos: { type: "array", items: { type: "string" } } } } } },
@@ -5245,7 +5263,7 @@ async function t_drive_criativos(companyId: string, pedido = "", args: Record<st
       if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
       for (const f of j.files ?? []) {
         if (f.mimeType === "application/vnd.google-apps.folder") {
-          if (no.nivel === 0 && !pastaFormatoDoPedido(String(f.name ?? ""), recorte)) continue;
+          if (!deveDescerPastaDrive(String(f.name ?? ""), recorte, no.nivel)) continue;
           if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz, meio: no.meio });
         } else if (arquivos.length < MAX_ARQUIVOS) {
           const caminhoRel = no.caminho || "(raiz)";
@@ -5318,12 +5336,27 @@ async function runTool(name: string, args: any, ctx: any) {
       });
       case "diagnosticar_custo": return await t_rpc("diagnosticar_custo", { p_company_id: ctx.companyId, p_ad_external_id: String(args?.ad_external_id ?? "") });
       case "avaliar_fadiga": return await t_rpc("avaliar_fadiga", { p_company_id: ctx.companyId, p_ad_external_id: String(args?.ad_external_id ?? "") });
-      case "casar_criativo_performance": return await t_rpc("casar_criativo_performance", {
-        p_company_id: ctx.companyId,
-        p_drive_file_id: args?.drive_file_id == null || String(args.drive_file_id).trim() === "" ? null : String(args.drive_file_id),
-        p_ad_external_id: args?.ad_external_id == null || String(args.ad_external_id).trim() === "" ? null : String(args.ad_external_id),
-        p_dias: Number(args?.dias ?? 7),
-      });
+      case "casar_criativo_performance": return await tCasarCriativoPerformance(
+        (nome, params) => t_rpc(nome, params),
+        {
+          companyId: ctx.companyId,
+          driveFileId: args?.drive_file_id == null || String(args.drive_file_id).trim() === "" ? null : String(args.drive_file_id),
+          adExternalId: args?.ad_external_id == null || String(args.ad_external_id).trim() === "" ? null : String(args.ad_external_id),
+          dias: Number(args?.dias ?? 7),
+        },
+      );
+      case "origem_drive_dos_anuncios": return await tOrigemDriveDosAnuncios(
+        supa,
+        ctx.companyId,
+        {
+          name_like: args?.name_like ? String(args.name_like) : undefined,
+          campaign_id: args?.campaign_id ? String(args.campaign_id) : undefined,
+          conjunto: args?.conjunto != null ? Number(args.conjunto) : undefined,
+          ad_external_id: args?.ad_external_id ? String(args.ad_external_id) : undefined,
+          incluir_apagados: args?.incluir_apagados === true,
+        },
+        String(ctx.pedido ?? ""),
+      );
       case "ler_brand_identity": {
         const meio = parseMeioDriveArg(args?.meio)
           ?? inferirMeioDrive(String(ctx.pedido ?? ""))
@@ -5737,6 +5770,7 @@ entregue o que ja apurou com lacunas declaradas — nunca um "vou…" sozinho.
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
 R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os dois limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
 R1-DRIVE. MENSAGEM NOVA QUE PEDE VERIFICAR / LISTAR / DISTRIBUIR / INVENTARIAR pecas do Drive OBRIGA chamar get_drive_criativos e get_acervo_para_anuncio NESTE turno. Historico e bloco [RETORNOS...] valem para CONTRATO (nomes de conjunto, orcamento, publico ja definidos), NAO como inventario de arquivos: a pasta pode ter mudado. PROIBIDO substituir o Drive por get_criativos_conteudo (anuncios ja no ar). PROIBIDO pedir ao gestor que cole o inventario. Se o pedido for La Felicita, recorte meio=la_felicita e so pastas Reels/Videos. EXCECAO: pedido de legendas/cards das pecas JA selecionadas (CONJ.N / "os 8 videos que selecionou") NAO e inventario — use get_slate_da_conversa / [SLATE DA CONVERSA]. PROIBIDO reabrir o Drive como se o slate nao existisse.
+R1-ORIGEM. "De qual PASTA DO DRIVE sao os anuncios JA NO AR deste conjunto?" NAO e inventario de pecas novas. Chame origem_drive_dos_anuncios (conjunto + name_like da campanha) NESTE turno. A fonte e o card criar_anuncio_a_partir_de (drive_file_id) + pasta da peca. AD_CONJ.N_…_2 NAO implica 2.mp4. PROIBIDO declarar "sem vinculo" / "nao rastreavel" sem ter chamado essa tool. Se casar_criativo_performance vier vazio com os dois filtros, ela mesma reconsulta pelo anuncio — leia o aviso; nao encerre. get_drive_criativos vazio NAO prova que a pasta nao existe.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
 R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. Para categoria especial: LEIA com get_campaign_detail / auditar_compliance_financeira / ler_pipeboard get_campaign_details; para ALTERAR ou REMOVER use alterar_categoria_especial (card alterar_categoria_especial_campanha). PROIBIDO dizer que "nao ha ferramenta" ou que "so na criacao". A Meta aplica a categoria na campanha; os anuncios herdam.
 R3. Distinga tres coisas diferentes: (a) o dado e ZERO, (b) o dado NAO EXISTE no sistema, (c) o dado NAO FOI COLETADO no periodo (sync/cobertura). Nunca trate (b) ou (c) como (a).
@@ -6018,6 +6052,7 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
   const lote = pedidoLoteCriativo(cp.objetivo);
   const uploadLote = ehPedidoUploadLote(cp.objetivo);
   const detalhe = ehPedidoDetalhamentoCampanha(cp.objetivo) || replyLeituraIncompleta(cp.reply_parcial || "");
+  const origem = ehPedidoOrigemDriveDosAnuncios(cp.objetivo);
   const faltamUp = (cp.pendentes_upload ?? [])
     .map((p) => `- ${p.nome} (${p.drive_file_id})`).join("\n");
   const instrucao = uploadLote
@@ -6037,6 +6072,13 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
       "EXCLUA pecas ja usadas no conjunto ativo (leia nomes em get_criativos_conteudo se ainda nao listou).\n" +
       "4. NAO emita card a menos que o objetivo original peca emissao. Entregue tabela: arquivo, drive_file_id, motivo, legenda escolhida.\n" +
       "5. Use ferramentas so do que falta; nao releia acervo inteiro se ja consta acima."
+    : origem
+    ? "INSTRUCOES OBRIGATORIAS (ORIGEM DRIVE):\n" +
+      "1. NAO cumprimente. NAO peca o gestor para repetir.\n" +
+      "2. Chame AGORA origem_drive_dos_anuncios (conjunto do pedido + name_like da campanha do fio). " +
+      "Nao inventarie a pasta. Nao chute N.mp4 a partir de AD_…_N.\n" +
+      "3. Escreva pasta + peca_nome + drive_file_id de CADA anuncio. PROIBIDO 'sem vinculo' se a tool trouxe o id.\n" +
+      "4. Se ambiguo (CONJ.N em duas campanhas), filtre pela campanha do fio (ex. VISTTA)."
     : detalhe
     ? "INSTRUCOES OBRIGATORIAS (LEITURA INCOMPLETA):\n" +
       "1. NAO cumprimente. NAO peca o gestor para repetir nem enviar nova pergunta.\n" +
@@ -6565,6 +6607,7 @@ Deno.serve(async (req) => {
     (recusaFalsaMoldeTrafego(ultimoAssistantTxt) ||
       /conjunto molde ['"]?sem_molde/i.test(ultimoAssistantTxt + "\n" + histRetornos));
   const precisaNudgeDrive = pedidoExigeInventarioDrive(objetivoOriginal);
+  const precisaNudgeOrigem = ehPedidoOrigemDriveDosAnuncios(objetivoOriginal);
   const precisaNudgeSlate =
     pedidoUsaSlateExistente(objetivoOriginal) &&
     /re-?colar|cole de novo|nao (inclui|traz|lista) o slate|inventario.{0,80}nao.{0,80}(os 8|selecion)|confirme os (8 )?videos|cole os (ids|nomes)/i.test(
@@ -6578,6 +6621,7 @@ Deno.serve(async (req) => {
   const extrasNudge = [
     precisaNudgeSemMolde ? MSG_NUDGE_SEM_MOLDE : "",
     precisaNudgeDrive ? MSG_NUDGE_DRIVE : "",
+    precisaNudgeOrigem ? MSG_NUDGE_ORIGEM : "",
     precisaNudgeSlate ? MSG_NUDGE_SLATE : "",
     precisaNudgeLegendas ? MSG_NUDGE_LEGENDAS : "",
   ].filter(Boolean);
@@ -6625,6 +6669,7 @@ Deno.serve(async (req) => {
   let deadlineTools = false;
   let nudgesSemMolde = 0;
   let nudgesDrive = 0;
+  let nudgesOrigem = 0;
   let nudgesUpload = 0;
   let nudgesSlate = 0;
   let nudgesLegendas = 0;
@@ -7014,6 +7059,14 @@ Deno.serve(async (req) => {
       finishReason = String(finishReason || "stop") + "+nudge_drive";
       continue;
     }
+    const coletouOrigem = toolsUsed.some((t) => t.tool === "origem_drive_dos_anuncios");
+    if (ehPedidoOrigemDriveDosAnuncios(objetivoOriginal) && !coletouOrigem && nudgesOrigem < 1) {
+      nudgesOrigem++;
+      messages.push({ role: "assistant", content: reply });
+      messages.push({ role: "user", content: MSG_NUDGE_ORIGEM });
+      finishReason = String(finishReason || "stop") + "+nudge_origem";
+      continue;
+    }
     if (
       pedidoUsaSlateExistente(objetivoOriginal) &&
       nudgesSlate < 1 &&
@@ -7215,16 +7268,22 @@ Deno.serve(async (req) => {
   const toolsPuladas = toolResults.some((t) =>
     /consulta_nao_realizada|deadline|teto de ferramentas|nao foi lido|flush_upload/i.test(String(t.erro ?? "")));
   const pedidoDetalhe = ehPedidoDetalhamentoCampanha(objetivoOriginal);
+  const pedidoOrigem = ehPedidoOrigemDriveDosAnuncios(objetivoOriginal);
   const toolsJaNoPedido = [...(turnCheckpoint?.tools_resumo ?? []), ...toolsUsed];
   const chamouDetalhe = toolsJaNoPedido.some((t) => String((t as any).tool ?? "") === "get_detalhe_anuncios");
+  const chamouOrigem = toolsJaNoPedido.some((t) =>
+    String((t as any).tool ?? "") === "origem_drive_dos_anuncios",
+  );
   const chamouDetalheOkNeste = toolResults.some((t) =>
     String(t.tool ?? "") === "get_detalhe_anuncios" && !t.erro);
   const leituraIncompleta = replyLeituraIncompleta(replyTrim);
   const detalheSemTool = pedidoDetalhe && !chamouDetalhe && !pedidoAtoCards && !pedidoUploadTurno;
+  const origemSemTool = pedidoOrigem && !chamouOrigem && !pedidoAtoCards && !pedidoUploadTurno;
+  const leituraComTeto = tetoTools && ehPerguntaDeLeitura(objetivoOriginal) && !pedidoAtoCards && !pedidoUploadTurno;
   const deadlineSemConteudo = deadlineTools && (
     pedidoUploadTurno
       ? uploadIncompleto
-      : (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas || leituraIncompleta || detalheSemTool)
+      : (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas || leituraIncompleta || detalheSemTool || origemSemTool)
   );
   const falhaModeloSemColeta = /openrouter/.test(String(finishReason)) && toolsUsed.length === 0;
   const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && !falhaModeloSemColeta && (
@@ -7232,12 +7291,14 @@ Deno.serve(async (req) => {
     (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas)) ||
     uploadIncompleto ||
     leituraIncompleta ||
-    (toolsPuladas && (pedidoDetalhe || leituraIncompleta)) ||
-    detalheSemTool
+    (toolsPuladas && (pedidoDetalhe || pedidoOrigem || leituraIncompleta)) ||
+    detalheSemTool ||
+    origemSemTool ||
+    leituraComTeto
   );
   const maxSeg = pedidoUploadTurno
     ? (uploadCurto ? 3 : MAX_TURN_SEGMENTS_UPLOAD)
-    : (pedidoDetalhe || leituraIncompleta ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS);
+    : (pedidoDetalhe || pedidoOrigem || leituraIncompleta || leituraComTeto ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS);
   const podeContinuarSegmento = segmentoAtual < maxSeg;
   let continuarTurno = false;
   let usouFallback = false;

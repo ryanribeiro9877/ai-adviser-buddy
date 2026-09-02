@@ -163,5 +163,10 @@ assert(
     !uploadMidia.includes('ilike("name", `%${compRef}%`)'),
   "upload-midia nao pode resolver empresa por substring (COHAPM vs Cooperativa_ Cohapm)",
 );
+assert(
+  /tOrigemDriveDosAnuncios\(\s*supa,\s*ctx\.companyId/.test(chat) &&
+    /tOrigemDriveDosAnuncios\(\s*supa,\s*ctx\.companyId/.test(job),
+  "origem Drive dos anuncios e da empresa nos dois caminhos",
+);
 
 console.log("ok: _prova_isolamento_empresas");

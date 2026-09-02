@@ -12,6 +12,7 @@ import {
   type FaixaLlm,
   type LlmModelo,
 } from "./llm_catalogo.ts";
+import { ehPedidoLeituraCruzada } from "./intencao_turno.ts";
 export type { FaixaLlm };
 import {
   extrasAutoRouter,
@@ -162,6 +163,10 @@ export function resolverChamadaLlm(opts: {
         primario = "anthropic/claude-haiku-4.5";
         req = { tools: true, json: true };
         motivo = "chat com propose_action — Haiku (JSON de card fiel, ainda economia)";
+      } else if (ehPedidoLeituraCruzada(opts.pergunta ?? "")) {
+        primario = "openai/gpt-5.6-luna-pro";
+        req = { tools: true, prosa: true };
+        motivo = "chat leitura cruzada ads×Drive — Luna Pro (nao declarar lacuna sem a tool de origem)";
       } else {
         primario = "openai/gpt-5.6-luna";
         req = { tools: true, prosa: true };

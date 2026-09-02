@@ -51,6 +51,14 @@ assert(!deep.provider, "premium nao forca sort=price");
 const rec = resolverChamadaLlm({ tipo: "reco" });
 assert(rec.model === "openai/gpt-4o-mini", `reco=${rec.model}`);
 
+const origem = resolverChamadaLlm({
+  tipo: "chat_loop",
+  pergunta:
+    "foque exclusivamente no conjunto 1: dos anuncios registrados, eles pertencem a qual pasta do drive?",
+});
+assert(origem.model === "openai/gpt-5.6-luna-pro", `origem model=${origem.model}`);
+assert(origem.faixa === "economia", "leitura cruzada permanece economia");
+
 const body = bodyOpenRouter(chat, { max_tokens: 10, messages: [] });
 assert(body.model === chat.model, "body.model");
 assert(Array.isArray(body.models) && (body.models as string[]).includes(chat.fallbacks[0]), "fallbacks no body");

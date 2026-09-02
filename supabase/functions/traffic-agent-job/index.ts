@@ -1,4 +1,6 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.17)
+// supabase/functions/traffic-agent-job/index.ts (v4.18)
+// v4.18 (02/09/2026) - origem_drive_dos_anuncios + varredura desce ano/mes VISTTA;
+//   pedido de pasta dos anuncios no ar deixa de ser inventario de pecas novas.
 // v4.17 (02/09/2026) - Ranking ignora anuncios DELETED/ARCHIVED (mesma regra do chat v28.94).
 // v4.16 (01/09/2026) - CTWA cria pelo pipeboard: casou_na_api=false NAO impede o
 //   conjunto (graph 1487246 as 11:49, pipeboard criou o 120249829825270182 as 12:46
@@ -265,13 +267,13 @@ import {
   inferirMeioDrive,
   parseMeioDriveArg,
   injetarArgsDrive,
-  pastaFormatoDoPedido,
+  deveDescerPastaDrive,
   pedidoExigeInventarioDrive,
   raizDriveDoMeio,
   recorteDriveDoPedido,
   serieCarrosselDrive,
 } from "../_shared/pedido_drive_criativos.ts";
-import { ehPedidoDetalhamentoCampanha, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
 import {
   tDetalheAnuncios,
   DEF_GET_DETALHE_ANUNCIOS,
@@ -280,6 +282,12 @@ import {
   janelaDetalhe,
   parseJanelaDatasPedido,
 } from "../_shared/leitura_desempenho.ts";
+import {
+  DEF_ORIGEM_DRIVE_DOS_ANUNCIOS,
+  FOCO_ORIGEM_DRIVE,
+  tOrigemDriveDosAnuncios,
+  tCasarCriativoPerformance,
+} from "../_shared/origem_drive_anuncios.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -437,7 +445,10 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
     perguntas_obrigatorias.push("Dos numeros cadastrados (juridico e La Felicita), quais receberam mais conversas?");
   }
   const pedeDrive = pedidoExigeInventarioDrive(raw);
-  if (pedeDrive) {
+  const pedeOrigem = ehPedidoOrigemDriveDosAnuncios(raw);
+  if (pedeOrigem) {
+    perguntas_obrigatorias.push("Pasta do Drive de CADA anuncio do conjunto (origem_drive_dos_anuncios): pasta + peca_nome + drive_file_id. PROIBIDO mapear AD_…_N para N.mp4. PROIBIDO 'sem vinculo' se a tool trouxe o id.");
+  } else if (pedeDrive) {
     perguntas_obrigatorias.push("Inventario do Drive NESTA rodada: nome + pasta + drive_file_id (Reels/Videos se o pedido restringir).");
     perguntas_obrigatorias.push("Distribuicao CONJ.1/2/3 a partir de Junho+Julho sem repetir arquivo; Agosto so no CONJ.4 se o pedido reservar.");
     perguntas_obrigatorias.push("Configuracao de cada conjunto citado (publico/geo, idade, optimization_goal, orcamento, destination_type).");
@@ -445,7 +456,10 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
     perguntas_obrigatorias.push("Visao geral das campanhas do universo do pedido (status, gasto, objetivo + optimization_goal).");
     perguntas_obrigatorias.push("Funil/metricas NA JANELA do pedido (nao fora dela).");
   }
-  if (ehPedidoDetalhamentoCampanha(raw) || (/\banuncio/.test(p) && /\b(diario|diaria|conjunto|campanha)/.test(p))) {
+  if (
+    !pedeOrigem
+    && (ehPedidoDetalhamentoCampanha(raw) || (/\banuncio/.test(p) && /\b(diario|diaria|conjunto|campanha)/.test(p)))
+  ) {
     perguntas_obrigatorias.push("Quantos anuncios em cada conjunto, status, gasto, impressoes, alcance, cliques, CTR, formularios/engajamento, custo e destino (get_detalhe_anuncios; pagine se restantes>0).");
     perguntas_obrigatorias.push("Serie diaria da janela por conjunto e por anuncio (get_detalhe_anuncios + get_campaign_detail com date_from/date_to).");
   }
@@ -480,7 +494,7 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
     metricas.length ? `Metricas pedidas: ${metricas.join(", ")}` : "",
     "Perguntas que DEVEM ter resposta explicita (cada uma):",
     ...(perguntas_obrigatorias.length ? perguntas_obrigatorias.map((q, i) => `${i + 1}. ${q}`) : ["1. Responder exatamente o que o gestor perguntou, sem secoes extras de historico nao pedido."]),
-    "PROIBIDO: dizer que um dado 'nao esta disponivel' sem ter chamado a tool que o expoe (ex.: alcance via get_ads_ranking; anuncio/serie diaria via get_detalhe_anuncios).",
+    "PROIBIDO: dizer que um dado 'nao esta disponivel' sem ter chamado a tool que o expoe (ex.: alcance via get_ads_ranking; anuncio/serie diaria via get_detalhe_anuncios; pasta do Drive de anuncio no ar via origem_drive_dos_anuncios).",
     "PROIBIDO: responder com serie da conta inteira quando o pedido e 'desde a ativacao dessas campanhas'.",
     "Se houver dado historico fora do contrato, no maximo uma linha de contexto rotulada FORA DO PEDIDO — nunca como corpo da analise.",
   ].filter(Boolean).join("\n");
@@ -549,10 +563,24 @@ function classificarCapacidade(pergunta: string): Capacidade {
   const linhas = raw.split(/\n/).filter((l) => l.trim().length > 0).length;
   const perguntas = (raw.match(/\?/g) ?? []).length;
   const detalheCampanha = ehPedidoDetalhamentoCampanha(raw);
+  const origemAnuncios = ehPedidoOrigemDriveDosAnuncios(raw);
   const deepHit = RE_DEEP.test(p)
     || len >= 1400
     || (len >= 900 && (perguntas >= 3 || linhas >= 8))
     || (perguntas >= 4 && len >= 500);
+  if (origemAnuncios) {
+    return {
+      tier: deepHit ? "deep" : "standard",
+      motivo: "origem Drive dos anuncios no ar (nao inventario de pecas novas)",
+      maxEspecialistas: 1,
+      devolucoesMax: 1,
+      permitirCheckpoint: true,
+      openRouterTimeoutMs: deepHit ? OPENROUTER_TIMEOUT_MS : STANDARD_OPENROUTER_TIMEOUT_MS,
+      forcarPlano: [
+        { nome: "desempenho_campanhas", foco: FOCO_ORIGEM_DRIVE },
+      ],
+    };
+  }
   // Pedido de pasta Drive NUNCA e overview de campanha, mesmo se o texto disser
   // "analise completa de criativos das pastas".
   if (pedidoExigeInventarioDrive(raw)) {
@@ -1246,12 +1274,27 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       case "nota_visual_da_peca": return await t_rpc("nota_visual_da_peca", { p_company_id: ctx.companyId, p_drive_file_id: String(args?.drive_file_id ?? "") });
       case "diagnosticar_custo": return await t_rpc("diagnosticar_custo", { p_company_id: ctx.companyId, p_ad_external_id: String(args?.ad_external_id ?? "") });
       case "avaliar_fadiga": return await t_rpc("avaliar_fadiga", { p_company_id: ctx.companyId, p_ad_external_id: String(args?.ad_external_id ?? "") });
-      case "casar_criativo_performance": return await t_rpc("casar_criativo_performance", {
-        p_company_id: ctx.companyId,
-        p_drive_file_id: args?.drive_file_id == null || String(args.drive_file_id).trim() === "" ? null : String(args.drive_file_id),
-        p_ad_external_id: args?.ad_external_id == null || String(args.ad_external_id).trim() === "" ? null : String(args.ad_external_id),
-        p_dias: Number(args?.dias ?? 7),
-      });
+      case "casar_criativo_performance": return await tCasarCriativoPerformance(
+        (nome, params) => t_rpc(nome, params),
+        {
+          companyId: ctx.companyId,
+          driveFileId: args?.drive_file_id == null || String(args.drive_file_id).trim() === "" ? null : String(args.drive_file_id),
+          adExternalId: args?.ad_external_id == null || String(args.ad_external_id).trim() === "" ? null : String(args.ad_external_id),
+          dias: Number(args?.dias ?? 7),
+        },
+      );
+      case "origem_drive_dos_anuncios": return await tOrigemDriveDosAnuncios(
+        supa,
+        ctx.companyId,
+        {
+          name_like: args?.name_like ? String(args.name_like) : undefined,
+          campaign_id: args?.campaign_id ? String(args.campaign_id) : undefined,
+          conjunto: args?.conjunto != null ? Number(args.conjunto) : undefined,
+          ad_external_id: args?.ad_external_id ? String(args.ad_external_id) : undefined,
+          incluir_apagados: args?.incluir_apagados === true,
+        },
+        String(ctx.pedido ?? ""),
+      );
       case "ler_brand_identity": {
         const meio = parseMeioDriveArg(args?.meio)
           ?? inferirMeioDrive(String(ctx.pedido ?? ""))
@@ -1417,7 +1460,8 @@ const DEF: Record<string, any> = {
   nota_visual_da_peca: { type: "function", function: { name: "nota_visual_da_peca", description: "Nota textual de uma peca no company_id: revisao, base, produto, aproveitabilidade, risco, motivo e divergencia. Informa, nao aprova; ausencia de leitura nao e ausencia de risco.", parameters: { type: "object", properties: { drive_file_id: { type: "string" } }, required: ["drive_file_id"] } } },
   diagnosticar_custo: { type: "function", function: { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id do job e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e pos-clique fica fora do escopo.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
   avaliar_fadiga: { type: "function", function: { name: "avaliar_fadiga", description: "Avalia se a peca cansou, teve queda sem saturacao, frequencia alta antes da queda ou nenhum sinal. Exige company_id do job e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e nao deriva a frequencia deduplicada de 30 dias.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
-  casar_criativo_performance: { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca Drive com anuncios criados pelo sistema e metricas da janela + amostra_pequena. Filtros opcionais: drive_file_id, ad_external_id, dias.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer" } } } } },
+  casar_criativo_performance: { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca Drive com anuncios criados pelo sistema. Se drive_file_id+ad_external_id zerarem, reconsulta so pelo anuncio. Para pasta do conjunto use origem_drive_dos_anuncios.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer" } } } } },
+  origem_drive_dos_anuncios: DEF_ORIGEM_DRIVE_DOS_ANUNCIOS,
   ler_brand_identity: { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: identidade de marca vigente. COHAPM: passe meio=la_felicita ou juridico. Sem meio a RPC prefere juridico. La Felicita NAO herda voz Juridico.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"] } } } } },
   computar_perfil_vencedor: { type: "function", function: { name: "computar_perfil_vencedor", description: "ESP-34: computa e VERSIONA o perfil do vencedor do company_id do job (regua evaluate_winners/ESP-01: >=30 resultados e >=30 gasto, custo <= teto_vigente*0,80; procedencia da peca ESP-33). Grava nova versao (dedup no mesmo dia salvo forcar). Nao substitui get_recommendations nem aprovacao humana; vencedor mora em ESCALA (ESP-39).", parameters: { type: "object", properties: { dias: { type: "integer" }, forcar: { type: "boolean" } } } } },
   ler_perfil_vencedor: { type: "function", function: { name: "ler_perfil_vencedor", description: "ESP-34: le a ultima versao (ou versao especifica) do perfil do vencedor ja computado para o company_id do job: vencedores, padroes, criterio, procedencia e lacunas. Leitura pura; se nunca computado, orienta chamar computar_perfil_vencedor.", parameters: { type: "object", properties: { versao: { type: "integer" } } } } },
@@ -1449,9 +1493,9 @@ const DEF: Record<string, any> = {
 // especialista nao atende fora do proprio dominio, recusa e registra em LACUNAS).
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
-    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, get_ads_ranking: 4, get_estrutura_conjuntos: 2, computar_perfil_vencedor: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 14,
-    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, detalhe POR ANUNCIO e serie diaria (get_detalhe_anuncios), diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir DB; use ler_pipeboard so se faltar numero critico. Relatorio denso. PROIBIDO fechar sem get_detalhe_anuncios quando o pedido pede anuncio/serie diaria.",
+    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "origem_drive_dos_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "listar_ferramentas_pipeboard", "ler_pipeboard"],
+    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, origem_drive_dos_anuncios: 2, get_ads_ranking: 4, get_estrutura_conjuntos: 2, casar_criativo_performance: 6, computar_perfil_vencedor: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 14,
+    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, detalhe POR ANUNCIO e serie diaria (get_detalhe_anuncios), origem Drive dos anuncios no ar (origem_drive_dos_anuncios), diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir DB; use ler_pipeboard so se faltar numero critico. Relatorio denso. PROIBIDO fechar sem get_detalhe_anuncios quando o pedido pede anuncio/serie diaria. PROIBIDO 'sem vinculo de pasta' sem origem_drive_dos_anuncios.",
   },
   criativos: {
     tools: ["get_criativos_conteudo", "get_ads_ranking", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard"],
@@ -1483,9 +1527,9 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive (pixels da miniatura em alta resolucao): produto detectado, texto visivel, riscos de compliance visiveis e veredito aproveitavel/nao/incerto por peca, persistido em banco. Use quando o gestor pedir para CLASSIFICAR/ANALISAR O CONTEUDO das pecas (nao apenas inventariar). Limite declarado: de video se ve UM FRAME.",
   },
   criativos_drive: {
-    tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "ler_brand_identity", "get_conhecimento"],
-    maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 8, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 3, ler_brand_identity: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
-    missao: "CRIATIVOS NOVOS NO DRIVE: leitura NESTA rodada. Historico nao substitui inventario. COHAPM: isole meio=juridico | la_felicita | sistema_ocular (VISTTA). inventario_global da empresa NAO e o recorte de um empreendimento. PROIBIDO get_criativos_conteudo (anuncios ja no ar). Cite nome+pasta+drive_file_id. Nunca invente arquivo.",
+    tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "origem_drive_dos_anuncios", "ler_brand_identity", "get_conhecimento"],
+    maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 8, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 6, origem_drive_dos_anuncios: 2, ler_brand_identity: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
+    missao: "CRIATIVOS NOVOS NO DRIVE: leitura NESTA rodada. Historico nao substitui inventario. COHAPM: isole meio=juridico | la_felicita | sistema_ocular (VISTTA). inventario_global da empresa NAO e o recorte de um empreendimento. PROIBIDO get_criativos_conteudo (anuncios ja no ar). Cite nome+pasta+drive_file_id. Nunca invente arquivo. Se o FOCO pedir origem dos anuncios JA NO AR, chame origem_drive_dos_anuncios e NAO inventarie pecas novas no lugar.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],
@@ -1596,7 +1640,7 @@ async function t_drive_criativos(companyId: string, opts?: { pedido?: string; ar
       if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
       for (const f of j.files ?? []) {
         if (f.mimeType === "application/vnd.google-apps.folder") {
-          if (no.nivel === 0 && !pastaFormatoDoPedido(String(f.name ?? ""), recorte)) continue;
+          if (!deveDescerPastaDrive(String(f.name ?? ""), recorte, no.nivel)) continue;
           if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz, meio: no.meio });
         } else if (arquivos.length < MAX_ARQUIVOS) {
           const caminhoRel = no.caminho || "(raiz)";
@@ -1776,6 +1820,12 @@ function planoFallbackSeguro(
     ].filter((x) => nomes.includes(x.nome));
     if (drive.length) return drive.slice(0, maxEsp);
   }
+  if (ehPedidoOrigemDriveDosAnuncios(pergunta)) {
+    const origem = [
+      { nome: "desempenho_campanhas", foco: FOCO_ORIGEM_DRIVE },
+    ].filter((x) => nomes.includes(x.nome));
+    if (origem.length) return origem.slice(0, Math.min(1, maxEsp));
+  }
   const metaHit = RE_META_DICA.test(p);
   if (metaHit && nomes.includes("alertas_recomendacoes")) {
     return [{ nome: "alertas_recomendacoes", foco: FOCO_META_DICAS }];
@@ -1821,7 +1871,9 @@ async function planejar(pergunta: string, tel: any, cap?: Capacidade, escopo?: E
     : "";
   const hintDrive = pedidoExigeInventarioDrive(pergunta)
     ? "\nDRIVE OBRIGATORIO NESTA RODADA: inclua criativos_drive. PROIBIDO usar o especialista criativos (pecas ja publicadas) no lugar do inventario de pastas. Historico da conversa nao substitui get_drive_criativos/get_acervo_para_anuncio."
-    : "";
+    : ehPedidoOrigemDriveDosAnuncios(pergunta)
+      ? "\nORIGEM DRIVE DOS ANUNCIOS NO AR: inclua desempenho_campanhas com origem_drive_dos_anuncios. NAO trate como inventario de pecas novas (criativos_drive so se o gestor pedir peca ainda nao publicada)."
+      : "";
   const sys = `Voce e o ROTEADOR de um gestor de trafego Meta Ads. Leia a pergunta de forma FRIA e LITERAL: nao amplie o brief, nao troque a janela, nao acrescente historico que o gestor nao pediu.
 Encaminhe ao MENOR conjunto de especialistas que cobre as perguntas atomicas do contrato.
 Especialistas disponiveis (use exatamente estes nomes):
@@ -2638,12 +2690,46 @@ function especialistaChamou(tel: any, nome: string, tool: string): boolean {
   return toolsDoEspecialista(tel, nome).includes(tool);
 }
 
+function motivosDevolucaoOrigem(
+  pergunta: string,
+  plano: { nome: string }[],
+  relatorios: { nome: string; relatorio: string }[],
+  tel: any,
+): { nome: string; motivo: string }[] {
+  if (!ehPedidoOrigemDriveDosAnuncios(pergunta)) return [];
+  const out: { nome: string; motivo: string }[] = [];
+  const donos = ["desempenho_campanhas", "criativos_drive"] as const;
+  const algumChamou = donos.some((n) => especialistaChamou(tel, n, "origem_drive_dos_anuncios"));
+  if (!algumChamou) {
+    for (const nome of donos) {
+      if (!plano.some((p) => p.nome === nome)) continue;
+      out.push({
+        nome,
+        motivo:
+          "O pedido pede a PASTA DO DRIVE dos anuncios ja no ar e origem_drive_dos_anuncios NAO foi chamada. Chame origem_drive_dos_anuncios (conjunto + name_like da campanha) e so depois escreva. PROIBIDO 'sem vinculo' / chutar N.mp4 a partir de AD_…_N. PROIBIDO inventariar pecas novas no lugar.",
+      });
+    }
+  }
+  for (const r of relatorios) {
+    if (!donos.includes(r.nome as typeof donos[number])) continue;
+    if (replyLeituraIncompleta(r.relatorio) && !out.some((d) => d.nome === r.nome)) {
+      out.push({
+        nome: r.nome,
+        motivo:
+          "O relatorio declara lacuna de pasta/vinculo Drive. Complete com origem_drive_dos_anuncios; nao peca nova pergunta ao gestor e nao mapeie AD_…_N para N.mp4.",
+      });
+    }
+  }
+  return out;
+}
+
 function motivosDevolucaoDetalhe(
   pergunta: string,
   plano: { nome: string }[],
   relatorios: { nome: string; relatorio: string }[],
   tel: any,
 ): { nome: string; motivo: string }[] {
+  if (ehPedidoOrigemDriveDosAnuncios(pergunta)) return [];
   if (!ehPedidoDetalhamentoCampanha(pergunta)) return [];
   const out: { nome: string; motivo: string }[] = [];
   if (
@@ -2675,13 +2761,16 @@ async function validarRelatorios(
   relatorios: { nome: string; relatorio: string; completo: boolean }[],
   tel: any,
 ): Promise<{ nome: string; motivo: string }[]> {
-  const det = motivosDevolucaoDetalhe(pergunta, plano, relatorios, tel);
+  const det = [
+    ...motivosDevolucaoOrigem(pergunta, plano, relatorios, tel),
+    ...motivosDevolucaoDetalhe(pergunta, plano, relatorios, tel),
+  ];
   const resumo = relatorios.map((r) => {
     const foco = plano.find((p) => p.nome === r.nome)?.foco ?? "";
     return `--- ${r.nome} (foco atribuido: ${foco || "geral"}) [${r.completo ? "COMPLETO" : "INCOMPLETO-cortado"}] ---\n${r.relatorio.slice(0, 3200)}`;
   }).join("\n\n");
   const sys = `Voce e a COORDENACAO de uma equipe de especialistas de trafego pago. Avalie cada relatorio contra CRITERIOS VERIFICAVEIS, nunca contra gosto:
-(1) COBERTURA: o relatorio atende o foco que foi atribuido ao especialista? (2) FORMA: numeros vem com fonte e janela, e existe a linha LACUNAS? (3) ESCOPO: ele respondeu o que era de OUTRO especialista em vez do proprio dominio? (4) COERENCIA INTERNA: ha contradicao evidente dentro do proprio relatorio? (5) COBERTURA PAGINAVEL: o relatorio aceitou corte de dados ('X de Y exibidos', 'restantes') SEM esgotar as paginas disponiveis, quando o foco exigia a lista inteira? Isso E motivo de devolucao - a ferramenta pagina e o especialista tinha teto sobrando. (6) DETALHAMENTO: se o pedido pede anuncio/serie diaria e desempenho_campanhas declara 'nao retornado nesta rodada' sem ter listado os anuncios, DEVOLVA — declarar LACUNAS nesse caso NAO e suficiente; a tool get_detalhe_anuncios existe.
+(1) COBERTURA: o relatorio atende o foco que foi atribuido ao especialista? (2) FORMA: numeros vem com fonte e janela, e existe a linha LACUNAS? (3) ESCOPO: ele respondeu o que era de OUTRO especialista em vez do proprio dominio? (4) COERENCIA INTERNA: ha contradicao evidente dentro do proprio relatorio? (5) COBERTURA PAGINAVEL: o relatorio aceitou corte de dados ('X de Y exibidos', 'restantes') SEM esgotar as paginas disponiveis, quando o foco exigia a lista inteira? Isso E motivo de devolucao - a ferramenta pagina e o especialista tinha teto sobrando. (6) DETALHAMENTO: se o pedido pede anuncio/serie diaria e desempenho_campanhas declara 'nao retornado nesta rodada' sem ter listado os anuncios, DEVOLVA — declarar LACUNAS nesse caso NAO e suficiente; a tool get_detalhe_anuncios existe. (7) ORIGEM DRIVE: se o pedido pede a pasta dos anuncios ja no ar e o relatorio diz 'sem vinculo' sem origem_drive_dos_anuncios, DEVOLVA.
 NAO devolva por: estilo, tamanho, relatorio marcado INCOMPLETO-cortado (isso e limite de tamanho, nao erro do especialista).
 Responda APENAS JSON valido: {"avaliacoes":[{"nome":"...","veredito":"ok"|"devolver","motivo":"especifico: o que faltou/errou e o que a nova tentativa deve trazer"}]}`;
   const r = await chamarLLM(
@@ -2808,7 +2897,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.17";
+  tel.versao = "job-v4.18";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -2966,10 +3055,16 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           if (i >= 0) relatorios[i] = novo; else relatorios.push(novo);
         }
         if (rodada >= cap.devolucoesMax) {
-          const ainda = motivosDevolucaoDetalhe(pergunta, plano, relatorios, tel);
+          const ainda = [
+            ...motivosDevolucaoOrigem(pergunta, plano, relatorios, tel),
+            ...motivosDevolucaoDetalhe(pergunta, plano, relatorios, tel),
+          ];
           const aindaNomes = new Set(ainda.map((x) => x.nome));
           for (const d of devolver) {
-            if (ehPedidoDetalhamentoCampanha(pergunta) && !aindaNomes.has(d.nome)) continue;
+            if (
+              (ehPedidoDetalhamentoCampanha(pergunta) || ehPedidoOrigemDriveDosAnuncios(pergunta))
+              && !aindaNomes.has(d.nome)
+            ) continue;
             if (!falhosDefinitivos.includes(d.nome)) falhosDefinitivos.push(d.nome);
           }
         }

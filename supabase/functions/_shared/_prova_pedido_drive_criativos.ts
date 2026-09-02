@@ -8,6 +8,7 @@ import {
   itemDriveDoMeio,
   parseMeioDriveArg,
   pastaFormatoIgnorada,
+  deveDescerPastaDrive,
   pedidoExigeInventarioDrive,
   pedidoSoReelsVideos,
   pedidoUsaSlateExistente,
@@ -95,5 +96,12 @@ assert(!itemDriveDoMeio(
   "juridico",
 ), "item ocular nao entra no recorte juridico");
 assert(!job.includes('nome: "criativos", foco: FOCO_CRIATIVOS_OVERVIEW') || job.includes("pedidoExigeInventarioDrive(raw)"), "overview magro nao captura Drive");
+assert(!pedidoExigeInventarioDrive(
+  "foque exclusivamente no conjunto 1: dos anuncios registrados, eles pertencem a qual pasta do drive?",
+), "origem dos anuncios no ar nao e inventario de pecas novas");
+assert(
+  deveDescerPastaDrive("2026", { meio: "sistema_ocular", soReelsVideos: true }, 0),
+  "ano VISTTA deve descer na varredura",
+);
 
 console.log("ok pedido_drive_criativos");

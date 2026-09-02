@@ -2,6 +2,8 @@
 // Separado do overview de campanhas: "análise completa de criativos das pastas" NÃO é
 // visão geral de gasto/CTR. Histórico da conversa não substitui coleta nesta rodada.
 
+import { ehPedidoOrigemDriveDosAnuncios } from "./intencao_turno.ts";
+
 export const MEIOS_DRIVE = ["la_felicita", "juridico", "sistema_ocular"] as const;
 export type MeioDrive = (typeof MEIOS_DRIVE)[number];
 
@@ -53,6 +55,7 @@ export function inferirMeioDeProduto(produto: string): MeioDrive | null {
 /** Pedido que obriga abrir o Drive nesta rodada — não anúncios já publicados na Meta. */
 export function pedidoExigeInventarioDrive(pedido: string): boolean {
   if (pedidoUsaSlateExistente(pedido)) return false;
+  if (ehPedidoOrigemDriveDosAnuncios(pedido)) return false;
   const p = deaccPedido(pedido);
   if (/\b(google\s*drive|\bno drive\b|\bdo drive\b|\bno google drive\b)\b/.test(p)) return true;
   if (/\bdrive\b/.test(p) && /\b(pasta|pastas|criativ|video|reels|acervo)\b/.test(p)) return true;
@@ -172,6 +175,27 @@ export function pastaFormatoDoPedido(nomePasta: string, recorte: RecorteDrive): 
   if (!recorte.soReelsVideos) return true;
   if (pastaFormatoIgnorada(nomePasta)) return false;
   return caminhoEhReelsOuVideos(nomePasta);
+}
+
+/** 2026 / 08. Agosto — VISTTA nao tem Reels no 1o nivel da raiz. */
+export function pastaIntermediariaCalendario(nome: string): boolean {
+  const n = deaccPedido(nome).trim();
+  if (/^\d{4}$/.test(n)) return true;
+  if (/^(0?[1-9]|1[0-2])[.\-\s]+(janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\b/.test(n)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Varredura do Drive: desce ano/mes e Reels/Videos; nao entra em Adesivo/Brutos/Cards.
+ * Antes, soReelsVideos no nivel 0 pulava "2026" e o inventario VISTTA voltava vazio.
+ */
+export function deveDescerPastaDrive(nomePasta: string, recorte: RecorteDrive, nivel: number): boolean {
+  if (pastaFormatoIgnorada(nomePasta)) return false;
+  if (!recorte.soReelsVideos) return true;
+  if (caminhoEhReelsOuVideos(nomePasta) || pastaIntermediariaCalendario(nomePasta)) return true;
+  return nivel >= 1;
 }
 
 /** Payload enxuto: thumbnail explode o teto de 14k e o modelo nao ve os nomes. */

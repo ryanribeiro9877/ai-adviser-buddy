@@ -7,6 +7,7 @@ import {
   ehPedidoUploadLote,
   ehUploadLoteCurto,
   ehPedidoDetalhamentoCampanha,
+  ehPedidoOrigemDriveDosAnuncios,
   replyLeituraIncompleta,
   objetivoDoFio,
 } from "./intencao-turno";
@@ -111,6 +112,32 @@ describe("replyLeituraIncompleta", () => {
         "O detalhamento dos anúncios de ambos os conjuntos — nome, status, gasto, impressões, alcance, cliques, CTR, engajamentos, formulários, custo e destino — não foi lido nesta rodada. Também não foi possível confirmar nesta resposta.",
       ),
     ).toBe(true);
+  });
+
+  it("pega prosa de origem Drive sem vinculo", () => {
+    expect(
+      replyLeituraIncompleta(
+        "A pasta existe e contém 1.mp4 a 6.mp4, mas não há evidência suficiente para afirmar que os anúncios 2 a 6 correspondem. Sem vínculo registrado. drive_file_id necessário.",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("ehPedidoOrigemDriveDosAnuncios", () => {
+  const pedidoRef =
+    "foque exclusivamente no conjunto 1 e me traga essa informação:\n" +
+    "dos anúncios que estão registrados dentro desse conjunto, eles pertencem a qual pasta do drive?";
+
+  it("reconhece pasta do Drive dos anuncios do conjunto", () => {
+    expect(ehPedidoOrigemDriveDosAnuncios(pedidoRef)).toBe(true);
+  });
+
+  it("nao classifica selecao de peca nova", () => {
+    expect(
+      ehPedidoOrigemDriveDosAnuncios(
+        "verifique na pasta Apenas oculos do drive e selecione um video que ainda nao esta no conj 1",
+      ),
+    ).toBe(false);
   });
 });
 
