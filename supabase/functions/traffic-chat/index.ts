@@ -1,4 +1,14 @@
-// supabase/functions/traffic-chat/index.ts (v28.96)
+// supabase/functions/traffic-chat/index.ts (v28.97)
+// v28.97 (02/09/2026) - "6 VIDEOS DO DRIVE DO JURIDICO" MORREU EM RECORTE, E O AGENTE PEDIU
+//   A PASTA AO GESTOR. O modelo mandou formatos=[Reels,Videos] num pedido de "qualquer
+//   pasta". O Juridico e "COHAPM Juridico · Exports Finais" e nao tem essas subpastas:
+//   caminhoEhReelsOuVideos reprovou os 42 videos (itens=[]) e deveDescerPastaDrive travou
+//   a varredura no nivel 0 (1 pasta lida, 0 arquivos). As duas leituras voltaram vazias e a
+//   resposta virou "qual o caminho da pasta?" + tabela de "(nao disponivel)" — desculpa, nao
+//   informacao. Agora: "qualquer pasta" anula o recorte de formato; recorte que zera lista
+//   com pecas do meio e DESCARTADO (recorte_formato_ignorado); a varredura rele sem formato;
+//   leitura vazia devolve o turno ao modelo (nudge) e auto-continua. Junto: "crie legendas"
+//   deixa de ser tratado como pedido de card (nao existe ato de emissao sem card pedido).
 // v28.96 (02/09/2026) - EMISSAO DO CONJ.4 VIROU UUID INVENTADO. O gestor pediu o mesmo
 //   processo do CONJ.3 (7 criativos + primeiros cards). O lote so reconhecia 6/8 e
 //   conjunto 2/3, entao o teto de coleta ficou 55s. O loop encerrou as tools e a
@@ -782,7 +792,7 @@ import {
   idInstagramDeParams,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
-import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
+import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
 import { tDetalheAnuncios, DEF_GET_DETALHE_ANUNCIOS, casarCampanhas, escolherCampanhaUnica, janelaDetalhe } from "../_shared/leitura_desempenho.ts";
 import { DEF_ORIGEM_DRIVE_DOS_ANUNCIOS, tOrigemDriveDosAnuncios, tCasarCriativoPerformance } from "../_shared/origem_drive_anuncios.ts";
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
@@ -796,10 +806,12 @@ import {
   parseMeioDriveArg,
   injetarArgsDrive,
   deveDescerPastaDrive,
+  leituraDriveVoltouVazia,
   pedidoExigeInventarioDrive,
   pedidoUsaSlateExistente,
   raizDriveDoMeio,
   recorteDriveDoPedido,
+  replyPedeCaminhoDaPastaDrive,
 } from "../_shared/pedido_drive_criativos.ts";
 import {
   callReadTool,
@@ -905,7 +917,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.96";
+const VERSAO = "chat-v28.97";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -928,10 +940,21 @@ const MSG_NUDGE_SEM_MOLDE =
 const MSG_NUDGE_DRIVE =
   "[CORRECAO DO SISTEMA — nao e o gestor] Pedido de inventario/distribuicao do Drive. " +
   "OBRIGATORIO NESTE TURNO: chame get_drive_criativos E get_acervo_para_anuncio. " +
-  "Se for La Felicita, meio=la_felicita. So pastas Reels e Videos. " +
+  "Se for La Felicita, meio=la_felicita. Reels/Videos SO se o gestor restringir: Juridico " +
+  "(Exports Finais) nao tem essas subpastas e mandar formatos zera a leitura. " +
   "PROIBIDO substituir por get_criativos_conteudo (anuncios ja no ar, LF_A_AD01…). " +
   "Historico e bloco [RETORNOS...] NAO valem como inventario de arquivos — a pasta pode ter mudado. " +
   "Liste nome + pasta + drive_file_id. Nao invente arquivo. Nao peca o gestor para colar o inventario.";
+const MSG_NUDGE_DRIVE_VAZIO =
+  "[CORRECAO DO SISTEMA — nao e o gestor] A leitura do Drive voltou VAZIA. Isso e RECORTE ERRADO, " +
+  "nao pasta vazia — e nao autoriza encerrar o turno. As pastas monitoradas desta empresa estao " +
+  "configuradas no banco: PROIBIDO perguntar ao gestor o nome ou o caminho da pasta, PROIBIDO " +
+  "responder 'inventario vazio' e PROIBIDO devolver tabela de '(nao disponivel)'. " +
+  "AGORA, nesta mesma rodada: chame get_acervo_para_anuncio SEM 'produto' e SEM 'formatos' " +
+  "(no maximo meio=) e get_drive_criativos SEM 'formatos'. " +
+  "Juridico e a pasta 'COHAPM Juridico · Exports Finais' e NAO tem subpasta Reels/Videos — " +
+  "mandar formatos=[Reels,Videos] zera o resultado. Com os drive_file_id que voltarem, " +
+  "cumpra o pedido ate o fim (selecao + gerar_legendas por peca).";
 const MSG_NUDGE_ORIGEM =
   "[CORRECAO DO SISTEMA — nao e o gestor] Pedido: pasta do Drive dos ANUNCIOS JA NO AR. " +
   "OBRIGATORIO NESTE TURNO: chame origem_drive_dos_anuncios (conjunto + name_like da campanha). " +
@@ -5251,45 +5274,67 @@ async function t_drive_criativos(companyId: string, pedido = "", args: Record<st
   catch (e) { return { erro: String((e as any)?.message ?? e), aviso: "Sem acesso ao Drive nesta rodada - o dado NAO foi lido; nao trate como pasta vazia." }; }
   const MAX_PASTAS = 40, MAX_ARQUIVOS = 250, MAX_PROFUNDIDADE = 4;
   type No = { id: string; caminho: string; nivel: number; raiz: string; meio: string | null };
-  const fila: No[] = raizes.map((raiz: any) => ({ id: raiz.id, caminho: "", nivel: 0, raiz: raiz.nome, meio: raiz.meio }));
-  const arquivos: any[] = [];
-  let pastasLidas = 0, cortado = false;
-  while (fila.length) {
-    const no = fila.shift()!;
-    if (pastasLidas >= MAX_PASTAS || arquivos.length >= MAX_ARQUIVOS) { cortado = true; break; }
-    pastasLidas++;
-    let pageToken = "";
-    do {
-      const url = new URL("https://www.googleapis.com/drive/v3/files");
-      url.searchParams.set("q", `'${no.id}' in parents and trashed=false`);
-      url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink)");
-      url.searchParams.set("pageSize", "100");
-      url.searchParams.set("supportsAllDrives", "true");
-      url.searchParams.set("includeItemsFromAllDrives", "true");
-      if (pageToken) url.searchParams.set("pageToken", pageToken);
-      const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
-      const j = await r.json();
-      if (!r.ok) return { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) };
-      for (const f of j.files ?? []) {
-        if (f.mimeType === "application/vnd.google-apps.folder") {
-          if (!deveDescerPastaDrive(String(f.name ?? ""), recorte, no.nivel)) continue;
-          if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz, meio: no.meio });
-        } else if (arquivos.length < MAX_ARQUIVOS) {
-          const caminhoRel = no.caminho || "(raiz)";
-          arquivos.push({
-            drive_file_id: f.id, nome: f.name, caminho: `${no.raiz}/${caminhoRel}`,
-            pasta_monitorada: no.raiz,
-            meio: no.meio,
-            formato_pasta: (no.caminho.split("/")[0] || "(raiz)"),
-            eixo_pasta: (no.caminho.split("/")[1] ?? null),
-            tipo: f.mimeType, tamanho_bytes: Number(f.size ?? 0) || null,
-            modificado_em: f.modifiedTime ?? null, thumbnail: f.thumbnailLink ?? null,
-          });
-        } else { cortado = true; }
-      }
-      pageToken = j.nextPageToken ?? "";
-    } while (pageToken && arquivos.length < MAX_ARQUIVOS);
+  type Varredura = { arquivos: any[]; pastasLidas: number; cortado: boolean; falha?: Record<string, unknown> };
+  async function varrer(rec: RecorteDrive): Promise<Varredura> {
+    const fila: No[] = raizes.map((raiz: any) => ({ id: raiz.id, caminho: "", nivel: 0, raiz: raiz.nome, meio: raiz.meio }));
+    const arquivos: any[] = [];
+    let pastasLidas = 0, cortado = false;
+    while (fila.length) {
+      const no = fila.shift()!;
+      if (pastasLidas >= MAX_PASTAS || arquivos.length >= MAX_ARQUIVOS) { cortado = true; break; }
+      pastasLidas++;
+      let pageToken = "";
+      do {
+        const url = new URL("https://www.googleapis.com/drive/v3/files");
+        url.searchParams.set("q", `'${no.id}' in parents and trashed=false`);
+        url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink)");
+        url.searchParams.set("pageSize", "100");
+        url.searchParams.set("supportsAllDrives", "true");
+        url.searchParams.set("includeItemsFromAllDrives", "true");
+        if (pageToken) url.searchParams.set("pageToken", pageToken);
+        const r = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+        const j = await r.json();
+        if (!r.ok) {
+          return { arquivos, pastasLidas, cortado, falha: { erro: `Drive respondeu ${r.status}`, detalhe: JSON.stringify(j).slice(0, 200) } };
+        }
+        for (const f of j.files ?? []) {
+          if (f.mimeType === "application/vnd.google-apps.folder") {
+            if (!deveDescerPastaDrive(String(f.name ?? ""), rec, no.nivel)) continue;
+            if (no.nivel + 1 <= MAX_PROFUNDIDADE) fila.push({ id: f.id, caminho: no.caminho ? `${no.caminho}/${f.name}` : f.name, nivel: no.nivel + 1, raiz: no.raiz, meio: no.meio });
+          } else if (arquivos.length < MAX_ARQUIVOS) {
+            const caminhoRel = no.caminho || "(raiz)";
+            arquivos.push({
+              drive_file_id: f.id, nome: f.name, caminho: `${no.raiz}/${caminhoRel}`,
+              pasta_monitorada: no.raiz,
+              meio: no.meio,
+              formato_pasta: (no.caminho.split("/")[0] || "(raiz)"),
+              eixo_pasta: (no.caminho.split("/")[1] ?? null),
+              tipo: f.mimeType, tamanho_bytes: Number(f.size ?? 0) || null,
+              modificado_em: f.modifiedTime ?? null, thumbnail: f.thumbnailLink ?? null,
+            });
+          } else { cortado = true; }
+        }
+        pageToken = j.nextPageToken ?? "";
+      } while (pageToken && arquivos.length < MAX_ARQUIVOS);
+    }
+    return { arquivos, pastasLidas, cortado };
   }
+  let varredura = await varrer(recorte);
+  if (varredura.falha) return varredura.falha;
+  // v28.97: Reels/Videos no nivel 0 impedia descer em "EMPRESTIMOS"/"CONTA DE LUZ" e a
+  // varredura do Juridico voltava com 1 pasta lida e 0 arquivos. Leitura vazia por recorte
+  // e relida SEM o filtro de formato — pasta vazia de verdade continua vazia.
+  let recorteEfetivo = recorte;
+  if (!varredura.arquivos.length && recorte.soReelsVideos) {
+    const semFormato: RecorteDrive = { ...recorte, soReelsVideos: false };
+    const segunda = await varrer(semFormato);
+    if (segunda.falha) return segunda.falha;
+    if (segunda.arquivos.length) {
+      varredura = { ...segunda, pastasLidas: varredura.pastasLidas + segunda.pastasLidas };
+      recorteEfetivo = semFormato;
+    }
+  }
+  const { arquivos, pastasLidas, cortado } = varredura;
   const porFormato: Record<string, number> = {};
   const porEixo: Record<string, number> = {};
   for (const a of arquivos) {
@@ -5303,7 +5348,19 @@ async function t_drive_criativos(companyId: string, pedido = "", args: Record<st
     arquivos,
   };
   if (cortado) out.aviso_corte = `Inventario truncado nos tetos (${MAX_PASTAS} pastas / ${MAX_ARQUIVOS} arquivos). O que nao veio EXISTE - nao trate como inexistente.`;
-  return compactarInventarioDriveParaAgente(out, recorte);
+  if (recorteEfetivo !== recorte) {
+    out.recorte_formato_ignorado =
+      "A varredura Reels/Videos voltou vazia e o filtro de formato foi DESCARTADO — estas pastas " +
+      "nao usam esse nome. Os arquivos abaixo sao reais: use os drive_file_id. PROIBIDO dizer que " +
+      "o inventario esta vazio e PROIBIDO pedir o caminho da pasta ao gestor.";
+  }
+  if (!arquivos.length) {
+    out.aviso_leitura_vazia =
+      `Varri ${pastasLidas} pasta(s) monitorada(s) desta empresa e nenhum arquivo voltou. As pastas ` +
+      `estao configuradas no banco (drive_pastas_monitoradas) — NAO peca o caminho ao gestor. ` +
+      `Chame get_acervo_para_anuncio SEM produto e SEM formatos: o acervo analisado tem as pecas com drive_file_id.`;
+  }
+  return compactarInventarioDriveParaAgente(out, recorteEfetivo);
 }
 
 async function runTool(name: string, args: any, ctx: any) {
@@ -5778,7 +5835,7 @@ entregue o que ja apurou com lacunas declaradas — nunca um "vou…" sozinho.
 
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
 R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os dois limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
-R1-DRIVE. MENSAGEM NOVA QUE PEDE VERIFICAR / LISTAR / DISTRIBUIR / INVENTARIAR pecas do Drive OBRIGA chamar get_drive_criativos e get_acervo_para_anuncio NESTE turno. Historico e bloco [RETORNOS...] valem para CONTRATO (nomes de conjunto, orcamento, publico ja definidos), NAO como inventario de arquivos: a pasta pode ter mudado. PROIBIDO substituir o Drive por get_criativos_conteudo (anuncios ja no ar). PROIBIDO pedir ao gestor que cole o inventario. Se o pedido for La Felicita, recorte meio=la_felicita e so pastas Reels/Videos. EXCECAO: pedido de legendas/cards das pecas JA selecionadas (CONJ.N / "os 8 videos que selecionou") NAO e inventario — use get_slate_da_conversa / [SLATE DA CONVERSA]. PROIBIDO reabrir o Drive como se o slate nao existisse.
+R1-DRIVE. MENSAGEM NOVA QUE PEDE VERIFICAR / LISTAR / DISTRIBUIR / INVENTARIAR pecas do Drive OBRIGA chamar get_drive_criativos e get_acervo_para_anuncio NESTE turno. Historico e bloco [RETORNOS...] valem para CONTRATO (nomes de conjunto, orcamento, publico ja definidos), NAO como inventario de arquivos: a pasta pode ter mudado. PROIBIDO substituir o Drive por get_criativos_conteudo (anuncios ja no ar). PROIBIDO pedir ao gestor que cole o inventario. Se o pedido for La Felicita, recorte meio=la_felicita e so pastas Reels/Videos. RECORTE DE FORMATO SO QUANDO O GESTOR RESTRINGIR (02/09/2026): o Juridico e a pasta "COHAPM Juridico · Exports Finais" e NAO tem subpasta Reels/Videos — mandar formatos=[Reels,Videos] ali devolve itens=[] com 42 videos existentes. Se a leitura voltar 0 arquivos/0 itens, o RECORTE esta errado: releia NA MESMA RODADA sem formatos e sem produto. PROIBIDO perguntar ao gestor o nome/caminho da pasta (as pastas monitoradas estao no banco), PROIBIDO responder "inventario vazio" e PROIBIDO tabela de "(nao disponivel)". EXCECAO: pedido de legendas/cards das pecas JA selecionadas (CONJ.N / "os 8 videos que selecionou") NAO e inventario — use get_slate_da_conversa / [SLATE DA CONVERSA]. PROIBIDO reabrir o Drive como se o slate nao existisse.
 R1-ORIGEM. "De qual PASTA DO DRIVE sao os anuncios JA NO AR deste conjunto?" NAO e inventario de pecas novas. Chame origem_drive_dos_anuncios (conjunto + name_like da campanha) NESTE turno. A fonte e o card criar_anuncio_a_partir_de (drive_file_id) + pasta da peca. AD_CONJ.N_…_2 NAO implica 2.mp4. PROIBIDO declarar "sem vinculo" / "nao rastreavel" sem ter chamado essa tool. Se casar_criativo_performance vier vazio com os dois filtros, ela mesma reconsulta pelo anuncio — leia o aviso; nao encerre. get_drive_criativos vazio NAO prova que a pasta nao existe.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial de Credito restringe, o que e fadiga de criativo, qual a diferenca entre CBO e ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e uma explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura do Gerenciador.
 R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. Para categoria especial: LEIA com get_campaign_detail / auditar_compliance_financeira / ler_pipeboard get_campaign_details; para ALTERAR ou REMOVER use alterar_categoria_especial (card alterar_categoria_especial_campanha). PROIBIDO dizer que "nao ha ferramenta" ou que "so na criacao". A Meta aplica a categoria na campanha; os anuncios herdam.
@@ -6060,6 +6117,7 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
   const parcial = (cp.reply_parcial || "").trim();
   const lote = pedidoLoteCriativo(cp.objetivo);
   const uploadLote = ehPedidoUploadLote(cp.objetivo);
+  const driveVazio = replyPedeCaminhoDaPastaDrive(cp.reply_parcial ?? "");
   const detalhe = ehPedidoDetalhamentoCampanha(cp.objetivo) || replyLeituraIncompleta(cp.reply_parcial || "");
   const origem = ehPedidoOrigemDriveDosAnuncios(cp.objetivo);
   const faltamUp = (cp.pendentes_upload ?? [])
@@ -6071,7 +6129,16 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
       "3. Sessao enviando: chame upload_midia de novo no MESMO id (a edge retoma; nao recomece do zero).\n" +
       "4. Varios upload_midia nesta janela. Depois o sistema entrega o inventario (ja na Meta vs fora).\n" +
       (faltamUp ? `Ainda fora:\n${faltamUp}\n` : "Se a lista abaixo estiver vazia, chame get_acervo_para_anuncio e suba os na_biblioteca_da_meta=false.\n")
-    : lote && ehPedidoDeAto(cp.objetivo)
+    : driveVazio
+    ? "INSTRUCOES OBRIGATORIAS (A LEITURA DO DRIVE VOLTOU VAZIA):\n" +
+      "1. NAO cumprimente. PROIBIDO pedir ao gestor o nome ou o caminho da pasta: as pastas " +
+      "monitoradas desta empresa estao configuradas no banco. PROIBIDO repetir 'inventario vazio'.\n" +
+      "2. Chame AGORA get_acervo_para_anuncio SEM 'produto' e SEM 'formatos' e get_drive_criativos SEM 'formatos'.\n" +
+      "3. Juridico = pasta 'COHAPM Juridico · Exports Finais' e NAO tem subpasta Reels/Videos — " +
+      "mandar formatos=[Reels,Videos] zera o resultado; o acervo analisado tem as pecas com drive_file_id.\n" +
+      "4. Com os ids que voltarem, cumpra o pedido original ate o fim (selecao + gerar_legendas por peca). " +
+      "PROIBIDO entregar tabela de '(nao disponivel)' / '(nao realizado)'."
+    : lote && ehPedidoDeAto(cp.objetivo) && !pedidoSoLegendasSemEmissao(cp.objetivo)
     ? "INSTRUCOES OBRIGATORIAS (LOTE + EMISSAO):\n" +
       "1. NAO cumprimente. NAO peca o gestor para repetir. NAO invente approval_id.\n" +
       "2. Se ja ha peca+legenda e NENHUM card neste pedido, chame propose_action AGORA " +
@@ -6696,6 +6763,7 @@ Deno.serve(async (req) => {
   let nudgesSlate = 0;
   let nudgesLegendas = 0;
   let nudgesEmitir = 0;
+  let nudgesDriveVazio = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
   const pedidoUploadTurno = ehPedidoUploadLote(objetivoOriginal);
   const nPendentesCp = (turnCheckpoint?.pendentes_upload ?? []).length;
@@ -6728,6 +6796,10 @@ Deno.serve(async (req) => {
   /** Coleta acabou; ainda cabe 1-2 propose_action nesta janela HTTP. */
   function aindaCabePropose(): boolean {
     return HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS > 18_000;
+  }
+  /** Cabe RELER ferramenta e ainda escrever a resposta nesta janela. */
+  function aindaCabeFerramenta(): boolean {
+    return HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS > 30_000;
   }
   function precisaProposeAto(): boolean {
     return ehPedidoDeAto(objetivoOriginal) && !pedidoUploadTurno && actionCards.length === 0 &&
@@ -7093,6 +7165,20 @@ Deno.serve(async (req) => {
       finishReason = String(finishReason || "stop") + "+nudge_drive";
       continue;
     }
+    // v28.97: leitura do Drive voltou vazia (recorte errado) e a prosa ia pedir a pasta ao
+    // gestor. Devolve o turno exigindo a releitura sem formatos/produto — 02/09, Juridico.
+    if (
+      coletouDrive &&
+      leituraDriveVoltouVazia(toolResults) &&
+      nudgesDriveVazio < 2 &&
+      aindaCabeFerramenta()
+    ) {
+      nudgesDriveVazio++;
+      messages.push({ role: "assistant", content: reply || "(sem texto)" });
+      messages.push({ role: "user", content: MSG_NUDGE_DRIVE_VAZIO });
+      finishReason = String(finishReason || "stop") + "+nudge_drive_vazio";
+      continue;
+    }
     const coletouOrigem = toolsUsed.some((t) => t.tool === "origem_drive_dos_anuncios");
     if (ehPedidoOrigemDriveDosAnuncios(objetivoOriginal) && !coletouOrigem && nudgesOrigem < 1) {
       nudgesOrigem++;
@@ -7242,10 +7328,15 @@ Deno.serve(async (req) => {
   // Nao continuar apos resposta completa (clarificacao / decisao humana / analise fechada).
   const pedidoLote = pedidoLoteTurno;
   const perguntaLeituraTurno = ehPerguntaDeLeitura(objetivoOriginal);
+  // "selecione 6 videos e crie legendas" tem verbo de ato sobre a COPY, nao sobre card. Sem
+  // esta excecao o turno passaria a exigir propose_action e emitiria anuncio nao pedido.
+  const soLegendasTurno = pedidoSoLegendasSemEmissao(objetivoOriginal);
   const pedidoAto = !perguntaLeituraTurno && (
-    ehPedidoDeAto(objetivoOriginal) ||
-    (turnCheckpoint?.pedido_ato === true) ||
-    pedidoLote ||
+    (!soLegendasTurno && (
+      ehPedidoDeAto(objetivoOriginal) ||
+      (turnCheckpoint?.pedido_ato === true) ||
+      pedidoLote
+    )) ||
     // v28.40: se propose_action de criacao rodou (ou tentou) sem card, trata como ato.
     (actionCards.length === 0 && toolsIncluemPropose(toolsUsed))
   );
@@ -7263,7 +7354,9 @@ Deno.serve(async (req) => {
     claimSan.reescreveu ||
     (pedidoAtoCards && cardsJaNoPedido === 0 && toolsIncluemPropose(toolsUsed)) ||
     uploadIncompleto ||
-    replyLeituraIncompleta(replyTrim)
+    replyLeituraIncompleta(replyTrim) ||
+    // Perguntar a pasta ao gestor parece clarificacao, mas e desistencia: o dado esta no banco.
+    replyPedeCaminhoDaPastaDrive(replyTrim)
   );
   const tentouEmitir =
     toolsIncluemPropose(toolsUsed) ||
@@ -7322,6 +7415,11 @@ Deno.serve(async (req) => {
   const detalheSemTool = pedidoDetalhe && !chamouDetalhe && !pedidoAtoCards && !pedidoUploadTurno;
   const origemSemTool = pedidoOrigem && !chamouOrigem && !pedidoAtoCards && !pedidoUploadTurno;
   const leituraComTeto = tetoTools && ehPerguntaDeLeitura(objetivoOriginal) && !pedidoAtoCards && !pedidoUploadTurno;
+  // v28.97: Drive lido e vazio, ou prosa pedindo a pasta ao gestor. As pastas monitoradas
+  // estao no banco — o turno continua e tenta de novo sem o recorte que zerou a leitura.
+  const driveVazioIncompleto =
+    !pedidoUploadTurno &&
+    (leituraDriveVoltouVazia(toolResults) || replyPedeCaminhoDaPastaDrive(replyTrim));
   const deadlineSemConteudo = deadlineTools && (
     pedidoUploadTurno
       ? uploadIncompleto
@@ -7337,11 +7435,12 @@ Deno.serve(async (req) => {
     detalheSemTool ||
     origemSemTool ||
     leituraComTeto ||
-    atoSemPropose
+    atoSemPropose ||
+    driveVazioIncompleto
   );
   const maxSeg = pedidoUploadTurno
     ? (uploadCurto ? 3 : MAX_TURN_SEGMENTS_UPLOAD)
-    : (pedidoDetalhe || pedidoOrigem || leituraIncompleta || leituraComTeto || atoSemPropose ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS);
+    : (pedidoDetalhe || pedidoOrigem || leituraIncompleta || leituraComTeto || atoSemPropose || driveVazioIncompleto ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS);
   const podeContinuarSegmento = segmentoAtual < maxSeg;
   let continuarTurno = false;
   let usouFallback = false;

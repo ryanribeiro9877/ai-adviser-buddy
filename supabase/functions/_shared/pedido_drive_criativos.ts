@@ -89,15 +89,29 @@ export function pedidoSoReelsVideos(pedido: string): boolean {
   return false;
 }
 
+/**
+ * O gestor ABRIU o escopo de pastas ("qualquer pasta", "todas as subpastas"). Recorte de
+ * formato passa a ser proibido: em 02/09/2026 o modelo mandou formatos=[Reels,Videos] num
+ * pedido de "qualquer pasta" do Juridico e zerou os 42 videos de Exports Finais.
+ */
+export function pedidoQualquerPastaDrive(pedido: string): boolean {
+  const p = deaccPedido(pedido);
+  return /\b(qualquer|quaisquer|todas as|toda|todos os)\s+(sub)?pastas?\b/.test(p) ||
+    /\bqualquer\s+(sub)?pasta\b/.test(p) ||
+    /\bnas subpastas\b/.test(p) ||
+    /\bdentro dessa pasta raiz\b/.test(p);
+}
+
 export function recorteDriveDoPedido(pedido: string, args?: Record<string, unknown> | null): RecorteDrive {
   const meio: MeioDrive | null = parseMeioDriveArg(args?.meio) ?? inferirMeioDrive(pedido);
   const formatos = args?.formatos ?? args?.pastas_formato;
   const soPorArg = Array.isArray(formatos)
     && formatos.map((x) => deaccPedido(String(x))).some((x) => x === "reels" || x === "videos");
-  return {
-    meio,
-    soReelsVideos: soPorArg || pedidoSoReelsVideos(pedido),
-  };
+  // Ordem: restricao explicita do gestor > "qualquer pasta" do gestor > palpite do modelo.
+  const soReelsVideos = pedidoSoReelsVideos(pedido)
+    ? true
+    : (pedidoQualquerPastaDrive(pedido) ? false : soPorArg);
+  return { meio, soReelsVideos };
 }
 
 export function caminhoEhReelsOuVideos(caminho: string): boolean {
@@ -137,16 +151,95 @@ export function itemDriveDoMeio(
   return true;
 }
 
-export function recortarItensDrive<T extends Record<string, unknown>>(itens: T[], recorte: RecorteDrive): T[] {
-  return itens.filter((it) => {
-    if (!itemDriveDoMeio(it, recorte.meio)) return false;
-    if (recorte.soReelsVideos) {
-      const caminho = String(it.caminho ?? it.arquivo ?? it.pasta ?? it.pasta_monitorada ?? "");
-      const nome = String(it.nome ?? it.formato_pasta ?? "");
-      if (!caminhoEhReelsOuVideos(`${caminho}/${nome}`)) return false;
-    }
-    return true;
+/**
+ * Recorte que APAGA TUDO nao e recorte, e leitura perdida. Medido 02/09/2026 no Juridico:
+ * meio=juridico + formatos=[Reels,Videos] devolveu itens=[] com 42 videos existentes em
+ * "Exports Finais/EMPRESTIMOS", e o agente concluiu "inventario vazio, me diga a pasta".
+ * Quando o filtro de formato zera um conjunto que TEM pecas do meio, o formato e descartado
+ * e o chamador declara isso ao modelo — nunca devolvemos lista vazia por recorte.
+ */
+export function recortarItensDriveComAviso<T extends Record<string, unknown>>(
+  itens: T[],
+  recorte: RecorteDrive,
+): { itens: T[]; formatoIgnorado: boolean } {
+  const doMeio = (itens ?? []).filter((it) => itemDriveDoMeio(it, recorte.meio));
+  if (!recorte.soReelsVideos) return { itens: doMeio, formatoIgnorado: false };
+  const doFormato = doMeio.filter((it) => {
+    const caminho = String(it.caminho ?? it.arquivo ?? it.pasta ?? it.pasta_monitorada ?? "");
+    const nome = String(it.nome ?? it.formato_pasta ?? "");
+    return caminhoEhReelsOuVideos(`${caminho}/${nome}`);
   });
+  if (!doFormato.length && doMeio.length) return { itens: doMeio, formatoIgnorado: true };
+  return { itens: doFormato, formatoIgnorado: false };
+}
+
+export function recortarItensDrive<T extends Record<string, unknown>>(itens: T[], recorte: RecorteDrive): T[] {
+  return recortarItensDriveComAviso(itens, recorte).itens;
+}
+
+const AVISO_FORMATO_IGNORADO =
+  "O recorte Reels/Videos zerou a leitura e foi DESCARTADO: estas pastas nao usam esse nome " +
+  "(ex.: Juridico · Exports Finais). Os itens abaixo sao reais. NAO diga que o inventario " +
+  "voltou vazio e NAO peca o caminho da pasta ao gestor.";
+
+/** Nomes das ferramentas que LISTAM peca do Drive (leitura que nunca pode voltar vazia calada). */
+export const TOOLS_LISTAGEM_DRIVE = [
+  "get_drive_criativos",
+  "get_acervo_para_anuncio",
+  "get_analise_visual_drive",
+] as const;
+
+function nItensDoRetornoDrive(retorno: unknown): number | null {
+  if (retorno && typeof retorno === "object") {
+    const o = retorno as Record<string, unknown>;
+    for (const k of ["arquivos", "itens"]) {
+      if (Array.isArray(o[k])) return (o[k] as unknown[]).length;
+    }
+    for (const k of ["total_arquivos", "total_analisados", "exibidos"]) {
+      if (typeof o[k] === "number") return o[k] as number;
+    }
+    return null;
+  }
+  // Retorno longo e persistido cortado como STRING; a contagem ainda esta legivel nela.
+  if (typeof retorno === "string" && retorno) {
+    const m = retorno.match(/"(?:total_arquivos|total_analisados|exibidos)"\s*:\s*(\d+)/);
+    if (m) return Number(m[1]);
+    if (/"(?:arquivos|itens)"\s*:\s*\[\s*\]/.test(retorno)) return 0;
+    if (/"(?:arquivos|itens)"\s*:\s*\[/.test(retorno)) return 1;
+  }
+  return null;
+}
+
+/** Alguma tool de Drive rodou SEM erro e nenhuma trouxe peca — recorte errado, nao pasta vazia. */
+export function leituraDriveVoltouVazia(
+  results: Array<{ tool?: string; erro?: string; retorno?: unknown }> | null | undefined,
+): boolean {
+  let houveLeitura = false;
+  for (const r of results ?? []) {
+    if (!TOOLS_LISTAGEM_DRIVE.includes(String(r?.tool ?? "") as typeof TOOLS_LISTAGEM_DRIVE[number])) continue;
+    if (r?.erro) continue;
+    const n = nItensDoRetornoDrive(r?.retorno);
+    if (n == null) continue;
+    houveLeitura = true;
+    if (n > 0) return false;
+  }
+  return houveLeitura;
+}
+
+/**
+ * A prosa desiste e joga a lição de casa no gestor ("qual o caminho da pasta?") ou declara
+ * inventario vazio. As pastas monitoradas estao no banco: isso e turno incompleto, nao resposta.
+ */
+export function replyPedeCaminhoDaPastaDrive(texto: string): boolean {
+  const t = deaccPedido(texto);
+  if (!t) return false;
+  const declaraVazio =
+    /\b(inventario|leitura|retorno)\b[^.\n]{0,60}\b(retornou|veio|voltou|esta)\b[^.\n]{0,20}\bvazi/.test(t) ||
+    /\bnao (expos|listou|trouxe|trouxeram)\b[^.\n]{0,40}\b(arquivos|videos|drive_file_ids?|itens)\b/.test(t);
+  const pedeCaminho =
+    /\b(qual (e )?(o )?(nome completo|caminho)|preciso do caminho|informe o caminho|caminho exato)\b/.test(t) &&
+    /\b(pasta|drive|subpasta)\b/.test(t);
+  return declaraVazio || pedeCaminho;
 }
 
 export function raizDriveDoMeio(
@@ -219,7 +312,8 @@ export function compactarInventarioDriveParaAgente(
   recorte: RecorteDrive,
 ): Record<string, unknown> {
   const raw = Array.isArray(out.arquivos) ? (out.arquivos as Record<string, unknown>[]) : [];
-  const filtrados = recortarItensDrive(raw, recorte).map(arquivoDriveParaAgente);
+  const corte = recortarItensDriveComAviso(raw, recorte);
+  const filtrados = corte.itens.map(arquivoDriveParaAgente);
   const porFormato: Record<string, number> = {};
   const porEixo: Record<string, number> = {};
   for (const a of filtrados) {
@@ -231,7 +325,7 @@ export function compactarInventarioDriveParaAgente(
   return {
     ...out,
     total_arquivos: filtrados.length,
-    recorte,
+    recorte: corte.formatoIgnorado ? { ...recorte, soReelsVideos: false } : recorte,
     resumo_por_formato: porFormato,
     resumo_por_eixo_de_mensagem: porEixo,
     arquivos: filtrados,
@@ -241,6 +335,7 @@ export function compactarInventarioDriveParaAgente(
           "Inventario recortado pelo pedido (meio e/ou so Reels/Videos). O total da empresa NAO e este recorte.",
       }
       : {}),
+    ...(corte.formatoIgnorado ? { recorte_formato_ignorado: AVISO_FORMATO_IGNORADO } : {}),
   };
 }
 
@@ -249,18 +344,20 @@ export function aplicarRecorteAcervo(data: unknown, recorte: RecorteDrive): unkn
   const obj = { ...(data as Record<string, unknown>) };
   if (!recorte.meio && !recorte.soReelsVideos) return obj;
   const itensIn = Array.isArray(obj.itens) ? (obj.itens as Record<string, unknown>[]) : [];
-  const itens = recortarItensDrive(itensIn, recorte);
+  const corte = recortarItensDriveComAviso(itensIn, recorte);
+  const itens = corte.itens;
   const videos = itens.filter((i) => /video/i.test(String(i.tipo ?? i.mime ?? "")));
   const recorteCount = { arquivos: itens.length, videos: videos.length };
   return {
     ...obj,
     itens,
-    recorte,
+    recorte: corte.formatoIgnorado ? { ...recorte, soReelsVideos: false } : recorte,
     inventario_global_empresa: obj.inventario_global ?? null,
     inventario_global: recorteCount,
     inventario_recorte: recorteCount,
     aviso_recorte:
       "itens recortados pelo pedido. inventario_global e o RECORTE. O total da empresa ficou em inventario_global_empresa — NAO cite esse total como videos La Felicita.",
+    ...(corte.formatoIgnorado ? { recorte_formato_ignorado: AVISO_FORMATO_IGNORADO } : {}),
   };
 }
 
@@ -269,13 +366,15 @@ export function aplicarRecorteAnalisesDrive(data: unknown, recorte: RecorteDrive
   const obj = { ...(data as Record<string, unknown>) };
   if (!recorte.meio && !recorte.soReelsVideos) return obj;
   const itensIn = Array.isArray(obj.itens) ? (obj.itens as Record<string, unknown>[]) : [];
-  const itens = recortarItensDrive(itensIn, recorte);
+  const corte = recortarItensDriveComAviso(itensIn, recorte);
+  const itens = corte.itens;
   return {
     ...obj,
     itens,
-    recorte,
+    recorte: corte.formatoIgnorado ? { ...recorte, soReelsVideos: false } : recorte,
     total_analisados: itens.length,
     aviso_recorte: "analises recortadas pelo pedido (meio e/ou so Reels/Videos).",
+    ...(corte.formatoIgnorado ? { recorte_formato_ignorado: AVISO_FORMATO_IGNORADO } : {}),
   };
 }
 

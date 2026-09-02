@@ -3,7 +3,7 @@
 // propose_action, e nenhum card existiu.
 // Roda com: deno run supabase/functions/_shared/_prova_forcar_emissao.ts
 
-import { deveForcarEmissao } from "./intencao_turno.ts";
+import { deveForcarEmissao, pedidoSoLegendasSemEmissao } from "./intencao_turno.ts";
 
 function ok(cond: boolean, msg: string) {
   if (!cond) {
@@ -126,6 +126,41 @@ function ok(cond: boolean, msg: string) {
       semTempo: false,
     }),
     "CONJ.4 com emita os primeiros cards nao forcou propose_action",
+  );
+}
+
+// 10) 02/09/2026: "selecione 6 videos do drive do juridico e crie legendas". "crie" e verbo de
+//     ato, mas o ato e escrever copy. Forcar propose_action aqui emitiria anuncio nao pedido.
+{
+  ok(
+    !deveForcarEmissao({
+      pedido:
+        "selecione 6 vídeos diferentes de dentro do drive do jurídico (qualquer pasta) e crie legendas para cada um deles",
+      chamouPropose: false,
+      cardsEmitidos: 0,
+    }),
+    "pedido de legendas virou pressao por card",
+  );
+  ok(
+    pedidoSoLegendasSemEmissao(
+      "selecione 6 vídeos diferentes de dentro do drive do jurídico (qualquer pasta) e crie legendas para cada um deles",
+    ),
+    "pedido de legendas nao foi reconhecido como sem emissao",
+  );
+  // O mesmo lote PEDINDO card continua sendo emissao.
+  ok(
+    !pedidoSoLegendasSemEmissao(
+      "selecione 6 videos, crie legendas e emita os primeiros cards para aprovacao",
+    ),
+    "pedido com card foi tratado como so legendas",
+  );
+  ok(
+    deveForcarEmissao({
+      pedido: "selecione 6 videos, crie legendas e emita os primeiros cards para aprovacao",
+      chamouPropose: false,
+      cardsEmitidos: 0,
+    }),
+    "legendas + emita cards deixou de forcar propose_action",
   );
 }
 

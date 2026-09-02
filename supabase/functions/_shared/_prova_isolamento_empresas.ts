@@ -109,6 +109,30 @@ assert(
     "lote_criativo deve reconhecer CONJ.4 com 7 criativos (senao o teto cai para 55s)",
   );
 }
+// 02/09/2026: leitura do Drive Juridico voltou vazia por recorte de formato e a resposta pediu
+// a pasta ao gestor. O chat precisa reler sem o recorte, avisar o descarte e auto-continuar.
+assert(
+  chat.includes("MSG_NUDGE_DRIVE_VAZIO") &&
+    chat.includes("leituraDriveVoltouVazia") &&
+    chat.includes("replyPedeCaminhoDaPastaDrive") &&
+    chat.includes("driveVazioIncompleto") &&
+    chat.includes("recorte_formato_ignorado"),
+  "traffic-chat deve insistir na leitura do Drive em vez de pedir a pasta ao gestor",
+);
+{
+  const driveEdge = await Deno.readTextFile(
+    new URL("./pedido_drive_criativos.ts", import.meta.url),
+  );
+  assert(
+    driveEdge.includes("pedidoQualquerPastaDrive") &&
+      driveEdge.includes("recortarItensDriveComAviso"),
+    "pedido_drive_criativos deve ter fail-open de recorte que zera a lista",
+  );
+}
+assert(
+  chat.includes("pedidoSoLegendasSemEmissao") && chat.includes("soLegendasTurno"),
+  "pedido de legendas nao pode ser tratado como pedido de card",
+);
 assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&

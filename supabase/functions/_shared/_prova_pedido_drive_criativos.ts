@@ -2,18 +2,23 @@
 import {
   aplicarRecorteAcervo,
   caminhoEhReelsOuVideos,
+  compactarInventarioDriveParaAgente,
   deaccPedido,
   inferirMeioDeProduto,
   inferirMeioDrive,
   itemDriveDoMeio,
+  leituraDriveVoltouVazia,
   parseMeioDriveArg,
   pastaFormatoIgnorada,
   deveDescerPastaDrive,
   pedidoExigeInventarioDrive,
+  pedidoQualquerPastaDrive,
   pedidoSoReelsVideos,
   pedidoUsaSlateExistente,
   recortarItensDrive,
+  recortarItensDriveComAviso,
   recorteDriveDoPedido,
+  replyPedeCaminhoDaPastaDrive,
   serieCarrosselDrive,
 } from "./pedido_drive_criativos.ts";
 
@@ -103,5 +108,118 @@ assert(
   deveDescerPastaDrive("2026", { meio: "sistema_ocular", soReelsVideos: true }, 0),
   "ano VISTTA deve descer na varredura",
 );
+
+// ── 02/09/2026: "6 videos do drive do juridico (qualquer pasta)" voltou vazio ─────────────
+// O modelo mandou formatos=[Reels,Videos]; Exports Finais nao tem essas subpastas, o recorte
+// reprovou os 42 videos e a resposta pediu o caminho da pasta ao gestor.
+const pedidoJuridico =
+  "pronto, agora quero que você selecione 6 vídeos diferentes de dentro do drive do jurídico (qualquer pasta) e crie legendas para cada um deles.";
+assert(pedidoQualquerPastaDrive(pedidoJuridico), "qualquer pasta reconhecido");
+assert(
+  pedidoQualquerPastaDrive("todos os vídeos que estão nas subpastas dentro dessa pasta raiz podem ser utilizados"),
+  "todas as subpastas reconhecido",
+);
+assert(inferirMeioDrive(pedidoJuridico) === "juridico", "meio juridico do pedido");
+const recorteJur = recorteDriveDoPedido(pedidoJuridico, { meio: "juridico", formatos: ["Videos", "Reels"] });
+assert(recorteJur.meio === "juridico", "recorte mantem o meio");
+assert(
+  recorteJur.soReelsVideos === false,
+  "arg formatos do modelo nao pode vencer 'qualquer pasta' do gestor",
+);
+
+// Mesmo com o recorte de formato ligado, zerar uma lista que TEM pecas do meio e proibido.
+const itensJur = [
+  { nome: "01. Conta de luz.mp4", caminho: "COHAPM Jurídico · Exports Finais/CONTA DE LUZ", tipo: "video/mp4" },
+  { nome: "02. Emprestimo.mp4", caminho: "COHAPM Jurídico · Exports Finais/EMPRÉSTIMOS", tipo: "video/mp4" },
+  { nome: "casa.mp4", caminho: "COHAPM La Felicità · 06. Junho/Vídeos", tipo: "video/mp4" },
+];
+const corteJur = recortarItensDriveComAviso(itensJur, { meio: "juridico", soReelsVideos: true });
+assert(corteJur.itens.length === 2, "fail-open devolve os videos do Juridico");
+assert(corteJur.formatoIgnorado, "fail-open declara que o formato foi descartado");
+assert(
+  recortarItensDrive(itensJur, { meio: "juridico", soReelsVideos: true }).length === 2,
+  "recortarItensDrive herda o fail-open",
+);
+// La Felicita tem Reels/Videos de verdade: o recorte continua valendo (nao virou passa-tudo).
+const corteLaf = recortarItensDriveComAviso(itensJur, { meio: "la_felicita", soReelsVideos: true });
+assert(corteLaf.itens.length === 1 && !corteLaf.formatoIgnorado, "recorte LF continua filtrando");
+
+const acervoJur = aplicarRecorteAcervo({
+  inventario_global: { videos: 148, imagens: 20 },
+  itens: itensJur,
+}, { meio: "juridico", soReelsVideos: true }) as Record<string, unknown>;
+assert((acervoJur.itens as unknown[]).length === 2, "acervo do Juridico nao volta vazio");
+assert(typeof acervoJur.recorte_formato_ignorado === "string", "acervo avisa que ignorou o formato");
+
+const invJur = compactarInventarioDriveParaAgente({
+  arquivos: itensJur.map((i) => ({ ...i, drive_file_id: `id_${i.nome}` })),
+}, { meio: "juridico", soReelsVideos: true }) as Record<string, unknown>;
+assert(invJur.total_arquivos === 2, "inventario do Juridico nao volta vazio");
+assert(typeof invJur.recorte_formato_ignorado === "string", "inventario avisa que ignorou o formato");
+
+// Varredura: sem recorte de formato, EMPRESTIMOS desce ja no nivel 0 da raiz.
+assert(
+  deveDescerPastaDrive("EMPRÉSTIMOS", { meio: "juridico", soReelsVideos: false }, 0),
+  "subpasta tematica do Juridico deve descer",
+);
+assert(
+  !deveDescerPastaDrive("Brutos", { meio: "juridico", soReelsVideos: false }, 0),
+  "Brutos continua fora",
+);
+
+// Leitura vazia detectada tanto no objeto quanto no retorno persistido como texto.
+assert(
+  leituraDriveVoltouVazia([
+    { tool: "get_acervo_para_anuncio", retorno: { itens: [], inventario_global: { videos: 0 } } },
+    { tool: "get_drive_criativos", retorno: { total_arquivos: 0, arquivos: [] } },
+  ]),
+  "leitura vazia do incidente nao foi detectada",
+);
+assert(
+  leituraDriveVoltouVazia([
+    { tool: "get_drive_criativos", retorno: '{"total_arquivos": 0, "arquivos": []}' },
+  ]),
+  "retorno string vazio nao foi detectado",
+);
+assert(
+  !leituraDriveVoltouVazia([
+    { tool: "get_drive_criativos", retorno: { total_arquivos: 42, arquivos: [{ nome: "a.mp4" }] } },
+    { tool: "get_acervo_para_anuncio", retorno: { itens: [] } },
+  ]),
+  "uma leitura com pecas basta para nao ser turno vazio",
+);
+assert(
+  !leituraDriveVoltouVazia([{ tool: "get_overview", retorno: { itens: [] } }]),
+  "tool que nao lista Drive nao conta",
+);
+assert(
+  !leituraDriveVoltouVazia([{ tool: "get_drive_criativos", erro: "sem acesso ao Drive" }]),
+  "erro de acesso nao e leitura vazia (nao adianta reler igual)",
+);
+
+// A prosa do incidente: pedir a pasta ao gestor e declarar inventario vazio.
+assert(
+  replyPedeCaminhoDaPastaDrive(
+    "Leitura do inventário retornou vazio. Para localizar os 6 vídeos, preciso do caminho exato da pasta no Drive Jurídico.",
+  ),
+  "reply que pede a pasta nao foi detectada",
+);
+assert(
+  replyPedeCaminhoDaPastaDrive(
+    "A leitura atual do Drive Jurídico não expôs os arquivos das subpastas de Exports Finais. O retorno veio vazio para inventário, acervo e análise visual.",
+  ),
+  "reply que declara vazio nao foi detectada",
+);
+assert(
+  !replyPedeCaminhoDaPastaDrive(
+    "Selecionei 6 vídeos do Jurídico e escrevi as legendas de cada um; os drive_file_id estão na tabela.",
+  ),
+  "resposta boa foi marcada como desistencia",
+);
+
+assert(chat.includes("MSG_NUDGE_DRIVE_VAZIO"), "chat tem nudge de leitura vazia do Drive");
+assert(chat.includes("recorte_formato_ignorado"), "chat declara recorte descartado");
+assert(chat.includes("driveVazioIncompleto"), "chat auto-continua quando o Drive volta vazio");
+assert(chat.includes("pedidoSoLegendasSemEmissao"), "chat nao trata legendas como emissao");
 
 console.log("ok pedido_drive_criativos");

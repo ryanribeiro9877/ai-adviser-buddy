@@ -8,9 +8,28 @@ import {
   ehUploadLoteCurto,
   ehPedidoDetalhamentoCampanha,
   ehPedidoOrigemDriveDosAnuncios,
+  pedidoSoLegendasSemEmissao,
   replyLeituraIncompleta,
   objetivoDoFio,
 } from "./intencao-turno";
+
+describe("pedidoSoLegendasSemEmissao", () => {
+  const pedidoJuridico =
+    "pronto, agora quero que você selecione 6 vídeos diferentes de dentro do drive do jurídico (qualquer pasta) e crie legendas para cada um deles.";
+
+  it("nao trata pedido de legendas como emissao de card", () => {
+    expect(ehPedidoDeAto(pedidoJuridico)).toBe(true);
+    expect(pedidoSoLegendasSemEmissao(pedidoJuridico)).toBe(true);
+  });
+
+  it("mantem emissao quando o gestor pede card, aprovacao ou anuncio", () => {
+    expect(
+      pedidoSoLegendasSemEmissao("selecione 6 videos, crie legendas e emita os primeiros cards para aprovacao"),
+    ).toBe(false);
+    expect(pedidoSoLegendasSemEmissao("crie legendas e monte os anuncios")).toBe(false);
+    expect(pedidoSoLegendasSemEmissao("emita os 3 cards do conjunto 2")).toBe(false);
+  });
+});
 
 describe("ehPerguntaDeLeitura", () => {
   it("reconhece pergunta sobre link do anuncio vs conjunto", () => {

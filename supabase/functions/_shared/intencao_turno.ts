@@ -47,7 +47,25 @@ export function deveForcarEmissao(t: {
 }): boolean {
   if (t.jaInsistiu || t.semTempo) return false;
   if (t.chamouPropose || t.cardsEmitidos > 0) return false;
+  if (pedidoSoLegendasSemEmissao(t.pedido)) return false;
   return ehPedidoDeAto(t.pedido);
+}
+
+const RE_ATO_DE_LEGENDA =
+  /\b(crie|criar|cria|gere|gerar|monte|montar|escreva|escrever|produza|produzir)\s+(as\s+|os\s+|umas?\s+|novas?\s+|novos\s+)?(legendas?|copys?|copy|textos?)\b/;
+
+/**
+ * "selecione 6 videos e CRIE LEGENDAS para cada um" tem verbo de ato, mas o ato e escrever
+ * copy — nao emitir card. Sem esta excecao o turno passa a exigir propose_action e o sistema
+ * emitiria anuncio que o gestor nao pediu (02/09/2026, Drive do Juridico).
+ */
+export function pedidoSoLegendasSemEmissao(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  if (/\b(cards?|aprovacao|aprovacoes|emit\w*|publiq\w*|publicar|anunci\w*|pause|pausar|suba|subir)\b/.test(p)) {
+    return false;
+  }
+  return RE_ATO_DE_LEGENDA.test(p);
 }
 
 /** "emita os cards dos 2 primeiros conjuntos" — nao e anuncio avulso. */
