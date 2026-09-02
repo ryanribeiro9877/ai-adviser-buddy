@@ -4,6 +4,7 @@ import {
   escolherCampanhaUnica,
   parseJanelaDatasPedido,
   janelaDetalhe,
+  DEF_GET_DETALHE_ANUNCIOS,
 } from "./leitura_desempenho.ts";
 import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha } from "./intencao_turno.ts";
 
@@ -59,6 +60,11 @@ assert(
 assert(
   !replyLeituraIncompleta("As duas campanhas estão ativas. Gasto da janela: R$ 420,00. Ranking por anúncio abaixo."),
   "relatorio fechado nao dispara",
+);
+
+assert(
+  DEF_GET_DETALHE_ANUNCIOS.function.description.includes("DELETED/ARCHIVED"),
+  "tool detalhe declara exclusos fora do inventario",
 );
 
 console.log("ok leitura_desempenho");

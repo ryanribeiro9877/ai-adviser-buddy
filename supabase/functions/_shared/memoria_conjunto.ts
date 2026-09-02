@@ -523,6 +523,38 @@ export function recusarCruzamentoLinhaProduto(opts: {
 }
 
 /**
+ * Objeto Meta DELETED/ARCHIVED nao existe para operacao.
+ *
+ * CAMPAIGN_PAUSED / ADSET_PAUSED / PAUSED / ACTIVE continuam no inventario: o objeto
+ * EXISTE, so nao entrega (ou entrega). Medido 02/09/2026 na VISTTA: 29 DELETED + 11
+ * CAMPAIGN_PAUSED foram somados como "40 anuncios registrados" e o agente tratou
+ * exclusos como pecas do conjunto.
+ */
+export function statusObjetoOperacional(status: unknown): boolean {
+  const st = String(status ?? "").trim().toUpperCase();
+  return st !== "DELETED" && st !== "ARCHIVED";
+}
+
+export function filtrarOperacionais<T extends { status?: unknown }>(
+  rows: T[] | null | undefined,
+): T[] {
+  return (rows ?? []).filter((r) => statusObjetoOperacional(r.status));
+}
+
+export function recusaAlvoNaoOperacional(
+  nivel: "anuncio" | "conjunto" | "campanha",
+  status: unknown,
+): { erro: string; detalhe: string } {
+  const st = String(status ?? "").trim().toUpperCase() || "DELETED";
+  return {
+    erro: "alvo_nao_operacional",
+    detalhe:
+      `Este ${nivel} esta ${st} no espelho Meta. DELETED/ARCHIVED saem da memoria operacional: ` +
+      `nao existem para leitura, molde nem card. Nao cite como inventario e nao emita acao sobre ele.`,
+  };
+}
+
+/**
  * Conjunto arquivado/apagado NAO e destino de anuncio — ele so cria ambiguidade de nome.
  *
  * Medido 01/09/2026: o gestor arquivou a duplicata CONJ.1_VISTTA (120249829825270182) e
@@ -531,8 +563,7 @@ export function recusarCruzamentoLinhaProduto(opts: {
  * um arquivado nao e ambiguidade nenhuma.
  */
 export function conjuntoVivoParaDestino(row: { status?: unknown } | null | undefined): boolean {
-  const st = String((row as { status?: unknown })?.status ?? "").trim().toUpperCase();
-  return st !== "ARCHIVED" && st !== "DELETED";
+  return statusObjetoOperacional(row?.status);
 }
 
 /**

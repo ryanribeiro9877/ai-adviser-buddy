@@ -2,6 +2,8 @@
 // Habilita o agente a fechar detalhamento (ID Meta ou nome) com série diária,
 // sem o gestor repetir a pergunta. Não grava fato de conta.
 
+import { statusObjetoOperacional } from "./memoria_conjunto.ts";
+
 export type CampanhaRef = {
   id?: string;
   name?: string | null;
@@ -221,7 +223,9 @@ export async function tDetalheAnuncios(
     .select("id,name,status,objective,external_id,special_ad_categories")
     .eq("company_id", companyId);
   if (eCamp) return { erro: `falha ao ler campanhas: ${eCamp.message}` };
-  const hits = casarCampanhas((all ?? []) as CampanhaRef[], needle);
+  const campsOperacionais = ((all ?? []) as Array<CampanhaRef & { status?: unknown }>)
+    .filter((c) => statusObjetoOperacional(c.status));
+  const hits = casarCampanhas(campsOperacionais, needle);
   const escolha = escolherCampanhaUnica(hits, needle);
   if (!escolha.unica) {
     if (escolha.ambiguo?.length) {
@@ -248,14 +252,17 @@ export async function tDetalheAnuncios(
     .eq("company_id", companyId)
     .eq("campaign_id", camp.id);
   if (eAds) return { erro: `falha ao ler anuncios: ${eAds.message}` };
-  const listaAds = (ads ?? []) as Record<string, unknown>[];
+  const listaAds = ((ads ?? []) as Record<string, unknown>[])
+    .filter((a) => statusObjetoOperacional(a.status));
 
   const { data: sets } = await supa.from("ad_sets")
     .select("external_id,name,status,daily_budget,optimization_goal,destination_type,targeting")
     .eq("company_id", companyId)
     .eq("campaign_id", camp.id);
+  const listaSets = ((sets ?? []) as Record<string, unknown>[])
+    .filter((s) => statusObjetoOperacional(s.status));
   const setMap = new Map(
-    ((sets ?? []) as Record<string, unknown>[]).map((s) => [String(s.external_id), s]),
+    listaSets.map((s) => [String(s.external_id), s]),
   );
 
   const ids = listaAds.map((a) => String(a.external_id)).filter(Boolean);
@@ -327,6 +334,14 @@ export async function tDetalheAnuncios(
   const porConjunto = new Map<string, {
     nome: unknown; status: unknown; n: number; tot: Agg; dias: Map<string, Record<string, unknown>[]>;
   }>();
+  for (const set of listaSets) {
+    const sid = String(set.external_id ?? "");
+    if (!sid) continue;
+    porConjunto.set(sid, {
+      nome: set.name, status: set.status ?? null, n: 0, tot: somarSnaps([]),
+      dias: new Map<string, Record<string, unknown>[]>(),
+    });
+  }
   for (const a of listaAds) {
     const sid = String(a.adset_external_id ?? "sem_conjunto");
     const set = setMap.get(String(a.adset_external_id ?? ""));
@@ -406,6 +421,9 @@ export async function tDetalheAnuncios(
     anuncios,
     nota:
       "Fonte: ads + ad_metric_snapshots (D-1). Aceita campaign_id Meta ou name_like. " +
+      "total_anuncios e a lista IGNORAM DELETED/ARCHIVED — esses objetos sairam da memoria operacional. " +
+      "CAMPAIGN_PAUSED/ADSET_PAUSED/PAUSED continuam: o anuncio EXISTE, nao entrega. " +
+      "Conjunto ACTIVE com anuncios=0 nao tem peca operacional (nao some DELETED). " +
       "Se restantes>0, chame de novo com pagina+1 — os anúncios omitidos EXISTEM. " +
       "Alcance na série é soma diária (não pessoas únicas). " +
       "Engajamento de post (POST_ENGAGEMENT) não vive neste espelho; use cliques_todos/impressões/alcance aqui e, se precisar do evento de otimização ao vivo, ler_pipeboard insights. " +
@@ -418,7 +436,7 @@ export const DEF_GET_DETALHE_ANUNCIOS = {
   function: {
     name: "get_detalhe_anuncios",
     description:
-      "DETALHE POR ANÚNCIO E POR CONJUNTO de UMA campanha: status, destino, CTA, totais da janela e série diária (gasto, impressões, alcance, cliques, CTR, CPC, CPM, formulários, conversas). Aceita campaign_id (ID numérico da Meta) OU name_like. PAGINADO (6 anúncios/página com série). Se restantes>0, pagine. PROIBIDO dizer que o detalhamento por anúncio 'não foi retornado nesta rodada' sem ter chamado isto. Para 2 campanhas, chame 2 vezes.",
+      "DETALHE POR ANÚNCIO E POR CONJUNTO de UMA campanha: status, destino, CTA, totais da janela e série diária (gasto, impressões, alcance, cliques, CTR, CPC, CPM, formulários, conversas). Aceita campaign_id (ID numérico da Meta) OU name_like. PAGINADO (6 anúncios/página com série). Se restantes>0, pagine. DELETED/ARCHIVED NAO entram em total_anuncios nem na lista — nao cite como 'anuncios registrados'. CAMPAIGN_PAUSED continua (existe, nao entrega porque a campanha-mae esta pausada). Conjunto ACTIVE com anuncios=0 = zero pecas operacionais naquele conjunto. PROIBIDO dizer que o detalhamento por anúncio 'não foi retornado nesta rodada' sem ter chamado isto. Para 2 campanhas, chame 2 vezes.",
     parameters: {
       type: "object",
       properties: {

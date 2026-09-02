@@ -543,3 +543,18 @@ export function recusarConjuntoErrado(opts: {
       `O card NAO pode ser emitido nem aplicado. Nao peca o ID numerico da Meta ao gestor: CONJ.${nPedido} no nome basta (get_estrutura_conjuntos).`,
   };
 }
+
+/**
+ * Objeto Meta DELETED/ARCHIVED nao existe para operacao.
+ * CAMPAIGN_PAUSED / ADSET_PAUSED / PAUSED / ACTIVE continuam no inventario.
+ */
+export function statusObjetoOperacional(status: unknown): boolean {
+  const st = String(status ?? "").trim().toUpperCase();
+  return st !== "DELETED" && st !== "ARCHIVED";
+}
+
+export function filtrarOperacionais<T extends { status?: unknown }>(
+  rows: T[] | null | undefined,
+): T[] {
+  return (rows ?? []).filter((r) => statusObjetoOperacional(r.status));
+}

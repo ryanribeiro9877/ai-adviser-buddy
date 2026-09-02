@@ -1,5 +1,6 @@
 // deno run supabase/functions/_shared/_prova_memoria_conjunto.ts
 import {
+  conjuntoVivoParaDestino,
   desempateDeAlvoDoCard,
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
@@ -7,9 +8,12 @@ import {
   ehSentinelaSemMolde,
   extrairNomesCriativoDaFala,
   extrairSlateDaFala,
+  filtrarOperacionais,
   nomeCompostoForaDeEscopoTrafego,
   pareceApprovalIdEmVezDeDrive,
   pecasDoConjunto,
+  recusaAlvoNaoOperacional,
+  statusObjetoOperacional,
   temSlateNoTexto,
 } from "./memoria_conjunto.ts";
 
@@ -167,6 +171,27 @@ assert(
   ]);
   assert(/nome completo exato/i.test(prefixo.instrucao), "com nomes distintos o nome exato serve");
   assert(prefixo.instrucao.includes("params.alvo_external_id"), "o id devia seguir disponivel");
+}
+
+// DELETED/ARCHIVED saem da memoria operacional; CAMPAIGN_PAUSED continua (VISTTA, 02/09/2026).
+{
+  assert(!statusObjetoOperacional("DELETED"), "deleted sai");
+  assert(!statusObjetoOperacional("deleted"), "deleted minusculo sai");
+  assert(!statusObjetoOperacional("ARCHIVED"), "archived sai");
+  assert(statusObjetoOperacional("CAMPAIGN_PAUSED"), "campaign_paused fica");
+  assert(statusObjetoOperacional("ADSET_PAUSED"), "adset_paused fica");
+  assert(statusObjetoOperacional("PAUSED"), "paused fica");
+  assert(statusObjetoOperacional("ACTIVE"), "active fica");
+  assert(!conjuntoVivoParaDestino({ status: "DELETED" }), "conjunto deleted nao e destino");
+  assert(conjuntoVivoParaDestino({ status: "ACTIVE" }), "conjunto active e destino");
+  const pool = filtrarOperacionais([
+    { name: "vivo", status: "CAMPAIGN_PAUSED" },
+    { name: "morto", status: "DELETED" },
+    { name: "arquivo", status: "ARCHIVED" },
+  ]);
+  assert(pool.length === 1 && pool[0].name === "vivo", "filtra so operacionais");
+  const recusa = recusaAlvoNaoOperacional("anuncio", "DELETED");
+  assert(recusa.erro === "alvo_nao_operacional", "recusa alvo morto");
 }
 
 console.log("ok: _prova_memoria_conjunto");

@@ -1,4 +1,5 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.15)
+// supabase/functions/traffic-agent-job/index.ts (v4.17)
+// v4.17 (02/09/2026) - Ranking ignora anuncios DELETED/ARCHIVED (mesma regra do chat v28.94).
 // v4.16 (01/09/2026) - CTWA cria pelo pipeboard: casou_na_api=false NAO impede o
 //   conjunto (graph 1487246 as 11:49, pipeboard criou o 120249829825270182 as 12:46
 //   com o mesmo payload). Especialista para de pedir vinculo de WABA.
@@ -251,7 +252,7 @@ import {
 } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
-import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto } from "../_shared/memoria_conjunto.ts";
+import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto, statusObjetoOperacional } from "../_shared/memoria_conjunto.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import {
   FOCO_CRIATIVOS_DRIVE,
@@ -751,7 +752,7 @@ async function t_ads_ranking(companyId: string, opts: {
   const from = opts.date_from?.slice(0, 10)
     || new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
   const to = opts.date_to?.slice(0, 10);
-  const { data: ads } = await supa.from("ads").select("external_id,name,campaign_id,adset_external_id").eq("company_id", companyId);
+  const { data: ads } = await supa.from("ads").select("external_id,name,campaign_id,adset_external_id,status").eq("company_id", companyId);
   let campQ = supa.from("campaigns").select("id,name,category,status,objective,external_id").eq("company_id", companyId);
   if (somenteAtivas) campQ = campQ.eq("status", "active");
   const { data: camps } = await campQ;
@@ -759,7 +760,9 @@ async function t_ads_ranking(companyId: string, opts: {
   const needle = String(opts.campaign_id || opts.name_like || "").trim();
   if (needle) campList = casarCampanhas(campList, needle) as typeof campList;
   const campMap = new Map(campList.map((c) => [c.id, c]));
-  const active = (ads ?? []).filter((a) => campMap.has(a.campaign_id));
+  const active = (ads ?? []).filter((a) =>
+    campMap.has(a.campaign_id) && statusObjetoOperacional(a.status)
+  );
   if (!active.length) {
     return {
       ranking: [],
@@ -2805,7 +2808,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.16";
+  tel.versao = "job-v4.17";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,

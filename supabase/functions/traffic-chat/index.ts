@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v28.93)
+// supabase/functions/traffic-chat/index.ts (v28.94)
+// v28.94 (02/09/2026) - DELETED/ARCHIVED SAEM DA MEMORIA OPERACIONAL. Na pergunta
+//   "quais conjuntos ativos e quais anuncios ativos neles" da VISTTA, o agente
+//   somou 29 DELETED + 11 CAMPAIGN_PAUSED = 40 "registrados" e misturou exclusos
+//   com pecas que ainda existem (campanha pausada). DELETED/ARCHIVED deixam de
+//   aparecer em detalhe/criativos/estrutura/ranking/molde/card; CAMPAIGN_PAUSED
+//   continua (existe, nao entrega). A acao de excluir na Meta nao existe: o
+//   sync e que marca DELETED e a leitura passa a desconsiderar.
 // v28.93 (01/09/2026) - A GUARDA DE LINHA LEU A LEGENDA E MANDOU MUDAR A CAMPANHA. Card
 //   AD_CONJ.2_APENAS_OCULOS_3 na campanha VISTTA falhou no apply porque a copy dizia
 //   "WhatsApp oficial do Juridico COHAPM". A peca e de oculos; o destino estava certo.
@@ -748,6 +755,8 @@ import {
   pecaChaveDoSlate,
   recusarConjuntoErrado,
   recusarCruzamentoLinhaProduto,
+  recusaAlvoNaoOperacional,
+  statusObjetoOperacional,
   temSlateNoTexto,
   type PecaSlate,
 } from "../_shared/memoria_conjunto.ts";
@@ -877,7 +886,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.93";
+const VERSAO = "chat-v28.94";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -1072,8 +1081,9 @@ async function resolverLegendaReferenciasAgente(opts: {
       .eq("adset_external_id", opts.adsetExternalId)
       .order("last_synced_at", { ascending: false })
       .limit(5);
-    const prefer = (ads ?? []).find((a: any) => /PAUSED/i.test(String(a.status ?? "")))
-      ?? (ads ?? [])[0];
+    const vivos = (ads ?? []).filter((a: { status?: unknown }) => statusObjetoOperacional(a.status));
+    const prefer = vivos.find((a: { status?: unknown }) => /PAUSED/i.test(String(a.status ?? "")))
+      ?? vivos[0];
     if (prefer?.name) push(prefer.name, "anuncio_do_mesmo_conjunto");
   }
 
@@ -1098,8 +1108,11 @@ async function resolverLegendaReferenciasAgente(opts: {
           .eq("company_id", opts.companyId)
           .in("adset_external_id", ids)
           .limit(8);
-        const prefer = (adsCamp ?? []).find((a: any) => /ACTIVE/i.test(String(a.status ?? "")))
-          ?? (adsCamp ?? [])[0];
+        const vivosCamp = (adsCamp ?? []).filter((a: { status?: unknown }) =>
+          statusObjetoOperacional(a.status)
+        );
+        const prefer = vivosCamp.find((a: { status?: unknown }) => /ACTIVE/i.test(String(a.status ?? "")))
+          ?? vivosCamp[0];
         if (prefer?.name) push(prefer.name, "anuncio_da_mesma_campanha");
       }
     }
@@ -1154,7 +1167,8 @@ async function sheetToText(name: string, mime: string, b64: string): Promise<{ t
 
 async function t_overview(companyId: string) {
   const { data: camps } = await supa.from("campaigns").select("name,status,category,spend,external_account_id").eq("company_id", companyId);
-  const ativos = (camps ?? []).filter((c) => c.status === "active");
+  const vivos = (camps ?? []).filter((c) => statusObjetoOperacional(c.status));
+  const ativos = vivos.filter((c) => c.status === "active");
   const from = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
   const { data: snaps } = await supa.from("metric_snapshots")
     .select("spend,impressions,link_clicks,form_leads,messaging_started,leads,snapshot_date")
@@ -1166,7 +1180,7 @@ async function t_overview(companyId: string) {
   }), { spend: 0, imp: 0, link: 0, forms: 0, msg: 0, leads: 0 });
   const dias = new Set((snaps ?? []).map((r) => r.snapshot_date)).size;
   return {
-    campanhas_ativas: ativos.length, campanhas_total: (camps ?? []).length,
+    campanhas_ativas: ativos.length, campanhas_total: vivos.length,
     ultimos_7_dias: { gasto: brl(s.spend), dias_com_dado: dias, impressoes: s.imp, cliques_link: s.link,
       formularios: s.forms, conversas_whatsapp: s.msg,
       custo_por_formulario: s.forms ? brl(s.spend / s.forms) : null,
@@ -1403,12 +1417,14 @@ async function t_ads_ranking(companyId: string, days = 30, ordenar_por = "gasto"
   let campQ = supa.from("campaigns").select("id,name,category,status,external_id").eq("company_id", companyId);
   const needle = String(name_like ?? "").trim();
   const { data: camps } = needle ? await campQ : await campQ.eq("status", "active");
-  let campList = camps ?? [];
+  let campList = (camps ?? []).filter((c) => statusObjetoOperacional(c.status));
   if (needle) {
     campList = casarCampanhas(campList, needle) as typeof campList;
   }
   const campMap = new Map(campList.map((c) => [c.id, c]));
-  const active = (ads ?? []).filter((a) => campMap.has(a.campaign_id));
+  const active = (ads ?? []).filter((a) =>
+    campMap.has(a.campaign_id) && statusObjetoOperacional(a.status)
+  );
   if (!active.length) return { ranking: [], nota: needle ? "sem criativos neste recorte de campanha" : "sem criativos em campanhas ativas" };
   const ids = active.map((a) => a.external_id);
   let snapQ = supa.from("ad_metric_snapshots")
@@ -1465,7 +1481,11 @@ async function t_campaign_detail(companyId: string, name_like: string, date_from
     .select("id,name,status,category,spend,special_ad_categories,objective,external_id")
     .eq("company_id", companyId);
   const needle = String(name_like ?? "").trim();
-  const hits = casarCampanhas((all ?? []) as { id?: string; name?: string | null; external_id?: string | null }[], needle);
+  const hits = casarCampanhas(
+    ((all ?? []) as Array<{ id?: string; name?: string | null; external_id?: string | null; status?: unknown }>)
+      .filter((c) => statusObjetoOperacional(c.status)),
+    needle,
+  );
   const escolha = escolherCampanhaUnica(hits, needle);
   if (!escolha.unica) {
     if (escolha.ambiguo?.length) {
@@ -1561,7 +1581,9 @@ async function t_auditar_compliance_financeira(companyId: string, nameLike: stri
     .from("campaigns")
     .select("id,name,status,objective,external_id,special_ad_categories,criado_pelo_sistema")
     .eq("company_id", companyId);
-  const hits = (camps ?? []).filter((c) => norm(c.name).includes(needle));
+  const hits = (camps ?? []).filter((c) =>
+    statusObjetoOperacional(c.status) && norm(c.name).includes(needle)
+  );
   if (!hits.length) return { erro: `nenhuma campanha contendo '${nameLike}'` };
   if (hits.length > 1) {
     const exact = hits.filter((c) => norm(c.name) === needle);
@@ -1593,6 +1615,8 @@ async function t_auditar_compliance_financeira(companyId: string, nameLike: stri
     .eq("campaign_id", camp.id)
     .eq("company_id", companyId);
 
+  const conjuntosVivos = (conjuntos ?? []).filter((s) => statusObjetoOperacional(s.status));
+
   const { data: regras } = await supa
     .from("compliance_rules")
     .select("code,regra,severidade,categoria,fonte")
@@ -1600,7 +1624,9 @@ async function t_auditar_compliance_financeira(companyId: string, nameLike: stri
     .or("code.ilike.FIN-%,code.ilike.LGL-%,code.ilike.CRI-%")
     .order("code");
 
-  const anuncios = (ads ?? []).map((a) => ({
+  const anuncios = (ads ?? [])
+    .filter((a) => statusObjetoOperacional(a.status))
+    .map((a) => ({
     nome: a.name,
     status: a.status,
     external_id: a.external_id,
@@ -1613,7 +1639,7 @@ async function t_auditar_compliance_financeira(companyId: string, nameLike: stri
   }));
 
   const alertas_segmentacao: string[] = [];
-  for (const s of conjuntos ?? []) {
+  for (const s of conjuntosVivos) {
     const t = (s.targeting && typeof s.targeting === "object") ? s.targeting as Record<string, unknown> : {};
     if (t.genders) alertas_segmentacao.push(`conjunto "${s.name}": genders presente (restricao tipica de categoria especial)`);
     if (Array.isArray(t.custom_audiences) && (t.custom_audiences as unknown[]).length) {
@@ -1644,7 +1670,7 @@ async function t_auditar_compliance_financeira(companyId: string, nameLike: stri
       criado_pelo_sistema: camp.criado_pelo_sistema === true,
     },
     anuncios,
-    conjuntos: (conjuntos ?? []).map((s) => ({
+    conjuntos: conjuntosVivos.map((s) => ({
       nome: s.name,
       status: s.status,
       external_id: s.external_id,
@@ -2200,24 +2226,33 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   const alvoExtPedido = String(
     params?.alvo_external_id ?? params?.target_external_id ?? params?.external_id ?? "",
   ).trim();
-  let universo: { id: string; name: string; external_id?: string }[] = [];
+  type AlvoRow = { id: string; name: string; external_id?: string; status?: unknown; campaign_id?: string };
+  let bruto: AlvoRow[] = [];
+  const nivelAlvo: "anuncio" | "conjunto" | "campanha" = isAd ? "anuncio" : isAdset ? "conjunto" : "campanha";
   if (isAd) {
     const { data: camps } = await supa.from("campaigns").select("id").eq("company_id", companyId).eq("status", "active");
     const campIds = (camps ?? []).map((c) => c.id);
-    const { data: ads } = await supa.from("ads").select("id,name,external_id,campaign_id").eq("company_id", companyId);
+    const { data: ads } = await supa.from("ads").select("id,name,external_id,campaign_id,status").eq("company_id", companyId);
     // Com external_id o gestor JA apontou o objeto; exigir campanha ativa so esconderia o alvo.
-    universo = (ads ?? []).filter((a) => !!alvoExtPedido || campIds.includes(a.campaign_id));
+    bruto = (ads ?? []).filter((a) => !!alvoExtPedido || campIds.includes(a.campaign_id));
   } else if (isAdset) {
     const { data: adsets } = await supa
       .from("ad_sets")
-      .select("id,name,external_id")
+      .select("id,name,external_id,status")
       .eq("company_id", companyId)
       .eq("provider", "meta_ads");
-    universo = adsets ?? [];
+    bruto = adsets ?? [];
   } else {
-    const { data: camps } = await supa.from("campaigns").select("id,name,external_id").eq("company_id", companyId);
-    universo = camps ?? [];
+    const { data: camps } = await supa.from("campaigns").select("id,name,external_id,status").eq("company_id", companyId);
+    bruto = camps ?? [];
   }
+  if (alvoExtPedido) {
+    const morto = bruto.find((m) =>
+      String(m.external_id ?? "").trim() === alvoExtPedido && !statusObjetoOperacional(m.status)
+    );
+    if (morto) return recusaAlvoNaoOperacional(nivelAlvo, morto.status);
+  }
+  const universo = bruto.filter((m) => statusObjetoOperacional(m.status));
 
   let alvo: { id: string; name: string; external_id?: string };
   if (alvoExtPedido) {
@@ -2573,7 +2608,7 @@ async function t_ler_instagram_anuncios(companyId: string, args: any) {
   for (const s of sets ?? []) {
     if (s.external_id) conjuntosNomes[String(s.external_id)] = String(s.name ?? "");
   }
-  const anuncios = await listarAnunciosInstagramDaCampanha({
+  const anuncios = (await listarAnunciosInstagramDaCampanha({
     g,
     campaignId: String(camp.external_id),
     accountId,
@@ -2581,7 +2616,9 @@ async function t_ler_instagram_anuncios(companyId: string, args: any) {
     conjuntosNomes,
     oficialId: ident.instagram_actor_id,
     oficialHandle: ident.instagram_handle ?? HANDLE_COHAPM_OFICIAL,
-  });
+  })).filter((a) =>
+    statusObjetoOperacional(a.status) && statusObjetoOperacional(a.effective_status)
+  );
   const porClasse = (c: string) => anuncios.filter((a) => a.classificacao === c);
   return {
     ok: true,
@@ -3507,11 +3544,12 @@ async function t_propose_criacao(
 
     let molde: any = null;
     if (!semMolde) {
-      const { data: anuncios } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id,adset_external_id").eq("company_id", companyId);
-      molde = (anuncios ?? []).find((x) => norm(x.name) === norm(nomeAlvo))
-        ?? (anuncios ?? []).find((x) => String(x.external_id ?? "") === String(nomeAlvo))
-        ?? (anuncios ?? []).find((x) => String(x.creative_id ?? "") === String(nomeAlvo))
-        ?? (anuncios ?? []).filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
+      const { data: anunciosRaw } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id,adset_external_id,status").eq("company_id", companyId);
+      const anuncios = (anunciosRaw ?? []).filter((x) => statusObjetoOperacional(x.status));
+      molde = anuncios.find((x) => norm(x.name) === norm(nomeAlvo))
+        ?? anuncios.find((x) => String(x.external_id ?? "") === String(nomeAlvo))
+        ?? anuncios.find((x) => String(x.creative_id ?? "") === String(nomeAlvo))
+        ?? anuncios.filter((x) => norm(x.name).includes(norm(nomeAlvo)))[0];
       if (!molde && (driveFileId || metaVideoIdEarly || metaImageHashEarly)) {
         // Tem midia propria: nao existe molde a procurar. v28.87 inclui a peca que ja subiu
         // para a biblioteca (meta_video_id) — antes so drive_file_id salvava daqui.
@@ -3519,15 +3557,15 @@ async function t_propose_criacao(
       } else if (!molde) {
         const pareceIdMeta = /^\d{10,}$/.test(String(nomeAlvo));
         const pareceInventado = !pareceIdMeta && (String(nomeAlvo).includes("[") || /LEV|LP|LEADS|TESTE|ESCALA|AGO\d{2}/i.test(String(nomeAlvo)));
-        const candidatos = (anuncios ?? [])
-          .filter((a: any) => a.adset_external_id && String(conjuntoDestino).includes(String(a.adset_external_id)))
+        const candidatos = anuncios
+          .filter((a: { adset_external_id?: string }) => a.adset_external_id && String(conjuntoDestino).includes(String(a.adset_external_id)))
           .slice(0, 8)
-          .map((a: any) => a.name);
+          .map((a: { name?: string }) => a.name);
         const { data: setsTmp } = await supa.from("ad_sets").select("external_id,name").eq("company_id", companyId);
         const destTmp = (setsTmp ?? []).find((x) => x.external_id === conjuntoDestino)
           ?? (setsTmp ?? []).find((x) => norm(x.name) === norm(conjuntoDestino));
         const noConjunto = destTmp?.external_id
-          ? (anuncios ?? []).filter((a: any) => a.adset_external_id === destTmp.external_id).map((a: any) => a.name).slice(0, 8)
+          ? anuncios.filter((a: { adset_external_id?: string }) => a.adset_external_id === destTmp.external_id).map((a: { name?: string }) => a.name).slice(0, 8)
           : candidatos;
         return {
           erro: pareceInventado ? "molde_parece_nome_composto_inventado" : "anuncio_molde_nao_encontrado",
@@ -4954,9 +4992,9 @@ const TOOLS = [
   { type: "function", function: { name: "get_slate_da_conversa", description: "MEMORIA DURAVEL do SLATE desta conversa (conversation_slate): pecas JA escolhidas por CONJ.N com nome, drive_file_id, angulo e CTA. Inventario Drive (N videos da pasta) NAO e o slate. OBRIGATORIO antes de dizer que 'o acervo nao traz o slate' ou de pedir ao gestor para re-colar os 8 videos. Pedido de legendas dos videos que VOCE selecionou: leia daqui e chame gerar_legendas por peca.", parameters: { type: "object", properties: { conjunto: { type: "number", description: "Opcional: so pecas deste CONJ.N." } } } } },
   { type: "function", function: { name: "registrar_peca_da_conversa", description: "Grava UMA peca no slate duravel (conjunto + drive_file_id + nome). O sistema tambem extrai tabelas CONJ.N da propria conversa. Use se selecionar peca nova e quiser persistir na hora.", parameters: { type: "object", properties: { conjunto: { type: "number" }, drive_file_id: { type: "string" }, nome: { type: "string" }, pasta: { type: "string" }, angulo: { type: "string" }, cta: { type: "string" }, peca_chave: { type: "string" } }, required: ["conjunto", "drive_file_id", "nome"] } } },
   { type: "function", function: { name: "check_compliance", description: "GUARDIAO DE COMPLIANCE: valida UMA legenda (texto integral) e/ou criativo anexado contra compliance_rules. Para esbocos que voce escreveu nesta conversa, PASSE o texto em legenda= — NAO use get_criativos_conteudo vazio como desculpa de '0 textos'. Para anuncios ja publicados, pegue a legenda em get_criativos_conteudo/legendas_unicas e passe aqui. Devolve veredito deterministicamente. COHAPM: se campanha/conjunto Juridico vs peca La Felicità (ou o inverso), REPROVA — ERRO GRAVE. Passe campanha/conjunto/nome_criativo ao auditar par destino×peca.", parameters: { type: "object", properties: { legenda: { type: "string", description: "Texto integral da legenda a validar (obrigatorio se nao houver imagem anexada)." }, campanha: { type: "string" }, conjunto: { type: "string" }, nome_criativo: { type: "string" }, drive_file_id: { type: "string" }, meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"] } }, required: ["legenda"] } } },
-  { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Traz tambem destino_url (link do CTA do criativo) e destino (whatsapp quando wa.me/api.whatsapp, senao site): O NUMERO DE WHATSAPP DE DESTINO de cada peca SAI DAQUI (ex.: wa.me/5571993451315). Isso e CONFIG do criativo coletada do Pipeboard - NAO confunda com a analitica de conversa WABA (pos-clique), que esta congelada; o numero de destino do anuncio E legivel e voce DEVE informa-lo quando perguntado. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico completo, payload maior e mais truncado. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
+  { type: "function", function: { name: "get_criativos_conteudo", description: "CONTEUDO REAL DOS ANUNCIOS ja coletado pelo sync: legenda (texto do anuncio), titulo, CTA, se tem imagem, gasto acumulado, formularios e status. Traz tambem destino_url (link do CTA do criativo) e destino (whatsapp quando wa.me/api.whatsapp, senao site): O NUMERO DE WHATSAPP DE DESTINO de cada peca SAI DAQUI (ex.: wa.me/5571993451315). Isso e CONFIG do criativo coletada do Pipeboard - NAO confunda com a analitica de conversa WABA (pos-clique), que esta congelada; o numero de destino do anuncio E legivel e voce DEVE informa-lo quando perguntado. Use para auditar compliance das pecas EM OPERACAO sem pedir o texto ao usuario (pegue a legenda aqui e passe para check_compliance), e para qualquer pergunta sobre o que os anuncios dizem. DELETED/ARCHIVED NUNCA entram, mesmo com somente_ativas=false — esses objetos sairam da memoria operacional. CAMPAIGN_PAUSED continua (existe, nao entrega). Pode vir truncado: leia os campos exibidos/omitidos/aviso_corte e nunca trate item omitido como inexistente. PARA ACHAR UM ANUNCIO ESPECIFICO use busca_nome em vez de folhear: sao 67 anuncios, a lista completa vem cortada, e o que voce procura pode estar justamente no pedaco omitido - foi assim que anuncio existente passou por inexistente. Com busca_nome o retorno traz total_que_casam_com_a_busca, e SO se ele for zero o anuncio realmente nao existe.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean", description: "true (recomendado) = so criativos em campanha ativa; false = historico operacional (PAUSED/CAMPAIGN_PAUSED), payload maior. DELETED/ARCHIVED continuam de fora. COM busca_nome o default ja e false, porque anuncio procurado pelo nome quase sempre esta pausado - nao passe true junto de busca_nome sem motivo, senao a busca pode devolver zero para peca que existe." }, busca_nome: { type: "string", description: "Parte do nome do anuncio. Insensivel a maiusculas e casa por pedaco: 'reel02' acha 'AD_LPV2_A1_Reel02'. Devolve os itens com legenda inteira, creative_id e external_id - e e o caminho certo para achar o MOLDE antes de propor criar_anuncio_a_partir_de. Sem este campo vem a listagem completa com legendas_unicas (dedupe para auditoria de compliance do acervo)." }, pagina: { type: "integer", description: "So com busca_nome. Comeca em 1, 20 itens por pagina; leia 'restantes' para saber se ha mais." } } } } },
   { type: "function", function: { name: "get_conhecimento", description: "BASE DE CONHECIMENTO TECNICA consultavel: politicas da Meta e compliance financeiro no Brasil, atlas de metricas com linha do tempo historica, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico (Breakdown Effect, fase de aprendizado, fadiga, gates de escala), operacao da Marketing API, unidade economica e analise critica, e biblioteca de criativo (formatos visuais, taticas de hook, mecanicas, padroes de voz). Use SEMPRE que a pergunta for conceitual, de politica, de metodo, de definicao de metrica, ou quando precisar propor/auditar criativo com fundamento. Os temas disponiveis estao listados no seu contexto. Se o tema for extenso, o retorno vem parcial com o indice das secoes: chame de novo com o parametro 'secao' para ler o resto.", parameters: { type: "object", properties: { tema: { type: "string", description: "o tema exato, conforme a lista no seu contexto" }, secao: { type: "string", description: "opcional: titulo (ou parte) de uma secao especifica do tema" } }, required: ["tema"] } } },
-  { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha ACTIVE), estrategia de lance, orcamento, segmentacao, gasto, destination_type (WEBSITE vs WHATSAPP). destination_type NAO e o wa.me: conjunto WEBSITE nao guarda o link; o wa.me fica no criativo (get_aprovacoes.destino_url / get_criativos_conteudo). PEGADA/destino e numeros_whatsapp = DESTINO Click-to-WA do criativo (wa.me) — NAO e inventario WABA. Para numeros operacionais vs inventario CTWA use get_waba_status. Conjunto ACTIVE sob campanha PAUSED = entregando false. PAGINADO 20; se restantes>0, pagine. CONJ.N no NOME basta para criar_anuncio (CONJ.1_LAF_… = CONJ.1). PROIBIDO pedir ao gestor o ID numerico da Meta. CONJ.1 nao e o CONJ.4 mais novo da mesma linha.", parameters: { type: "object", properties: { pagina: { type: "number", description: "Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero." } } } } },
+  { type: "function", function: { name: "get_estrutura_conjuntos", description: "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha ACTIVE), estrategia de lance, orcamento, segmentacao, gasto, destination_type (WEBSITE vs WHATSAPP). destination_type NAO e o wa.me: conjunto WEBSITE nao guarda o link; o wa.me fica no criativo (get_aprovacoes.destino_url / get_criativos_conteudo). PEGADA/destino e numeros_whatsapp = DESTINO Click-to-WA do criativo (wa.me) — NAO e inventario WABA. Para numeros operacionais vs inventario CTWA use get_waba_status. Conjunto ACTIVE sob campanha PAUSED = entregando false. DELETED/ARCHIVED de conjunto e de anuncio ficam de fora (wa.me/CTA so de pecas operacionais). PAGINADO 20; se restantes>0, pagine. CONJ.N no NOME basta para criar_anuncio (CONJ.1_LAF_… = CONJ.1). PROIBIDO pedir ao gestor o ID numerico da Meta. CONJ.1 nao e o CONJ.4 mais novo da mesma linha.", parameters: { type: "object", properties: { pagina: { type: "number", description: "Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero." } } } } },
   { type: "function", function: { name: "get_waba_status", description: "INVENTARIO WHATSAPP da empresa (obrigatorio para 'numero de pe', 'qual WA linkar', WABA, qualidade/tier, Juridico vs La Felicita). Devolve waba_cloud_on_premise (CLOUD_API+ON_PREMISE; de_pe=CONNECTED) e click_to_whatsapp_inventario (wa.me; de_pe so IN_ACTIVE_ADS). NUNCA trate so os CTWA como candidatos se a lista WABA veio no retorno. Filtro meio=juridico|la_felicita|financeiro|outro. NAO decide se um conjunto CTWA pode ser emitido.", parameters: { type: "object", properties: { meio: { type: "string", description: "Opcional: juridico | la_felicita | financeiro | outro" } } } } },
   { type: "function", function: { name: "get_whatsapp_da_pagina", description: "CHECAGEM antes de emitir conjunto CTWA: diz se o numero e ativo WhatsApp da conta (Pagina, WABAs do Business, conjuntos existentes). EMITA criar_conjunto_a_partir_de com destination_type=WHATSAPP (Messenger OFF) e whatsapp_phone_number em DIGITOS nos DOIS casos: e_ativo_whatsapp_da_conta=false e so inventario, porque o create sai pelo driver pipeboard, que cria numero ligado so a Pagina (01/09/2026: graph 1487246, pipeboard criou o 120249829825270182 com o mesmo payload). PROIBIDO pedir vinculo de WABA ou mandar criar no Gerenciador. Distinto de get_waba_status. Escrita = propose_action — Pipeboard create_adset e recusado em ler_pipeboard. COHAPM: nao misture numero Juridico em VISTTA.", parameters: { type: "object", properties: { numero: { type: "string", description: "Telefone do conjunto (com ou sem o 9 extra)." } } } } },
   { type: "function", function: { name: "listar_ferramentas_pipeboard", description: "Catalogo ao vivo das ferramentas de LEITURA do Pipeboard (get_/list_/search_/estimate_/...). Use quando precisar saber QUAL endpoint chama para um dado que as tools de DB nao cobrem (pages, pixels, audiences, activities, breakdowns, Instagram, lead forms, catalogs, etc.). Depois chame ler_pipeboard com o nome exato.", parameters: { type: "object", properties: {} } } },
@@ -5561,6 +5599,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 - LEITURA HIBRIDA PIPEBOARD: preferir tools de DB (get_overview, get_campaign_detail, get_estrutura_conjuntos, get_criativos_conteudo, get_waba_status, funil/ranking) para o que ja esta sincronizado. Se faltar dado (breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca do dia), chame listar_ferramentas_pipeboard e ler_pipeboard — NUNCA diga que "saiu de escopo" ou "nao tenho tool" se o Pipeboard expoe leitura para aquilo. Escrita continua so via propose_action.
 - GEO/BAIRROS NO CRIAR_CONJUNTO: HA campo. Use buscar_geolocalizacao (lotes <=40). No propose: params.bairros ou params.geo_locations. Presets em geo_targeting_presets sao POR empresa+meio; outra empresa/meio NAO herda. NUNCA diga que falta campo de bairros.
 - WHATSAPP / NUMEROS DE PE (21/08/2026): pergunta sobre numero operacional, de pe, qual WA linkar, WABA, qualidade/tier OU isolamento Juridico vs La Felicita OBRIGA get_waba_status (meio=juridico|la_felicita quando o pedido recortar). get_estrutura_conjuntos / get_criativos_conteudo so mostram destino wa.me do anuncio (Click-to-WA) — NAO substituem. Separe sempre: (1) WABA Cloud/ON_PREMISE — de_pe so CONNECTED; (2) CTWA — inventario; de_pe so IN_ACTIVE_ADS. NUNCA peca escolher so entre CTWA como se fossem os unicos. Conjunto ACTIVE sob campanha PAUSED = entregando=false (nao esta no ar). COHAPM: isole JUR vs LF.
+- DELETED/ARCHIVED NAO EXISTEM PARA OPERACAO (02/09/2026 v28.94): anuncio/conjunto/campanha com status DELETED ou ARCHIVED saem da memoria operacional. NAO conte, NAO liste, NAO use de molde, NAO emita card. CAMPAIGN_PAUSED / ADSET_PAUSED / PAUSED continuam no inventario: o objeto EXISTE e so nao entrega. Pergunta "quais anuncios ativos nos conjuntos" com campanha pausada = liste os que AINDA EXISTEM (status CAMPAIGN_PAUSED) e diga que nao entregam porque a campanha-mae esta pausada. PROIBIDO somar DELETED com CAMPAIGN_PAUSED como "N anuncios registrados" — foi o erro de 02/09 na VISTTA (29 exclusos + 11 pausados pela campanha viraram "40"). Conjunto ACTIVE com zero anuncios operacionais = zero pecas, nao "12 registrados exclusos".
 - WHATSAPP NO CONJUNTO (01/09/2026 v28.85): destino MANUAL so WhatsApp — destination_type=WHATSAPP. Messenger OFF. PROIBIDO MESSAGING_MESSENGER_WHATSAPP e destino automatico. whatsapp_phone_number vai em DIGITOS (55+DDD+8); o display "+55 71 9189-4229" e so para o texto do card — no promoted_object ele e invalido. PROIBIDO numero Juridico em VISTTA.
 - CRUZAMENTO DE LINHA COHAPM (31/08/2026) E ERRO GRAVE, NAO AVISO: as linhas compartilham a empresa mas NUNCA a campanha. Tres meios: Juridico (JUR_…, JURIDICO_CONJ, meio=juridico), La Felicità (CONJ.1_LAF_…, COHAPM_LAFELICITA_*, meio=la_felicita/imovel) e Sistema Ocular / VISTTA (pasta COHAPM - VISTTA, AD_*_APENAS_OCULOS_*, meio=sistema_ocular). Peca de um empreendimento so vai para campanha/conjunto do mesmo. Colocar video La Felicità em JURIDICO_CONJ ou peca VISTTA em LAF e falta operacional grave. O sistema RECUSA o card (cruzamento_linha_produto). Se o NOME da peca ja e da linha certa (AD_CONJ.2_APENAS_OCULOS_*) e so a LEGENDA vazou voz de outra (ex. "WhatsApp oficial do Juridico"), o erro e voz_linha_errada: reescreva a copy na voz do destino e reemita na MESMA campanha — NAO mude para JURIDICO.
 - CONJ.N NO NOME BASTA (25/08/2026): params.conjunto_destino = o NOME (CONJ.1_LAF_8CRIATIVOS_JUN/JUL26, CONJ.1, CONJ.01). Barra ou nao (JUN/JUL vs JUNJUL) e CONJ.1 vs CONJ.01 sao o mesmo numero. PROIBIDO pedir ao gestor o ID numerico da Meta / Graph. Resolva com get_estrutura_conjuntos ou o slate. CONJ.1 NUNCA cai no CONJ.4 (mais novo da linha La Felicità). Se o numero do destino ≠ CONJ.N do pedido/slate/peca, o sistema RECUSA (ERRO GRAVE) — nao emita card.
@@ -5581,6 +5620,7 @@ Voce e um SUPER GESTOR: facilita a vida de quem usa o sistema. Monta a solucao c
 == LIMITES DUROS (nao negociaveis, mesmo se pedirem) ==
 - CTWA CRIA PELO PIPEBOARD (01/09/2026 v28.86, medido em comparacao controlada): quem decide o create do conjunto e o DRIVER, nao o numero. Mesmo promoted_object {page_id:105656372312257, whatsapp_phone_number:"557191894229"}, mesmo destination_type=WHATSAPP, mesmo CONVERSATIONS: driver graph deu HTTP 400 / 1487246 as 11:49 UTC (tentou tambem +557191894229 e 5571991894229) e driver pipeboard CRIOU o conjunto 120249829825270182 as 12:46 UTC. Conjunto CTWA da COHAPM sai por driver_por_acao.criar_conjunto_a_partir_de=pipeboard. Entao: get_whatsapp_da_pagina com casou_na_api=true OU false → EMITA. Os numeros VISTTA 7199189-4229, 7199185-8107, 7199264-9576 e 7199188-7731 nao estao em WABA alguma e o Pipeboard cria assim mesmo. PROIBIDO dizer que falta vincular o numero a uma WABA/WhatsApp Manager, que o numero "nao existe", que "nao esta no seletor da Pagina" ou que so o Gerenciador cria — a medicao desmentiu tudo isso. PROIBIDO trocar por numero Juridico/La Felicita.
 - MESSENGER OFF NO CTWA (01/09/2026 v28.84): destination_type=WHATSAPP. PROIBIDO MESSAGING_MESSENGER_WHATSAPP. Criar campanha e conjuntos 100% pelo agente; a peca de teste no Gerenciador nao e molde.
+- DELETED/ARCHIVED FORA DA MEMORIA (02/09/2026 v28.94): objeto com status DELETED ou ARCHIVED nao existe para operacao. Nao cite, nao some, nao use de molde. CAMPAIGN_PAUSED nao e exclusao.
 - NOME LIVRE JA FALADO E CONTRATO (22/08/2026 v28.62): se VOCE listou os nomes nesta conversa (ex. JUR_CONV_CONJ03_AD01_…), esses nomes SAO o contrato; alterar na emissao e perda de memoria. params.nome_novo = o string EXATO. PROIBIDO substituir por [COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26] ou qualquer [MARCA][CANAL][OBJ]…. WEBSITE + LANDING_PAGE_VIEWS / OUTCOME_TRAFFIC NAO recebe canal WA nem objetivo LEADS (wa.me no criativo ≠ familia mensagens).
 - INSTAGRAM VINCULATED (22/08/2026 v28.62): todo card de criativo com Instagram (padrao facebook+instagram) DEVE nascer com a identidade Instagram da config JA vinculada (instagram_user_id / instagram_actor_id). O codigo auto-preenche da meta_execution_config; se a config nao tiver id, a emissao recusa com instagram_nao_vinculado. NUNCA emita peca que o gestor precise vincular Instagram a mao no Gerenciador. Threads continua OFF.
 - INSTAGRAM DOS ANUNCIOS JA NO AR (26/08/2026 v28.75): para ver @coop_cohapm vs @cohapm, chame get_instagram_dos_anuncios(campanha=COHAPM_LAFELICITA_CONV_AGO26). NAO use so get_criativos_conteudo nem o perfil unico da conta. Para ALTERAR, chame vincular_instagram_dos_anuncios na MESMA campanha — emite card; so apos aprovacao a Meta troca o criativo e republica. Conjuntos pausados entram; outras campanhas (Juridico, SALT) ficam de fora. PROIBIDO dizer que falta ferramenta de edicao.
