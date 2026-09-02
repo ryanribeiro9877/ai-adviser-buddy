@@ -6,6 +6,7 @@ import {
   approvalIdsInexistentes,
   approvalIdsInventados,
   avisoDeCardInventado,
+  cortarClaimEmitidoSemCard,
 } from "./aprovacoes.ts";
 
 function ok(cond: boolean, msg: string) {
@@ -115,6 +116,8 @@ const textoDoIncidente = `
 {
   const aviso = avisoDeCardInventado([INVENTADOS[0]], []);
   ok(/Nenhum card foi emitido nesta rodada/.test(aviso), "aviso nao declara rodada vazia");
+  ok(/sistema retoma propose_action/i.test(aviso), "aviso ainda pede ao gestor para repetir");
+  ok(!/peca (a emissao|de novo)|peça de novo/i.test(aviso), "aviso manda o gestor reenviar");
 }
 
 // ===== VEREDITO NO BANCO: o falso positivo que a v28.88 produziu =====
@@ -222,6 +225,43 @@ const FORA_DO_HEXA = [
     recebidos.length === 1 && recebidos[0] === EXISTE_MAS_NAO_VEIO_DE_TOOL,
     "consulta recebeu id que nao e uuid",
   );
+}
+
+// ===== CONJ.4 (02/09/2026): guarda nomeou UUID inventado e deixou slate "✅ Card emitido" =====
+const leftoverConj4 = `
+1) Vídeos selecionados para Conjunto 4
+Foram selecionados 7 vídeos da pasta "Apenas óculos".
+
+2) Legendas aprovadas em compliance — primeiros 2 criativos
+AD_CONJ.4_APENAS_OCULOS_1 (Vídeo 16.mp4)
+Quando foi a última vez que você deu uma pausa para cuidar da sua visão?
+
+3) Cards emitidos — Conjunto 4
+Criativo	Approval ID	Vídeo	Status
+Os dois primeiros cards foram emitidos para CONJ.4_VISTTA_WA_7199188-7731.
+
+Prontos para próxima janela: Os criativos 3 a 7 terão legendas geradas.
+
+[SLATE DA CONVERSA — store durável]
+
+CONJ.4 | 16.mp4 | 1gdhO5sKjnTJUy-s-FvkE7LQE4_0NboNc | AD_CONJ.4_APENAS_OCULOS_1 | ✅ Card emitido
+CONJ.4 | 17.mp4 | 1dxLQtGIqzjFHqAgrhmnOAMr3Me0Ci6t3 | AD_CONJ.4_APENAS_OCULOS_2 | ✅ Card emitido
+CONJ.4 | 18.mp4 | 1n_YImIhFmHod48aKdzxttNGOZ4N7-1JY | AD_CONJ.4_APENAS_OCULOS_3 | ⏳ Legenda em processamento
+
+[LEGENDAS DA CONVERSA — store durável]
+
+[conj4_video_16 | drive=1gdhO5sKjnTJUy-s-FvkE7LQE4_0NboNc | var=1 | selecionada] Quando foi a última vez que você deu uma pausa para cuidar da sua visão?
+`;
+
+{
+  const limpo = cortarClaimEmitidoSemCard(leftoverConj4);
+  ok(!/card emitido/i.test(limpo), `slate de emissao falsa sobreviveu: ${limpo.slice(0, 400)}`);
+  ok(!/cards?\s+foram\s+emitid/i.test(limpo), "frase 'cards foram emitidos' sobreviveu");
+  ok(!/3\)\s*Cards emitidos/i.test(limpo), "secao 3) Cards emitidos sobreviveu");
+  ok(/16\.mp4/.test(limpo) || /AD_CONJ\.4_APENAS_OCULOS_1/.test(limpo), "cortou a selecao/legenda real junto");
+  ok(/última vez que você deu uma pausa/i.test(limpo), "cortou a copy aprovada junto");
+  ok(/18\.mp4/.test(limpo) || /Legenda em processamento/.test(limpo), "apagou o slate dos que ainda geram legenda");
+  ok(limpo.length >= 80, "corte deixou resto curto demais — a sanitizacao UUID jogaria a selecao fora");
 }
 
 console.log("ok: _prova_card_inventado");

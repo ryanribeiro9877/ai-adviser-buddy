@@ -93,9 +93,22 @@ assert(
     chat.includes("ehSentinelaSemMolde") &&
     chat.includes("LINKS DE CONJUNTO DEFINIDOS NESTA CONVERSA") &&
     chat.includes("replyLoteComLegendas") &&
-    chat.includes("LOTE DE 6 CRIATIVOS"),
+    chat.includes("LOTE DE 6 CRIATIVOS") &&
+    chat.includes("LOTE + EMISSAO") &&
+    chat.includes("precisaProposeAto") &&
+    chat.includes("cortarClaimEmitidoSemCard") &&
+    chat.includes("ato_sem_propose_sem_sintese_cega"),
   "traffic-chat deve lembrar conjunto N + link da conversa e auto-continuar lote",
 );
+{
+  const loteEdge = await Deno.readTextFile(
+    new URL("./lote_criativo.ts", import.meta.url),
+  );
+  assert(
+    loteEdge.includes("7 criativ") && loteEdge.includes("conjunto [2-4]"),
+    "lote_criativo deve reconhecer CONJ.4 com 7 criativos (senao o teto cai para 55s)",
+  );
+}
 assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&

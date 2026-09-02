@@ -114,4 +114,19 @@ function ok(cond: boolean, msg: string) {
   );
 }
 
+// 9) CONJ.4 (02/09/2026): lote de 7 + "emita os primeiros cards". Sem isto o turno
+//    encerrava a coleta e a sintese cega inventava UUID.
+{
+  ok(
+    deveForcarEmissao({
+      pedido:
+        "agora faça o mesmo para o conjunto 4, seguindo o mesmo processo de seleção e legendas, mas dessa vez serão 7 criativos, todos diferentes dos criativos que estão nos outros conjuntos. realize esse processo e emita os primeiros cards para aprovação",
+      chamouPropose: false,
+      cardsEmitidos: 0,
+      semTempo: false,
+    }),
+    "CONJ.4 com emita os primeiros cards nao forcou propose_action",
+  );
+}
+
 console.log("ok: _prova_forcar_emissao");

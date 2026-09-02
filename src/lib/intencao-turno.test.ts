@@ -27,6 +27,11 @@ describe("ehPerguntaDeLeitura", () => {
   it("nao classifica pedido de emitir card como pergunta", () => {
     expect(ehPerguntaDeLeitura("emita os 3 cards do conjunto 2")).toBe(false);
     expect(ehPedidoDeAto("emita os 3 cards do conjunto 2")).toBe(true);
+    expect(
+      ehPedidoDeAto(
+        "agora faça o mesmo para o conjunto 4, seguindo o mesmo processo de seleção e legendas, mas dessa vez serão 7 criativos, todos diferentes dos criativos que estão nos outros conjuntos. realize esse processo e emita os primeiros cards para aprovação",
+      ),
+    ).toBe(true);
   });
 
   it("reconhece consulta de status sem verbo de ato", () => {

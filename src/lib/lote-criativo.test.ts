@@ -41,6 +41,22 @@ describe("pedidoLoteCriativo", () => {
       ),
     ).toBe(true);
   });
+
+  it("reconhece conjunto 4 com 7 criativos + legendas + emissao", () => {
+    expect(
+      pedidoLoteCriativo(
+        "agora faça o mesmo para o conjunto 4, serão 7 criativos, mesmo processo de seleção e legendas, emita os primeiros cards",
+      ),
+    ).toBe(true);
+  });
+
+  it("reconhece o pedido literal do CONJ.4 que caiu no teto de 55s", () => {
+    expect(
+      pedidoLoteCriativo(
+        "agora faça o mesmo para o conjunto 4, seguindo o mesmo processo de seleção e legendas, mas dessa vez serão 7 criativos, todos diferentes dos criativos que estão nos outros conjuntos. realize esse processo e emita os primeiros cards para aprovação",
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("replyLoteCriativoIncompleto", () => {

@@ -458,5 +458,28 @@ export function avisoDeCardInventado(inventados: string[], reaisDaRodada: string
     (reaisDaRodada.length
       ? `Cards realmente emitidos nesta rodada: ${reaisDaRodada.join(", ")}. `
       : `Nenhum card foi emitido nesta rodada. `) +
-    `Peca a emissao do que faltou e confira em get_aprovacoes antes de aprovar.`;
+    `O sistema retoma propose_action no proximo bloco — nao peca o gestor para repetir. ` +
+    `Confira em get_aprovacoes antes de aprovar.`;
+}
+
+/**
+ * Quando nenhum card real saiu, a prosa que ainda afirma "cards emitidos" / slate com
+ * check de emissao e o resto da mentira. Medido 02/09/2026 no CONJ.4: o guarda nomeou
+ * dois UUID inventados e deixou a secao "Cards emitidos" + slate "✅ Card emitido".
+ */
+export function cortarClaimEmitidoSemCard(texto: string): string {
+  let t = String(texto ?? "");
+  t = t.replace(/##\s*[^\n]*cards?\s+(re)?emitid[\s\S]*?(?=\n##\s|\n\[SLATE|\n---\s*\n|$)/gi, "");
+  // "3) Cards emitidos — Conjunto 4" (sem ##) ate o proximo bloco numerado, slate ou legendas.
+  t = t.replace(
+    /\n?\d+\)\s*[^\n]*cards?\s+(re)?emitid[^\n]*\n[\s\S]*?(?=\n\d+\)\s|\n\[SLATE|\n\[LEGENDAS|\n##\s|\n---\s*\n|$)/gi,
+    "\n",
+  );
+  t = t.replace(/^.*\bos\s+dois\s+(primeiros\s+)?cards?\s+foram\s+emitid.*$/gim, "");
+  // Toda linha que afirma emissao — inclusive slate "✅ Card emitido" SEM approval_id.
+  // A versao anterior FAZIA O CONTRARIO: mantinha a linha se nao havia UUID, que e o
+  // formato do incidente CONJ.4 (02/09/2026).
+  t = t.replace(/^.*card emitido.*$/gim, "");
+  t = t.replace(/\b(os\s+)?(dois\s+)?(primeiros\s+)?cards?\s+(foram\s+)?(re)?emitid[^\n.]*/gi, "");
+  return t.replace(/\n{3,}/g, "\n\n").trim();
 }

@@ -1,4 +1,12 @@
-// supabase/functions/traffic-chat/index.ts (v28.95)
+// supabase/functions/traffic-chat/index.ts (v28.96)
+// v28.96 (02/09/2026) - EMISSAO DO CONJ.4 VIROU UUID INVENTADO. O gestor pediu o mesmo
+//   processo do CONJ.3 (7 criativos + primeiros cards). O lote so reconhecia 6/8 e
+//   conjunto 2/3, entao o teto de coleta ficou 55s. O loop encerrou as tools e a
+//   sintese cega (chamar sem tools) inventou approval_id; o guarda nomeou os falsos
+//   e MESMO ASSIM deixou a secao "Cards emitidos" + slate. deveForcarEmissao nao
+//   rodou: a janela HARD ainda tinha ~40s, mas deadlineTools (coleta) era tratado
+//   como "sem tempo". Agora: 7 criativos/CONJ.4 e lote; propose_action ainda roda
+//   apos o teto de coleta; sintese sem tools NAO escreve ato; o turno continua sozinho.
 // v28.95 (02/09/2026) - ORIGEM DRIVE DOS ANUNCIOS. Pedido "qual pasta do Drive
 //   dos anuncios do CONJ.1" saiu com 5 de 6 "sem vinculo": (1) o pedido foi
 //   tratado como inventario (get_drive_criativos vazio porque VISTTA tem
@@ -715,6 +723,7 @@ import {
   approvalIdsInexistentes,
   approvalIdsInventados,
   avisoDeCardInventado,
+  cortarClaimEmitidoSemCard,
   situacaoDoCard,
 } from "../_shared/aprovacoes.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
@@ -896,7 +905,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.95";
+const VERSAO = "chat-v28.96";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -6062,6 +6071,14 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
       "3. Sessao enviando: chame upload_midia de novo no MESMO id (a edge retoma; nao recomece do zero).\n" +
       "4. Varios upload_midia nesta janela. Depois o sistema entrega o inventario (ja na Meta vs fora).\n" +
       (faltamUp ? `Ainda fora:\n${faltamUp}\n` : "Se a lista abaixo estiver vazia, chame get_acervo_para_anuncio e suba os na_biblioteca_da_meta=false.\n")
+    : lote && ehPedidoDeAto(cp.objetivo)
+    ? "INSTRUCOES OBRIGATORIAS (LOTE + EMISSAO):\n" +
+      "1. NAO cumprimente. NAO peca o gestor para repetir. NAO invente approval_id.\n" +
+      "2. Se ja ha peca+legenda e NENHUM card neste pedido, chame propose_action AGORA " +
+      "(criar_anuncio_a_partir_de, ate 2 por bloco) com drive_file_id e legenda REAIS desta conversa.\n" +
+      "3. So depois gere legendas que ainda faltam (gerar_legendas, no maximo 3). " +
+      "PROIBIDO escrever 'card emitido' sem o UUID devolvido pela tool.\n" +
+      "4. Use ferramentas so do que falta; nao releia acervo inteiro se ja consta acima."
     : lote
     ? "INSTRUCOES OBRIGATORIAS:\n" +
       "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir.\n" +
@@ -6175,11 +6192,17 @@ async function sanitizarClaimEmitSemCard(
     );
     // Tira as LINHAS que carregam o id inventado (linha de tabela, item de lista) em vez de
     // apagar a resposta: o que veio de ferramenta na mesma resposta continua valendo.
-    const semInventado = raw
+    let semInventado = raw
       .split("\n")
       .filter((l) => !inventados.some((u) => l.toLowerCase().includes(u)))
       .join("\n")
       .trim();
+    if (!cards.length) {
+      semInventado = cortarClaimEmitidoSemCard(semInventado);
+      // Nao apaga o resto so porque ainda casa RE_CLAIM: a selecao/legendas do CONJ.4
+      // precisam ficar. So descarta sobra curta (titulo oco depois do corte).
+      if (semInventado.length < 80) semInventado = "";
+    }
     return { reply: semInventado ? `${aviso}\n\n${semInventado}` : aviso, reescreveu: true };
   }
 
@@ -6212,11 +6235,10 @@ async function sanitizarClaimEmitSemCard(
   const aviso =
     `**Nenhum pedido de aprovação foi emitido nesta rodada.** ${motivo}. ` +
     `Afirmar "card emitido" sem o identificador devolvido pela ferramenta é fabricar um ato — ` +
-    `não há card na fila. Peça de novo a emissão (ou aguarde a continuação automática) e eu ` +
-    `volto a chamar propose_action até obter o approval_id real.`;
+    `não há card na fila. O sistema retoma propose_action no próximo bloco — não peça de novo.`;
 
   // Remove a secao "## Card emitido…" (ate o proximo ## ou fim) e o claim solto.
-  let limpo = raw
+  let limpo = cortarClaimEmitidoSemCard(raw)
     .replace(/##\s*card\s+emitido[^\n]*\n[\s\S]*?(?=\n##\s|\n---\s*\n|$)/gi, "")
     .replace(/\bcard\s+emitido[^\n.]*/gi, "")
     .replace(/\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)[^\n.]*/gi, "")
@@ -6703,6 +6725,14 @@ Deno.serve(async (req) => {
     const est = Math.floor((restanteMs / 1000) * TOKENS_POR_SEGUNDO);
     return Math.max(600, Math.min(MAX_TOKENS, est));
   }
+  /** Coleta acabou; ainda cabe 1-2 propose_action nesta janela HTTP. */
+  function aindaCabePropose(): boolean {
+    return HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS > 18_000;
+  }
+  function precisaProposeAto(): boolean {
+    return ehPedidoDeAto(objetivoOriginal) && !pedidoUploadTurno && actionCards.length === 0 &&
+      !toolsIncluemPropose(toolsUsed);
+  }
 
   // v20: fallback de cache. Nao esta confirmado que o OpenRouter aceita cache_control para
   // o claude-sonnet-5. Se ele IGNORAR o campo, tudo funciona sem cache (inofensivo). Se
@@ -6880,7 +6910,7 @@ Deno.serve(async (req) => {
     // tools): sem isso o loop consumia os 150s coletando e o gateway devolvia 504.
     if (decorrido() > toolsDeadlineMs && (iter > 0 || toolsUsed.length > 0)) {
       deadlineTools = true;
-      break;
+      if (!(precisaProposeAto() && aindaCabePropose())) break;
     }
     if (decorrido() > HARD_LIMIT_MS - RESERVA_GRAVACAO_MS - 12_000) {
       deadlineTools = true;
@@ -6939,17 +6969,21 @@ Deno.serve(async (req) => {
           decorrido() > toolsDeadlineMs || restanteAgora < 25_000
         ) && toolsUsed.some((t) => t.tool === "upload_midia" || t.tool === "get_acervo_para_anuncio");
         if (decorrido() > toolsDeadlineMs || flushUpload) {
-          deadlineTools = true;
           const nomeSkip = String(tc.function?.name ?? "");
-          let argsSkip: any = {}; try { argsSkip = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
-          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
-            erro: "consulta_nao_realizada_nesta_rodada",
-            aviso: flushUpload
-              ? "Bloco encerrado para entregar o progresso ao gestor. O sistema continua no proximo bloco os ids que faltam. NAO peca para repetir."
-              : "O orcamento de tempo de coleta acabou antes desta consulta. O dado NAO foi lido — nao o trate como zero nem como inexistente. O sistema continua no proximo bloco. NAO peca ao gestor para repetir a pergunta. NAO escreva que o item ficou para a proxima." }) });
-          toolResults.push({ tool: nomeSkip, args: argsSkip, chars: 0, cortado: false, retorno: null,
-            erro: flushUpload ? "flush_upload_bloco" : "deadline de coleta — o dado NAO foi lido" });
-          continue;
+          const executarProposeAposColeta =
+            nomeSkip === "propose_action" && precisaProposeAto() && aindaCabePropose() && !flushUpload;
+          if (!executarProposeAposColeta) {
+            deadlineTools = true;
+            let argsSkip: any = {}; try { argsSkip = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
+            messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
+              erro: "consulta_nao_realizada_nesta_rodada",
+              aviso: flushUpload
+                ? "Bloco encerrado para entregar o progresso ao gestor. O sistema continua no proximo bloco os ids que faltam. NAO peca para repetir."
+                : "O orcamento de tempo de coleta acabou antes desta consulta. O dado NAO foi lido — nao o trate como zero nem como inexistente. O sistema continua no proximo bloco. NAO peca ao gestor para repetir a pergunta. NAO escreva que o item ficou para a proxima." }) });
+            toolResults.push({ tool: nomeSkip, args: argsSkip, chars: 0, cortado: false, retorno: null,
+              erro: flushUpload ? "flush_upload_bloco" : "deadline de coleta — o dado NAO foi lido" });
+            continue;
+          }
         }
         // v20: teto de ferramentas. A API exige resposta para CADA tool_call_id, entao nao
         // e possivel simplesmente pular - devolvemos um resultado que DECLARA o teto, para
@@ -7131,7 +7165,7 @@ Deno.serve(async (req) => {
         pedido: objetivoOriginal,
         chamouPropose: toolsIncluemPropose(toolsUsed),
         cardsEmitidos: actionCards.length,
-        semTempo: deadlineTools,
+        semTempo: !aindaCabePropose(),
         jaInsistiu: nudgesEmitir > 0,
       })
     ) {
@@ -7145,21 +7179,27 @@ Deno.serve(async (req) => {
   }
 
   if (!reply && !atalhoMetaDicas && !/openrouter/.test(String(finishReason))) {
-    messages.push({ role: "user", content: deadlineTools
-      ? "PARE de usar ferramentas: o tempo de coleta desta janela acabou. Com os dados JA coletados, escreva o que couber. O sistema continua sozinho no proximo bloco o que faltou. NAO peca ao gestor para reenviar a pergunta. NAO escreva que o item ficou para a proxima."
-      : "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes. O sistema continua o que faltar. Nao responda que nao conseguiu." });
-    const rf = await chamar(false, tokensDisponiveis(), true);
-    if (!rf.erro) {
-      const p = rf.parsed;
-      tokensIn += Number(p?.usage?.prompt_tokens ?? 0);
-      tokensOut += Number(p?.usage?.completion_tokens ?? 0);
-      somarCache(p?.usage); somarReasoning(p?.usage);
-      modeloRoteado = modeloEfetivoDaResposta(p, modeloRoteado);
-      finishReason = String(p?.choices?.[0]?.finish_reason ?? finishReason) + "+sintese_final";
-      reply = p?.choices?.[0]?.message?.content ?? "";
-    } else if (rf.erro === "openrouter_timeout" || rf.erro === "orcamento_tempo_esgotado") {
-      finishReason = String(finishReason || rf.erro) + "+sintese_abortada";
-      deadlineTools = true;
+    // v28.96: sintese CEGA (sem tools) no pedido de emitir inventa approval_id — CONJ.4 02/09.
+    // Nao peca prosa de ato sem propose_action; o turno continua com tools no proximo bloco.
+    if (precisaProposeAto()) {
+      finishReason = String(finishReason || "stop") + "+ato_sem_propose_sem_sintese_cega";
+    } else {
+      messages.push({ role: "user", content: deadlineTools
+        ? "PARE de usar ferramentas: o tempo de coleta desta janela acabou. Com os dados JA coletados, escreva o que couber. O sistema continua sozinho no proximo bloco o que faltou. NAO peca ao gestor para reenviar a pergunta. NAO escreva que o item ficou para a proxima."
+        : "PARE de usar ferramentas. Com os dados JA coletados, responda AGORA por blocos, com numeros reais e suas fontes. O sistema continua o que faltar. Nao responda que nao conseguiu." });
+      const rf = await chamar(false, tokensDisponiveis(), true);
+      if (!rf.erro) {
+        const p = rf.parsed;
+        tokensIn += Number(p?.usage?.prompt_tokens ?? 0);
+        tokensOut += Number(p?.usage?.completion_tokens ?? 0);
+        somarCache(p?.usage); somarReasoning(p?.usage);
+        modeloRoteado = modeloEfetivoDaResposta(p, modeloRoteado);
+        finishReason = String(p?.choices?.[0]?.finish_reason ?? finishReason) + "+sintese_final";
+        reply = p?.choices?.[0]?.message?.content ?? "";
+      } else if (rf.erro === "openrouter_timeout" || rf.erro === "orcamento_tempo_esgotado") {
+        finishReason = String(finishReason || rf.erro) + "+sintese_abortada";
+        deadlineTools = true;
+      }
     }
   }
   // v18/v28.35: emenda preambulos substantivos; DESCARTA narracao de intencao.
@@ -7238,7 +7278,9 @@ Deno.serve(async (req) => {
     pedidoAtoCards &&
     cardsJaNoPedido === 0 &&
     !turnoJaFechado &&
-    (tentouEmitir || (toolsNesteSegmento > 0 && midLoopFraco));
+    (tentouEmitir || toolsNesteSegmento > 0);
+  const atoSemPropose =
+    pedidoAtoCards && cardsJaNoPedido === 0 && !tentouEmitir;
 
   // v28.45: propose_action ja rodou e FALHOU com erro duro (destino/compliance/contrato) —
   // NAO auto-continuar so para re-narrar "nenhum card". Continua so se foi deadline/timeout
@@ -7294,11 +7336,12 @@ Deno.serve(async (req) => {
     (toolsPuladas && (pedidoDetalhe || pedidoOrigem || leituraIncompleta)) ||
     detalheSemTool ||
     origemSemTool ||
-    leituraComTeto
+    leituraComTeto ||
+    atoSemPropose
   );
   const maxSeg = pedidoUploadTurno
     ? (uploadCurto ? 3 : MAX_TURN_SEGMENTS_UPLOAD)
-    : (pedidoDetalhe || pedidoOrigem || leituraIncompleta || leituraComTeto ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS);
+    : (pedidoDetalhe || pedidoOrigem || leituraIncompleta || leituraComTeto || atoSemPropose ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS);
   const podeContinuarSegmento = segmentoAtual < maxSeg;
   let continuarTurno = false;
   let usouFallback = false;
