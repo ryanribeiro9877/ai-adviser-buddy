@@ -1736,7 +1736,11 @@ function ehRateLimitErro(s: string): boolean {
  * jogaria fora uma coleta inteira por causa de um relogio.
  */
 function ehErroDeCredencial(s: string): boolean {
-  return /openrouter_http_40[13]\b|invalid.?api|billing|forbidden|unauthorized/i.test(s);
+  // 402 entrou em 03/09, quando a conta da OpenRouter zerou o credito no meio de um job deep
+  // (`erro_llm:openrouter_http_402`). Ele nao casava com nenhum padrao de resgate, entao o job
+  // ja se comportava certo — por acidente. Declarar 402 aqui torna a intencao explicita: sem
+  // credito, a segunda tentativa recebe a mesma recusa e so queima um segmento.
+  return /openrouter_http_40[123]\b|invalid.?api|billing|payment|insufficient|credit|forbidden|unauthorized/i.test(s);
 }
 
 /**
