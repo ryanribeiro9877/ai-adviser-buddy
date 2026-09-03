@@ -39,6 +39,17 @@ export type FerramentaRegistro = {
   superficies: string[];
   /** Propriedades que o handler daquela superficie nao implementa. Ver ferramentas_base.ts. */
   parametros_omitidos: Record<string, string[]>;
+  /**
+   * 'escrita' = produz estado duravel fora da resposta do turno. Falha aberta: ausente ou
+   * 'leitura' => nao verifica. Ver ferramentas_base.ts para o porque da assimetria.
+   *
+   * NAO vai ao modelo. definicaoDaFerramenta() nao carrega efeito nem setor de proposito:
+   * eles servem a guarda que le o turno DEPOIS, e cada caractere que entra na definicao e
+   * pago em todo turno em que a ferramenta esta na mesa.
+   */
+  efeito: "leitura" | "escrita";
+  /** Setor dono, no vocabulario de public.agents.setor. */
+  setor: string | null;
 };
 
 export type CatalogoFerramentas = {
@@ -68,6 +79,8 @@ export function catalogoFerramentasFallback(): CatalogoFerramentas {
       doutrina: null,
       superficies: base.superficies,
       parametros_omitidos: base.omitidos ?? {},
+      efeito: base.efeito,
+      setor: base.setor,
     });
   }
   return { porChave, degradado: true };
@@ -79,7 +92,7 @@ export async function carregarFerramentas(
 ): Promise<CatalogoFerramentas> {
   try {
     const { data } = await supa.from("agent_ferramentas")
-      .select("chave,descricao,parametros,doutrina,superficies,parametros_omitidos")
+      .select("chave,descricao,parametros,doutrina,superficies,parametros_omitidos,efeito,setor")
       .eq("vigente", true);
     const linhas = (data ?? []) as FerramentaRegistro[];
     if (!linhas.length) return catalogoFerramentasFallback();
@@ -93,6 +106,10 @@ export async function carregarFerramentas(
         doutrina: l.doutrina ?? null,
         superficies: Array.isArray(l.superficies) ? l.superficies : ["chat"],
         parametros_omitidos: (l.parametros_omitidos ?? {}) as Record<string, string[]>,
+        // Coluna nula ou valor estranho cai em 'leitura' — a resolucao de duvida do campo e
+        // "nao verifica", e uma linha de banco incompleta e uma duvida.
+        efeito: l.efeito === "escrita" ? "escrita" : "leitura",
+        setor: l.setor ?? FERRAMENTAS_BASE[l.chave]?.setor ?? null,
       });
     }
     // Registro parcial e pior que registro nenhum: o turno perderia ferramentas sem avisar.
