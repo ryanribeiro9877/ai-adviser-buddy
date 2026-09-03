@@ -283,18 +283,22 @@ import {
 import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
 import {
   tDetalheAnuncios,
-  DEF_GET_DETALHE_ANUNCIOS,
   casarCampanhas,
   escolherCampanhaUnica,
   janelaDetalhe,
   parseJanelaDatasPedido,
 } from "../_shared/leitura_desempenho.ts";
 import {
-  DEF_ORIGEM_DRIVE_DOS_ANUNCIOS,
   FOCO_ORIGEM_DRIVE,
   tOrigemDriveDosAnuncios,
   tCasarCriativoPerformance,
 } from "../_shared/origem_drive_anuncios.ts";
+import {
+  carregarFerramentas,
+  type CatalogoFerramentas,
+  montarFerramentas,
+  retornoComDoutrina,
+} from "../_shared/ferramentas.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -1449,51 +1453,10 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
   } catch (e) { return { erro: String((e as any)?.message ?? e) }; }
 }
 
-// Schemas (subset do v27.1)
-const DEF: Record<string, any> = {
-  get_analise_visual_drive: { type: "function", function: { name: "get_analise_visual_drive", description: "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Leitura instantanea - nao repete a visao. Se total_analisados < inventario, pecas novas ainda nao passaram pela visao: declare, nao invente.", parameters: { type: "object", properties: {} } } },
-  get_drive_criativos: { type: "function", function: { name: "get_drive_criativos", description: "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo, tamanho, data de cada arquivo, com resumo por formato e por eixo. SEM thumbnail (estoura o teto). Pode vir recortado por meio=la_felicita|juridico e formatos Reels/Videos. Pode vir truncado: leia aviso_corte e nunca trate item omitido como inexistente. LIMITE: video e analisado por nome+caminho, nao pelo conteudo interno.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"], description: "Recorte de marca/pasta monitorada." }, formatos: { type: "array", items: { type: "string" }, description: "Ex.: Reels, Videos. Ignora Adesivo/Brutos/Cards." } } } } },
-  get_acervo_para_anuncio: { type: "function", function: { name: "get_acervo_para_anuncio", description: "LEITURA do acervo Drive. Devolve inventario_global do RECORTE quando meio/formatos (ou o pedido) restringem. inventario_global_empresa e o total da empresa - NAO cite como videos La Felicita. Em lote/mix chame SEM produto primeiro. apta=true so = pronta pra publicar agora; NAO use para afirmar escassez. NAO use get_criativos_conteudo.", parameters: { type: "object", properties: { produto: { type: "string", description: "Opcional; em lote deixe vazio na 1a chamada." }, incluir_inaptas: { type: "boolean", description: "Padrao true (leitura total)." }, meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"] }, formatos: { type: "array", items: { type: "string" } } } } } },
-  upload_midia: { type: "function", function: { name: "upload_midia", description: "Sobe UMA peca do Drive para a biblioteca Meta (adimages/advideos) e grava meta_image_hash ou meta_video_id. USE quando na_biblioteca_da_meta=false. NAO cria anuncio. LOTE: suba TODAS as pecas fora da biblioteca; NAO invente teto de 5/hora. Idempotente. TETO = Meta: video <= 4 GB, imagem <= 8 MB. Envio em partes; se em_andamento, chame de novo o mesmo drive_file_id. Video: so considere pronta se pronto=true.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, account_id: { type: "string" } }, required: ["drive_file_id"] } } },
-  get_overview: { type: "function", function: { name: "get_overview", description: "Visao geral de MIDIA: campanhas ativas (status real), gasto/resultados 7d, dias_com_dado.", parameters: { type: "object", properties: {} } } },
-  get_alerts: { type: "function", function: { name: "get_alerts", description: "Alertas ativos do sistema.", parameters: { type: "object", properties: {} } } },
-  get_recommendations: { type: "function", function: { name: "get_recommendations", description: "FILA INTERNA de custo de midia (nao e badge Ads Manager).", parameters: { type: "object", properties: {} } } },
-  get_meta_dicas: { type: "function", function: { name: "get_meta_dicas", description: "Dicas da Meta (Opportunity Score + campo classico) com veredito interno. Cite sempre o veredito.", parameters: { type: "object", properties: { dias: { type: "integer" }, veredito: { type: "string" } } } } },
-  teto_vigente: { type: "function", function: { name: "teto_vigente", description: "FONTE PRIORITARIA para teto vigente. Exige company_id do job e metrica; declara regua governante, denominador, autor/data/citacao, historico, aspiracao e divergencias. Targets isolado NAO e veredito de negocio.", parameters: { type: "object", properties: { metric: { type: "string" } }, required: ["metric"] } } },
-  checar_par_texto_e_peca: { type: "function", function: { name: "checar_par_texto_e_peca", description: "Avalia legenda + peca juntas no company_id do job. Devolve PAR, leituras separadas, cobertura e lacunas. E deteccao por texto, NAO aprovacao; audio sem transcricao fica declarado como nao lido. COHAPM: cruzamento Juridico × La Felicità REPROVA (ERRO GRAVE).", parameters: { type: "object", properties: { legenda: { type: "string" }, drive_file_id: { type: "string" }, campanha: { type: "string" }, conjunto: { type: "string" }, nome_criativo: { type: "string" } }, required: ["legenda", "drive_file_id"] } } },
-  saude_das_integracoes: { type: "function", function: { name: "saude_das_integracoes", description: "Mede integracoes Meta do company_id por ads, snapshots, breakdown e relogios; declara divergencias com status sem altera-lo. Nao cobre alem do retorno.", parameters: { type: "object", properties: { dias_tolerancia: { type: "integer" } } } } },
-  custo_llm_periodo: { type: "function", function: { name: "custo_llm_periodo", description: "Custo derivado em USD dos tokens gravados de chat/jobs do company_id no periodo. Nao e fatura; declara modelos presumidos, cache-teto, tokens ausentes e visao/compliance invisiveis.", parameters: { type: "object", properties: { de: { type: "string" }, ate: { type: "string" } }, required: ["de", "ate"] } } },
-  panorama_utm_anuncios: { type: "function", function: { name: "panorama_utm_anuncios", description: "Panorama do company_id para url_tags e destino: nunca lido, sem/com rotulo, rotulos e ambiguidades. Nao mede leads por UTM; token cobre so parte das contas.", parameters: { type: "object", properties: {} } } },
-  nota_visual_da_peca: { type: "function", function: { name: "nota_visual_da_peca", description: "Nota textual de uma peca no company_id: revisao, base, produto, aproveitabilidade, risco, motivo e divergencia. Informa, nao aprova; ausencia de leitura nao e ausencia de risco.", parameters: { type: "object", properties: { drive_file_id: { type: "string" } }, required: ["drive_file_id"] } } },
-  diagnosticar_custo: { type: "function", function: { name: "diagnosticar_custo", description: "Diagnostica por que o custo por formulario de um anuncio subiu, comparando o ultimo dia com entrega aos 3 anteriores. Exige company_id do job e ad_external_id. Devolve sinal, causa, acao, confirmacao, medidas e guarda de maturacao; sem base nao conclui, e pos-clique fica fora do escopo.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
-  avaliar_fadiga: { type: "function", function: { name: "avaliar_fadiga", description: "Avalia se a peca cansou, teve queda sem saturacao, frequencia alta antes da queda ou nenhum sinal. Exige company_id do job e ad_external_id. Sem entrega/base nao conclui; usa frequencia DIARIA e nao deriva a frequencia deduplicada de 30 dias.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
-  casar_criativo_performance: { type: "function", function: { name: "casar_criativo_performance", description: "ESP-33: casa peca Drive com anuncios criados pelo sistema. Se drive_file_id+ad_external_id zerarem, reconsulta so pelo anuncio. Para pasta do conjunto use origem_drive_dos_anuncios.", parameters: { type: "object", properties: { drive_file_id: { type: "string" }, ad_external_id: { type: "string" }, dias: { type: "integer" } } } } },
-  origem_drive_dos_anuncios: DEF_ORIGEM_DRIVE_DOS_ANUNCIOS,
-  ler_brand_identity: { type: "function", function: { name: "ler_brand_identity", description: "ESP-36: identidade de marca vigente. COHAPM: passe meio=la_felicita ou juridico. Sem meio a RPC prefere juridico. La Felicita NAO herda voz Juridico.", parameters: { type: "object", properties: { meio: { type: "string", enum: ["la_felicita", "juridico", "sistema_ocular"] } } } } },
-  computar_perfil_vencedor: { type: "function", function: { name: "computar_perfil_vencedor", description: "ESP-34: computa e VERSIONA o perfil do vencedor do company_id do job (regua evaluate_winners/ESP-01: >=30 resultados e >=30 gasto, custo <= teto_vigente*0,80; procedencia da peca ESP-33). Grava nova versao (dedup no mesmo dia salvo forcar). Nao substitui get_recommendations nem aprovacao humana; vencedor mora em ESCALA (ESP-39).", parameters: { type: "object", properties: { dias: { type: "integer" }, forcar: { type: "boolean" } } } } },
-  ler_perfil_vencedor: { type: "function", function: { name: "ler_perfil_vencedor", description: "ESP-34: le a ultima versao (ou versao especifica) do perfil do vencedor ja computado para o company_id do job: vencedores, padroes, criterio, procedencia e lacunas. Leitura pura; se nunca computado, orienta chamar computar_perfil_vencedor.", parameters: { type: "object", properties: { versao: { type: "integer" } } } } },
-  score_de_prontidao: { type: "function", function: { name: "score_de_prontidao", description: "ESP-38: score read-only 0-100 de prontidao do company_id do job para propor/executar anuncios: config (25), integracao viva (25), postura (20), brand (15), destino (10), driver (5). Devolve nivel (bloqueado|parcial|operacional|pronto), checks com evidencia/lacuna, bloqueios e recomendacoes. Nao altera nada nem substitui gates por pedido.", parameters: { type: "object", properties: {} } } },
-  saude_dos_tokens: { type: "function", function: { name: "saude_dos_tokens", description: "ESP-30: saude dos tokens Meta (ads/waba) do company_id do job por metadado gravado (meta_tokens): dias para expirar, dias para data_access, escopos faltando vs esperado por papel e veredito. Leitura pura do ultimo estado do meta-token-monitor; nao chama a Graph e nunca expoe o valor do token.", parameters: { type: "object", properties: {} } } },
-  ler_entregas_digest: { type: "function", function: { name: "ler_entregas_digest", description: "ESP-41: config de digest (cadencia/slots, e-mails, alerta critico) + entregas recentes (digest e alerta critico) do company_id do job, com status por entrega. Leitura pura; status sem_provedor/sem_destinatario indicam que o digest seguiu so no chat.", parameters: { type: "object", properties: { dias: { type: "integer" } } } } },
-  pode_pausar_por_custo: { type: "function", function: { name: "pode_pausar_por_custo", description: "Libera avaliacao de pausa por custo quando o anuncio esta maduro ou atende a excecao dura de zero resultado, CTR baixo e piso de gasto. Exige company_id do job e ad_external_id. Nao verifica a guarda do unico conjunto/alternativa ativa; permitido nao significa seguro pausar.", parameters: { type: "object", properties: { ad_external_id: { type: "string" } }, required: ["ad_external_id"] } } },
-  decidir_sobre_conjunto: { type: "function", function: { name: "decidir_sobre_conjunto", description: "Decide manter, maturar, trocar criativo ou preparar reversao usando custo, volume e tendencia. Exige company_id do job e adset_external_id. A guarda do unico conjunto entregando sobrescreve pausa; sem regua de IDEAL separada do teto, nao prescreve escala.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
-  avaliar_escala: { type: "function", function: { name: "avaliar_escala", description: "Avalia escala por duplicacao com no maximo +20%, usando arvore, custo ate 80% do teto, volume e espera. Exige company_id do job e adset_external_id. Nao cobre CBO sem orcamento proprio; a espera ve apenas escalas registradas pelo sistema.", parameters: { type: "object", properties: { adset_external_id: { type: "string" } }, required: ["adset_external_id"] } } },
-  avaliar_pacing: { type: "function", function: { name: "avaliar_pacing", description: "Calcula capacidade diaria e, com meta_leads_dia opcional, o PISO de verba ao custo atual. Exige company_id do job. Nao ha meta registrada e a projecao nao e estimativa: escalar tende a elevar o custo, entao a verba real pode ser maior.", parameters: { type: "object", properties: { meta_leads_dia: { type: "number" } } } } },
-  validar_pedido_contra_contrato: { type: "function", function: { name: "validar_pedido_contra_contrato", description: "Valida pedido jsonb contra contrato_de_execucao. Assinatura: (acao, pedido). contrato_desconhecido se acao sem linhas; recusa obrigatorios faltantes; extras nao invalidam. Lacunas: contrato de anuncio veio do codigo montarCriacao; url_tags opcional no adcreative; NAO substitui pedido_de_anuncio_completo.", parameters: { type: "object", properties: { acao: { type: "string" }, pedido: { type: "object" } }, required: ["acao", "pedido"] } } },
-  get_funnel: { type: "function", function: { name: "get_funnel", description: "Funil de MIDIA num periodo, com cobertura_real.", parameters: { type: "object", properties: { date_from: { type: "string" }, date_to: { type: "string" } } } } },
-  get_ads_ranking: { type: "function", function: { name: "get_ads_ranking", description: "Ranking de criativos por gasto, alcance_soma_diaria, conversas, impressoes ou custo. Use ordenar_por=alcance quando o gestor perguntar quem trouxe mais alcance. Recorte com name_like ou campaign_id (ID Meta). Passe date_from/date_to da janela.", parameters: { type: "object", properties: { days: { type: "number" }, ordenar_por: { type: "string", description: "gasto|alcance|conversas|impressoes|custo" }, somente_ativas: { type: "boolean" }, date_from: { type: "string" }, date_to: { type: "string" }, name_like: { type: "string" }, campaign_id: { type: "string" } } } } },
-  get_campaign_detail: { type: "function", function: { name: "get_campaign_detail", description: "Detalhe e serie diaria de UMA campanha (nome OU campaign_id Meta). Passe date_from/date_to da janela do pedido. Totais e cada dia: gasto, impressoes, alcance, frequencia, cliques_todos, cliques_no_link, visualizacoes_lp, formularios, conversas, CTR/CPC/CPM. NAO substitui get_detalhe_anuncios.", parameters: { type: "object", properties: { name_like: { type: "string" }, campaign_id: { type: "string" }, date_from: { type: "string" }, date_to: { type: "string" } } } } },
-  get_detalhe_anuncios: DEF_GET_DETALHE_ANUNCIOS,
-  get_criativos_conteudo: { type: "function", function: { name: "get_criativos_conteudo", description: "Legendas/titulo/CTA reais dos anuncios; traz tambem destino_url e destino (whatsapp quando wa.me, senao site) - o numero de WhatsApp de destino da peca sai daqui (CONFIG do criativo, nao a analitica WABA congelada). Sem busca_nome: PAGINADO por gasto (20). Com busca_nome: sobrecarga (somente_ativas, company, offset, limit, busca_nome) para achar molde sem folhear; default somente_ativas=false quando busca. Nunca trate item de outra pagina como inexistente.", parameters: { type: "object", properties: { somente_ativas: { type: "boolean" }, busca_nome: { type: "string", description: "Parte do nome do anuncio (ex.: LPV2_A2_Reel02 ou TESTE-GT02 no molde)." }, pagina: { type: "integer", description: "Pagina de 20, comecando em 1." } } } } },
-  get_estrutura_conjuntos: { type: "function", function: { name: "get_estrutura_conjuntos", description: "CBO vs ABO, orcamento, lance, targeting por conjunto. Inclui entregando (adset+campanha ACTIVE), pegada e numeros_whatsapp (=destino CTWA wa.me, NAO inventario WABA). Para de pe / Cloud / ON_PREMISE use get_waba_status.", parameters: { type: "object", properties: {} } } },
-  listar_ferramentas_pipeboard: { type: "function", function: { name: "listar_ferramentas_pipeboard", description: "Catalogo ao vivo das ferramentas de LEITURA do Pipeboard. Use antes de ler_pipeboard quando nao souber o nome do endpoint.", parameters: { type: "object", properties: {} } } },
-  ler_pipeboard: { type: "function", function: { name: "ler_pipeboard", description: "Leitura AO VIVO do Pipeboard (so get_/list_/search_/...). Preferir DB quando bastar; use ao vivo para breakdown, activities, pages, pixels, audiences, insights pontuais, config fresca. Escopo: contas da empresa do job.", parameters: { type: "object", properties: { ferramenta: { type: "string" }, argumentos: { type: "object" } }, required: ["ferramenta"] } } },
-  check_compliance: { type: "function", function: { name: "check_compliance", description: "Valida UMA legenda contra a base de regras versionada (FIN/CRI/LGL). COHAPM: cruzamento Juridico × La Felicità REPROVA (ERRO GRAVE).", parameters: { type: "object", properties: { legenda: { type: "string" }, campanha: { type: "string" }, conjunto: { type: "string" }, nome_criativo: { type: "string" }, drive_file_id: { type: "string" } }, required: ["legenda"] } } },
-  get_conhecimento: { type: "function", function: { name: "get_conhecimento", description: "Base tecnica: politicas Meta, metricas, otimizacao, criativo. Use 'secao' p/ temas extensos.", parameters: { type: "object", properties: { tema: { type: "string" }, secao: { type: "string" } }, required: ["tema"] } } },
-  get_waba_status: { type: "function", function: { name: "get_waba_status", description: "INVENTARIO WHATSAPP da empresa (RPC get_waba_phones). SEMPRE use quando perguntarem numero de pe, qual WA linkar, WABA, Cloud, qualidade/tier, Juridico vs La Felicita. Devolve DUAS listas: waba_cloud_on_premise (CLOUD_API+ON_PREMISE+null; de_pe=CONNECTED; qualidade/tier) e click_to_whatsapp_inventario (destino wa.me; de_pe so IN_ACTIVE_ADS). NUNCA trate CTWA IN_ADS como de pe nem como unico candidato. Filtro meio=juridico|la_felicita|financeiro|outro. NAO decide emissao de conjunto CTWA.", parameters: { type: "object", properties: { meio: { type: "string", description: "Opcional: juridico | la_felicita | financeiro | outro" } } } } },
-  get_whatsapp_da_pagina: { type: "function", function: { name: "get_whatsapp_da_pagina", description: "LEITURA Graph/WABA/conjuntos: diz se o numero e ativo WhatsApp da conta. casou_na_api=false = numero fora das WABAs, e isso NAO impede o conjunto: o create sai pelo driver pipeboard, que cria numero ligado so a Pagina (01/09/2026 — graph 1487246, pipeboard criou o 120249829825270182 com o mesmo payload). Distinto de get_waba_status. Escrita no conjunto e no chat sincrono (criar_conjunto), nao neste job.", parameters: { type: "object", properties: { numero: { type: "string" } } } } },
-  get_waba_template_insights: { type: "function", function: { name: "get_waba_template_insights", description: "Insights por TEMPLATE WhatsApp numa janela: envios, entregues, leituras, cliques e taxa de clique. Detalhe por numero ainda nao e coletado (declarado no retorno).", parameters: { type: "object", properties: { days: { type: "number", description: "janela em dias (default 30)" } } } } },
-};
+// As definicoes de ferramenta deste job saiam de um literal `const DEF` daqui. Passaram para
+// public.agent_ferramentas (fallback local em _shared/ferramentas_base.ts). Motivo: as mesmas
+// 42 ferramentas tinham AQUI uma descricao e no traffic-chat OUTRA, e nenhuma das duas era a
+// que public.agent_unidades ja usava para dizer de qual agente a ferramenta e. Uma verdade so.
 
 // Whitelist de subagentes: UM POR CAPACIDADE IMPLEMENTADA, escopo estrito (decisao do Ryan
 // 28/07: tarefa de criativo vai pro de criativo, tarefa de insight vai pro de desempenho -
@@ -1502,46 +1465,46 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   desempenho_campanhas: {
     tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "origem_drive_dos_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "listar_ferramentas_pipeboard", "ler_pipeboard"],
     maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, origem_drive_dos_anuncios: 2, get_ads_ranking: 4, get_estrutura_conjuntos: 2, casar_criativo_performance: 6, computar_perfil_vencedor: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 14,
-    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, impressoes, cliques, CTR, formularios, custos vs teto_vigente, detalhe POR ANUNCIO e serie diaria (get_detalhe_anuncios), origem Drive dos anuncios no ar (origem_drive_dos_anuncios), diagnostico de custo/fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir DB; use ler_pipeboard so se faltar numero critico. Relatorio denso. PROIBIDO fechar sem get_detalhe_anuncios quando o pedido pede anuncio/serie diaria. PROIBIDO 'sem vinculo de pasta' sem origem_drive_dos_anuncios.",
+    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, entrega, custo vs teto vigente, detalhe por anuncio e serie diaria, origem Drive das pecas no ar, diagnostico de custo e fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir o banco; leitura ao vivo so se faltar numero critico. Relatorio denso.",
   },
   criativos: {
     tools: ["get_criativos_conteudo", "get_ads_ranking", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard"],
     maxPorTool: { get_criativos_conteudo: 3, get_ads_ranking: 3, get_conhecimento: 2, validar_pedido_contra_contrato: 1, ler_pipeboard: 2, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 8,
-    missao: "CONTEUDO REAL DAS PECAS + RANKING: legendas/CTA e get_ads_ranking (gasto, alcance, conversas). Se o pedido pede maior alcance ou mais conversas, CHAME get_ads_ranking com ordenar_por correspondente — PROIBIDO dizer indisponivel sem essa chamada. Preferir DB; Pipeboard so se faltar detalhe. NAO faz auditoria de compliance nem metricas de campanha agregadas.",
+    missao: "CONTEUDO REAL DAS PECAS no ar (legenda, titulo, CTA, destino) e ranking de criativo. Preferir o banco; leitura ao vivo so se faltar detalhe. NAO faz auditoria de compliance nem metrica agregada de campanha.",
   },
   compliance: {
     tools: ["check_compliance", "checar_par_texto_e_peca", "get_criativos_conteudo", "get_conhecimento"],
     maxPorTool: { check_compliance: 4, checar_par_texto_e_peca: 4, get_criativos_conteudo: 2, get_conhecimento: 1 }, maxToolsTotal: 8,
-    missao: "AUDITORIA DE COMPLIANCE: amostrar as legendas de maior gasto (ate o teto de tools); validar o PAR legenda+peca quando houver drive_file_id. Declare cobertura e lacunas — nao tente auditar o universo inteiro em uma rodada.",
+    missao: "AUDITORIA DE COMPLIANCE: amostre as legendas de maior gasto ate o teto de ferramentas e valide o PAR legenda+peca quando houver drive_file_id. Declare cobertura e lacunas — nao tente auditar o universo inteiro numa rodada.",
   },
   estrutura_conta: {
     tools: ["get_estrutura_conjuntos", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard"],
     maxPorTool: { get_estrutura_conjuntos: 1, get_conhecimento: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 5,
-    missao: "ESTRUTURA da conta: CBO vs ABO, orcamentos por conjunto, estrategia de lance, targeting, pegada e destino. Preferir get_estrutura_conjuntos; Pipeboard so se faltar. Relatorio curto com riscos visiveis.",
+    missao: "ESTRUTURA da conta: CBO vs ABO, orcamento por conjunto, estrategia de lance, targeting, pegada e destino. Relatorio curto, com os riscos visiveis.",
   },
   whatsapp_waba: {
     tools: ["get_waba_status", "get_whatsapp_da_pagina", "get_waba_template_insights", "get_conhecimento"],
     maxPorTool: { get_waba_status: 2, get_whatsapp_da_pagina: 2, get_waba_template_insights: 2, get_conhecimento: 1 }, maxToolsTotal: 6,
-    missao: "CANAL WHATSAPP: chame get_waba_status (meio=juridico/la_felicita se recortar) E get_whatsapp_da_pagina quando o pedido for conjunto CTWA. casou_na_api=false = numero fora das WABAs da conta, o que NAO impede o conjunto: o driver pipeboard cria (medido 01/09/2026). PROIBIDO pedir vinculo de WABA. Separe WABA Cloud/ON_PREMISE (CONNECTED=de pe; DISCONNECTED=declare) de CTWA inventario (IN_ADS nao e de pe). NUNCA diga que so ha os numeros wa.me dos anuncios se a lista WABA veio no retorno. Templates so se o foco pedir.",
+    missao: "CANAL WHATSAPP: inventario de numeros, estado de pe e destino Click-to-WhatsApp. Em pedido de conjunto CTWA leia o inventario WABA E o numero da pagina, nesta rodada. Insight de template so se o foco pedir.",
   },
   alertas_recomendacoes: {
     tools: ["get_alerts", "get_recommendations", "get_meta_dicas", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest"],
     maxPorTool: { get_alerts: 1, get_recommendations: 1, get_meta_dicas: 1, saude_das_integracoes: 1, custo_llm_periodo: 1, score_de_prontidao: 1, saude_dos_tokens: 1, ler_entregas_digest: 1 }, maxToolsTotal: 6,
-    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacoes INTERNAS e dicas da Meta. Em dica/boost/musica: julgamento acionavel. Inclua saude/score/tokens so se o foco pedir — nao inventarie tudo por default.",
+    missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacao interna e dica da Meta, sempre com julgamento acionavel. Saude, score e tokens so se o foco pedir — nao inventarie tudo por default.",
   },
   analise_visual_drive: {
     tools: [], maxPorTool: {}, maxToolsTotal: 0,  // pipeline codificado - nao usa loop de tools
-    missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive (pixels da miniatura em alta resolucao): produto detectado, texto visivel, riscos de compliance visiveis e veredito aproveitavel/nao/incerto por peca, persistido em banco. Use quando o gestor pedir para CLASSIFICAR/ANALISAR O CONTEUDO das pecas (nao apenas inventariar). Limite declarado: de video se ve UM FRAME.",
+    missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive, pelos pixels da miniatura em alta resolucao: produto detectado, texto visivel, risco de compliance visivel e veredito por peca, persistido em banco. Use quando o pedido for CLASSIFICAR o conteudo das pecas, nao apenas inventariar. Limite declarado: de video se ve UM FRAME.",
   },
   criativos_drive: {
     tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "origem_drive_dos_anuncios", "ler_brand_identity", "get_conhecimento"],
     maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 8, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 6, origem_drive_dos_anuncios: 2, ler_brand_identity: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
-    missao: "CRIATIVOS NOVOS NO DRIVE: leitura NESTA rodada. Historico nao substitui inventario. COHAPM: isole meio=juridico | la_felicita | sistema_ocular (VISTTA). inventario_global da empresa NAO e o recorte de um empreendimento. PROIBIDO get_criativos_conteudo (anuncios ja no ar). Cite nome+pasta+drive_file_id. Nunca invente arquivo. Se o FOCO pedir origem dos anuncios JA NO AR, chame origem_drive_dos_anuncios e NAO inventarie pecas novas no lugar.",
+    missao: "CRIATIVOS NOVOS NO DRIVE: leitura NESTA rodada — historico nao substitui inventario. COHAPM: isole meio=juridico | la_felicita | sistema_ocular (VISTTA). Cite nome + pasta + drive_file_id e nunca invente arquivo. Se o foco pedir a origem dos anuncios JA NO AR, isso e leitura de origem, nao inventario de peca nova.",
   },
   conhecimento: {
     tools: ["get_conhecimento"],
     maxPorTool: { get_conhecimento: 5 }, maxToolsTotal: 5,
-    missao: "FUNDAMENTO TECNICO puro (politicas Meta, definicao de metricas, metodo de otimizacao, boas praticas de criativo), citando o tema consultado e declarando [VENCIDO] quando for o caso. So e acionado quando a pergunta exige conceito alem do que os outros especialistas ja fundamentam.",
+    missao: "FUNDAMENTO TECNICO puro (politica da Meta, definicao de metrica, metodo de otimizacao, boa pratica de criativo), citando o tema consultado e declarando [VENCIDO] quando for o caso. So e acionado quando a pergunta exige conceito alem do que os outros especialistas ja fundamentam.",
   },
 };
 
@@ -1864,6 +1827,15 @@ async function catalogoAgentes(): Promise<CatalogoAgentes> {
   return _catalogo;
 }
 
+// Registro de ferramentas. Mesma politica de leitura unica do catalogo de agentes: o job roda
+// varios subagentes dentro da mesma parede de 5 min e nenhum deles pode pagar um SELECT.
+let _catFerramentas: CatalogoFerramentas | null = null;
+async function catalogoFerramentas(): Promise<CatalogoFerramentas> {
+  if (_catFerramentas) return _catFerramentas;
+  _catFerramentas = await carregarFerramentas(supa);
+  return _catFerramentas;
+}
+
 // Quando um agente cobre mais de um subagente e o tier nao comporta todos, esta ordem decide
 // quem entra. Vale so como desempate: com orcamento sobrando, todos os subagentes do agente
 // escolhido rodam.
@@ -1984,7 +1956,10 @@ Use o codigo (AG-02) ou o nome (Analista). Para overview amplo, 3 agentes bastam
 // ============================================================================
 async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number) {
   const cfg = SUBAGENTES[nome];
-  const tools = cfg.tools.map((t) => DEF[t]);
+  // cfg.tools serve como recorte E como ordem: array de ferramenta estavel entre rodadas e o
+  // que permite ao provider reaproveitar o prefixo da requisicao.
+  const catFerr = await catalogoFerramentas();
+  const tools = montarFerramentas(catFerr, "job", new Set(cfg.tools), cfg.tools);
   const isLegal = norm(ctx.companyName).includes("legal");
   const perfil = isLegal
     ? "empresa de credito consignado; aplique categoria especial somente quando o objeto lido confirmar esse produto"
@@ -2000,11 +1975,11 @@ async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx:
   const sys = `${identidade} do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).
 MISSAO: ${cfg.missao}${fronteira}
 FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
-FIDELIDADE AO PEDIDO: interprete a pergunta de forma fria e literal. Nao amplie janela, nao misture campanhas fora do universo do CONTRATO DO PEDIDO, nao responda perguntas que nao foram feitas. Se o contrato traz date_from, use-o em get_funnel/get_ads_ranking/get_campaign_detail.
+FIDELIDADE AO PEDIDO: interprete a pergunta de forma fria e literal. Nao amplie a janela, nao traga campanha fora do universo do CONTRATO DO PEDIDO, nao responda o que nao foi perguntado. Se o contrato traz date_from, ele e a janela de toda leitura de desempenho.
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio, registre em LACUNAS e siga so com a sua parte.
-VELOCIDADE: teto ~5 min. DB local primeiro; Pipeboard so se faltar numero. Apos cobrir o FOCO, ESCREVA. Se o foco pedir anuncio/serie diaria, chame get_detalhe_anuncios (ID Meta ou nome; pagine se restantes>0) ANTES de fechar — 2-3 tools so vale para pergunta pontual.
-PROIBIDO dizer 'nao disponivel'/'nao coletado a tempo' para alcance, gasto, anuncio ou serie diaria se voce NAO chamou get_detalhe_anuncios / get_ads_ranking / get_campaign_detail. Se a tool falhar, diga a falha; se nao chamou, chame.
-REGRAS: todo numero vem de ferramenta CHAMADA AGORA; distinga zero / nao existe / nao coletado; incorpore 'nota'/'aviso'; nao misture janelas.\nPAGINACAO: se restantes > 0 E o foco exigir cobertura total, peca a proxima pagina ate o teto; senao declare o corte em LACUNAS.
+VELOCIDADE: teto ~5 min. Cobriu o FOCO, ESCREVA.
+PROIBIDO dizer 'nao disponivel' ou 'nao coletado a tempo' para um dado que voce NAO tentou ler: chame a ferramenta. Se ela falhar, relate a falha.
+REGRAS: todo numero vem de ferramenta CHAMADA AGORA; distinga zero / nao existe / nao coletado; incorpore 'nota' e 'aviso' do retorno; nao misture janelas.\nPAGINACAO: se restantes > 0 E o foco exigir cobertura total, peca a proxima pagina ate o teto; senao declare o corte em LACUNAS.
 Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, terminando com 'LACUNAS:' (ou 'nenhuma').`;
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
@@ -2034,7 +2009,10 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
         let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
         const result = await runTool(nomeTc, args, ctx);
         usadas.push(nomeTc);
-        messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(result).slice(0, 14000) });
+        // A doutrina de uso entra colada ao retorno, e so aqui: e o unico ponto do fluxo em
+        // que a ferramenta comprovadamente rodou. Fora daqui ela seria contexto pago a toa.
+        messages.push({ role: "tool", tool_call_id: tc.id,
+          content: retornoComDoutrina(catFerr, nomeTc, JSON.stringify(result).slice(0, 14000)) });
       }
       continue;
     }

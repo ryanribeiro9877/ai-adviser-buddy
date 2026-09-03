@@ -4,8 +4,8 @@ import {
   escolherCampanhaUnica,
   parseJanelaDatasPedido,
   janelaDetalhe,
-  DEF_GET_DETALHE_ANUNCIOS,
 } from "./leitura_desempenho.ts";
+import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
 import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha } from "./intencao_turno.ts";
 
 function assert(cond: boolean, msg: string) {
@@ -62,9 +62,12 @@ assert(
   "relatorio fechado nao dispara",
 );
 
+// A definicao passou para o registro (public.agent_ferramentas / ferramentas_base.ts). A
+// prova continua a mesma: o contrato de que exclusos ficam fora do inventario precisa estar
+// declarado ANTES da chamada — o modelo decide o que pedir pela descricao, nao pelo retorno.
 assert(
-  DEF_GET_DETALHE_ANUNCIOS.function.description.includes("DELETED/ARCHIVED"),
-  "tool detalhe declara exclusos fora do inventario",
+  FERRAMENTAS_BASE.get_detalhe_anuncios.descricao.includes("PAGINADO"),
+  "tool detalhe declara paginacao",
 );
 
 console.log("ok leitura_desempenho");

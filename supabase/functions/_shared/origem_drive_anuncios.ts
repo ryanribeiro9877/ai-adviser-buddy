@@ -369,24 +369,10 @@ export async function tOrigemDriveDosAnuncios(
   };
 }
 
-export const DEF_ORIGEM_DRIVE_DOS_ANUNCIOS = {
-  type: "function" as const,
-  function: {
-    name: "origem_drive_dos_anuncios",
-    description:
-      "PASTA DO DRIVE DE CADA ANUNCIO JA NO AR de um conjunto/campanha. UMA chamada lista todos: nome, pasta, peca_nome, drive_file_id, vinculo. Fonte = card criar_anuncio_a_partir_de, NAO chute 2.mp4 a partir de AD_…_2. OBRIGATORIA quando o gestor pergunta 'de qual pasta do Drive sao os anuncios do CONJ.N'. NAO e inventario de pecas novas (isso e get_acervo_para_anuncio). NAO declare 'sem vinculo' sem ter chamado isto. casar_criativo_performance e plano B: nesse caso passe SO ad_external_id, nunca chute drive_file_id.",
-    parameters: {
-      type: "object",
-      properties: {
-        conjunto: { type: "number", description: "Numero do conjunto (1-99). Preferivel." },
-        name_like: { type: "string", description: "Trecho da campanha (ex.: VISTTA_CONV_WA_SET26) se houver mais de um CONJ.N." },
-        campaign_id: { type: "string", description: "ID Meta da campanha." },
-        ad_external_id: { type: "string", description: "Se quiser um anuncio so." },
-        incluir_apagados: { type: "boolean", description: "Default false. DELETED/ARCHIVED ficam de fora." },
-      },
-    },
-  },
-};
+// A definicao desta ferramenta (nome, descricao e schema) mora em public.agent_ferramentas,
+// com snapshot local em _shared/ferramentas_base.ts. Mantida aqui, seria a segunda copia da
+// mesma verdade — e foi divergindo da versao do traffic-agent-job ate 03/09/2026.
+
 
 export const FOCO_ORIGEM_DRIVE =
   "ORIGEM DRIVE DOS ANUNCIOS JA NO AR: chame origem_drive_dos_anuncios (conjunto + name_like da campanha). " +

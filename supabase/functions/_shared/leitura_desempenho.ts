@@ -431,22 +431,7 @@ export async function tDetalheAnuncios(
   };
 }
 
-export const DEF_GET_DETALHE_ANUNCIOS = {
-  type: "function" as const,
-  function: {
-    name: "get_detalhe_anuncios",
-    description:
-      "DETALHE POR ANÚNCIO E POR CONJUNTO de UMA campanha: status, destino, CTA, totais da janela e série diária (gasto, impressões, alcance, cliques, CTR, CPC, CPM, formulários, conversas). Aceita campaign_id (ID numérico da Meta) OU name_like. PAGINADO (6 anúncios/página com série). Se restantes>0, pagine. DELETED/ARCHIVED NAO entram em total_anuncios nem na lista — nao cite como 'anuncios registrados'. CAMPAIGN_PAUSED continua (existe, nao entrega porque a campanha-mae esta pausada). Conjunto ACTIVE com anuncios=0 = zero pecas operacionais naquele conjunto. PROIBIDO dizer que o detalhamento por anúncio 'não foi retornado nesta rodada' sem ter chamado isto. Para 2 campanhas, chame 2 vezes.",
-    parameters: {
-      type: "object",
-      properties: {
-        campaign_id: { type: "string", description: "ID Meta da campanha (external_id)." },
-        name_like: { type: "string", description: "Trecho do nome da campanha, se não tiver o ID." },
-        date_from: { type: "string", description: "YYYY-MM-DD" },
-        date_to: { type: "string", description: "YYYY-MM-DD" },
-        pagina: { type: "number", description: "Página de anúncios, começando em 1." },
-        incluir_serie_diaria: { type: "boolean", description: "Default true. false devolve mais anúncios sem a série." },
-      },
-    },
-  },
-};
+// A definicao desta ferramenta (nome, descricao e schema) mora em public.agent_ferramentas,
+// com snapshot local em _shared/ferramentas_base.ts. Mantida aqui, seria a segunda copia da
+// mesma verdade — e foi divergindo da versao do traffic-agent-job ate 03/09/2026.
+
