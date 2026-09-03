@@ -3,11 +3,16 @@
 //
 // A mesma entrada, repetida, tem que produzir saida IDENTICA BYTE A BYTE.
 //
-// A LINHA DE BASE MEDIDA (chat_messages, 23/07 a 03/09/2026): as 13 perguntas_ouro foram
-// executadas 40 vezes pelo caminho atual, que e geracao livre. Saiu 40 respostas distintas —
-// 0 de 40 repetiram. Em 12 dos 13 codigos o CONJUNTO DE NUMEROS citados mudou entre rodadas.
-// PO-01 rodou 3x no mesmo dia contra a mesma RPC e uma das rodadas nao citou R$ 1.512,00, que
-// e a resposta da pergunta.
+// A LINHA DE BASE MEDIDA: as 13 perguntas_ouro tem 39 execucoes com resposta real do agente
+// (3 por codigo, todas em 06/08), pelo caminho atual, que e geracao livre. Saiu 39 respostas
+// distintas — 0 de 39 repetiram. Em 10 dos 13 codigos o CONJUNTO DE NUMEROS citados mudou
+// entre rodadas do mesmo dia. PO-01 rodou 3x em 32 minutos e a rodada de 17:35 nao citou
+// R$ 1.512,00, que as outras duas citaram como resposta da pergunta.
+//
+// Ressalva do metodo, registrada em molde_pergunta.ts: as 3 rodadas sao versoes diferentes do
+// agente, entao a divergencia de NUMERO esta confundida com mudanca intencional. A divergencia
+// de TEXTO nao esta: 39 de 39 saidas distintas, inclusive entre rodadas a 7 minutos com o
+// mesmo conjunto de numeros.
 //
 // Esta prova mede a mesma coisa no caminho canonico e exige o oposto: 1 hash distinto.
 //

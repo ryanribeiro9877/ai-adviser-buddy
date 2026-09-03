@@ -212,7 +212,11 @@ Este e o estado do cadastro na hora da leitura. Nao inclui desempenho: custo, CT
  '2027-03-03', 1),
 
 -- --- CONFIRMACAO DE ATO ----------------------------------------------------
--- O maior molde da operacao: 152 dos 645 turnos (23,6%), media de 94 chars.
+-- A maior familia da operacao: 320 das 741 respostas do assistente (43,2%) contem confirmacao
+-- de card. RESSALVA MEDIDA: so 22 delas caberiam INTEIRAS neste molde (6 com ate 200 chars,
+-- 16 entre 201 e 500). As outras 287 misturam confirmacao com analise, media de 1.933 chars e
+-- maximo de quase 3.000. Ou seja: este molde cobre o SEGMENTO de confirmacao, e ligar ele como
+-- resposta inteira encurtaria o que o gestor recebe hoje. A decisao de encurtar e dele.
 --
 -- O INCIDENTE QUE ISTO FECHA (01/09/2026, 19:00-19:30, CONJ.2 do VISTTA): em cinco rodadas
 -- seguidas a resposta anunciou "6 Cards de Pausa Emitidos" e "2 Cards Emitidos", com tabela e

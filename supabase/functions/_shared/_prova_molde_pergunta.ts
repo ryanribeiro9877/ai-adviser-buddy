@@ -79,7 +79,7 @@ exata("tem algum alerta critico na conta agora, algo de bm politica ou cobranca?
 exata("me informe quais das campanhas cadastradas estao ativas por favor", "EST_CAMPANHAS_ATIVAS");
 
 // ============================================================================
-// CONFIRMACAO DE ATO — o maior molde da operacao (152 turnos, 23,6%)
+// CONFIRMACAO DE ATO — a maior familia (320 de 741 respostas, 43,2%; 22 cabem inteiras)
 // ============================================================================
 exata("gere o proximo card", "ATO_CONFIRMACAO_CARD");
 exata("emita os cards", "ATO_CONFIRMACAO_CARD");

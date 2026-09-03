@@ -1,12 +1,21 @@
 // Classificacao DETERMINISTICA do turno em molde + parametros, antes de qualquer geracao.
 //
-// POR QUE ESTA CAMADA EXISTE (medido em 03/09/2026 sobre chat_messages de 23/07 a 03/09):
-// as 13 perguntas_ouro foram executadas 40 vezes. Saiu 40 respostas distintas — ZERO repeticao
-// byte a byte. Pior: em 12 dos 13 codigos o CONJUNTO DE NUMEROS citados mudou entre rodadas.
-// PO-01 ("qual a exposicao de orcamento diario e o pior dia possivel") rodou 3x no MESMO dia,
-// contra a MESMA RPC, e uma das rodadas simplesmente nao citou R$ 1.512,00 — que e a resposta
-// da pergunta — enquanto citava seis valores (R$ 180,00 / 225,00 / 312,00 / 350,00 / 374,40 /
-// 90,00) que nao aparecem em nenhuma das outras duas.
+// POR QUE ESTA CAMADA EXISTE (medido em 03/09/2026; ver metodo e ressalva no fim do bloco):
+// as 13 perguntas_ouro tem 39 execucoes com resposta real do agente em chat_messages, 3 por
+// codigo, TODAS em 06/08. Saiu 39 respostas distintas — ZERO repeticao byte a byte. Em 10 dos
+// 13 codigos o CONJUNTO DE NUMEROS citados mudou entre rodadas do mesmo dia.
+// PO-01 ("qual a exposicao de orcamento diario e o pior dia possivel") rodou 3x em 32 minutos:
+// as rodadas de 18:00 e 18:07 citaram R$ 1.512,00 como pior dia; a de 17:35 nao citou esse
+// valor em lugar nenhum e trouxe seis outros (R$ 180,00 / 225,00 / 312,00 / 350,00 / 374,40 /
+// 90,00) ausentes das outras duas. PO-13 rodou 3x: duas citaram R$ 1,07 e R$ 2,14, a terceira
+// citou R$ 1.130,17 e R$ 24.396,27 e nenhum dos dois.
+//
+// RESSALVA HONESTA DO METODO: as tres rodadas de cada codigo sao versoes diferentes do agente
+// (v62, v63, v64), entao isto NAO e "o mesmo codigo rodado 3x" e a divergencia de numero esta
+// confundida com mudanca intencional. O que sobrevive a ressalva e o essencial: v63 e v64
+// estao a 7 minutos de distancia, e mesmo quando o conjunto de numeros e IGUAL o texto difere
+// (PO-01: 2.605 vs 2.874 chars). Do ponto de vista do gestor, a mesma pergunta devolveu uma
+// resposta diferente em todas as 39 tentativas.
 //
 // Isto e o defeito que o gestor descreveu: quando o certo as vezes sai errado e o errado as
 // vezes sai certo, o defeito fica indetectavel e nenhum teste de regressao significa nada.
@@ -224,7 +233,10 @@ const GATILHOS: Gatilho[] = [
   {
     codigo: "ATO_CONFIRMACAO_CARD",
     classe: "confirmacao_de_ato",
-    // 152 turnos (23,6% do historico) — o maior molde da operacao, media de 94 chars.
+    // A maior familia da operacao: 320 das 741 respostas do assistente (43,2%) contem
+    // confirmacao de card. MAS so 22 delas caberiam INTEIRAS neste molde — as outras 287
+    // misturam confirmacao com analise (media de 1.933 chars). Ver ressalva em
+    // resposta_canonica.ts: aqui o molde cobre o SEGMENTO de confirmacao, nao o turno todo.
     // "gere o proximo card" (15x), "gere os proximos cards" (10x), "emita o proximo card" (9x),
     // "emita os cards" (7x). O incidente de 01/09 (19h-19h30, CONJ.2 VISTTA) esta exatamente
     // aqui: cinco rodadas anunciaram "6 Cards de Pausa Emitidos" e "2 Cards Emitidos" com

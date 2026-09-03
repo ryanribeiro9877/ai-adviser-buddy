@@ -1,23 +1,50 @@
 ﻿-- Camada de conhecimento deterministico (03/09/2026)
 --
--- A MEDICAO QUE JUSTIFICA ESTA CAMADA (chat_messages, 23/07 a 03/09/2026, 645 turnos do gestor):
+-- NOTA DE FIDELIDADE: o DDL abaixo e byte a byte o que rodou como migration 20260903200454.
+-- O BLOCO DE COMENTARIO desta medicao foi corrigido DEPOIS de aplicado: a primeira versao
+-- dizia "40 execucoes, 12 dos 13 codigos" e estava errada. A conferencia encontrou 74
+-- execucoes registradas, 69 com conversation_id e apenas 39 com resposta real do agente em
+-- chat_messages — o "40" era uma leitura da coluna `evidencia`, que e nota do harness e nao a
+-- resposta do agente. Medir variancia ali seria medir quem escreveu a nota. Os numeros abaixo
+-- vem das 39 respostas reais. Nenhum objeto do banco mudou nesta correcao.
 --
--- As 13 perguntas_ouro foram executadas 40 vezes pelo caminho de geracao livre. Saiu 40
--- respostas DISTINTAS — nenhuma repeticao byte a byte. Em 12 dos 13 codigos o conjunto de
--- numeros citados mudou entre rodadas. O caso mais grave:
+-- A MEDICAO QUE JUSTIFICA ESTA CAMADA (chat_messages, 23/07 a 03/09/2026, 650 turnos do gestor
+-- e 741 respostas do assistente):
+--
+-- As 13 perguntas_ouro tem 39 execucoes com resposta real do agente em chat_messages — 3 por
+-- codigo, TODAS em 06/08. Saiu 39 respostas DISTINTAS: nenhuma repeticao byte a byte. Em 10
+-- dos 13 codigos o conjunto de numeros citados mudou entre rodadas do MESMO dia. Os dois
+-- casos mais graves:
 --
 --   PO-01 "qual e a exposicao de orcamento diario da operacao hoje, e qual seria o pior dia
---   possivel?" rodou 3x no MESMO dia (06/08), contra a MESMA RPC. Duas rodadas citaram
---   R$ 1.512,00 como pior dia. A terceira NAO citou esse valor em nenhum lugar, e em vez
---   dele trouxe R$ 180,00 / 225,00 / 312,00 / 350,00 / 374,40 / 90,00 — seis valores que
---   nao aparecem nas outras duas.
+--   possivel?" rodou 3x em 32 minutos. As rodadas de 18:00 e 18:07 citaram R$ 1.512,00 como
+--   pior dia. A de 17:35 NAO citou esse valor em nenhum lugar, e em vez dele trouxe
+--   R$ 180,00 / 225,00 / 312,00 / 350,00 / 374,40 / 90,00 — seis valores ausentes das outras.
 --
 --   PO-13 "quais contas de anuncio estao conectadas e trazendo dado?" rodou 3x. Duas rodadas
 --   citaram R$ 1,07 e R$ 2,14 como custo. A terceira citou R$ 1.130,17 e R$ 24.396,27 e
 --   nenhum dos dois custos.
 --
+-- RESSALVA HONESTA DO METODO: as 3 rodadas de cada codigo sao versoes diferentes do agente
+-- (v62, v63, v64), entao isto NAO e "o mesmo codigo rodado 3x" e a divergencia de NUMERO esta
+-- confundida com mudanca intencional entre versoes. O que sobrevive a ressalva e o essencial:
+-- v63 e v64 estao a 7 minutos, e mesmo quando o conjunto de numeros e IGUAL o texto difere
+-- (PO-01: 2.605 vs 2.874 chars). Do ponto de vista do gestor, a mesma pergunta devolveu uma
+-- resposta diferente em 39 de 39 tentativas.
+--
 -- Isto e exatamente o que o gestor descreveu: quando o certo as vezes sai errado e o errado
 -- as vezes sai certo, o defeito fica indetectavel e nenhum teste de regressao significa nada.
+--
+-- O PERCENTUAL DETERMINIZAVEL NAO E 90%, E DEPENDE DO QUE SE CONTA:
+--   ~5%  se a exigencia e o molde emitir o TURNO INTEIRO. Medido: das 23 perguntas que casam
+--        EST_CAMPANHAS_ATIVAS, a resposta media hoje tem 4.354 chars (max 15.684) contra 250
+--        do molde, e so 3 das 23 respostas cabem no tamanho do molde. Idem recusas: as 7 de
+--        REC_SEGMENTAR_IDADE tem media de 3.612 chars contra 929 do texto canonico.
+--   ~48% se a exigencia e o molde emitir um SEGMENTO da resposta (a confirmacao de card, o
+--        bloco de numeros), com o resto seguindo gerado.
+-- Os dois numeros sao verdadeiros e medem coisas diferentes. Prometer 90% exigiria encurtar
+-- deliberadamente a resposta que o gestor recebe hoje — que e uma decisao de produto dele,
+-- nao um efeito colateral desta migration.
 --
 -- POR QUE NAO RESOLVER NO PROMPT: regra escrita no system prompt continua sendo LIDA e
 -- REEXPRESSA pelo modelo a cada turno — e a variancia acima ja acontece com o prompt atual,
