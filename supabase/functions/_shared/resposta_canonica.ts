@@ -1,4 +1,4 @@
-// Resolucao de resposta canonica: dado um molde e parametros, produzir a resposta SEM geracao
+﻿// Resolucao de resposta canonica: dado um molde e parametros, produzir a resposta SEM geracao
 // livre. Texto armazenado sai literal; molde sai preenchido por valor calculado.
 //
 // A FRONTEIRA E ASSIMETRICA, e isto e a decisao central do modulo.
@@ -85,6 +85,30 @@ export type CampoDoMolde = {
   obrigatorio: boolean;
 };
 
+/**
+ * Como o molde convive com analise livre em volta.
+ *
+ * O criterio e um so e vale para os tres: um molde e componivel quando texto livre depois dele
+ * NAO consegue tornar o canonico falso nem repeti-lo.
+ *
+ * - `turno_inteiro`       o molde responde tudo; nao ha analise a acrescentar.
+ * - `segmento_componivel` o molde trava um pedaco e a analise do modelo entra em volta.
+ * - `nao_componivel`      texto livre em volta falsifica ou dilui o canonico. E o DEFAULT.
+ *
+ * O default e o restritivo de proposito: molde novo nasce emitindo sozinho, e liberar
+ * composicao e decisao explicita. Assimetria igual a da fronteira canonico/LLM — soltar
+ * analise em volta de um molde que nao aceita produz contradicao dentro da mesma mensagem,
+ * enquanto travar demais so custa uma resposta mais seca.
+ */
+export type GrupoDeComposicao = "turno_inteiro" | "segmento_componivel" | "nao_componivel";
+
+/** Vocabulario aceito. Rotulo fora daqui cai no restritivo em vez de passar. */
+export const GRUPOS_DE_COMPOSICAO: readonly string[] = [
+  "turno_inteiro",
+  "segmento_componivel",
+  "nao_componivel",
+];
+
 export type MoldeRegistro = {
   codigo: string;
   classe: ClasseDeMolde;
@@ -94,6 +118,7 @@ export type MoldeRegistro = {
   campos: CampoDoMolde[];
   /** Quando NAO usar este molde. Fica no registro para ser revisado junto com o gabarito. */
   fronteira: string | null;
+  composicao: GrupoDeComposicao;
   verificado_em: string;
   revalidar_ate: string | null;
   versao: number;
@@ -127,6 +152,9 @@ const FALLBACK: MoldeRegistro[] = [
     campos: [],
     fronteira:
       "Nao usar quando a conta NAO esta em Categoria Especial. Fora dela a segmentacao por idade e permitida e a recusa seria errada.",
+    // Analise livre depois de uma recusa a torna FALSA: uma ressalva anexada reabre o que a
+    // recusa fechou, e o gestor le a ressalva como permissao.
+    composicao: "nao_componivel",
     verificado_em: "2026-09-03",
     revalidar_ate: "2027-03-03",
     versao: 1,
@@ -145,6 +173,9 @@ const FALLBACK: MoldeRegistro[] = [
     campos: [],
     fronteira:
       "Nao usar quando o pedido ja nomeia orcamento, conjunto ou campanha como alvo do aumento — nesse caso o pedido e legitimo e tem caminho proprio.",
+    // O gabarito termina pedindo ESCOLHA entre dois caminhos. Analise em volta responderia a
+    // pergunta no lugar do gestor, e o molde existe justamente para nao escolher por ele.
+    composicao: "nao_componivel",
     verificado_em: "2026-09-03",
     revalidar_ate: "2027-03-03",
     versao: 1,
@@ -163,6 +194,9 @@ const FALLBACK: MoldeRegistro[] = [
       "Se voce me disser qual peca e, eu faco o upload e volto com o card na sequencia — sem card intermediario.",
     campos: [],
     fronteira: "Nao usar quando a peca ja tem creative_id conhecido: nesse caso o pedido esta completo.",
+    // O gabarito afirma IMPEDIMENTO, "nao uma ressalva". Texto livre em volta e exatamente a
+    // ressalva que ele nega ser.
+    composicao: "nao_componivel",
     verificado_em: "2026-09-03",
     revalidar_ate: "2027-03-03",
     versao: 1,
@@ -177,6 +211,9 @@ const FALLBACK: MoldeRegistro[] = [
       "Para liberar aqui, o caminho e habilitar a acao **nesta** empresa, de forma explicita e registrada. Se voce quiser, eu digo exatamente qual permissao esta faltando nesta conta para o ato que voce pediu.",
     campos: [],
     fronteira: null,
+    // Recusa de ISOLAMENTO entre empresas. Analise em volta tenderia a citar o que a outra
+    // empresa tem liberado — vazando justamente o que a recusa protege.
+    composicao: "nao_componivel",
     verificado_em: "2026-09-03",
     revalidar_ate: "2027-03-03",
     versao: 1,
@@ -194,6 +231,9 @@ const FALLBACK: MoldeRegistro[] = [
       "Qual dos dois?",
     campos: [],
     fronteira: null,
+    // A recusa e sobre NAO remontar numero de lembranca. Analise livre em volta remontaria o
+    // numero — o modelo tem o historico no contexto e a tentacao e reproduzi-lo.
+    composicao: "nao_componivel",
     verificado_em: "2026-09-03",
     revalidar_ate: "2027-03-03",
     versao: 1,
@@ -205,6 +245,8 @@ const FALLBACK: MoldeRegistro[] = [
     gabarito: "ok",
     campos: [],
     fronteira: "So para sonda automatizada que pede resposta literal.",
+    // O pedido e literalmente "responda apenas ok". Qualquer texto a mais reprova a sonda.
+    composicao: "turno_inteiro",
     verificado_em: "2026-09-03",
     revalidar_ate: null,
     versao: 1,
@@ -221,7 +263,7 @@ export async function carregarRegistroDeMoldes(
 ): Promise<RegistroDeMoldes> {
   try {
     const { data, error } = await supa.from("moldes_de_resposta")
-      .select("codigo,classe,titulo,gabarito,campos,fronteira,verificado_em,revalidar_ate,versao")
+      .select("codigo,classe,titulo,gabarito,campos,fronteira,composicao,verificado_em,revalidar_ate,versao")
       .eq("vigente", true).order("codigo");
     if (error || !Array.isArray(data) || !data.length) return registroFallback();
     return {
@@ -233,6 +275,12 @@ export async function carregarRegistroDeMoldes(
         gabarito: String(r.gabarito ?? ""),
         campos: Array.isArray(r.campos) ? r.campos as CampoDoMolde[] : [],
         fronteira: r.fronteira ? String(r.fronteira) : null,
+        // Valor desconhecido cai no restritivo. Uma coluna nova que chegue vazia, ou um rotulo
+        // que o banco passe a aceitar e este codigo ainda nao conheca, NAO deve destravar
+        // analise livre por omissao — o erro barato e travar demais.
+        composicao: GRUPOS_DE_COMPOSICAO.includes(r.composicao)
+          ? r.composicao as GrupoDeComposicao
+          : "nao_componivel",
         verificado_em: String(r.verificado_em ?? ""),
         revalidar_ate: r.revalidar_ate ? String(r.revalidar_ate) : null,
         versao: Number(r.versao ?? 1),
@@ -255,6 +303,8 @@ export type Resolucao =
     caminho: "canonico";
     molde: string;
     classe: ClasseDeMolde;
+    /** Decide se este texto admite analise em volta. Lido do registro, nao inferido da classe. */
+    composicao: GrupoDeComposicao;
     versao: number;
     texto: string;
     /** Campos usados, com origem declarada. Vai para a telemetria e para a auditoria. */
@@ -408,102 +458,224 @@ export function resolverRespostaCanonica(opts: {
     caminho: "canonico",
     molde: reg.codigo,
     classe: reg.classe,
+    composicao: reg.composicao,
     versao: reg.versao,
     texto: feito.texto,
     campos_usados: feito.campos_usados,
   };
 }
 
-/** Linha de telemetria. Grava-se sempre, nos dois caminhos: sem os `llm` nao ha governanca. */
-export type LinhaDeTelemetria = {
-  molde: string | null;
-  caminho: "canonico" | "llm";
-  motivo: string | null;
-  confianca: string;
-  versao: number | null;
-  parametros: Record<string, unknown>;
-};
-
-export function linhaDeTelemetria(molde: Molde, r: Resolucao): LinhaDeTelemetria {
-  return {
-    molde: r.caminho === "canonico" ? r.molde : (r.molde ?? null),
-    caminho: r.caminho,
-    motivo: r.caminho === "llm" ? r.motivo : null,
-    confianca: molde.confianca,
-    versao: r.caminho === "canonico" ? r.versao : null,
-    parametros: { ...molde.parametros },
-  };
-}
+// A TELEMETRIA MUDOU DE CASA. `linhaDeTelemetria` vivia aqui e produzia `caminho` com dois
+// valores possiveis. Foi REMOVIDA de proposito, e nao apenas marcada como obsoleta: com o
+// hibrido existem tres caminhos, e uma funcao que so sabe emitir dois passaria pelo CHECK da
+// tabela (que aceita os tres) contando todo turno hibrido como canonico. O erro seria
+// silencioso e cairia exatamente sobre o numero que a auditoria precisa medir — a proporcao
+// real de texto travado. Deixar a funcao antiga acessivel para quem for ligar a camada era
+// deixar a armadilha montada.
+//
+// Use `linhaDeComposicao` de _shared/composicao_hibrida.ts.
 
 // ============================================================================
-// PONTO DE LIGACAO — NAO APLICADO DE PROPOSITO
+// PONTO DE LIGACAO — NAO APLICADO DE PROPOSITO — versao HIBRIDA
 // ============================================================================
 //
 // Esta camada esta pronta e provada, mas NAO esta ligada: o traffic-chat pertence a outro
-// agente nesta rodada. A ligacao e um passo consolidado, junto com a verificacao ponta a ponta.
-// O diff exato esta aqui para nao precisar ser redescoberto.
+// agente nesta rodada e segue sob medicao de latencia. O diff exato esta aqui para nao
+// precisar ser redescoberto.
+//
+// A versao anterior deste diff descrevia a ligacao BINARIA: um curto-circuito unico, antes do
+// modelo, que emitia canonico ou nao fazia nada. O hibrido exige TRES pontos, porque a
+// composicao acontece em dois tempos: a instrucao ao modelo tem de entrar antes da geracao, e
+// o bloco s'o pode ser resolvido depois das ferramentas.
 //
 // ARQUIVO: supabase/functions/traffic-chat/index.ts
 //
-// (1) No bloco de imports, junto de intencao_turno.ts (hoje linha ~795):
+// ----------------------------------------------------------------------------
+// (1) IMPORTS, junto de intencao_turno.ts (hoje linha ~795)
+// ----------------------------------------------------------------------------
 //
 //     import { classificarMolde } from "../_shared/molde_pergunta.ts";
-//     import { carregarRegistroDeMoldes, resolverRespostaCanonica, linhaDeTelemetria }
+//     import { carregarRegistroDeMoldes, resolverRespostaCanonica }
 //       from "../_shared/resposta_canonica.ts";
+//     import { compor, conferirIntegridade, instrucaoDeComposicao, linhaDeComposicao }
+//       from "../_shared/composicao_hibrida.ts";
 //
-// (2) O curto-circuito entra DEPOIS de persistir a fala do gestor e ANTES do comentario
-//     "v20: prompt caching" — hoje logo apos o fecha-chaves do `if (!ehRetomada)` da linha
-//     ~6592. Este ponto foi escolhido por tres motivos, e nenhum e estetico:
-//       - a fala do gestor ja esta em chat_messages, entao a conversa nao perde turno;
-//       - `objetivoOriginal` (linha ~6471) ja passou pelo objetivoDoFio, ou seja, "e o
-//         mesmo para o CONJ.5?" ja virou o pedido inteiro. Classificar `message` cru em vez
-//         dele quebraria todo turno de continuidade;
-//       - esta ANTES de montarFerramentas e do cacheSystem, entao o turno canonico nao paga
-//         roteador, nem catalogo de ferramentas, nem chamada de modelo.
+// ----------------------------------------------------------------------------
+// (2) PONTO A — curto-circuito dos que emitem sozinhos, e a instrucao dos componiveis
+// ----------------------------------------------------------------------------
+//
+// Entra DEPOIS de persistir a fala do gestor e ANTES do comentario "v20: prompt caching" —
+// hoje logo apos o fecha-chaves do `if (!ehRetomada)` da linha ~6590, imediatamente antes da
+// ~6594. Os tres motivos da versao anterior seguem valendo:
+//   - a fala do gestor ja esta em chat_messages, entao a conversa nao perde turno;
+//   - `objetivoOriginal` ja passou pelo objetivoDoFio, ou seja, "e o mesmo para o CONJ.5?" ja
+//     virou o pedido inteiro. Classificar `message` cru quebraria todo turno de continuidade;
+//   - esta ANTES de montarFerramentas e do cacheSystem, entao o turno que emite sozinho nao
+//     paga roteador, nem catalogo de ferramentas, nem chamada de modelo.
 //
 //     const moldeDoTurno = classificarMolde(objetivoOriginal);
+//     let instruiuOmitir = false;
+//     let registroDeMoldes: Awaited<ReturnType<typeof carregarRegistroDeMoldes>> | null = null;
+//
 //     if (moldeDoTurno.confianca === "exata") {
-//       const registro = await carregarRegistroDeMoldes(supa);
+//       registroDeMoldes = await carregarRegistroDeMoldes(supa);
 //       const resol = resolverRespostaCanonica({
-//         molde: moldeDoTurno, registro, valores: {},
-//         // `hojeIso` ja existe no escopo (linha ~6377). `degradado` vem do registro e nao
-//         // do chamador de proposito: quem leu a tabela e quem sabe se a leitura falhou.
-//         ctx: { hojeIso, degradado: registro.degradado },
+//         molde: moldeDoTurno, registro: registroDeMoldes, valores: {},
+//         // `hojeIso` ja existe no escopo (linha ~6377). `degradado` vem do registro e nao do
+//         // chamador de proposito: quem leu a tabela e quem sabe se a leitura falhou.
+//         ctx: { hojeIso, degradado: registroDeMoldes.degradado },
 //       });
-//       await supa.from("resolucoes_de_molde").insert({
-//         company_id: company.id, conversation_id: convId,
-//         ...linhaDeTelemetria(moldeDoTurno, resol),
-//       });
-//       if (resol.caminho === "canonico") {
+//
+//       // Emite sozinho: nao_componivel e turno_inteiro. Nunca chama modelo.
+//       if (resol.caminho === "canonico" && resol.composicao !== "segmento_componivel") {
+//         const c = compor({ resolucao: resol });
+//         await supa.from("resolucoes_de_molde").insert({
+//           company_id: company.id, conversation_id: convId,
+//           ...linhaDeComposicao(moldeDoTurno, c),
+//         });
 //         await supa.from("chat_messages").insert({
 //           conversation_id: convId, company_id: company.id, role: "assistant",
-//           content: resol.texto, model: `molde:${resol.molde}`,
-//           diagnostico: { caminho: "canonico", molde: resol.molde, versao: resol.versao },
+//           content: c.texto, model: `molde:${c.molde}`,
+//           diagnostico: {
+//             caminho: c.caminho, molde: c.molde, versao: c.versao,
+//             composicao: c.composicao, chars_canonicos: c.bloco_canonico.length,
+//           },
 //         });
-//         return json({ reply: resol.texto, actionCards: [] });
+//         return json({ reply: c.texto, actionCards: [] });
 //       }
+//
+//       // Componivel: NAO emite aqui. So avisa o modelo para nao escrever o bloco.
+//       const linha = instrucaoDeComposicao(resol);
+//       if (linha) { instrucaoExtra = linha; instruiuOmitir = true; }
 //     }
 //
-// (3) O `return json(...)` acima tem de espelhar a FORMA que o front ja consome no fim do
-//     handler (hoje linha ~7561 monta o insert do assistant e o json de saida). Se a chave
-//     mudou, esta e a unica linha do diff que precisa de conferencia — o resto e aditivo.
+//     `instrucaoExtra` e uma string a concatenar no system prompt. Ela tem de ir FORA do bloco
+//     marcado com cache_control (hoje ~6594-6616), no mesmo lugar em que o bloco de agentes
+//     entra: e conteudo que varia por turno, e dentro do bloco cacheavel invalidaria o cache
+//     de prompt a cada pergunta — trocaria 34 tokens por um cache miss inteiro.
 //
-// TRES ARMADILHAS DESTE DIFF, todas ja pagas uma vez neste repo:
+// ----------------------------------------------------------------------------
+// (3) PONTO B — a composicao, DEPOIS do filtro pos-sintese
+// ----------------------------------------------------------------------------
 //
-//   - `resolverRespostaCanonica` recebe `{}` de valores porque hoje SO texto_canonico tem
-//     como emitir sem ferramenta. Molde calculado precisa dos numeros, e os numeros vem das
-//     RPCs que rodam depois deste ponto. Ligar molde_calculado aqui faria todos eles caírem
-//     para o LLM com motivo "campo obrigatorio sem valor" — funciona, mas nao ganha nada.
-//     Molde calculado se liga em outro lugar: depois das ferramentas, antes da redacao.
+// Entra depois do bloco do `claimSan` (hoje ~7255-7258) e antes do insert final do assistant.
+// A ORDEM AQUI NAO E NEGOCIAVEL, e o motivo esta na proxima secao.
 //
-//   - Passar `objetivoOriginal` e obrigatorio, `message` nao serve. Ver motivo em (2).
+//     if (moldeDoTurno.confianca === "exata" && registroDeMoldes) {
+//       const resol = resolverRespostaCanonica({
+//         molde: moldeDoTurno, registro: registroDeMoldes,
+//         valores: valoresDoMolde,   // montado das RPCs/toolResults deste turno
+//         ctx: { hojeIso, degradado: registroDeMoldes.degradado },
+//       });
+//       const c = compor({ resolucao: resol, gerado: reply, instruiuOmitir });
+//       const integ = conferirIntegridade(c);
+//       if (c.caminho === "hibrido" && integ.intacto) {
+//         reply = c.texto;
+//       }
+//       await supa.from("resolucoes_de_molde").insert({
+//         company_id: company.id, conversation_id: convId,
+//         ...linhaDeComposicao(moldeDoTurno, c),
+//       });
+//       // diagnostico do insert final ganha: caminho, molde, composicao, chars_canonicos,
+//       // chars_gerados e integ.inicio_do_gerado — este ultimo e o que a verificacao
+//       // pos-resposta precisa para checar SO o trecho gerado. Ver contrato no fim.
+//     }
 //
-//   - A telemetria e gravada nos DOIS caminhos, de proposito. Gravar so o canonico esconde
-//     exatamente o dado que revela molde mal desenhado: um `motivo` repetido 200 vezes no
-//     caminho llm e uma fonte de campo quebrada que ninguem veria.
+// ============================================================================
+// ARMADILHAS. A primeira e nova e e a mais grave do diff.
+// ============================================================================
 //
-// INTERSECAO COM A VERIFICACAO POS-RESPOSTA (dono: outro agente): o turno canonico nao passa
-// por geracao, entao verificar a saida contra o prompt nao se aplica. Se o verificador rodar
-// sobre tudo, vai reprovar texto canonico por "nao segue o formato do prompt". O acordo
-// natural e ele ignorar turno com diagnostico.caminho = "canonico" — descrito aqui, nao
-// implementado, porque a decisao e dele.
+//   [1] O FILTRO POS-SINTESE APAGA O BLOCO CANONICO SE A COMPOSICAO VIER ANTES DELE.
+//
+//       `filtroPosSintese` (~6096-6197) existe por causa do incidente IMPULSAO de 20/08: se a
+//       resposta AFIRMA card emitido e `actionCards` esta vazio, ele descarta o texto e troca
+//       por um aviso. E a linha ~6192 e explicita: se o que sobrou ainda casa
+//       RE_CLAIM_CARD_EMITIDO (~5972), zera tudo.
+//
+//       O gabarito de ATO_CONFIRMACAO_CARD casa esse regex por construcao — ele existe
+//       justamente para afirmar cards emitidos. Compor ANTES do filtro significa que, em toda
+//       rodada em que os cards nao entraram em `actionCards`, o bloco canonico e DELETADO. O
+//       determinismo nao seria parafraseado, seria apagado, e a telemetria diria "hibrido"
+//       para uma mensagem que saiu sem bloco nenhum.
+//
+//       Por isso o ponto B e depois do claimSan, e nao antes. Efeito colateral que e um ganho:
+//       o filtro continua julgando SO o texto gerado, que e o unico que pode mentir. O bloco
+//       canonico vem de approval_requests e nao tem como afirmar card que nao existe — foi
+//       exatamente para isso que ele foi desenhado.
+//
+//       Consequencia para quem aplicar: se algum dia a composicao for movida para antes da
+//       sintese, este filtro tem de passar a receber `integ.inicio_do_gerado` e julgar so o
+//       slice. Mover sem isso reintroduz o incidente de 20/08 com aparencia de determinismo.
+//
+//   [2] MOLDE CALCULADO DEPENDE DE RPC — e o hibrido RESOLVE isso, com uma ressalva nova.
+//
+//       Na versao binaria isto era um beco: o unico ponto de ligacao era antes das RPCs, e
+//       molde calculado sem numero cai para o LLM com "campo obrigatorio sem valor". O ponto
+//       B esta DEPOIS das ferramentas, entao os 6 moldes calculados e os 2 de ato passam a
+//       ter valor disponivel — e sao exatamente os 7 componiveis.
+//
+//       A ressalva nova: `valoresDoMolde` nao existe hoje: alguem tem de montar o mapa
+//       campo->valor a partir dos toolResults, e a origem de cada campo esta declarada em
+//       `moldes_de_resposta.campos[].origem` justamente para isso. Enquanto esse mapa nao
+//       existir, o ponto B resolve para llm com "campo obrigatorio sem valor" e — atencao —
+//       com `instruiuOmitir` verdadeiro, o que cai na armadilha [3].
+//
+//   [3] RESPOSTA MUTILADA: instruir a omitir e nao entregar o bloco.
+//
+//       O ponto A promete ao modelo que o bloco vem; o ponto B pode falhar. O modelo obedeceu
+//       e omitiu os numeros, e a resposta sai comentando numeros que nao aparecem. Nao e
+//       resposta errada, e resposta INCOMPLETA que parece completa.
+//
+//       `compor` devolve `defeito` preenchido nesse caso (por isso `instruiuOmitir` e
+//       obrigatorio no ponto B). O conserto correto e regerar sem a instrucao; o aceitavel e
+//       anexar uma nota honesta. O que NAO se pode fazer e entregar em silencio. O defeito
+//       tambem vai para `resolucoes_de_molde.motivo`, entao um pico ali e alarme.
+//
+//   [4] Passar `objetivoOriginal` e obrigatorio, `message` nao serve. Ver motivo em (2).
+//
+//   [5] A telemetria e gravada nos TRES caminhos, de proposito. Gravar so canonico e hibrido
+//       esconde exatamente o dado que revela molde mal desenhado: um `motivo` repetido 200
+//       vezes no caminho llm e uma fonte de campo quebrada que ninguem veria. E sem os tres
+//       `proporcao_canonica_medida()` nao tem denominador.
+//
+//   [6] O `return json(...)` do ponto A tem de espelhar a FORMA que o front ja consome no fim
+//       do handler. Se a chave mudou, e a unica linha do diff que precisa de conferencia.
+//
+// ============================================================================
+// CONTRATO PARA A VERIFICACAO POS-RESPOSTA (dono: outro agente. Descrito, nao implementado.)
+// ============================================================================
+//
+// Na versao binaria eu propus que o verificador ignorasse turno com caminho = "canonico".
+// MUDEI DE OPINIAO, e o hibrido e o motivo: um turno hibrido tem as duas naturezas, e ignorar
+// o turno inteiro abriria um buraco na verificacao justamente na parte gerada — que e a unica
+// que pode alucinar. Seria trocar um falso positivo por um falso negativo, no lado errado.
+//
+// O contrato correto e por TRECHO, nao por turno:
+//
+//   caminho = "llm"        verifica o texto inteiro. Nada muda.
+//
+//   caminho = "canonico"   NAO verifica. Nao passou por geracao; reprovar aqui e sempre falso
+//                          positivo. Se o texto canonico esta errado, o conserto e no registro
+//                          (`moldes_de_resposta`) e a deteccao e por revalidar_ate, nao pelo
+//                          verificador de saida.
+//
+//   caminho = "hibrido"    verifica SO `texto.slice(inicio_do_gerado)`. O `diagnostico` do
+//                          turno carrega `inicio_do_gerado` e `chars_canonicos` para isso, e
+//                          `conferirIntegridade` devolve o offset ja calculado.
+//
+// Tres condicoes que o dono daquela camada precisa saber:
+//
+//   a) O offset e confiavel porque o bloco esta SEMPRE em posicao 0 e o separador e fixo
+//      ("\n\n"). Nao ha delimitador a procurar no texto, e nao ha heuristica.
+//
+//   b) Se `conferirIntegridade` reprovar, o turno NAO deve ser verificado por trecho — deve
+//      ser tratado como incidente da camada de composicao, porque significa que alguem mexeu
+//      no texto entre a composicao e a persistencia. Verificar por trecho um texto adulterado
+//      verificaria o slice errado.
+//
+//   c) O trecho gerado do hibrido foi produzido sob a instrucao de NAO repetir o bloco. Um
+//      verificador que exija "a resposta declara os numeros" reprovaria o trecho por
+//      obedecer. A regra de formato precisa ver a mensagem inteira para julgar completude, e
+//      so o slice para julgar alucinacao. E a unica parte do contrato que nao e um simples
+//      recorte, e vale discutir antes de implementar.
+

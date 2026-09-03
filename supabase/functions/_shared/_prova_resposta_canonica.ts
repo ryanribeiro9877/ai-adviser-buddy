@@ -10,7 +10,6 @@ import {
   carregarRegistroDeMoldes,
   inteiro,
   lacunasDoGabarito,
-  linhaDeTelemetria,
   type MoldeRegistro,
   pct,
   preencher,
@@ -209,20 +208,31 @@ const reg = registroFallback();
 }
 
 // ============================================================================
-// TELEMETRIA — grava nos DOIS caminhos, senao nao ha governanca
+// GRUPO DE COMPOSICAO vem do REGISTRO, nao da classe
 // ============================================================================
+//
+// A telemetria mudou de casa: com o hibrido ela tem TRES estados e mora em
+// composicao_hibrida.ts (`linhaDeComposicao`), provada em _prova_composicao_hibrida.ts secao
+// [5]. O que sobra a provar aqui e que a resolucao carrega o grupo lido do registro — inferir
+// o grupo da classe seria o atalho errado: duas recusas podem ter grupos diferentes no dia em
+// que uma delas passar a admitir analise, e a decisao e da tabela.
 {
   const molde = classificarMolde("Escale o criativo vencedor.");
   const r = resolverRespostaCanonica({ molde, registro: reg, ctx });
-  const t = linhaDeTelemetria(molde, r);
-  assert(t.caminho === "canonico" && t.molde === "REC_ESCALAR_CRIATIVO", "telemetria do canonico");
-  assert(t.motivo === null && t.versao === 1, "canonico sem motivo, com versao");
+  assert(r.caminho === "canonico", "recusa deveria resolver canonico");
+  if (r.caminho === "canonico") {
+    assert(r.molde === "REC_ESCALAR_CRIATIVO", "molde esperado");
+    assert(r.composicao === "nao_componivel", `grupo deveria ser nao_componivel, veio ${r.composicao}`);
+  }
 }
 {
-  const molde = classificarMolde("escreva 3 legendas para esse reel");
+  // Mesma classe (texto_canonico), grupo DIFERENTE: prova que o grupo nao e derivado da classe.
+  const molde = classificarMolde("sonda responda apenas ok");
   const r = resolverRespostaCanonica({ molde, registro: reg, ctx });
-  const t = linhaDeTelemetria(molde, r);
-  assert(t.caminho === "llm" && t.motivo !== null, "telemetria do LLM tem motivo");
+  if (r.caminho === "canonico") {
+    assert(r.classe === "texto_canonico", "classe esperada");
+    assert(r.composicao === "turno_inteiro", `grupo deveria ser turno_inteiro, veio ${r.composicao}`);
+  }
 }
 
 // ============================================================================
