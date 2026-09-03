@@ -36,8 +36,11 @@ export function AccountsTable({
               <TableHead className="text-right">Cliques no link</TableHead>
               <TableHead className="text-right">Conversas</TableHead>
               <TableHead className="text-right">Formulário</TableHead>
-              <TableHead className="text-right">Leads</TableHead>
-              <TableHead className="text-right">CPL</TableHead>
+              {/* Cada custo divide o gasto DA BASE. A coluna "Leads" saiu: somava formulário
+                  com conversa sem declarar denominador, e vinha de uma coluna que a ingestão
+                  parou de atualizar em julho. */}
+              <TableHead className="text-right">Custo/formulário</TableHead>
+              <TableHead className="text-right">Custo/conversa</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -66,9 +69,13 @@ export function AccountsTable({
                   {fmtInt(a.messaging_started)}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{fmtInt(a.form_leads)}</TableCell>
-                <TableCell className="text-right tabular-nums">{fmtInt(a.leads)}</TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {a.leads > 0 ? fmtBRL(a.spend / a.leads) : "—"}
+                  {a.form_leads > 0 ? fmtBRL(a.gasto_em_formulario / a.form_leads) : "—"}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {a.messaging_started > 0
+                    ? fmtBRL(a.gasto_em_conversa / a.messaging_started)
+                    : "—"}
                 </TableCell>
               </TableRow>
             ))}

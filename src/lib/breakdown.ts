@@ -13,6 +13,17 @@ export type TipoConta =
   | "outro"
   | "sem_dados";
 
+/**
+ * Base de resultado declarada, igual a de _shared/metrica_canonica.ts e a de
+ * public.base_de_resultado(). O painel NAO decide a base: ela vem pronta da view
+ * v_campaign_breakdown. Aqui o tipo existe so para o TypeScript recusar rotulo trocado.
+ */
+export type BaseDeResultado =
+  | "formularios"
+  | "conversas"
+  | "formularios_e_conversas"
+  | "cliques_no_link";
+
 export type AccountRow = {
   account_id: string;
   account_name: string;
@@ -25,7 +36,11 @@ export type AccountRow = {
   landing_page_views: number;
   messaging_started: number;
   form_leads: number;
-  leads: number;
+  // Gasto SEPARADO por base. Uma conta mistura campanha de formulario, de conversa e de
+  // trafego; dividir o gasto total pelos formularios da conta inflava o custo em ate 5,4x.
+  gasto_em_formulario: number;
+  gasto_em_conversa: number;
+  gasto_em_trafego: number;
   sales: number;
   revenue: number;
 };
@@ -49,10 +64,15 @@ export type CampaignRow = {
   landing_page_views: number;
   messaging_started: number;
   form_leads: number;
-  leads: number;
   sales: number;
   revenue: number;
-  cpl: number | null;
+  // Base decidida no banco (public.base_de_resultado), com o resultado e o custo dela.
+  // Substituiu `leads` (coluna orfa, removida em 03/09/2026) e `cpl` (= gasto / leads).
+  base_de_resultado: BaseDeResultado;
+  rotulo_do_custo: string;
+  unidade_do_resultado: string;
+  resultados: number;
+  custo_por_resultado: number | null;
   cpc_link: number | null;
   last_synced_at: string | null;
 };
@@ -147,67 +167,39 @@ export type ResultMetric = {
   costValue: string | null;
 };
 
+/**
+ * Resultado destacado de uma campanha, na base que o BANCO declarou.
+ *
+ * ANTES esta funcao escolhia a base pelo `tipo` da campanha, num switch escrito a mao — a
+ * setima copia da mesma regra no sistema — e o ramo `default`, que atendia as 44 campanhas
+ * sem categoria, mostrava "Leads" a partir da coluna orfa `leads`, com CPL = gasto / leads.
+ * A base agora vem pronta em `c.base_de_resultado` e o rotulo em `c.rotulo_do_custo`: o
+ * painel apresenta, nao decide. Venda continua com tratamento proprio porque ROAS nao e
+ * custo por resultado — e a unica leitura em que a receita, e nao o denominador, manda.
+ */
 export function resultForCampaign(c: CampaignRow): ResultMetric {
-  switch (c.tipo) {
-    case "trafego":
-      return {
-        label: "Cliques no link",
-        value: fmtInt(c.link_clicks),
-        costLabel: "CPC-link",
-        costValue: c.link_clicks > 0 ? fmtBRL(num(c.cpc_link) || c.spend / c.link_clicks) : "—",
-      };
-    case "mensagem":
-      return {
-        label: "Conversas",
-        value: fmtInt(c.messaging_started),
-        costLabel: "Custo/conversa",
-        costValue: c.messaging_started > 0 ? fmtBRL(c.spend / c.messaging_started) : "—",
-      };
-    case "leadgen":
-      return {
-        label: "Formulários",
-        value: fmtInt(c.form_leads),
-        costLabel: "CPL",
-        costValue: c.form_leads > 0 ? fmtBRL(c.spend / c.form_leads) : "—",
-      };
-    case "vendas":
-      return {
-        label: "Vendas / Receita",
-        value: `${fmtInt(c.sales)} · ${fmtBRL(c.revenue)}`,
-        costLabel: c.revenue > 0 ? "ROAS" : "CPA",
-        costValue:
-          c.revenue > 0
-            ? `${fmtDec(c.revenue / Math.max(c.spend, 1))}x`
-            : c.sales > 0
-              ? fmtBRL(c.spend / c.sales)
-              : "—",
-      };
-    case "engajamento":
-      return {
-        label: "Interações",
-        value: fmtInt(c.clicks),
-        costLabel: "Impressões",
-        costValue: fmtInt(c.impressions),
-      };
-    case "alcance":
-      return {
-        label: "Alcance",
-        value: fmtInt(c.reach),
-        costLabel: "CPM",
-        costValue: c.impressions > 0 ? fmtBRL((c.spend / c.impressions) * 1000) : "—",
-      };
-    case "video":
-      return { label: "Cliques", value: fmtInt(c.clicks), costLabel: null, costValue: null };
-    case "app":
-      return { label: "—", value: "—", costLabel: null, costValue: null };
-    default:
-      return {
-        label: "Leads",
-        value: fmtInt(c.leads),
-        costLabel: "CPL",
-        costValue: c.leads > 0 ? fmtBRL(c.spend / c.leads) : "—",
-      };
+  if (c.revenue > 0) {
+    return {
+      label: "Vendas / Receita",
+      value: `${fmtInt(c.sales)} · ${fmtBRL(c.revenue)}`,
+      costLabel: "ROAS",
+      costValue: `${fmtDec(c.revenue / Math.max(c.spend, 1))}x`,
+    };
   }
+  const rotuloDaBase: Record<BaseDeResultado, string> = {
+    formularios: "Formulários",
+    conversas: "Conversas",
+    formularios_e_conversas: "Formulários + conversas",
+    cliques_no_link: "Cliques no link",
+  };
+  return {
+    label: rotuloDaBase[c.base_de_resultado] ?? "Resultados",
+    value: fmtInt(c.resultados),
+    costLabel: `Custo ${c.rotulo_do_custo ?? "por resultado"}`,
+    // Custo nulo com zero resultado e INDEFINIDO, nao zero: "R$ 0,00 por lead" leria como
+    // "sai de graca". O travessao e a unica leitura honesta.
+    costValue: c.resultados > 0 ? fmtBRL(c.custo_por_resultado ?? c.spend / c.resultados) : "—",
+  };
 }
 
 // --- Formatadores (pt-BR) ------------------------------------------------------
@@ -252,7 +244,9 @@ export type AdRow = {
   reach: number;
   clicks: number;
   link_clicks: number;
-  leads: number;
+  // `leads` saiu daqui: sem base declarada e sem escritor vivo desde a troca de pipeline.
+  form_leads: number;
+  messaging_started: number;
   sales: number;
   revenue: number;
   campaign_id: string | null;
@@ -291,7 +285,8 @@ export type AdSetRow = {
   reach: number;
   clicks: number;
   link_clicks: number;
-  leads: number;
+  form_leads: number;
+  messaging_started: number;
   sales: number;
   revenue: number;
   campaign_id: string | null;

@@ -61,7 +61,9 @@ function conta(over: Partial<AccountRow> = {}): AccountRow {
     landing_page_views: 0,
     messaging_started: 0,
     form_leads: 0,
-    leads: 0,
+    gasto_em_formulario: 0,
+    gasto_em_conversa: 0,
+    gasto_em_trafego: 0,
     sales: 0,
     revenue: 0,
     ...over,
@@ -88,10 +90,13 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
     landing_page_views: 0,
     messaging_started: 0,
     form_leads: 0,
-    leads: 0,
     sales: 0,
     revenue: 0,
-    cpl: null,
+    base_de_resultado: "formularios",
+    rotulo_do_custo: "por formulario enviado",
+    unidade_do_resultado: "formularios",
+    resultados: 0,
+    custo_por_resultado: null,
     cpc_link: null,
     last_synced_at: null,
     ...over,
@@ -163,20 +168,29 @@ describe("KPIs somados do nível de campanha", () => {
     expect(screen.getByText(`R$${NB}1.234,50`)).toBeInTheDocument();
   });
 
-  it("soma leads e calcula o CPL a partir da soma", () => {
+  it("o custo por formulario divide o gasto DA BASE, nao o investimento total", () => {
+    // R$ 1.000 investidos, dos quais R$ 400 em campanha de trafego, que nao produz
+    // formulario. Dividir o total pelos 50 formularios daria R$ 20,00 — 66% acima do custo
+    // real. Foi esse numerador que inflou o indicador da carteira medida em 5,4x.
     campanhas = [
-      campanha({ spend: 600, leads: 20 }),
-      campanha({ campaign_id: "c2", spend: 400, leads: 30 }),
+      campanha({ base_de_resultado: "formularios", spend: 600, form_leads: 50 }),
+      campanha({
+        campaign_id: "c2",
+        tipo: "trafego",
+        base_de_resultado: "cliques_no_link",
+        spend: 400,
+        link_clicks: 800,
+      }),
     ];
     render(<Dashboard />);
-    expect(screen.getByText("50")).toBeInTheDocument(); // leads
-    expect(screen.getByText(`R$${NB}20,00`)).toBeInTheDocument(); // 1000 / 50
+    expect(kpi("Formulários")).toBe("50");
+    expect(kpi("Custo por formulário")).toBe(`R$${NB}12,00`); // 600 / 50, nao 1000 / 50
   });
 
-  it("ZERO leads nao divide por zero no CPL", () => {
-    campanhas = [campanha({ spend: 500, leads: 0 })];
+  it("ZERO resultado na base nao divide por zero", () => {
+    campanhas = [campanha({ spend: 500, form_leads: 0 })];
     render(<Dashboard />);
-    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(kpi("Custo por formulário")).toBe("—");
   });
 
   it("sem campanha nenhuma, os KPIs sao zero — nao vazio", () => {
@@ -189,12 +203,13 @@ describe("KPIs somados do nível de campanha", () => {
   it("mostra os KPIs de aquisição", () => {
     campanhas = [campanha({ link_clicks: 400, messaging_started: 25, form_leads: 30 })];
     render(<Dashboard />);
-    // Cada um pelo cartao: "Leads" tambem e cabecalho de coluna na tabela.
+    // Cada um pelo cartao: o rotulo tambem aparece como cabecalho de coluna na tabela.
     expect(kpi("Cliques no link")).toBe("400");
     expect(kpi("Conversas")).toBe("25");
-    expect(kpi("Formulário")).toBe("30");
+    expect(kpi("Formulários")).toBe("30");
     expect(kpi("Investimento")).toBeTruthy();
-    expect(kpi("CPL")).toBeTruthy();
+    // "CPL" nao existe mais como cartao: custo sem denominador declarado saiu da tela.
+    expect(screen.queryByText("CPL")).not.toBeInTheDocument();
   });
 });
 
@@ -237,7 +252,7 @@ describe("filtro por tipo", () => {
     // O erro que isso evita: filtrar a tabela e deixar o numero grande do topo
     // parado, mostrando dois totais diferentes na mesma tela.
     campanhas = [
-      campanha({ tipo: "leadgen", spend: 700, leads: 10 }),
+      campanha({ tipo: "leadgen", spend: 700, form_leads: 10 }),
       campanha({ campaign_id: "c2", tipo: "mensagem", spend: 300 }),
     ];
     render(<Dashboard />);

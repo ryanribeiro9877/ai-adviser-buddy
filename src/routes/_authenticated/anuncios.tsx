@@ -65,8 +65,10 @@ function AdCard({ ad }: { ad: AdRow }) {
       </div>
       <div className="grid grid-cols-4 gap-2 mt-3">
         <Stat label="Gasto" value={fmtBRL(ad.spend)} />
-        <Stat label="Leads" value={fmtInt(ad.leads)} />
-        <Stat label="CPL" value={ad.leads > 0 ? fmtBRL(ad.spend / ad.leads) : "—"} />
+        {/* Formulário e conversa aparecem separados: o anúncio não tem "lead" genérico, e a
+            coluna que somava os dois parou de ser atualizada em julho de 2026. */}
+        <Stat label="Formulários" value={fmtInt(ad.form_leads)} />
+        <Stat label="Conversas" value={fmtInt(ad.messaging_started)} />
         <Stat label="CTR" value={ctr(ad)} />
       </div>
       {ad.permalink_url && (

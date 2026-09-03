@@ -195,10 +195,63 @@ export function custoPorResultado(
  * Substitui o `forms || convs` de get_ads_ranking, que trocava de base silenciosamente: uma
  * campanha de formulario com zero formularios e conversas de WhatsApp passava a ser medida por
  * conversa, e o numero saia comparavel com o de campanhas medidas por formulario quando nao e.
+ *
+ * TRES ENTRADAS, NESTA ORDEM, e nenhum contador. A categoria vem primeiro porque e decisao
+ * humana; depois `optimization_goal` e `objective`, que sao configuracao DECLARADA na Meta.
+ * Contador esta proibido de propósito: base decidida por "teve conversa > 0" muda de identidade
+ * conforme a janela do relatorio, e a campanha passa a ser medida por conversa numa semana e
+ * por formulario na outra sem que nada tenha mudado na campanha.
+ *
+ * POR QUE as duas ultimas entradas existem (medido em 03/09/2026): categoria e NULL em 44 das
+ * 79 campanhas e em 35 das 41 com entrega nos ultimos 7 dias, porque `classify_campaign` so e
+ * chamada pelo pipeline aposentado. Decidir so pela categoria deixaria a maior parte do gasto
+ * caindo no `else formularios` — que foi exatamente o erro de 5,4x da Legal e Viver, onde 21
+ * das 27 campanhas com entrega sao impulsionamento de post e nenhuma produz formulario.
+ *
+ * ESPELHO EXATO de `public.base_de_resultado(p_categoria, p_optimization_goal, p_objective)`
+ * (migration 20260903230000). A ordem dos ramos aqui e a ordem dos `when` la, e a prova
+ * `public.prova_base_de_resultado()` confronta os dois lados caso a caso: mexer em um so
+ * quebra a prova.
  */
-export function baseDoObjetivo(categoria: string | null | undefined): BaseDeResultado {
-  const c = String(categoria ?? "").trim().toLowerCase();
-  if (c === "mensagem" || c === "mensagens") return "conversas";
+export function baseDoObjetivo(
+  categoria: string | null | undefined,
+  optimizationGoal?: string | null,
+  objective?: string | null,
+): BaseDeResultado {
+  const cat = String(categoria ?? "").trim().toLowerCase();
+  const goal = String(optimizationGoal ?? "").trim().toUpperCase();
+  const obj = String(objective ?? "").toUpperCase();
+  const contem = (...partes: string[]) => partes.some((p) => obj.includes(p));
+
+  if (cat === "mensagem" || cat === "mensagens") return "conversas";
+  if (["leadgen", "lead", "leads", "formulario", "formularios", "cadastro", "vendas", "conversao", "conversoes"].includes(cat)) {
+    return "formularios";
+  }
+  if (["trafego", "engajamento", "alcance", "video", "app", "outro"].includes(cat)) return "cliques_no_link";
+
+  if (goal === "CONVERSATIONS") return "conversas";
+  if (contem("MESSAGE")) return "conversas";
+
+  if (["LEAD_GENERATION", "QUALITY_LEAD", "QUALITY_CALL", "OFFSITE_CONVERSIONS", "ONSITE_CONVERSIONS"].includes(goal)) {
+    return "formularios";
+  }
+  if (contem("LEAD")) return "formularios";
+  if (contem("SALES", "CONVERSION", "CATALOG")) return "formularios";
+
+  if (contem("TRAFFIC", "LINK_CLICK", "ENGAGEMENT", "AWARENESS", "REACH", "VIDEO", "APP", "POST", "PAGE_LIKES")) {
+    return "cliques_no_link";
+  }
+  if (
+    [
+      "LANDING_PAGE_VIEWS", "LINK_CLICKS", "POST_ENGAGEMENT", "VISIT_INSTAGRAM_PROFILE", "PROFILE_VISIT",
+      "REACH", "IMPRESSIONS", "THRUPLAY", "VIDEO_VIEWS", "PAGE_LIKES", "EVENT_RESPONSES", "AD_RECALL_LIFT",
+    ].includes(goal)
+  ) {
+    return "cliques_no_link";
+  }
+
+  // Sem categoria e sem configuracao legivel: formulario e o padrao historico do sistema.
+  // NAO e "a base certa" — e o unico chute que nao inventa resultado onde nao houve leitura.
   return "formularios";
 }
 

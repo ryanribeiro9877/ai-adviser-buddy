@@ -18,7 +18,6 @@ type SnapshotSelectRow = {
   landing_page_views: number | string | null;
   messaging_started: number | string | null;
   form_leads: number | string | null;
-  leads: number | string | null;
   sales: number | string | null;
   revenue: number | string | null;
 };
@@ -33,7 +32,6 @@ type SnapshotAgg = {
   landing_page_views: number;
   messaging_started: number;
   form_leads: number;
-  leads: number;
   sales: number;
   revenue: number;
 };
@@ -47,7 +45,6 @@ const emptyAgg = (): SnapshotAgg => ({
   landing_page_views: 0,
   messaging_started: 0,
   form_leads: 0,
-  leads: 0,
   sales: 0,
   revenue: 0,
 });
@@ -61,8 +58,11 @@ function useCampaignSnapshots(companyId: string | null, range: { start: ISODate;
       const db = supabase as unknown as SupabaseClient;
       const { data, error } = await db
         .from("metric_snapshots")
+        // `leads` NAO entra: a coluna soma formulario com conversa sem declarar base, esta
+        // desatualizada desde a troca de pipeline e foi removida de campaigns em 03/09/2026.
+        // Ela sobrevive em metric_snapshots so porque duas edges sob medicao ainda a leem.
         .select(
-          "campaign_id,spend,impressions,reach,clicks,link_clicks,landing_page_views,messaging_started,form_leads,leads,sales,revenue",
+          "campaign_id,spend,impressions,reach,clicks,link_clicks,landing_page_views,messaging_started,form_leads,sales,revenue",
         )
         .eq("company_id", companyId!)
         .gte("snapshot_date", range.start)
@@ -82,7 +82,6 @@ function useCampaignSnapshots(companyId: string | null, range: { start: ISODate;
         a.landing_page_views += num(r.landing_page_views);
         a.messaging_started += num(r.messaging_started);
         a.form_leads += num(r.form_leads);
-        a.leads += num(r.leads);
         a.sales += num(r.sales);
         a.revenue += num(r.revenue);
         map.set(id, a);
@@ -108,6 +107,17 @@ export function usePeriodCampaigns(
     if (!snaps) return [];
     return meta.map((m) => {
       const s = snaps.get(m.campaign_id) ?? emptyAgg();
+      // A BASE vem da view (decidida por public.base_de_resultado); aqui so se aplica o
+      // contador correspondente ao periodo escolhido. Escolher a base aqui seria a oitava
+      // copia da mesma regra — e base que depende do periodo muda de identidade a cada filtro.
+      const resultados =
+        m.base_de_resultado === "conversas"
+          ? s.messaging_started
+          : m.base_de_resultado === "cliques_no_link"
+            ? s.link_clicks
+            : m.base_de_resultado === "formularios_e_conversas"
+              ? s.form_leads + s.messaging_started
+              : s.form_leads;
       return {
         ...m,
         spend: s.spend,
@@ -118,11 +128,11 @@ export function usePeriodCampaigns(
         landing_page_views: s.landing_page_views,
         messaging_started: s.messaging_started,
         form_leads: s.form_leads,
-        leads: s.leads,
         sales: s.sales,
         revenue: s.revenue,
-        // CPL/CPC-link recalculados sobre o período (guard de divisão por zero).
-        cpl: s.leads > 0 ? s.spend / s.leads : null,
+        resultados,
+        // Zero resultado no periodo devolve null (custo indefinido), nunca zero.
+        custo_por_resultado: resultados > 0 ? s.spend / resultados : null,
         cpc_link: s.link_clicks > 0 ? s.spend / s.link_clicks : null,
       };
     });

@@ -7,6 +7,7 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { situacaoDoCard } from "../_shared/aprovacoes.ts";
 import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto } from "../_shared/memoria_conjunto.ts";
 import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
+import { type BaseDeResultado, baseDoObjetivo, custoPorResultado, rotuloDaBase } from "../_shared/metrica_canonica.ts";
 
 const db = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -42,12 +43,36 @@ async function checkAuth(req: Request): Promise<boolean> {
   return auth.ok;
 }
 
-function derive(r: Record<string, unknown>) {
-  const n = (v: unknown) => Number(v ?? 0);
-  const spend = n(r.spend), leads = n(r.leads), sales = n(r.sales),
-    revenue = n(r.revenue), clicks = n(r.clicks), impressions = n(r.impressions);
+const n = (v: unknown) => Number(v ?? 0);
+
+/**
+ * Derivados de UMA campanha, com a base do resultado declarada.
+ *
+ * ANTES (ate 03/09/2026) esta funcao devolvia `cpl: spend / leads`, lendo `campaigns.leads` —
+ * coluna agregada que o pipeline vivo parou de alimentar quando o Windsor foi aposentado.
+ * Na pratica: campanha de WhatsApp com 83 conversas devolvia `leads: 0` e `cpl: null`, e
+ * campanha de trafego devolvia custo por lead como se produzisse lead. O nome "cpl" era o
+ * proprio defeito: indicador de custo sem denominador declarado convida cada chamador a
+ * escolher o dele. A base agora vem de `baseDoObjetivo()`, a mesma regra que
+ * `public.base_de_resultado()` aplica no banco, com paridade provada em
+ * `public.prova_base_de_resultado()`.
+ */
+function derivadosDaCampanha(r: Record<string, unknown>) {
+  const base = baseDoObjetivo(r.category as string | null, null, r.objective as string | null);
+  const custo = custoPorResultado({
+    gasto: n(r.spend),
+    formularios: n(r.form_leads),
+    conversas: n(r.messaging_started),
+    cliques_no_link: n(r.link_clicks),
+  }, base);
+  const sales = n(r.sales), spend = n(r.spend), revenue = n(r.revenue),
+    clicks = n(r.clicks), impressions = n(r.impressions);
   return {
-    cpl: leads ? +(spend / leads).toFixed(2) : null,
+    base_de_resultado: base,
+    resultados: custo.resultados,
+    custo_por_resultado: custo.valor,
+    rotulo_do_custo: rotuloDaBase(base),
+    custo_indefinido_porque: custo.indefinido_porque,
     cpa: sales ? +(spend / sales).toFixed(2) : null,
     roas: spend ? +(revenue / spend).toFixed(2) : null,
     ctr: impressions ? +((clicks / impressions) * 100).toFixed(2) : null,
@@ -58,9 +83,9 @@ const sinceDate = (days: number) => new Date(Date.now() - days * 864e5).toISOStr
 
 const TOOLS = [
   { name: "list_companies", description: "Lista as empresas (clientes) cadastradas.", inputSchema: { type: "object", properties: {} } },
-  { name: "list_campaigns", description: "Lista campanhas com metricas atuais e derivadas (CPL, CPA, ROAS, CTR). Filtros opcionais por empresa e status.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, status: { type: "string" } } } },
+  { name: "list_campaigns", description: "Lista campanhas com metricas atuais e derivadas. O custo vem em custo_por_resultado COM a base declarada (formularios, conversas ou cliques_no_link) e o rotulo dela; nao existe 'CPL' sem denominador. Zero resultado devolve custo nulo e o motivo, nunca zero. Filtros opcionais por empresa e status.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, status: { type: "string" } } } },
   { name: "get_campaign_timeseries", description: "Serie temporal diaria de metricas de UMA campanha (metric_snapshots). Base para tendencia e comparacao de periodo.", inputSchema: { type: "object", properties: { campaign_id: { type: "string" }, days: { type: "number" } }, required: ["campaign_id"] } },
-  { name: "get_portfolio_summary", description: "Resumo agregado do periodo (spend, leads, revenue + CPL/ROAS derivados) a partir dos snapshots.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, days: { type: "number" } } } },
+  { name: "get_portfolio_summary", description: "Resumo agregado do periodo a partir dos snapshots, com gasto e resultado SEPARADOS por base (formularios, conversas, cliques_no_link). Nao devolve custo unico do portfolio: somar o gasto das tres bases e dividir pelos formularios inflava o indicador em 5,4x na carteira medida.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, days: { type: "number" } } } },
   { name: "list_alerts", description: "Lista alertas disparados. Por padrao apenas os nao resolvidos.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, only_unresolved: { type: "boolean" } } } },
   { name: "list_alert_rules", description: "Lista as regras de alerta (thresholds) configuradas.", inputSchema: { type: "object", properties: { company_id: { type: "string" } } } },
   { name: "list_approvals", description: "Lista solicitacoes de alteracao na fila de aprovacao. Por padrao as pendentes.", inputSchema: { type: "object", properties: { company_id: { type: "string" }, status: { type: "string" } } } },
@@ -110,7 +135,7 @@ async function callTool(name: string, args: any, mcpKeyEncaminhada: string) {
         if (args.status) q = q.eq("status", args.status);
         const { data, error } = await q.order("spend", { ascending: false });
         if (error) return toolText(error.message, true);
-        return toolText((data ?? []).map((c: Record<string, unknown>) => ({ ...c, derived: derive(c) })));
+        return toolText((data ?? []).map((c: Record<string, unknown>) => ({ ...c, derived: derivadosDaCampanha(c) })));
       }
       case "get_campaign_timeseries": {
         const days = Number(args.days ?? 30);
@@ -120,16 +145,73 @@ async function callTool(name: string, args: any, mcpKeyEncaminhada: string) {
         return toolText({ days, rows: data, note: data && data.length ? undefined : "Sem snapshots ainda — a ingestao (pg_cron -> Windsor) precisa popular metric_snapshots." });
       }
       case "get_portfolio_summary": {
+        // O defeito corrigido em 03/09/2026 nao era so o denominador: era o NUMERADOR. Somar o
+        // gasto de TODAS as campanhas e dividir pelos resultados de ALGUMAS inflava o custo por
+        // formulario da Legal e Viver em 5,4x (R$ 7,63 contra R$ 1,40 reais), porque R$ 1.283
+        // dos R$ 1.572 gastos eram impulsionamento de post, que nao produz formulario. Por isso
+        // o resumo separa gasto e resultado POR BASE em vez de devolver um custo unico.
         const days = Number(args.days ?? 7);
-        let q = db.from("metric_snapshots").select("spend,leads,sales,revenue,clicks,impressions").gte("snapshot_date", sinceDate(days));
-        if (args.company_id) q = q.eq("company_id", args.company_id);
-        const { data, error } = await q;
-        if (error) return toolText(error.message, true);
-        const totals = (data ?? []).reduce((a: Record<string, number>, r: Record<string, unknown>) => {
-          for (const k of ["spend", "leads", "sales", "revenue", "clicks", "impressions"]) a[k] = (a[k] ?? 0) + Number(r[k] ?? 0);
-          return a;
-        }, {});
-        return toolText({ window_days: days, totals, derived: derive(totals), note: data && data.length ? undefined : "Sem snapshots no periodo — ingestao pendente." });
+        let qs = db.from("metric_snapshots")
+          .select("campaign_id,spend,form_leads,messaging_started,link_clicks,sales,revenue,clicks,impressions")
+          .gte("snapshot_date", sinceDate(days));
+        let qc = db.from("campaigns").select("id,category,objective");
+        if (args.company_id) {
+          qs = qs.eq("company_id", args.company_id);
+          qc = qc.eq("company_id", args.company_id);
+        }
+        const [{ data, error }, { data: camps, error: erroCamp }] = await Promise.all([qs, qc]);
+        if (error || erroCamp) return toolText((error ?? erroCamp)!.message, true);
+
+        const baseDaCampanha = new Map<string, BaseDeResultado>(
+          (camps ?? []).map((c: Record<string, unknown>) => [
+            String(c.id),
+            baseDoObjetivo(c.category as string | null, null, c.objective as string | null),
+          ]),
+        );
+
+        const totals: Record<string, number> = {
+          spend: 0, clicks: 0, impressions: 0, sales: 0, revenue: 0,
+          formularios: 0, conversas: 0, cliques_no_link: 0,
+        };
+        const porBase = new Map<BaseDeResultado, { gasto: number; formularios: number; conversas: number; cliques_no_link: number }>();
+        for (const r of (data ?? []) as Record<string, unknown>[]) {
+          totals.spend += n(r.spend);
+          totals.clicks += n(r.clicks);
+          totals.impressions += n(r.impressions);
+          totals.sales += n(r.sales);
+          totals.revenue += n(r.revenue);
+          totals.formularios += n(r.form_leads);
+          totals.conversas += n(r.messaging_started);
+          totals.cliques_no_link += n(r.link_clicks);
+
+          const base = baseDaCampanha.get(String(r.campaign_id)) ?? "formularios";
+          const acc = porBase.get(base) ?? { gasto: 0, formularios: 0, conversas: 0, cliques_no_link: 0 };
+          acc.gasto += n(r.spend);
+          acc.formularios += n(r.form_leads);
+          acc.conversas += n(r.messaging_started);
+          acc.cliques_no_link += n(r.link_clicks);
+          porBase.set(base, acc);
+        }
+
+        const por_base = [...porBase.entries()].map(([base, a]) => {
+          const custo = custoPorResultado({ gasto: a.gasto, formularios: a.formularios, conversas: a.conversas, cliques_no_link: a.cliques_no_link }, base);
+          return {
+            base_de_resultado: base,
+            gasto_nesta_base: custo.gasto,
+            resultados: custo.resultados,
+            custo_por_resultado: custo.valor,
+            rotulo_do_custo: rotuloDaBase(base),
+            custo_indefinido_porque: custo.indefinido_porque,
+          };
+        }).sort((a, b) => b.gasto_nesta_base - a.gasto_nesta_base);
+
+        return toolText({
+          window_days: days,
+          totals,
+          por_base,
+          nota_de_leitura: "Nao existe custo por resultado do portfolio inteiro: cada base tem denominador proprio. Somar o gasto das tres bases e dividir pelos formularios foi o defeito corrigido em 03/09/2026.",
+          note: data && data.length ? undefined : "Sem snapshots no periodo — ingestao pendente.",
+        });
       }
       case "list_alerts": {
         let q = db.from("alerts").select("*");

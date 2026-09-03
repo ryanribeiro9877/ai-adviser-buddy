@@ -71,7 +71,8 @@ function anuncio(over: Partial<AdRow> = {}): AdRow {
     reach: 8000,
     clicks: 300,
     link_clicks: 250,
-    leads: 10,
+    form_leads: 10,
+    messaging_started: 0,
     sales: 0,
     revenue: 0,
     campaign_id: "cmp_1",
@@ -99,10 +100,13 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
     landing_page_views: 0,
     messaging_started: 0,
     form_leads: 0,
-    leads: 0,
     sales: 0,
     revenue: 0,
-    cpl: null,
+    base_de_resultado: "formularios",
+    rotulo_do_custo: "por formulario enviado",
+    unidade_do_resultado: "formularios",
+    resultados: 0,
+    custo_por_resultado: null,
     cpc_link: null,
     last_synced_at: null,
     ...over,
@@ -167,25 +171,24 @@ describe("lista", () => {
 });
 
 describe("cartão do criativo", () => {
-  it("mostra nome, status em pt-BR e métricas", () => {
-    anuncios = [anuncio({ name: "Vídeo Julho", spend: 200, leads: 10 })];
+  it("mostra nome, status em pt-BR e os resultados SEPARADOS por base", () => {
+    // O cartao nao tem mais "Leads"/"CPL": o anuncio nao produz "lead" generico, e a coluna
+    // que somava formulario com conversa parou de ser atualizada em julho de 2026.
+    anuncios = [anuncio({ name: "Vídeo Julho", spend: 200, form_leads: 10, messaging_started: 4 })];
     render(<Anuncios />);
     expect(screen.getByText("Vídeo Julho")).toBeInTheDocument();
     expect(screen.getByText("Ativo")).toBeInTheDocument();
     expect(screen.getByText(`R$${NB}200,00`)).toBeInTheDocument();
-    expect(screen.getByText(`R$${NB}20,00`)).toBeInTheDocument(); // CPL 200/10
-  });
-
-  it("ZERO leads mostra travessão no CPL", () => {
-    anuncios = [anuncio({ leads: 0 })];
-    render(<Anuncios />);
-    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getByText("Formulários")).toBeInTheDocument();
+    expect(screen.getByText("10")).toBeInTheDocument();
+    expect(screen.getByText("Conversas")).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
   });
 
   it("ZERO impressões não divide por zero no CTR", () => {
-    anuncios = [anuncio({ impressions: 0, leads: 0 })];
+    anuncios = [anuncio({ impressions: 0, form_leads: 0 })];
     render(<Anuncios />);
-    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(1);
   });
 
   it("calcula o CTR sobre impressões", () => {

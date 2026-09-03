@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+﻿import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
@@ -56,10 +56,13 @@ function campanhaMeta(over: Partial<CampaignRow> = {}): CampaignRow {
     landing_page_views: 999,
     messaging_started: 999,
     form_leads: 999,
-    leads: 999,
     sales: 999,
     revenue: 999,
-    cpl: 999,
+    base_de_resultado: "formularios" as const,
+    rotulo_do_custo: "por formulario enviado",
+    unidade_do_resultado: "formularios",
+    resultados: 999,
+    custo_por_resultado: 999,
     cpc_link: 999,
     last_synced_at: null,
     ...over,
@@ -77,7 +80,6 @@ function snapshot(campaign_id: string, over: Record<string, unknown> = {}) {
     landing_page_views: 0,
     messaging_started: 0,
     form_leads: 0,
-    leads: 0,
     sales: 0,
     revenue: 0,
     ...over,
@@ -104,7 +106,7 @@ describe("usePeriodCampaigns — junção metadados + período", () => {
     // numeros tem de ser os do periodo — senao a tela mostraria o acumulado
     // com rotulo de periodo, que e mentira silenciosa.
     metaMock.mockReturnValue({ data: [campanhaMeta()], isLoading: false, isError: false });
-    linhasSnapshot = [snapshot("cmp_1", { spend: 100, leads: 4, link_clicks: 50 })];
+    linhasSnapshot = [snapshot("cmp_1", { spend: 100, form_leads: 4, link_clicks: 50 })];
 
     const { result } = montar();
     await waitFor(() => expect(result.current.data).toHaveLength(1));
@@ -112,7 +114,8 @@ describe("usePeriodCampaigns — junção metadados + período", () => {
       campanha: "Campanha A", // metadado preservado
       tipo: "leadgen",
       spend: 100, // numero do periodo
-      leads: 4,
+      form_leads: 4,
+      resultados: 4,
       link_clicks: 50,
     });
   });
@@ -120,27 +123,27 @@ describe("usePeriodCampaigns — junção metadados + período", () => {
   it("SOMA várias linhas diárias da mesma campanha", async () => {
     metaMock.mockReturnValue({ data: [campanhaMeta()], isLoading: false, isError: false });
     linhasSnapshot = [
-      snapshot("cmp_1", { spend: 100, leads: 2 }),
-      snapshot("cmp_1", { spend: 50, leads: 3 }),
-      snapshot("cmp_1", { spend: 25, leads: 1 }),
+      snapshot("cmp_1", { spend: 100, form_leads: 2 }),
+      snapshot("cmp_1", { spend: 50, form_leads: 3 }),
+      snapshot("cmp_1", { spend: 25, form_leads: 1 }),
     ];
     const { result } = montar();
     await waitFor(() => expect(result.current.data).toHaveLength(1));
     expect(result.current.data[0].spend).toBe(175);
-    expect(result.current.data[0].leads).toBe(6);
+    expect(result.current.data[0].resultados).toBe(6);
   });
 
   it("coage numeric que o PostgREST manda como STRING", async () => {
     // Sem o num(), "100" + "50" concatenaria em "10050".
     metaMock.mockReturnValue({ data: [campanhaMeta()], isLoading: false, isError: false });
     linhasSnapshot = [
-      snapshot("cmp_1", { spend: "100.50", leads: "2" }),
-      snapshot("cmp_1", { spend: "50.25", leads: "3" }),
+      snapshot("cmp_1", { spend: "100.50", form_leads: "2" }),
+      snapshot("cmp_1", { spend: "50.25", form_leads: "3" }),
     ];
     const { result } = montar();
     await waitFor(() => expect(result.current.data).toHaveLength(1));
     expect(result.current.data[0].spend).toBeCloseTo(150.75, 2);
-    expect(result.current.data[0].leads).toBe(5);
+    expect(result.current.data[0].resultados).toBe(5);
   });
 
   it("campanha SEM snapshot no periodo vira zero, nao undefined", async () => {
@@ -150,7 +153,7 @@ describe("usePeriodCampaigns — junção metadados + período", () => {
     linhasSnapshot = [];
     const { result } = montar();
     await waitFor(() => expect(result.current.data).toHaveLength(1));
-    expect(result.current.data[0]).toMatchObject({ spend: 0, leads: 0, impressions: 0 });
+    expect(result.current.data[0]).toMatchObject({ spend: 0, resultados: 0, impressions: 0 });
   });
 
   it("ignora linha de snapshot sem campaign_id", async () => {
@@ -190,10 +193,10 @@ describe("usePeriodCampaigns — junção metadados + período", () => {
 describe("usePeriodCampaigns — CPL e CPC recalculados no período", () => {
   it("recalcula sobre os numeros do periodo, nao reaproveita o do agregado", async () => {
     metaMock.mockReturnValue({ data: [campanhaMeta()], isLoading: false, isError: false });
-    linhasSnapshot = [snapshot("cmp_1", { spend: 200, leads: 8, link_clicks: 40 })];
+    linhasSnapshot = [snapshot("cmp_1", { spend: 200, form_leads: 8, link_clicks: 40 })];
     const { result } = montar();
     await waitFor(() => expect(result.current.data).toHaveLength(1));
-    expect(result.current.data[0].cpl).toBe(25); // 200/8
+    expect(result.current.data[0].custo_por_resultado).toBe(25); // 200/8
     expect(result.current.data[0].cpc_link).toBe(5); // 200/40
   });
 
@@ -201,10 +204,10 @@ describe("usePeriodCampaigns — CPL e CPC recalculados no período", () => {
     // Infinity chegaria na tela como "—" no melhor caso e contaminaria
     // qualquer soma no pior.
     metaMock.mockReturnValue({ data: [campanhaMeta()], isLoading: false, isError: false });
-    linhasSnapshot = [snapshot("cmp_1", { spend: 200, leads: 0, link_clicks: 0 })];
+    linhasSnapshot = [snapshot("cmp_1", { spend: 200, form_leads: 0, link_clicks: 0 })];
     const { result } = montar();
     await waitFor(() => expect(result.current.data).toHaveLength(1));
-    expect(result.current.data[0].cpl).toBeNull();
+    expect(result.current.data[0].custo_por_resultado).toBeNull();
     expect(result.current.data[0].cpc_link).toBeNull();
   });
 });

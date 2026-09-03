@@ -80,14 +80,23 @@ describe("useAccountBreakdown", () => {
 
   it("coage numeric que vem como string", async () => {
     resposta = {
-      data: [{ account_id: "a1", spend: "1234.56", campaigns: "3", leads: "7" }],
+      data: [
+        {
+          account_id: "a1",
+          spend: "1234.56",
+          campaigns: "3",
+          form_leads: "7",
+          gasto_em_formulario: "800.10",
+        },
+      ],
       error: null,
     };
     const { result } = montar(() => useAccountBreakdown(EMPRESA));
     await waitFor(() => expect(result.current.data).toHaveLength(1));
     expect(result.current.data![0].spend).toBeCloseTo(1234.56, 2);
     expect(result.current.data![0].campaigns).toBe(3);
-    expect(result.current.data![0].leads).toBe(7);
+    expect(result.current.data![0].form_leads).toBe(7);
+    expect(result.current.data![0].gasto_em_formulario).toBeCloseTo(800.1, 2);
   });
 
   it("preenche os defaults de texto em vez de deixar null vazar para a tela", async () => {
@@ -131,29 +140,48 @@ describe("useCampaignBreakdown", () => {
     expect(fromMock).toHaveBeenCalledWith("v_campaign_breakdown");
   });
 
-  it("PRESERVA null em cpl e cpc_link", async () => {
+  it("PRESERVA null em custo_por_resultado e cpc_link", async () => {
     // A distincao que mais importa deste arquivo: null = "nao havia
     // denominador"; 0 diria "custo zero".
-    resposta = { data: [{ campaign_id: "c1", cpl: null, cpc_link: null }], error: null };
+    resposta = {
+      data: [{ campaign_id: "c1", custo_por_resultado: null, cpc_link: null }],
+      error: null,
+    };
     const { result } = montar(() => useCampaignBreakdown(EMPRESA));
     await waitFor(() => expect(result.current.data).toHaveLength(1));
-    expect(result.current.data![0].cpl).toBeNull();
+    expect(result.current.data![0].custo_por_resultado).toBeNull();
     expect(result.current.data![0].cpc_link).toBeNull();
   });
 
-  it("coage cpl e cpc_link quando vem preenchidos como string", async () => {
-    resposta = { data: [{ campaign_id: "c1", cpl: "12.34", cpc_link: "0.56" }], error: null };
+  it("coage custo_por_resultado e cpc_link quando vem preenchidos como string", async () => {
+    resposta = {
+      data: [{ campaign_id: "c1", custo_por_resultado: "12.34", cpc_link: "0.56" }],
+      error: null,
+    };
     const { result } = montar(() => useCampaignBreakdown(EMPRESA));
     await waitFor(() => expect(result.current.data).toHaveLength(1));
-    expect(result.current.data![0].cpl).toBeCloseTo(12.34, 2);
+    expect(result.current.data![0].custo_por_resultado).toBeCloseTo(12.34, 2);
     expect(result.current.data![0].cpc_link).toBeCloseTo(0.56, 2);
   });
 
-  it("cpl igual a ZERO nao e confundido com ausencia", async () => {
-    resposta = { data: [{ campaign_id: "c1", cpl: 0 }], error: null };
+  it("custo igual a ZERO nao e confundido com ausencia", async () => {
+    resposta = { data: [{ campaign_id: "c1", custo_por_resultado: 0 }], error: null };
     const { result } = montar(() => useCampaignBreakdown(EMPRESA));
     await waitFor(() => expect(result.current.data).toHaveLength(1));
-    expect(result.current.data![0].cpl).toBe(0);
+    expect(result.current.data![0].custo_por_resultado).toBe(0);
+  });
+
+  it("a BASE vem do banco; ausencia cai em formularios sem inventar contador", async () => {
+    // O painel nao decide base. Se a view nao trouxer, o hook assume a base padrao do
+    // sistema e o rotulo generico — nunca escolhe pelo contador que estiver maior.
+    resposta = {
+      data: [{ campaign_id: "c1", base_de_resultado: "cliques_no_link", resultados: "40" }],
+      error: null,
+    };
+    const { result } = montar(() => useCampaignBreakdown(EMPRESA));
+    await waitFor(() => expect(result.current.data).toHaveLength(1));
+    expect(result.current.data![0].base_de_resultado).toBe("cliques_no_link");
+    expect(result.current.data![0].resultados).toBe(40);
   });
 
   it("tipo ausente cai em 'outro', nao em 'sem_dados'", async () => {

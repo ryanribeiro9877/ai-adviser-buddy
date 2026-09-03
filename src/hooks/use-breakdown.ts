@@ -5,6 +5,7 @@ import {
   type AccountRow,
   type AdRow,
   type AdSetRow,
+  type BaseDeResultado,
   type CampaignRow,
   type Targeting,
   type TipoConta,
@@ -34,7 +35,9 @@ export function useAccountBreakdown(companyId: string | null) {
         landing_page_views: num(r.landing_page_views),
         messaging_started: num(r.messaging_started),
         form_leads: num(r.form_leads),
-        leads: num(r.leads),
+        gasto_em_formulario: num(r.gasto_em_formulario),
+        gasto_em_conversa: num(r.gasto_em_conversa),
+        gasto_em_trafego: num(r.gasto_em_trafego),
         sales: num(r.sales),
         revenue: num(r.revenue),
       }));
@@ -73,10 +76,13 @@ export function useCampaignBreakdown(companyId: string | null) {
         landing_page_views: num(r.landing_page_views),
         messaging_started: num(r.messaging_started),
         form_leads: num(r.form_leads),
-        leads: num(r.leads),
         sales: num(r.sales),
         revenue: num(r.revenue),
-        cpl: r.cpl == null ? null : num(r.cpl),
+        base_de_resultado: (r.base_de_resultado ?? "formularios") as BaseDeResultado,
+        rotulo_do_custo: r.rotulo_do_custo ?? "por resultado",
+        unidade_do_resultado: r.unidade_do_resultado ?? "resultados",
+        resultados: num(r.resultados),
+        custo_por_resultado: r.custo_por_resultado == null ? null : num(r.custo_por_resultado),
         cpc_link: r.cpc_link == null ? null : num(r.cpc_link),
         last_synced_at: r.last_synced_at ?? null,
       }));
@@ -93,7 +99,9 @@ export function useAds(companyId: string | null) {
       const { data, error } = await supabase
         .from("ads")
         .select(
-          "id,name,status,object_type,call_to_action_type,title,body,thumbnail_url,image_url,permalink_url,spend,impressions,reach,clicks,link_clicks,leads,sales,revenue,campaign_id",
+          // `leads` saiu: coluna sem base declarada e sem escritor vivo. Formulario e conversa
+          // vem separados, cada um com o nome do que e.
+          "id,name,status,object_type,call_to_action_type,title,body,thumbnail_url,image_url,permalink_url,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,sales,revenue,campaign_id",
         )
         .eq("company_id", companyId!)
         .order("spend", { ascending: false });
@@ -114,7 +122,8 @@ export function useAds(companyId: string | null) {
         reach: num(r.reach),
         clicks: num(r.clicks),
         link_clicks: num(r.link_clicks),
-        leads: num(r.leads),
+        form_leads: num(r.form_leads),
+        messaging_started: num(r.messaging_started),
         sales: num(r.sales),
         revenue: num(r.revenue),
         campaign_id: r.campaign_id ?? null,
@@ -132,7 +141,7 @@ export function useAdSets(companyId: string | null) {
       const { data, error } = await supabase
         .from("ad_sets")
         .select(
-          "id,name,status,daily_budget,lifetime_budget,bid_strategy,targeting,spend,impressions,reach,clicks,link_clicks,leads,sales,revenue,campaign_id",
+          "id,name,status,daily_budget,lifetime_budget,bid_strategy,targeting,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,sales,revenue,campaign_id",
         )
         .eq("company_id", companyId!)
         .order("spend", { ascending: false });
@@ -150,7 +159,8 @@ export function useAdSets(companyId: string | null) {
         reach: num(r.reach),
         clicks: num(r.clicks),
         link_clicks: num(r.link_clicks),
-        leads: num(r.leads),
+        form_leads: num(r.form_leads),
+        messaging_started: num(r.messaging_started),
         sales: num(r.sales),
         revenue: num(r.revenue),
         campaign_id: r.campaign_id ?? null,

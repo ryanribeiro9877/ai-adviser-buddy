@@ -163,8 +163,11 @@ function Campanhas() {
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Investimento</TableHead>
                   <TableHead className="text-right">CTR</TableHead>
-                  <TableHead className="text-right">Leads</TableHead>
-                  <TableHead className="text-right">CPL</TableHead>
+                  {/* Resultado e custo na base declarada da campanha (formulário, conversa ou
+                      clique no link). "Leads"/"CPL" saíram porque o mesmo rótulo cobria bases
+                      diferentes e o número não era comparável entre linhas. */}
+                  <TableHead className="text-right">Resultado</TableHead>
+                  <TableHead className="text-right">Custo</TableHead>
                   {hasRevenue && <TableHead className="text-right">ROAS</TableHead>}
                   <TableHead className="text-right">Ações</TableHead>
                 </TableRow>
@@ -201,9 +204,17 @@ function Campanhas() {
                       </TableCell>
                       <TableCell className="text-right tabular-nums">{fmtBRL(c.spend)}</TableCell>
                       <TableCell className="text-right tabular-nums">{ctr(c)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{fmtInt(c.leads)}</TableCell>
                       <TableCell className="text-right tabular-nums">
-                        {c.leads > 0 ? fmtBRL(c.cpl ?? c.spend / c.leads) : "—"}
+                        {fmtInt(c.resultados)}{" "}
+                        <span className="text-xs text-muted-foreground">
+                          {c.unidade_do_resultado}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {c.resultados > 0
+                          ? fmtBRL(c.custo_por_resultado ?? c.spend / c.resultados)
+                          : "—"}{" "}
+                        <span className="text-xs text-muted-foreground">{c.rotulo_do_custo}</span>
                       </TableCell>
                       {hasRevenue && (
                         <TableCell className="text-right tabular-nums">

@@ -213,129 +213,102 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
     landing_page_views: 0,
     messaging_started: 0,
     form_leads: 0,
-    leads: 0,
     sales: 0,
     revenue: 0,
-    cpl: null,
+    base_de_resultado: "formularios",
+    rotulo_do_custo: "por formulario enviado",
+    unidade_do_resultado: "formularios",
+    resultados: 0,
+    custo_por_resultado: null,
     cpc_link: null,
     last_synced_at: null,
     ...over,
   };
 }
 
-describe("resultForCampaign — a metrica que cada tipo destaca", () => {
-  it("trafego: cliques no link e CPC-link", () => {
-    const r = resultForCampaign(campanha({ tipo: "trafego", link_clicks: 200, spend: 100 }));
-    expect(r.label).toBe("Cliques no link");
-    expect(r.value).toBe("200");
-    expect(r.costLabel).toBe("CPC-link");
-    expect(r.costValue).toBe(`R$${NB}0,50`);
-  });
-
-  it("trafego: usa cpc_link da view quando ela traz o valor", () => {
+describe("resultForCampaign — a metrica que a BASE declarada manda", () => {
+  it("formularios: mostra o rotulo da base, nao 'CPL'", () => {
     const r = resultForCampaign(
-      campanha({ tipo: "trafego", link_clicks: 200, spend: 100, cpc_link: 0.75 }),
+      campanha({ base_de_resultado: "formularios", resultados: 20, custo_por_resultado: 15, spend: 300 }),
     );
-    // 0,75 da view prevalece sobre os 0,50 que o calculo daria.
-    expect(r.costValue).toBe(`R$${NB}0,75`);
-  });
-
-  it("trafego: cpc_link zerado cai no calculo, em vez de mostrar R$ 0,00", () => {
-    // `num(c.cpc_link) || c.spend / c.link_clicks` — o `||` trata 0 como
-    // ausencia de propósito: CPC zero com gasto positivo seria mentira.
-    const r = resultForCampaign(
-      campanha({ tipo: "trafego", link_clicks: 200, spend: 100, cpc_link: 0 }),
-    );
-    expect(r.costValue).toBe(`R$${NB}0,50`);
-  });
-
-  it("mensagem: conversas e custo por conversa", () => {
-    const r = resultForCampaign(campanha({ tipo: "mensagem", messaging_started: 50, spend: 250 }));
     expect(r).toMatchObject({
-      label: "Conversas",
-      value: "50",
-      costLabel: "Custo/conversa",
-      costValue: `R$${NB}5,00`,
+      label: "Formulários",
+      value: "20",
+      costLabel: "Custo por formulario enviado",
     });
-  });
-
-  it("leadgen: formularios e CPL", () => {
-    const r = resultForCampaign(campanha({ tipo: "leadgen", form_leads: 20, spend: 300 }));
-    expect(r).toMatchObject({ label: "Formulários", value: "20", costLabel: "CPL" });
     expect(r.costValue).toBe(`R$${NB}15,00`);
   });
 
-  it("vendas com receita: mostra ROAS", () => {
+  it("conversas: custo por conversa iniciada", () => {
     const r = resultForCampaign(
-      campanha({ tipo: "vendas", sales: 10, revenue: 5000, spend: 1000 }),
+      campanha({
+        base_de_resultado: "conversas",
+        rotulo_do_custo: "por conversa iniciada",
+        resultados: 50,
+        custo_por_resultado: 5,
+        spend: 250,
+      }),
     );
+    expect(r).toMatchObject({ label: "Conversas", value: "50", costLabel: "Custo por conversa iniciada" });
+    expect(r.costValue).toBe(`R$${NB}5,00`);
+  });
+
+  it("cliques no link: a base que faltava, e que o tipo NULL mandava para formulario", () => {
+    // Campanha de impulsionamento de post nao produz formulario. Antes, o tipo null caia no
+    // default "Leads" e o gasto dela entrava num custo por formulario que ela nunca gerou —
+    // o erro de 5,4x. Agora a base vem do banco e o rotulo diz o que esta sendo medido.
+    const r = resultForCampaign(
+      campanha({
+        tipo: "outro",
+        base_de_resultado: "cliques_no_link",
+        rotulo_do_custo: "por clique no link",
+        resultados: 200,
+        custo_por_resultado: 0.5,
+        spend: 100,
+      }),
+    );
+    expect(r).toMatchObject({ label: "Cliques no link", value: "200" });
+    expect(r.costValue).toBe(`R$${NB}0,50`);
+  });
+
+  it("com receita: ROAS vence a base, porque ROAS nao e custo por resultado", () => {
+    const r = resultForCampaign(campanha({ sales: 10, revenue: 5000, spend: 1000 }));
     expect(r.label).toBe("Vendas / Receita");
     expect(r.value).toBe(`10 · R$${NB}5.000,00`);
     expect(r.costLabel).toBe("ROAS");
     expect(r.costValue).toBe("5.00x");
   });
 
-  it("vendas sem receita mas com venda: cai para CPA", () => {
-    const r = resultForCampaign(campanha({ tipo: "vendas", sales: 4, revenue: 0, spend: 200 }));
-    expect(r.costLabel).toBe("CPA");
-    expect(r.costValue).toBe(`R$${NB}50,00`);
-  });
-
-  it("vendas com receita e gasto ZERO nao divide por zero", () => {
-    // Math.max(spend, 1) segura o caso; sem isso o ROAS viria Infinity.
-    const r = resultForCampaign(campanha({ tipo: "vendas", sales: 1, revenue: 500, spend: 0 }));
+  it("receita com gasto ZERO nao divide por zero", () => {
+    const r = resultForCampaign(campanha({ sales: 1, revenue: 500, spend: 0 }));
     expect(r.costValue).toBe("500.00x");
   });
 
-  it("engajamento: interacoes e impressoes", () => {
-    const r = resultForCampaign(campanha({ tipo: "engajamento", clicks: 80, impressions: 9000 }));
-    expect(r).toMatchObject({
-      label: "Interações",
-      value: "80",
-      costLabel: "Impressões",
-      costValue: "9.000",
-    });
-  });
-
-  it("alcance: alcance e CPM (por MIL impressoes)", () => {
+  it("custo ausente cai para o calculo local, em vez de sumir com o numero", () => {
     const r = resultForCampaign(
-      campanha({ tipo: "alcance", reach: 7000, impressions: 10000, spend: 50 }),
+      campanha({ base_de_resultado: "conversas", resultados: 4, custo_por_resultado: null, spend: 100 }),
     );
-    expect(r.label).toBe("Alcance");
-    expect(r.value).toBe("7.000");
-    expect(r.costLabel).toBe("CPM");
-    expect(r.costValue).toBe(`R$${NB}5,00`);
-  });
-
-  it("video: so cliques, sem metrica de custo", () => {
-    const r = resultForCampaign(campanha({ tipo: "video", clicks: 42 }));
-    expect(r).toEqual({ label: "Cliques", value: "42", costLabel: null, costValue: null });
-  });
-
-  it("app: ainda nao tem metrica definida", () => {
-    expect(resultForCampaign(campanha({ tipo: "app" }))).toEqual({
-      label: "—",
-      value: "—",
-      costLabel: null,
-      costValue: null,
-    });
-  });
-
-  it("tipo desconhecido cai no default de Leads/CPL", () => {
-    const r = resultForCampaign(campanha({ tipo: "outro", leads: 5, spend: 100 }));
-    expect(r).toMatchObject({ label: "Leads", value: "5", costLabel: "CPL" });
-    expect(r.costValue).toBe(`R$${NB}20,00`);
+    expect(r.costValue).toBe(`R$${NB}25,00`);
   });
 
   it.each([
-    ["trafego", { link_clicks: 0 }],
-    ["mensagem", { messaging_started: 0 }],
-    ["leadgen", { form_leads: 0 }],
-    ["alcance", { impressions: 0 }],
-    ["outro", { leads: 0 }],
-  ])("%s com denominador zero mostra travessao, nao divisao por zero", (tipo, campos) => {
-    const r = resultForCampaign(campanha({ tipo: tipo as TipoConta, spend: 100, ...campos }));
+    ["formularios", "por formulario enviado"],
+    ["conversas", "por conversa iniciada"],
+    ["cliques_no_link", "por clique no link"],
+  ])("base %s com ZERO resultado mostra travessao, nunca R$ 0,00", (base, rotulo) => {
+    // Zero resultado e custo INDEFINIDO. "R$ 0,00 por lead" leria como "sai de graca" e o
+    // gestor escalaria a campanha mais cara da carteira achando que e a mais barata.
+    const r = resultForCampaign(
+      campanha({
+        base_de_resultado: base as CampaignRow["base_de_resultado"],
+        rotulo_do_custo: rotulo,
+        resultados: 0,
+        custo_por_resultado: null,
+        spend: 100,
+      }),
+    );
     expect(r.costValue).toBe("—");
+    expect(r.value).toBe("0");
   });
 });
 

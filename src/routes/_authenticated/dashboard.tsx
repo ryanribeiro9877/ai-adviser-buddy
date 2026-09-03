@@ -153,19 +153,37 @@ function Dashboard() {
       ) : (
         <div className="grid gap-3 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
           <MetricCard label="Investimento" value={fmtBRL(kpi.spend)} icon={DollarSign} />
-          <MetricCard label="Leads" value={fmtInt(kpi.leads)} icon={Target} tone="success" />
-          <MetricCard label="CPL" value={kpi.leads > 0 ? fmtBRL(kpi.spend / kpi.leads) : "—"} />
           <MetricCard
-            label="Cliques no link"
-            value={fmtInt(kpi.link_clicks)}
-            icon={MousePointerClick}
+            label="Formulários"
+            value={fmtInt(kpi.form_leads)}
+            icon={FileText}
+            tone="success"
+          />
+          {/* Cada custo divide o gasto DA BASE, não o investimento total: campanha de tráfego
+              e de conversa não produzem formulário, e somar o gasto delas no numerador
+              inflava o custo por formulário em até 5,4x. */}
+          <MetricCard
+            label="Custo por formulário"
+            value={kpi.form_leads > 0 ? fmtBRL(kpi.gasto_em_formulario / kpi.form_leads) : "—"}
           />
           <MetricCard
             label="Conversas"
             value={fmtInt(kpi.messaging_started)}
             icon={MessageCircle}
           />
-          <MetricCard label="Formulário" value={fmtInt(kpi.form_leads)} icon={FileText} />
+          <MetricCard
+            label="Custo por conversa"
+            value={
+              kpi.messaging_started > 0
+                ? fmtBRL(kpi.gasto_em_conversa / kpi.messaging_started)
+                : "—"
+            }
+          />
+          <MetricCard
+            label="Cliques no link"
+            value={fmtInt(kpi.link_clicks)}
+            icon={MousePointerClick}
+          />
           {hasRevenue && (
             <>
               <MetricCard label="Compras" value={fmtInt(kpi.sales)} icon={ShoppingCart} />
@@ -268,6 +286,10 @@ function Dashboard() {
 }
 
 // Soma métricas de um conjunto de campanhas.
+//
+// O gasto sai TAMBÉM separado por base, porque custo por resultado do agregado divide o gasto
+// das campanhas medidas naquela base — nunca o investimento total da seleção. Foi esse
+// numerador que inflou o custo por formulário da carteira medida em 5,4x.
 function aggregate(rows: CampaignRow[]) {
   return rows.reduce(
     (acc, c) => {
@@ -276,7 +298,9 @@ function aggregate(rows: CampaignRow[]) {
       acc.link_clicks += c.link_clicks;
       acc.messaging_started += c.messaging_started;
       acc.form_leads += c.form_leads;
-      acc.leads += c.leads;
+      if (c.base_de_resultado === "formularios") acc.gasto_em_formulario += c.spend;
+      else if (c.base_de_resultado === "conversas") acc.gasto_em_conversa += c.spend;
+      else if (c.base_de_resultado === "cliques_no_link") acc.gasto_em_trafego += c.spend;
       acc.sales += c.sales;
       acc.revenue += c.revenue;
       acc.impressions += c.impressions;
@@ -288,7 +312,9 @@ function aggregate(rows: CampaignRow[]) {
       link_clicks: 0,
       messaging_started: 0,
       form_leads: 0,
-      leads: 0,
+      gasto_em_formulario: 0,
+      gasto_em_conversa: 0,
+      gasto_em_trafego: 0,
       sales: 0,
       revenue: 0,
       impressions: 0,
@@ -314,7 +340,9 @@ function deriveAccounts(rows: CampaignRow[], tipo: TipoConta): AccountRow[] {
         landing_page_views: 0,
         messaging_started: 0,
         form_leads: 0,
-        leads: 0,
+        gasto_em_formulario: 0,
+        gasto_em_conversa: 0,
+        gasto_em_trafego: 0,
         sales: 0,
         revenue: 0,
       };
@@ -327,7 +355,9 @@ function deriveAccounts(rows: CampaignRow[], tipo: TipoConta): AccountRow[] {
     a.landing_page_views += c.landing_page_views;
     a.messaging_started += c.messaging_started;
     a.form_leads += c.form_leads;
-    a.leads += c.leads;
+    if (c.base_de_resultado === "formularios") a.gasto_em_formulario += c.spend;
+    else if (c.base_de_resultado === "conversas") a.gasto_em_conversa += c.spend;
+    else if (c.base_de_resultado === "cliques_no_link") a.gasto_em_trafego += c.spend;
     a.sales += c.sales;
     a.revenue += c.revenue;
   }

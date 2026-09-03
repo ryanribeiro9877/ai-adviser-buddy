@@ -26,7 +26,9 @@ function conta(over: Partial<AccountRow> = {}): AccountRow {
     landing_page_views: 300,
     messaging_started: 20,
     form_leads: 40,
-    leads: 50,
+    gasto_em_formulario: 800,
+    gasto_em_conversa: 200,
+    gasto_em_trafego: 0,
     sales: 0,
     revenue: 0,
     ...over,
@@ -53,10 +55,13 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
     landing_page_views: 300,
     messaging_started: 0,
     form_leads: 30,
-    leads: 30,
     sales: 0,
     revenue: 0,
-    cpl: 20,
+    base_de_resultado: "formularios" as const,
+    rotulo_do_custo: "por formulario enviado",
+    unidade_do_resultado: "formularios",
+    resultados: 30,
+    custo_por_resultado: 20,
     cpc_link: 1.5,
     last_synced_at: null,
     ...over,
@@ -81,19 +86,53 @@ describe("AccountsTable", () => {
   });
 
   it("formata gasto em real e inteiros com separador", () => {
-    render(<AccountsTable accounts={[conta({ spend: 1234.5, leads: 1200 })]} onSelect={vi.fn()} />);
+    render(
+      <AccountsTable accounts={[conta({ spend: 1234.5, form_leads: 1200 })]} onSelect={vi.fn()} />,
+    );
     expect(screen.getByText(`R$${NB}1.234,50`)).toBeInTheDocument();
     expect(screen.getByText("1.200")).toBeInTheDocument();
   });
 
-  it("calcula o CPL da linha", () => {
-    render(<AccountsTable accounts={[conta({ spend: 1000, leads: 50 })]} onSelect={vi.fn()} />);
-    expect(screen.getByText(`R$${NB}20,00`)).toBeInTheDocument();
+  it("o custo por formulario divide o gasto DA BASE, nao o gasto total da conta", () => {
+    // A conta gastou R$ 1.000, dos quais so R$ 400 em campanha de formulario. Dividir o
+    // total pelos 40 formularios daria R$ 25,00 — 2,5x o custo real. Foi esse numerador
+    // que inflou o indicador da carteira medida em 5,4x.
+    render(
+      <AccountsTable
+        accounts={[
+          conta({
+            spend: 1000,
+            form_leads: 40,
+            gasto_em_formulario: 400,
+            messaging_started: 20,
+            gasto_em_conversa: 60,
+          }),
+        ]}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(`R$${NB}10,00`)).toBeInTheDocument();
+    expect(screen.queryByText(`R$${NB}25,00`)).not.toBeInTheDocument();
   });
 
-  it("ZERO leads mostra travessao, nao divisao por zero", () => {
-    render(<AccountsTable accounts={[conta({ spend: 1000, leads: 0 })]} onSelect={vi.fn()} />);
-    expect(screen.getByText("—")).toBeInTheDocument();
+  it("o custo por conversa usa o gasto das campanhas de conversa", () => {
+    render(
+      <AccountsTable
+        accounts={[conta({ messaging_started: 20, gasto_em_conversa: 300 })]}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(`R$${NB}15,00`)).toBeInTheDocument();
+  });
+
+  it("ZERO resultado na base mostra travessao, nao divisao por zero", () => {
+    render(
+      <AccountsTable
+        accounts={[conta({ spend: 1000, form_leads: 0, messaging_started: 0 })]}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
   });
 
   it("clicar na linha seleciona a conta", async () => {
@@ -220,26 +259,36 @@ describe("CampaignsTable", () => {
     expect(screen.getByText("Leads Julho")).toBeInTheDocument();
   });
 
-  it("destaca a metrica-resultado DO TIPO da campanha", () => {
-    // leadgen destaca formularios; trafego destacaria cliques no link. Mostrar a
-    // metrica errada faria o gestor comparar coisas diferentes.
+  it("destaca a metrica-resultado da BASE declarada pelo banco", () => {
+    // A base vem da view, nao do tipo lido na tela: mostrar a metrica errada faria o gestor
+    // comparar campanha medida por formulario com campanha medida por clique.
     render(
       <CampaignsTable
-        campaigns={[campanha({ tipo: "leadgen", form_leads: 30 })]}
+        campaigns={[campanha({ base_de_resultado: "formularios", resultados: 30 })]}
         accountName="x"
       />,
     );
     expect(screen.getByText("30")).toBeInTheDocument();
   });
 
-  it("campanha de trafego destaca cliques no link", () => {
+  it("campanha de trafego destaca cliques no link, e nao formulario", () => {
     render(
       <CampaignsTable
-        campaigns={[campanha({ tipo: "trafego", link_clicks: 444 })]}
+        campaigns={[
+          campanha({
+            tipo: "trafego",
+            base_de_resultado: "cliques_no_link",
+            rotulo_do_custo: "por clique no link",
+            link_clicks: 444,
+            resultados: 444,
+            custo_por_resultado: 0.5,
+          }),
+        ]}
         accountName="x"
       />,
     );
     expect(screen.getByText("444")).toBeInTheDocument();
+    expect(screen.getByText("Cliques no link")).toBeInTheDocument();
   });
 
   it("lista vazia nao estoura", () => {

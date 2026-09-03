@@ -1,4 +1,7 @@
-// Prova do calculo canonico de metrica. Rode: deno run supabase/functions/_shared/_prova_metrica_canonica.ts
+// Prova do calculo canonico de metrica.
+// Rode: deno run --allow-read supabase/functions/_shared/_prova_metrica_canonica.ts
+// (--allow-read porque a prova le a migration da paridade para conferir que os dois lados
+//  da regra de base de resultado nao se separaram.)
 //
 // O caso central desta prova e o CENARIO DA DIVERGENCIA medido no repositorio em 03/09/2026:
 // gasto R$ 300, 5 formularios, 10 conversas, 20 cliques no link. Hoje quatro pedacos do
@@ -16,6 +19,10 @@ import {
   custoPorResultado,
   rotuloDaBase,
 } from "./metrica_canonica.ts";
+import { CASOS_DE_BASE_DE_RESULTADO, casosParaJson } from "./casos_de_base_de_resultado.ts";
+
+/** Migration que carrega a copia SQL dos casos. A prova le o arquivo para conferir sincronia. */
+const MIGRATION_DA_PARIDADE = "20260903243000_paridade_da_base_de_resultado.sql";
 
 let falhas = 0;
 function assert(cond: boolean, msg: string) {
@@ -126,6 +133,59 @@ function dia(p: Partial<ContadoresDoDia>): ContadoresDoDia {
 assert(baseDoObjetivo("mensagem") === "conversas", "campanha de mensagem mede por conversa");
 assert(baseDoObjetivo("leadgen") === "formularios", "campanha de lead mede por formulario");
 assert(baseDoObjetivo(null) === "formularios", "sem categoria, padrao formulario");
+
+// A campanha de trafego e o caso que faltava: jogar impulsionamento de post na base
+// 'formularios' foi o que inflou o custo por formulario da Legal e Viver em 5,4x.
+assert(baseDoObjetivo(null, "POST_ENGAGEMENT", "OUTCOME_ENGAGEMENT") === "cliques_no_link", "post impulsionado mede por clique no link");
+assert(baseDoObjetivo(null, "CONVERSATIONS", "OUTCOME_ENGAGEMENT") === "conversas", "Click-to-WhatsApp mede por conversa mesmo com objetivo de engajamento");
+
+// A base NAO pode depender de contador: `baseDoObjetivo` nao recebe contador nenhum, e esta
+// linha existe para que a tentativa de passar um apareca como erro de tipo, nao como numero
+// que muda de identidade conforme a janela do relatorio.
+assert(baseDoObjetivo.length === 3, "baseDoObjetivo recebe categoria, optimization_goal e objective - nada mais");
+
+// ----------------------------------------------------------------------------
+// PARIDADE COM O SQL: a mesma regra existe nos dois lados, e uma lista unica de casos
+// amarra os dois. Aqui roda o lado TypeScript; `select * from public.prova_base_de_resultado()`
+// roda o lado SQL contra a copia embutida na migration. A terceira conferencia, logo abaixo,
+// e a que impede que as copias se separem: se esta lista mudar e a migration nao for
+// regerada, a prova reprova antes de qualquer um dos dois lados rodar em producao.
+// ----------------------------------------------------------------------------
+for (const caso of CASOS_DE_BASE_DE_RESULTADO) {
+  const veio = baseDoObjetivo(caso.categoria, caso.optimization_goal, caso.objective);
+  assert(
+    veio === caso.base_ts,
+    `base de [${caso.categoria ?? "null"} | ${caso.optimization_goal ?? "null"} | ${caso.objective ?? "null"}]: esperado ${caso.base_ts}, veio ${veio} (${caso.porque})`,
+  );
+}
+
+{
+  const arquivo = new URL(`../../migrations/${MIGRATION_DA_PARIDADE}`, import.meta.url);
+  let sql = "";
+  try {
+    sql = Deno.readTextFileSync(arquivo);
+  } catch (e) {
+    assert(false, `nao consegui ler ${MIGRATION_DA_PARIDADE} (rode com --allow-read): ${e instanceof Error ? e.message : e}`);
+  }
+  if (sql) {
+    const entre = sql.split("$casos$");
+    assert(entre.length >= 3, "a migration precisa embutir os casos entre delimitadores $casos$");
+    if (entre.length >= 3) {
+      let noSql: unknown = null;
+      try {
+        noSql = JSON.parse(entre[1]);
+      } catch (e) {
+        assert(false, `o JSON de casos da migration nao faz parse: ${e instanceof Error ? e.message : e}`);
+      }
+      assert(
+        JSON.stringify(noSql) === casosParaJson(),
+        `os casos da migration ${MIGRATION_DA_PARIDADE} sairam de sincronia com casos_de_base_de_resultado.ts.\n` +
+          `  Regere o literal da migration com o conteudo de casosParaJson() e reaplique a funcao public.prova_base_de_resultado().`,
+      );
+    }
+  }
+}
+
 {
   // Campanha de formulario com ZERO formularios e 40 conversas: o custo fica INDEFINIDO na
   // base dela. Nao troca para conversa so porque a conversa tem numero — trocar produzia um

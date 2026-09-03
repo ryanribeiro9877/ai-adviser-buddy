@@ -88,8 +88,9 @@ function AdSetCard({ s }: { s: AdSetRow }) {
       {/* Métricas */}
       <div className="mt-3 grid grid-cols-4 gap-2">
         <Stat label="Gasto" value={fmtBRL(s.spend)} />
-        <Stat label="Leads" value={fmtInt(s.leads)} />
-        <Stat label="CPL" value={s.leads > 0 ? fmtBRL(s.spend / s.leads) : "—"} />
+        {/* Idem anúncios: base declarada, não "leads" somando formulário com conversa. */}
+        <Stat label="Formulários" value={fmtInt(s.form_leads)} />
+        <Stat label="Conversas" value={fmtInt(s.messaging_started)} />
         <Stat label="CTR" value={ctr(s)} />
       </div>
     </Card>
