@@ -1,0 +1,176 @@
+-- espelho para git — NÃO re-executar (os objetos já existem em produção)
+--
+-- Classificação derivada da configuração, atribuição de marca e veredito da transcrição.
+-- SQL completo em ../migrations/ (20260903233000, 20260903234000, 20260903235000).
+-- Este arquivo registra a DECISÃO e a evidência, que é o que não cabe no SQL.
+--
+-- ============================================================================
+-- 1. AS SEIS CAMPANHAS ATIVAS: DERIVADAS, NÃO CHUTADAS
+-- ============================================================================
+-- O pedido era esgotar o que dá para derivar antes de consumir o tempo do gestor. Deu para
+-- derivar todas as seis, e o que sustenta isso não é opinião: é a doutrina que o próprio
+-- repositório já tinha escrita.
+--
+-- `public.base_de_resultado(categoria, optimization_goal, objective)` — IMMUTABLE, usada
+-- hoje por `get_report_export_data` — declara a precedência: a categoria manda; na falta
+-- dela, `optimization_goal = 'CONVERSATIONS'` significa conversa e `VISIT_INSTAGRAM_PROFILE`
+-- significa clique no link. Ou seja, o sistema JÁ sabia ler esses campos; só não estava
+-- gravando a conclusão em `campaigns.category`, que é o que as regras de custo exigem.
+--
+-- As 29 campanhas classificadas à mão no histórico concordam com a doutrina sem um único
+-- contraexemplo — e o ponto fino: `OUTCOME_ENGAGEMENT` NÃO decide sozinho, porque aparece
+-- em `mensagem` (11) e em `engajamento` (3). Quem separa os dois é `CONVERSATIONS` na meta
+-- de otimização do conjunto. Derivar só pelo objetivo da campanha seria exatamente o erro
+-- que aponta a regra de custo para a régua errada.
+--
+-- Evidência campo por campo das seis (todos os conjuntos concordando entre si):
+--
+--   COHAPM_JURIDICO_CONV_WA_2026-08   -> mensagem
+--     objective=OUTCOME_ENGAGEMENT; 3/3 conjuntos destination_type=WHATSAPP e
+--     optimization_goal=CONVERSATIONS; promoted_object com whatsapp_phone_number nos 3;
+--     comportamento medido: 83 conversas iniciadas, 0 formulário.
+--   COHAPM_LAFELICITA_CONV_WA_2026-08 -> mensagem
+--     idem, 4/4 conjuntos; 34 conversas, 0 formulário.
+--   COHAPM_VISTTA_CONV_WA_SET26       -> mensagem
+--     idem, 5 conjuntos (WHATSAPP + CONVERSATIONS); 23 conversas, 0 formulário.
+--   Publicação do Instagram: Cuidar de você também...   -> trafego
+--     objective=LINK_CLICKS; destination_type=INSTAGRAM_PROFILE;
+--     optimization_goal=VISIT_INSTAGRAM_PROFILE; 683 cliques no link.
+--   Publicação do Instagram: Já se imaginou no lugar... -> trafego  (idem; 319 cliques)
+--   Publicação do Instagram: Uma chegada organizada...  -> trafego  (idem; 543 cliques)
+--
+-- NENHUMA ficou sem classificar, e nenhuma dependeu de julgamento de negócio.
+--
+-- A TRAVA CONTRA A RÉGUA ERRADA. Classificação errada não é neutra: faz a regra comparar a
+-- campanha contra a régua errada e o alerta resultante manda pausar campanha saudável. Então
+-- a derivação só é aceita quando é NEUTRA perante a doutrina canônica — exigimos que
+-- `base_de_resultado(derivada, ...) = base_de_resultado(null, ...)` em TODOS os conjuntos da
+-- campanha. Se um só discordar, devolve NULL e o caso vai para o gestor. Conferido nas 15
+-- combinações campanha×conjunto ativas: neutro em 15 de 15.
+--
+-- Consequência que importa para a leitura cruzada: como a derivação é neutra por construção,
+-- ela NÃO altera o resultado de `get_report_export_data` (único dos três alvos do outro
+-- agente que menciona `category`, e só para alimentar `base_de_resultado`). `diagnosticar_custo`
+-- e `decidir_sobre_conjunto` não mencionam `category` em lugar nenhum.
+--
+-- TESTE DE REGRESSÃO contra as 29 classificações humanas, rodado ANTES de gravar qualquer
+-- coisa: 24 acertos exatos, 5 abstenções (as que não têm objetivo gravado ou não têm conjunto
+-- lido), ZERO contradições. Em nenhum caso a função afirmou categoria diferente da que o
+-- humano escolheu — onde falta dado ela se cala, e é isso que a torna segura.
+--
+-- AUDITORIA. `campaigns.categoria_origem` ('derivada' | 'manual') + `categoria_definida_em`.
+-- Estado final: 6 derivadas, 29 manuais, 0 campanhas ativas sem classificação.
+--
+-- ============================================================================
+-- 2. A CAUSA, NÃO O SINTOMA: DERIVAR NA ENTRADA
+-- ============================================================================
+-- Se a classificação é derivável, campanha nova não deveria nascer sem ela. São dois gatilhos
+-- porque o espelho da Meta grava a campanha ANTES dos conjuntos: `trg_categoria_na_entrada_da_campanha`
+-- resolve o que o objetivo já decide (OUTCOME_LEADS, LINK_CLICKS) e
+-- `trg_categoria_quando_o_conjunto_chega` fecha o resto quando a meta de otimização aparece.
+-- Ambos apenas PREENCHEM o que está nulo — classificação manual nunca é sobrescrita, e é essa
+-- mesma condição (`where category is null`) que impede laço no gatilho.
+--
+-- Provado em transação desfeita por exceção (zero resíduo, conferido depois):
+--   (1) LINK_CLICKS na entrada                          -> trafego / derivada
+--   (2) OUTCOME_ENGAGEMENT sem conjunto                 -> (nula)   [abstém-se, correto]
+--   (3) o mesmo, depois do conjunto CONVERSATIONS       -> mensagem / derivada
+--   (4) manual 'engajamento' numa campanha LINK_CLICKS  -> engajamento / manual  [manual vence]
+--
+-- DEFEITO CRÍTICO ACHADO PELO PRÓPRIO TESTE, e a razão de ele valer o esforço: a função do
+-- gatilho escolhia a campanha com `case when tg_table_name='campaigns' then new.id else
+-- new.campaign_id end`. Em PL/pgSQL uma expressão CASE resolve os campos dos DOIS ramos contra
+-- o mesmo registro, então `new.campaign_id` estourava também vindo de `campaigns` —
+-- `record "new" has no field "campaign_id"`. Com o gatilho nesse estado, TODO insert de
+-- campanha falharia e o espelho da Meta pararia inteiro. Trocado por IF/ELSE.
+--
+-- ============================================================================
+-- 3. AS CAMPANHAS DO INSTAGRAM: NÃO HÁ CAMINHO CONFIÁVEL, E ISSO É O ACHADO
+-- ============================================================================
+-- Nome é a pior fonte para atribuir marca — foi o que quebrou a proteção contra contaminação.
+-- Procurei no dado, e esgotei os caminhos. Todos vazios ou não discriminantes:
+--
+--   promoted_object ......... nulo (não é campanha de mensagem, não há telefone)
+--   url_tags (UTM) .......... nulo nos 15 anúncios das três campanhas
+--   destino_url / destination_url / permalink_url ... nulos nos 15
+--   title / body / object_type / call_to_action_type  nulos nos 15
+--   targeting ............... genérico e IDÊNTICO nas três: Brasil, 18-65, todos os
+--                             gêneros, publisher_platforms=[instagram]. Sem geo, sem interesse.
+--   nome_partes ............. nulo (não seguem a nomenclatura com tag entre colchetes)
+--   conta de anúncio ........ 1622612945584817 — a MESMA das outras marcas
+--   página .................. 105656372312257 — a MESMA das outras marcas
+--   company_id .............. 57f755b9-… — as quatro marcas dividem um só
+--
+-- Achado colateral que vale registrar: `waba_phone_numbers.verified_name` (nome verificado
+-- pela Meta, atrelado ao `whats_app_business_phone_number_id` do promoted_object) É um caminho
+-- de atribuição legítimo que não passa pelo nome da campanha — mas cobre pouco. Nas ativas:
+-- COHAPM_JURIDICO resolve 3/3 para "Cohapm Jurídico"; LAFELICITA resolve 3/4 só para "Cohapm"
+-- (o guarda-chuva, que não distingue La Felicità de VISTTA); VISTTA resolve 0/5 (telefones não
+-- cadastrados). Serve para 1 de 6 campanhas ativas — não resolve o caso do Instagram, que não
+-- usa WhatsApp.
+--
+-- Então a constatação é a resposta: existe campanha em produção que o sistema não consegue
+-- atribuir a uma marca, e como as quatro marcas dividem um company_id, qualquer alerta sobre
+-- ela corre risco de aparecer no contexto errado. Em vez de chutar para a primeira marca que
+-- casar, isso virou alerta próprio ('Campanha ativa que o sistema nao sabe de qual marca e',
+-- gravidade média, chave `cobertura_atribuicao:<company>`), com `linha_produto = 'nao atribuida'`
+-- de forma deliberada e explícita. A ação sugerida pede vínculo estruturado (url_tags ou url
+-- de destino), não renomeação — porque nome continuaria sendo nome.
+--
+-- ============================================================================
+-- 4. O VIGIA DE COBERTURA ESTAVA ERRADO — ERRO DA ENTREGA ANTERIOR, MEU
+-- ============================================================================
+-- `vigiar_cobertura_das_regras` media a lacuna como `category not in ('leadgen','mensagem')`.
+-- Enquanto todas as ativas estavam nulas isso batia por acidente. Com as três do Instagram
+-- viradas `trafego` — classificadas CERTO, e por natureza fora do alcance das regras de custo,
+-- porque visita a perfil não tem formulário nem conversa para dividir o gasto — a conta antiga
+-- as manteria como lacuna para sempre, e a ação sugerida seria "classifique como formulário ou
+-- mensagem". O alerta ensinaria o erro. Alerta que ensina o erro é pior que alerta nenhum.
+--
+-- Agora são três estados, não dois: sem classificação (lacuna real, vira alerta pedindo ação),
+-- dentro do escopo (as regras avaliam) e fora do escopo (as regras não se aplicam, e isso entra
+-- no alerta como CONTEXTO para o silêncio das regras de custo não ser lido como "custo bom").
+--
+-- ============================================================================
+-- 5. O NÚMERO QUE MOSTRA SE O PONTO CEGO FECHOU
+-- ============================================================================
+-- Antes: 3 regras de custo × 0 campanhas. Estruturalmente mortas — rodavam, concluíam sem erro
+-- e gravavam 'sucesso_vazio', que na tela se lê "nada a relatar".
+-- Depois: 3 regras de custo (cpl, spend_no_leads, pause_3d) × 3 campanhas, as três recém
+-- classificadas. As outras 3 ativas seguem fora, corretamente, por serem trafego.
+--
+-- A PROVA VIVA, e o susto que ela deu: ao rodar `evaluate_alerts` logo após classificar, saíram
+-- 3 alertas "Gasto sem nenhum lead — 0 lead" nas três campanhas de mensagem, que na verdade
+-- tinham gerado 83, 34 e 23 conversas. Era o cenário exato do risco: R$ 332,12 / 83 conversas
+-- ≈ R$ 4,00 por conversa, campanha saudável recebendo alerta que manda pausar. A causa não era
+-- a classificação: era a regra R4 olhando `campaigns.leads` (coluna populada de forma
+-- inconsistente — nas campanhas de mensagem do histórico soma 2.483 contra 2.623 conversas, e
+-- nas três ativas está zerada). O outro agente já havia corrigido isso na mesma janela, trocando
+-- o teste por `resultados_da_base(base_de_resultado_da_campanha(id), form_leads,
+-- messaging_started, link_clicks) = 0`. Reexecutado depois: 0 alertas, e os 3 enganosos foram
+-- ENCERRADOS (resolved), não apagados. As duas mudanças compõem certo — `base_de_resultado_da_campanha`
+-- lê a categoria derivada e devolve 'conversas' para as três de mensagem (83/34/23 resultados
+-- contados) e 'cliques_no_link' para as três de trafego (683/319/543).
+--
+-- Leitura conjunta obrigatória: sem a correção do denominador, classificar teria ligado uma
+-- regra que acusa campanha saudável. Sem a classificação, a correção do denominador não teria
+-- campanha nenhuma para avaliar. Nenhuma das duas entrega valor sozinha.
+--
+-- ============================================================================
+-- 6. `transcrever-audios-drive`: NÃO APOSENTAR — AGENDAR
+-- ============================================================================
+-- Os dois critérios que justificariam aposentar são falsos:
+--   consumidor vivo -> `get_acervo_para_anuncio` entrega `o_que_diz_no_audio` e
+--     `videos_sem_transcricao` ao agente de criação de anúncio. Sem transcrição, quem escolhe
+--     criativo escolhe sem saber o que o vídeo fala.
+--   material chegando -> último arquivo do Drive em 28/08, última análise em 31/08, e nesse
+--     mesmo dia entraram 5 vídeos novos no recorte que a tarefa processa.
+-- E ela funciona: 19 transcritos com texto, 5 com falha honesta e permanente (`sem_fala_util`),
+-- 0 pendentes. Convergiu o backlog e hoje é no-op idempotente — comportamento correto de tarefa
+-- de escoamento, não sinal de morte. "Parecia" morta por não ter agendamento nenhum em
+-- `cron.job`. Agendada às 09:50, depois das varreduras do Drive das 08:45/08:46.
+--
+-- FICA PARA O GESTOR, com o número: a tarefa só transcreve vídeo com análise `multiquadro/*`.
+-- Existem 172 vídeos analisados só por `thumbnail` que ela nunca vai pegar, e que hoje chegam
+-- ao agente de criação com `transcricao_ausente`. Ampliar o recorte tem preço de API por
+-- arquivo e é decisão de escopo do pipeline de análise — o dado não decide isso sozinho.
