@@ -5,6 +5,8 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { pipeboardToken } from "../_shared/pipeboard.ts";
 import {
   callReadTool,
+  catalogoPipeboard,
+  classificarCatalogoPipeboard,
   companyMetaAccounts,
   isReadOnlyTool,
   listReadTools,
@@ -46,6 +48,46 @@ Deno.serve(async (req) => {
     .maybeSingle();
   const token = await pipeboardToken(async () => String(secret?.value ?? ""));
   if (!token) return json({ error: "missing_pipeboard_api_token" }, 400);
+
+  // MODO AUDITORIA: catalogo remoto INTEIRO, com o veredito de leitura/escrita item a item.
+  //
+  // Distinto de list:true de proposito. list:true serve ao MODELO e por isso mostra so o que
+  // ele pode chamar; auditoria serve a QUEM CLASSIFICA o proxy, e para isso o lado da escrita
+  // e justamente a metade que importa. ler_pipeboard e listar_ferramentas_pipeboard estao no
+  // registro como 'leitura' — essa afirmacao so e verificavel se o catalogo do outro lado
+  // puder ser enumerado, e ate 03/09/2026 nao havia como enumera-lo.
+  //
+  // tools/list nao executa ferramenta nenhuma: le schemas. Este modo nao aceita args, nao
+  // recebe company_id e nao chama tools/call em caso nenhum.
+  if (body?.auditoria === true || body?.list_all === true) {
+    const cat = await catalogoPipeboard(token);
+    if (!cat.ok) return json({ ok: false, erro: cat.erro }, 502);
+    const c = classificarCatalogoPipeboard(cat.tools);
+    const detalhe = (v: typeof c.leitura[number]) => {
+      const def = cat.tools.find((t) => String(t?.name ?? "") === v.name);
+      return {
+        ...v,
+        descricao: String(def?.description ?? "").replace(/\s+/g, " ").slice(0, 200),
+        argumentos: Object.keys(def?.inputSchema?.properties ?? {}),
+      };
+    };
+    const cut = truncatePipeboardPayload({
+      ok: true,
+      source: "pipeboard:meta",
+      modo: "auditoria",
+      total: c.total,
+      total_leitura: c.leitura.length,
+      total_recusadas: c.recusadas.length,
+      // O caso que o allowlist de nome sozinho nao pegava: nome de leitura, servidor dizendo
+      // o contrario. Lista vazia aqui e o resultado desejado, nao ausencia de conferencia.
+      divergentes_nome_x_anotacao: c.divergentes.map(detalhe),
+      leitura: c.leitura.map(detalhe),
+      recusadas: c.recusadas.map(detalhe),
+      nota:
+        "Veredito por NOME (allowlist de prefixo, vale sem rede) E por ANOTACAO do servidor (estreita, nunca alarga). Escrita continua exclusivamente em meta-actions, com card de aprovacao.",
+    }, 120000);
+    return json(cut.data);
+  }
 
   if (body?.list === true) {
     const catalog = await listReadTools(token);
