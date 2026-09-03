@@ -6769,10 +6769,14 @@ Deno.serve(async (req) => {
     const payload: any = bodyOpenRouter(rotaLlm, {
       messages: usarCache ? messages : semCache(messages),
       max_tokens: maxTokens,
+      // 03/09/2026: quem decide o esforco de raciocinio e o roteador (modo padrao = high,
+      // pesquisa profunda = xhigh) e bodyOpenRouter SOBREPOE este campo. As duas constantes
+      // continuam valendo no modo legado, onde o roteador nao dita esforco — e onde a
+      // sintese ainda pode desligar o raciocinio para dar todo o orcamento ao texto.
+      reasoning: semRaciocinio ? REASONING_SINTESE : REASONING_LOOP,
     });
     if (comTools) { payload.tools = toolsDoTurno; payload.tool_choice = "auto"; }
-    // v21: na sintese o raciocinio e excluido para que TODO o orcamento va para o texto.
-    if (!reasoningDesativado) payload.reasoning = semRaciocinio ? REASONING_SINTESE : REASONING_LOOP;
+    if (reasoningDesativado) delete payload.reasoning;
     // v28.32: AbortSignal — sem isso uma unica geracao com contexto grande segura o HTTP
     // alem dos ~150s do gateway (ms_total=170s medido em 20/08 com 504 no cliente).
     const capMs = Math.min(OPENROUTER_CALL_CAP_MS, restanteMs);

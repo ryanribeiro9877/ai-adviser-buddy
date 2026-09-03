@@ -386,7 +386,11 @@ Responda APENAS com JSON valido, sem markdown:
       headers: { "content-type": "application/json", authorization: `Bearer ${opts.chaveOpenRouter}` },
       body: JSON.stringify(opts.montarBody(opts.rota, {
         messages: [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 4000) }],
-        max_tokens: 300,
+        // 03/09/2026: 300 nao serve mais. max_tokens cobre raciocinio + texto, e o padrao da
+        // casa (Grok 4.6) raciocina em TODA chamada — nao ha como desligar. Com 300 o modelo
+        // gastaria o teto pensando e devolveria content vazio, o que aqui significa turno com
+        // as 54 ferramentas em vez das do setor. O JSON de resposta continua tendo ~40 tokens.
+        max_tokens: 1200,
       })),
       signal: ac.signal,
     });

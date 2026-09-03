@@ -311,7 +311,10 @@ const MODEL_SUB = modeloOpenRouterSubPadrao();
 let JOB_SESSION_ID: string | null = null;
 let JOB_MODELO_ROTEADO = MODEL;
 let JOB_FAIXA_SINTESE: FaixaLlm = "economia";
-const JOB_LLM_ROTAS: { tipo: string; model: string; faixa: string; motivo: string }[] = [];
+// 03/09/2026: o tier ja classificado desce ao roteador — `deep` e o modo de pesquisa
+// profunda, e e ele que pede esforco de raciocinio xhigh em vez de high.
+let JOB_TIER: CapacidadeTier = "standard";
+const JOB_LLM_ROTAS: { tipo: string; model: string; faixa: string; motivo: string; esforco: string | null }[] = [];
 // v2: credencial do Drive (service account) + pasta raiz dos criativos.
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
 const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? "").trim();
@@ -352,6 +355,12 @@ const SUB_REASONING = { max_tokens: 600 };
 const SINT_MAX_TOKENS = 8_000;
 const SINT_MAX_PARTES = 3;
 const REASONING_OFF = { enabled: false };
+// 03/09/2026: piso de max_tokens quando o roteador dita esforco de raciocinio. O padrao da
+// casa (Grok 4.6) raciocina em TODA chamada — nao ha como desligar — e o raciocinio sai do
+// mesmo max_tokens do texto. Os tetos pequenos foram escritos para modelos com o raciocinio
+// desligado: 800 no planner e 1500 na visao devolveriam content vazio, e no pipeline de visao
+// isso nao vira erro — vira peca gravada como "indeterminado / incerto" sem ninguem notar.
+const MIN_TOKENS_COM_RACIOCINIO = 4000;
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
@@ -1704,14 +1713,22 @@ async function chamarLLM(messages: any[], opts: {
     faixaForcada: opts.faixaForcada,
     especialista: opts.especialista,
     sessionId: opts.sessionId ?? JOB_SESSION_ID,
+    tier: JOB_TIER,
   });
-  JOB_LLM_ROTAS.push({ tipo: rota.tipo, model: rota.model, faixa: rota.faixa, motivo: rota.motivo });
+  JOB_LLM_ROTAS.push({
+    tipo: rota.tipo, model: rota.model, faixa: rota.faixa, motivo: rota.motivo,
+    // Sem isto nao da para auditar se a pesquisa profunda pensou mais que a padrao.
+    esforco: rota.esforco,
+  });
   const payload: any = bodyOpenRouter(rota, {
     messages,
-    max_tokens: opts.maxTokens,
+    max_tokens: rota.esforco ? Math.max(opts.maxTokens, MIN_TOKENS_COM_RACIOCINIO) : opts.maxTokens,
+    // O roteador SOBREPOE este campo (modo padrao = high, profundo = xhigh). O que o
+    // chamador pede aqui vale so no modo legado: o padrao da casa raciocina sempre e nao
+    // aceita orcamento em tokens nem enabled:false.
+    ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
   });
   if (opts.tools?.length) { payload.tools = opts.tools; payload.tool_choice = "auto"; }
-  if (opts.reasoning) payload.reasoning = opts.reasoning;
   const timeoutMs = opts.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
   const maxRetries = opts.retries ?? OPENROUTER_RETRY_MAX;
   const retryCap = opts.retryCapMs ?? OPENROUTER_RETRY_CAP_MS;
@@ -2938,6 +2955,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_LLM_ROTAS.length = 0;
   const cap = classificarCapacidade(pergunta);
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
+  JOB_TIER = cap.tier;
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
   tel.versao = "job-v4.18";

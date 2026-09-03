@@ -47,7 +47,12 @@ export const CATALOGO_PREMIUM: LlmModelo[] = [
   { slug: "openai/gpt-5.6-terra", faixa: "premium", tools: true, visao: true, json: true, prosa: true, nota: "GPT-5.6 prosa longa" },
   { slug: "openai/gpt-5.5", faixa: "premium", tools: true, visao: true, json: true, prosa: true, nota: "flagship OpenAI" },
   { slug: "google/gemini-3.1-pro-preview", faixa: "premium", tools: true, visao: true, json: true, prosa: true, nota: "Pro Google; visao pesada" },
-  { slug: "x-ai/grok-4.6", faixa: "premium", tools: true, visao: true, json: true, prosa: true, nota: "ja foi padrao da casa" },
+  // 03/09/2026: padrao da casa para TODO agente e TODA tarefa (ver llm_roteador.ts).
+  // Capacidades conferidas na /api/v1/models da OpenRouter em 03/09: input text+image+file,
+  // tools/tool_choice, response_format + structured_outputs, 500k de contexto.
+  // Raciocinio OBRIGATORIO (reasoning.mandatory=true): efforts low|medium|high|xhigh,
+  // default high, e NAO aceita effort "none" / enabled:false — o modelo recusa.
+  { slug: "x-ai/grok-4.6", faixa: "premium", tools: true, visao: true, json: true, prosa: true, nota: "padrao da casa (03/09/2026); raciocinio obrigatorio, aceita xhigh" },
   { slug: "anthropic/claude-opus-4.7", faixa: "premium", tools: true, visao: true, json: true, prosa: true, nota: "Opus anterior" },
   { slug: "openai/gpt-5.4", faixa: "premium", tools: true, visao: true, json: true, prosa: true, nota: "GPT-5.4" },
   { slug: "openai/gpt-5.6-sol-pro", faixa: "premium", tools: true, visao: true, json: true, prosa: true, nota: "Sol Pro" },
@@ -67,16 +72,19 @@ export function slugsDaFaixa(faixa: FaixaLlm): string[] {
   return (faixa === "premium" ? CATALOGO_PREMIUM : CATALOGO_ECONOMIA).map((m) => m.slug);
 }
 
-export function filtrarCatalogo(
-  faixa: FaixaLlm,
-  req: { tools?: boolean; visao?: boolean; json?: boolean; prosa?: boolean },
-): LlmModelo[] {
+export type RequisitoCapacidade = { tools?: boolean; visao?: boolean; json?: boolean; prosa?: boolean };
+
+/** O modelo entrega o que o bloco exige? Usado tambem para julgar o padrao da casa. */
+export function atendeCapacidade(m: LlmModelo | undefined, req: RequisitoCapacidade): boolean {
+  if (!m) return false;
+  if (req.tools && !m.tools) return false;
+  if (req.visao && !m.visao) return false;
+  if (req.json && !m.json) return false;
+  if (req.prosa && !m.prosa) return false;
+  return true;
+}
+
+export function filtrarCatalogo(faixa: FaixaLlm, req: RequisitoCapacidade): LlmModelo[] {
   const lista = faixa === "premium" ? CATALOGO_PREMIUM : CATALOGO_ECONOMIA;
-  return lista.filter((m) => {
-    if (req.tools && !m.tools) return false;
-    if (req.visao && !m.visao) return false;
-    if (req.json && !m.json) return false;
-    if (req.prosa && !m.prosa) return false;
-    return true;
-  });
+  return lista.filter((m) => atendeCapacidade(m, req));
 }

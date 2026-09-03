@@ -193,7 +193,10 @@ ${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"`
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${OR_KEY}` },
     body: JSON.stringify(bodyOpenRouter(rota, {
-      max_tokens: 900, reasoning: { enabled: false },
+      // 03/09/2026: teto subiu de 900 porque max_tokens cobre raciocinio + texto e o padrao
+      // da casa raciocina sempre (o reasoning abaixo so vale no modo legado — o roteador
+      // sobrepoe com effort). Sem folga, o redator devolveria JSON vazio e a edge daria 502.
+      max_tokens: 1500, reasoning: { enabled: false },
       messages: [{ role: "system", content: sys }, { role: "user", content: `Objetivo do template: ${objetivo}` }],
     })),
   });

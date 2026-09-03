@@ -1,6 +1,14 @@
-// Prova do catalogo + roteador. Rode: deno run supabase/functions/_shared/_prova_llm_roteador.ts
-import { CATALOGO_ECONOMIA, CATALOGO_PREMIUM, CATALOGO_TODOS, acharModelo } from "./llm_catalogo.ts";
-import { bodyOpenRouter, resolverChamadaLlm } from "./llm_roteador.ts";
+// Prova do catalogo + roteador (modelo unico + esforco por modo).
+// Rode: deno run --allow-read --allow-env supabase/functions/_shared/_prova_llm_roteador.ts
+// (--allow-env porque a prova do modo legado precisa ligar o segredo LLM_ROTEADOR)
+import { acharModelo, atendeCapacidade, CATALOGO_ECONOMIA, CATALOGO_PREMIUM, CATALOGO_TODOS } from "./llm_catalogo.ts";
+import {
+  bodyOpenRouter,
+  diagnosticoRota,
+  MODELO_PADRAO,
+  resolverChamadaLlm,
+  type TipoTarefaLlm,
+} from "./llm_roteador.ts";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -12,60 +20,119 @@ const slugs = CATALOGO_TODOS.map((m) => m.slug);
 assert(new Set(slugs).size === 30, "slugs duplicados no catalogo");
 assert(CATALOGO_ECONOMIA.every((m) => m.faixa === "economia" && m.tools), "economia deve ter tools");
 assert(CATALOGO_PREMIUM.every((m) => m.faixa === "premium"), "premium mal marcado");
-assert(!!acharModelo("openai/gpt-5.6-luna"), "luna no catalogo");
-assert(!!acharModelo("anthropic/claude-sonnet-5"), "sonnet-5 no catalogo");
+assert(!!acharModelo(MODELO_PADRAO), `${MODELO_PADRAO} precisa estar no catalogo`);
+// O padrao da casa so pode ser universal se declarar TODAS as capacidades — a de visao
+// inclusive, senao o pipeline de peca do Drive cairia em excecao.
+assert(
+  atendeCapacidade(acharModelo(MODELO_PADRAO), { tools: true, visao: true, json: true, prosa: true }),
+  `${MODELO_PADRAO} precisa declarar tools+visao+json+prosa`,
+);
 
-const chat = resolverChamadaLlm({ tipo: "chat_loop", pergunta: "qual o gasto de ontem?" });
-assert(!chat.legado, "roteador padrao nao e legado");
-assert(chat.faixa === "economia", "chat simples deve ser economia");
-assert(chat.model === "openai/gpt-5.6-luna", `chat model=${chat.model}`);
-assert(chat.fallbacks.length >= 2, "precisa de fallback");
-assert(chat.provider?.sort === "price", "economia ordena por preco do provedor");
+// ---------------------------------------------------------------------------
+// 1. TODO tipo de tarefa sai no padrao da casa, com rede de fallback nao vazia.
+// ---------------------------------------------------------------------------
+const TIPOS: TipoTarefaLlm[] = [
+  "planner", "subagente", "visao", "coordenacao", "sintese",
+  "chat_loop", "legendas", "compliance", "reco", "waba",
+];
+for (const tipo of TIPOS) {
+  for (const temImagem of [false, true]) {
+    const r = resolverChamadaLlm({ tipo, temImagem, pergunta: "qual o gasto de ontem?" });
+    assert(r.model === MODELO_PADRAO, `${tipo}${temImagem ? "+img" : ""} model=${r.model}`);
+    assert(r.padraoDaCasa, `${tipo}: padraoDaCasa deveria ser true`);
+    assert(r.fallbacks.length >= 2, `${tipo}: rede de fallback vazia demais (${r.fallbacks.length})`);
+    assert(!r.fallbacks.includes(MODELO_PADRAO), `${tipo}: padrao repetido na rede`);
+    assert(!r.legado, `${tipo}: nao e legado`);
+  }
+}
+// Variantes do chat que antes trocavam de modelo continuam no padrao.
+for (const opts of [
+  { tipo: "chat_loop" as const, pedidoAto: true },
+  { tipo: "chat_loop" as const, pergunta: "dos anuncios registrados, eles pertencem a qual pasta do drive?" },
+  { tipo: "subagente" as const, especialista: "analise_visual_drive" },
+  { tipo: "sintese" as const, faixaForcada: "economia" as const },
+]) {
+  const r = resolverChamadaLlm(opts);
+  assert(r.model === MODELO_PADRAO, `${JSON.stringify(opts)} -> ${r.model}`);
+}
 
-const ato = resolverChamadaLlm({ tipo: "chat_loop", pedidoAto: true });
-assert(ato.model === "anthropic/claude-haiku-4.5", `ato model=${ato.model}`);
-assert(ato.faixa === "economia", "ato nao sobe para Opus no sincrono");
-
-const vis = resolverChamadaLlm({ tipo: "chat_loop", temImagem: true });
-assert(vis.model === "google/gemini-2.5-flash", `vis model=${vis.model}`);
-
-const plan = resolverChamadaLlm({ tipo: "planner" });
-assert(plan.model === "anthropic/claude-haiku-4.5", `planner=${plan.model}`);
-assert(plan.faixa === "economia", "planner e economia");
-
-const sub = resolverChamadaLlm({ tipo: "subagente", especialista: "desempenho_campanhas" });
-assert(sub.model === "openai/gpt-5.6-luna", `sub=${sub.model}`);
-
+// Rede de visao so com modelo de visao: se o Grok cair num quadro do Drive, o fallback
+// tambem precisa ler pixel.
 const visao = resolverChamadaLlm({ tipo: "visao" });
-assert(visao.model === "google/gemini-2.5-flash", `visao=${visao.model}`);
+assert(
+  visao.fallbacks.every((s) => acharModelo(s)?.visao === true),
+  `fallback sem visao na rota de visao: ${visao.fallbacks.join(",")}`,
+);
+assert(visao.fallbacks[0] === "google/gemini-2.5-flash", `preferido antigo deve abrir a rede: ${visao.fallbacks[0]}`);
 
-const lite = resolverChamadaLlm({ tipo: "sintese", faixaForcada: "economia" });
-assert(lite.faixa === "economia", "sintese lite/standard fica economia");
-assert(lite.model === "openai/gpt-5.6-luna-pro", `sintese lite=${lite.model}`);
+// ---------------------------------------------------------------------------
+// 2. Esforco de raciocinio: profundo = xhigh, padrao = high.
+// ---------------------------------------------------------------------------
+for (const tipo of TIPOS) {
+  const padrao = resolverChamadaLlm({ tipo });
+  assert(padrao.modo === "padrao", `${tipo}: modo default deve ser padrao`);
+  assert(padrao.esforco === "high", `${tipo}: esforco padrao=${padrao.esforco}`);
 
-const deep = resolverChamadaLlm({ tipo: "sintese" });
-assert(deep.faixa === "premium", "sintese deep e premium");
-assert(deep.model === "anthropic/claude-sonnet-5", `sintese deep=${deep.model}`);
-assert(!deep.provider, "premium nao forca sort=price");
+  const lite = resolverChamadaLlm({ tipo, tier: "lite" });
+  const std = resolverChamadaLlm({ tipo, tier: "standard" });
+  assert(lite.esforco === "high" && std.esforco === "high", `${tipo}: lite/standard devem ser high`);
 
-const rec = resolverChamadaLlm({ tipo: "reco" });
-assert(rec.model === "openai/gpt-4o-mini", `reco=${rec.model}`);
+  const deep = resolverChamadaLlm({ tipo, tier: "deep" });
+  assert(deep.modo === "profundo", `${tipo}: tier deep deve virar modo profundo`);
+  assert(deep.esforco === "xhigh", `${tipo}: esforco deep=${deep.esforco}`);
 
-const origem = resolverChamadaLlm({
-  tipo: "chat_loop",
-  pergunta:
-    "foque exclusivamente no conjunto 1: dos anuncios registrados, eles pertencem a qual pasta do drive?",
-});
-assert(origem.model === "openai/gpt-5.6-luna-pro", `origem model=${origem.model}`);
-assert(origem.faixa === "economia", "leitura cruzada permanece economia");
+  const explicito = resolverChamadaLlm({ tipo, profundo: true });
+  assert(explicito.esforco === "xhigh", `${tipo}: profundo explicito=${explicito.esforco}`);
+  const negado = resolverChamadaLlm({ tipo, tier: "deep", profundo: false });
+  assert(negado.esforco === "high", `${tipo}: profundo=false vence o tier`);
+}
 
-const body = bodyOpenRouter(chat, { max_tokens: 10, messages: [] });
-assert(body.model === chat.model, "body.model");
+// O esforco entra no body como effort (unico controle que o padrao da casa aceita) e
+// SOBREPOE o reasoning que a edge mandou — as constantes antigas desligavam o raciocinio.
+const chat = resolverChamadaLlm({ tipo: "chat_loop", pergunta: "qual o gasto de ontem?" });
+const body = bodyOpenRouter(chat, { max_tokens: 10, messages: [], reasoning: { enabled: false } });
+assert(body.model === MODELO_PADRAO, "body.model");
+assert(JSON.stringify(body.reasoning) === '{"effort":"high"}', `body.reasoning=${JSON.stringify(body.reasoning)}`);
 assert(Array.isArray(body.models) && (body.models as string[]).includes(chat.fallbacks[0]), "fallbacks no body");
 assert((body.provider as { sort: string }).sort === "price", "provider no body");
 
-const premiumBody = bodyOpenRouter(deep, { max_tokens: 8 });
-assert(premiumBody.model === "anthropic/claude-sonnet-5", "premium body");
-assert(premiumBody.provider == null, "premium sem sort price");
+const deepSint = resolverChamadaLlm({ tipo: "sintese", tier: "deep" });
+const bodyDeep = bodyOpenRouter(deepSint, { max_tokens: 8, reasoning: { max_tokens: 600 } });
+assert(JSON.stringify(bodyDeep.reasoning) === '{"effort":"xhigh"}', `deep body=${JSON.stringify(bodyDeep.reasoning)}`);
+assert(bodyDeep.provider == null, "premium nao forca sort=price");
 
-console.log("ok llm_roteador", { chat: chat.model, ato: ato.model, deep: deep.model });
+// Telemetria: sem esforco/modo no diagnostico nao da para auditar o modo profundo.
+const diag = diagnosticoRota(deepSint);
+assert(diag.esforco_raciocinio === "xhigh", `diagnostico esforco=${diag.esforco_raciocinio}`);
+assert(diag.modo_raciocinio === "profundo", `diagnostico modo=${diag.modo_raciocinio}`);
+assert(diag.padrao_da_casa === true, "diagnostico padrao_da_casa");
+assert(diag.modelo_pedido === MODELO_PADRAO, "diagnostico modelo_pedido");
+assert(String(diag.motivo_rota).includes("raciocinio xhigh"), "motivo declara o esforco");
+
+// ---------------------------------------------------------------------------
+// 3. Modo legado continua respeitado (escape do gestor).
+// ---------------------------------------------------------------------------
+Deno.env.set("LLM_ROTEADOR", "legado");
+try {
+  const leg = resolverChamadaLlm({ tipo: "chat_loop", tier: "deep" });
+  assert(leg.legado, "LLM_ROTEADOR=legado deve voltar ao comportamento antigo");
+  assert(leg.model !== MODELO_PADRAO, `legado nao forca o padrao: ${leg.model}`);
+  assert(leg.esforco === null, "legado nao dita esforco");
+  const bodyLeg = bodyOpenRouter(leg, { max_tokens: 5, reasoning: { max_tokens: 6000 } });
+  assert(
+    JSON.stringify(bodyLeg.reasoning) === '{"max_tokens":6000}',
+    `legado preserva o reasoning da edge: ${JSON.stringify(bodyLeg.reasoning)}`,
+  );
+} finally {
+  Deno.env.delete("LLM_ROTEADOR");
+}
+const voltou = resolverChamadaLlm({ tipo: "chat_loop" });
+assert(!voltou.legado && voltou.model === MODELO_PADRAO, "sem o segredo, volta ao padrao da casa");
+
+console.log("ok llm_roteador", {
+  padrao: MODELO_PADRAO,
+  tipos_conferidos: TIPOS.length,
+  esforco_padrao: chat.esforco,
+  esforco_profundo: deepSint.esforco,
+  rede_chat: chat.fallbacks,
+});
