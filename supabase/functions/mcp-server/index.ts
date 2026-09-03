@@ -56,9 +56,15 @@ const n = (v: unknown) => Number(v ?? 0);
  * escolher o dele. A base agora vem de `baseDoObjetivo()`, a mesma regra que
  * `public.base_de_resultado()` aplica no banco, com paridade provada em
  * `public.prova_base_de_resultado()`.
+ *
+ * `goalDosConjuntos` completa a terceira entrada da regra: `campaigns` nao tem coluna
+ * `optimization_goal` — ele vive em `ad_sets`, e e de la que
+ * `public.base_de_resultado_da_campanha()` o busca. Passar null aqui deixaria o TS decidindo
+ * com duas entradas onde o SQL decide com tres, que e a mesma classe de divergencia que esta
+ * frente veio eliminar. Medido em 03/09/2026: 1 campanha das 79 muda de base por causa disso.
  */
-function derivadosDaCampanha(r: Record<string, unknown>) {
-  const base = baseDoObjetivo(r.category as string | null, null, r.objective as string | null);
+function derivadosDaCampanha(r: Record<string, unknown>, goalDosConjuntos?: string | null) {
+  const base = baseDoObjetivo(r.category as string | null, goalDosConjuntos ?? null, r.objective as string | null);
   const custo = custoPorResultado({
     gasto: n(r.spend),
     formularios: n(r.form_leads),
@@ -77,6 +83,23 @@ function derivadosDaCampanha(r: Record<string, unknown>) {
     roas: spend ? +(revenue / spend).toFixed(2) : null,
     ctr: impressions ? +((clicks / impressions) * 100).toFixed(2) : null,
   };
+}
+
+/**
+ * Espelho do subselect de `public.base_de_resultado_da_campanha()`: devolve 'CONVERSATIONS'
+ * para as campanhas que tem ao menos um conjunto otimizado para conversa, e nada para as
+ * demais. So esse valor importa para a regra — os outros goals ja estao cobertos por
+ * categoria e objective —, entao o filtro fica no banco e nao trafega conjunto a toa.
+ */
+async function goalDeConversaPorCampanha(companyId?: string): Promise<Map<string, string>> {
+  let q = db.from("ad_sets").select("campaign_id,optimization_goal").eq("optimization_goal", "CONVERSATIONS");
+  if (companyId) q = q.eq("company_id", companyId);
+  const { data } = await q;
+  const m = new Map<string, string>();
+  for (const r of (data ?? []) as Record<string, unknown>[]) {
+    if (r.campaign_id) m.set(String(r.campaign_id), "CONVERSATIONS");
+  }
+  return m;
 }
 
 const sinceDate = (days: number) => new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
@@ -133,9 +156,15 @@ async function callTool(name: string, args: any, mcpKeyEncaminhada: string) {
         let q = db.from("campaigns").select("*");
         if (args.company_id) q = q.eq("company_id", args.company_id);
         if (args.status) q = q.eq("status", args.status);
-        const { data, error } = await q.order("spend", { ascending: false });
+        const [{ data, error }, goals] = await Promise.all([
+          q.order("spend", { ascending: false }),
+          goalDeConversaPorCampanha(args.company_id),
+        ]);
         if (error) return toolText(error.message, true);
-        return toolText((data ?? []).map((c: Record<string, unknown>) => ({ ...c, derived: derivadosDaCampanha(c) })));
+        return toolText((data ?? []).map((c: Record<string, unknown>) => ({
+          ...c,
+          derived: derivadosDaCampanha(c, goals.get(String(c.id)) ?? null),
+        })));
       }
       case "get_campaign_timeseries": {
         const days = Number(args.days ?? 30);
@@ -159,13 +188,21 @@ async function callTool(name: string, args: any, mcpKeyEncaminhada: string) {
           qs = qs.eq("company_id", args.company_id);
           qc = qc.eq("company_id", args.company_id);
         }
-        const [{ data, error }, { data: camps, error: erroCamp }] = await Promise.all([qs, qc]);
+        const [{ data, error }, { data: camps, error: erroCamp }, goals] = await Promise.all([
+          qs,
+          qc,
+          goalDeConversaPorCampanha(args.company_id),
+        ]);
         if (error || erroCamp) return toolText((error ?? erroCamp)!.message, true);
 
         const baseDaCampanha = new Map<string, BaseDeResultado>(
           (camps ?? []).map((c: Record<string, unknown>) => [
             String(c.id),
-            baseDoObjetivo(c.category as string | null, null, c.objective as string | null),
+            baseDoObjetivo(
+              c.category as string | null,
+              goals.get(String(c.id)) ?? null,
+              c.objective as string | null,
+            ),
           ]),
         );
 
