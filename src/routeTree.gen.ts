@@ -13,6 +13,7 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedWhatsappRouteImport } from './routes/_authenticated/whatsapp'
+import { Route as AuthenticatedTarefasRouteImport } from './routes/_authenticated/tarefas'
 import { Route as AuthenticatedRecomendacoesRouteImport } from './routes/_authenticated/recomendacoes'
 import { Route as AuthenticatedMetasRouteImport } from './routes/_authenticated/metas'
 import { Route as AuthenticatedFunilRouteImport } from './routes/_authenticated/funil'
@@ -43,6 +44,11 @@ const IndexRoute = IndexRouteImport.update({
 const AuthenticatedWhatsappRoute = AuthenticatedWhatsappRouteImport.update({
   id: '/whatsapp',
   path: '/whatsapp',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedTarefasRoute = AuthenticatedTarefasRouteImport.update({
+  id: '/tarefas',
+  path: '/tarefas',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedRecomendacoesRoute =
@@ -123,6 +129,7 @@ export interface FileRoutesByFullPath {
   '/funil': typeof AuthenticatedFunilRoute
   '/metas': typeof AuthenticatedMetasRoute
   '/recomendacoes': typeof AuthenticatedRecomendacoesRoute
+  '/tarefas': typeof AuthenticatedTarefasRoute
   '/whatsapp': typeof AuthenticatedWhatsappRoute
 }
 export interface FileRoutesByTo {
@@ -140,6 +147,7 @@ export interface FileRoutesByTo {
   '/funil': typeof AuthenticatedFunilRoute
   '/metas': typeof AuthenticatedMetasRoute
   '/recomendacoes': typeof AuthenticatedRecomendacoesRoute
+  '/tarefas': typeof AuthenticatedTarefasRoute
   '/whatsapp': typeof AuthenticatedWhatsappRoute
 }
 export interface FileRoutesById {
@@ -159,6 +167,7 @@ export interface FileRoutesById {
   '/_authenticated/funil': typeof AuthenticatedFunilRoute
   '/_authenticated/metas': typeof AuthenticatedMetasRoute
   '/_authenticated/recomendacoes': typeof AuthenticatedRecomendacoesRoute
+  '/_authenticated/tarefas': typeof AuthenticatedTarefasRoute
   '/_authenticated/whatsapp': typeof AuthenticatedWhatsappRoute
 }
 export interface FileRouteTypes {
@@ -178,6 +187,7 @@ export interface FileRouteTypes {
     | '/funil'
     | '/metas'
     | '/recomendacoes'
+    | '/tarefas'
     | '/whatsapp'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -195,6 +205,7 @@ export interface FileRouteTypes {
     | '/funil'
     | '/metas'
     | '/recomendacoes'
+    | '/tarefas'
     | '/whatsapp'
   id:
     | '__root__'
@@ -213,6 +224,7 @@ export interface FileRouteTypes {
     | '/_authenticated/funil'
     | '/_authenticated/metas'
     | '/_authenticated/recomendacoes'
+    | '/_authenticated/tarefas'
     | '/_authenticated/whatsapp'
   fileRoutesById: FileRoutesById
 }
@@ -250,6 +262,13 @@ declare module '@tanstack/react-router' {
       path: '/whatsapp'
       fullPath: '/whatsapp'
       preLoaderRoute: typeof AuthenticatedWhatsappRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/tarefas': {
+      id: '/_authenticated/tarefas'
+      path: '/tarefas'
+      fullPath: '/tarefas'
+      preLoaderRoute: typeof AuthenticatedTarefasRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/recomendacoes': {
@@ -352,6 +371,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedFunilRoute: typeof AuthenticatedFunilRoute
   AuthenticatedMetasRoute: typeof AuthenticatedMetasRoute
   AuthenticatedRecomendacoesRoute: typeof AuthenticatedRecomendacoesRoute
+  AuthenticatedTarefasRoute: typeof AuthenticatedTarefasRoute
   AuthenticatedWhatsappRoute: typeof AuthenticatedWhatsappRoute
 }
 
@@ -368,6 +388,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedFunilRoute: AuthenticatedFunilRoute,
   AuthenticatedMetasRoute: AuthenticatedMetasRoute,
   AuthenticatedRecomendacoesRoute: AuthenticatedRecomendacoesRoute,
+  AuthenticatedTarefasRoute: AuthenticatedTarefasRoute,
   AuthenticatedWhatsappRoute: AuthenticatedWhatsappRoute,
 }
 

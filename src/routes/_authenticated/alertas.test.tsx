@@ -107,12 +107,45 @@ describe("lista", () => {
     expect(await screen.findByText("Nenhum alerta ativo.")).toBeInTheDocument();
   });
 
-  it("mostra titulo, descricao e severidade", async () => {
+  it("mostra titulo, descricao e severidade em portugues", async () => {
     linhas = [alerta()];
     montar();
     expect(await screen.findByText("CPL acima do teto")).toBeInTheDocument();
     expect(screen.getByText("O custo por lead passou de R$ 20")).toBeInTheDocument();
-    expect(screen.getByText("high")).toBeInTheDocument();
+    // A gravidade aparece traduzida: o codigo cru do banco ("high") nao chega ao gestor.
+    expect(screen.getByText("Alto")).toBeInTheDocument();
+    expect(screen.queryByText("high")).not.toBeInTheDocument();
+  });
+
+  // O padrao novo (padrao_versao = 2) guarda os blocos em colunas proprias. A tela tem de
+  // mostrar cada um rotulado, e nao despejar a description numa linha corrida — era isso
+  // que tornava o alerta ilegivel.
+  it("alerta no padrao novo mostra onde, quanto, janela e o que fazer", async () => {
+    linhas = [
+      alerta({
+        padrao_versao: 2,
+        description: "A campanha ja consumiu R$ 1.200,00 e nao trouxe um unico lead.",
+        onde: "Campanha [LAF] Institucional",
+        quanto: "R$ 1.200,00 gastos, 0 lead",
+        janela: "total acumulado da campanha",
+        acao: "Testar o caminho do lead de ponta a ponta.",
+        linha_produto: "La Felicità",
+        vistas: 3,
+        primeira_deteccao: "2026-08-11T12:00:00Z",
+      }),
+    ];
+    montar();
+    expect(
+      await screen.findByText("A campanha ja consumiu R$ 1.200,00 e nao trouxe um unico lead."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Campanha [LAF] Institucional")).toBeInTheDocument();
+    expect(screen.getByText("R$ 1.200,00 gastos, 0 lead")).toBeInTheDocument();
+    expect(screen.getByText("total acumulado da campanha")).toBeInTheDocument();
+    expect(screen.getByText(/Testar o caminho do lead/)).toBeInTheDocument();
+    // A linha de produto tem de estar visivel: alerta de uma linha lido no contexto de
+    // outra ja aconteceu neste sistema e e erro grave.
+    expect(screen.getByText("La Felicità")).toBeInTheDocument();
+    expect(screen.getByText(/confirmado em 3 rodadas/)).toBeInTheDocument();
   });
 
   it("alerta resolvido mostra o rotulo 'Resolvido' em vez da severidade", async () => {

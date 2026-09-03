@@ -8,6 +8,7 @@ import {
   Image as ImageIcon,
   Funnel,
   Bell,
+  Clock,
   MessageCircle,
   Goal,
   Sparkles,
@@ -48,6 +49,7 @@ const nav: NavItem[] = [
   { to: "/anuncios", label: "Anúncios e criativos", icon: ImageIcon },
   { to: "/funil", label: "Funil e conversões", icon: Funnel },
   { to: "/alertas", label: "Alertas", icon: Bell },
+  { to: "/tarefas", label: "Tarefas agendadas", icon: Clock },
   { to: "/whatsapp", label: "WhatsApp", icon: MessageCircle },
   { to: "/metas", label: "Metas & Tetos", icon: Goal },
   // "Operação" = futuro chat do gestor de tráfego (Fase 3). Hoje abre a tela

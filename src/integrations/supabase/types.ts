@@ -267,31 +267,61 @@ export type Database = {
       };
       alerts: {
         Row: {
+          acao: string | null;
+          chave_dedupe: string | null;
           company_id: string;
           created_at: string;
           description: string | null;
           id: string;
+          janela: string | null;
+          linha_produto: string | null;
+          onde: string | null;
+          padrao_versao: number | null;
+          primeira_deteccao: string | null;
+          quanto: string | null;
           resolved: boolean;
           severity: Database["public"]["Enums"]["alert_severity"];
+          tarefa: string | null;
           title: string;
+          vistas: number | null;
         };
         Insert: {
+          acao?: string | null;
+          chave_dedupe?: string | null;
           company_id: string;
           created_at?: string;
           description?: string | null;
           id?: string;
+          janela?: string | null;
+          linha_produto?: string | null;
+          onde?: string | null;
+          padrao_versao?: number | null;
+          primeira_deteccao?: string | null;
+          quanto?: string | null;
           resolved?: boolean;
           severity?: Database["public"]["Enums"]["alert_severity"];
+          tarefa?: string | null;
           title: string;
+          vistas?: number | null;
         };
         Update: {
+          acao?: string | null;
+          chave_dedupe?: string | null;
           company_id?: string;
           created_at?: string;
           description?: string | null;
           id?: string;
+          janela?: string | null;
+          linha_produto?: string | null;
+          onde?: string | null;
+          padrao_versao?: number | null;
+          primeira_deteccao?: string | null;
+          quanto?: string | null;
           resolved?: boolean;
           severity?: Database["public"]["Enums"]["alert_severity"];
+          tarefa?: string | null;
           title?: string;
+          vistas?: number | null;
         };
         Relationships: [
           {
@@ -1184,6 +1214,33 @@ export type Database = {
     Functions: {
       decide_approval: {
         Args: { p_id: string; p_decision: string; p_reason: string | null };
+        Returns: Json;
+      };
+      painel_tarefas_agendadas: {
+        Args: Record<PropertyKey, never>;
+        Returns: {
+          tarefa: string;
+          titulo: string;
+          pergunta: string | null;
+          periodicidade: string | null;
+          tolerancia_horas: number | null;
+          tipo: string;
+          empresa: string | null;
+          ultima_em: string | null;
+          desfecho: string | null;
+          duracao_ms: number | null;
+          itens_processados: number | null;
+          achados: number | null;
+          mensagem_erro: string | null;
+          horas_desde_ok: number | null;
+          atrasada: boolean;
+          rodadas_7d: number | null;
+          falhas_7d: number | null;
+          agendada_no_cron: boolean;
+        }[];
+      };
+      reexecutar_tarefa: {
+        Args: { p_tarefa: string };
         Returns: Json;
       };
       reexecutar_aprovacao: {

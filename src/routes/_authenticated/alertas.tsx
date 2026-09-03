@@ -19,6 +19,15 @@ export const Route = createFileRoute("/_authenticated/alertas")({
 // Ordem de severidade: critical no topo (pendência da fase 2).
 const SEVERITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
+// A gravidade era exibida com o código cru do banco ("high"), que é justamente o tipo de
+// saída que ninguém interpreta rápido.
+const SEVERITY_LABEL: Record<string, string> = {
+  critical: "Crítico",
+  high: "Alto",
+  medium: "Médio",
+  low: "Baixo",
+};
+
 function Alertas() {
   const { selectedCompany, isAdmin } = useApp();
   const { recarregar } = useNotificacoes();
@@ -94,14 +103,61 @@ function Alertas() {
                 className={`h-5 w-5 ${a.severity === "high" || a.severity === "critical" ? "text-destructive" : a.severity === "medium" ? "text-[color:var(--color-warning)]" : "text-muted-foreground"}`}
               />
             </div>
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="font-semibold">{a.title}</span>
                 <Badge variant={a.resolved ? "secondary" : "outline"}>
-                  {a.resolved ? "Resolvido" : a.severity}
+                  {a.resolved ? "Resolvido" : (SEVERITY_LABEL[a.severity] ?? a.severity)}
                 </Badge>
+                {/* A linha de produto fica em destaque de propósito: já houve alerta de uma
+                    linha lido no contexto de outra, e o erro é grave. */}
+                {a.linha_produto && <Badge variant="secondary">{a.linha_produto}</Badge>}
               </div>
-              <div className="mt-1 text-sm text-muted-foreground">{a.description}</div>
+
+              {a.padrao_versao === 2 ? (
+                <div className="mt-1 space-y-1 text-sm">
+                  <p className="text-foreground">{a.description?.split("\n")[0]}</p>
+                  <dl className="grid gap-x-4 gap-y-1 text-xs text-muted-foreground sm:grid-cols-[auto_1fr]">
+                    {a.onde && (
+                      <>
+                        <dt className="font-medium">Onde</dt>
+                        <dd>{a.onde}</dd>
+                      </>
+                    )}
+                    {a.quanto && (
+                      <>
+                        <dt className="font-medium">Quanto</dt>
+                        <dd>{a.quanto}</dd>
+                      </>
+                    )}
+                    {a.janela && (
+                      <>
+                        <dt className="font-medium">Janela</dt>
+                        <dd>{a.janela}</dd>
+                      </>
+                    )}
+                  </dl>
+                  {a.acao && (
+                    <p className="rounded-md bg-muted/50 p-2 text-xs">
+                      <span className="font-medium">O que fazer: </span>
+                      {a.acao}
+                    </p>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Detectado em{" "}
+                    {new Date(a.primeira_deteccao ?? a.created_at).toLocaleString("pt-BR", {
+                      dateStyle: "short",
+                      timeStyle: "short",
+                    })}
+                    {(a.vistas ?? 1) > 1 && ` · confirmado em ${a.vistas} rodadas`}
+                  </p>
+                </div>
+              ) : (
+                // Alertas antigos guardam tudo numa string só; ao menos preserva as quebras.
+                <div className="mt-1 whitespace-pre-line text-sm text-muted-foreground">
+                  {a.description}
+                </div>
+              )}
             </div>
             {isAdmin && !a.resolved && (
               <Button size="sm" variant="outline" onClick={() => resolve(a.id)}>

@@ -1,0 +1,183 @@
+-- espelho para git — NÃO re-executar (os objetos já existem em produção).
+--
+-- ============================================================================
+-- Crons que rodam de verdade, registro de execução e alerta legível
+-- ============================================================================
+--
+-- Espelho consolidado da entrega de 03/09. O SQL completo está versionado em
+-- ../migrations/ (9 arquivos, 20260903200000 a 20260903208000); este arquivo
+-- registra a DECISÃO e a EVIDÊNCIA, que é o que a pasta de espelhos guarda.
+--
+-- Correspondência com as versões aplicadas no remoto (apply_migration via MCP,
+-- intercaladas com o trabalho de outros dois agentes no mesmo dia):
+--
+--   20260903195631  registro_de_execucoes_e_alerta_legivel
+--   20260903200450  crons_pelo_registro_funcoes
+--   20260903200710  crons_pelo_registro_catalogo
+--   20260903201104  contagem_do_corpo_das_edges
+--   20260903201121  fechar_execucao_conta_piso
+--   20260903201233  conferir_http_com_contagem
+--   20260903201744  reais_numero_br_e_emitir_alerta_com_rule_id
+--   20260903202254  evaluate_alerts_no_padrao_legivel
+--   20260903203038  crons_passam_pelo_registro
+--   20260903203509  fechar_execucao_das_rpcs_internas
+--   20260903203558  search_path_fixo_nos_auxiliares
+--   20260903210114  duracao_real_da_chamada_http
+--   20260903210147  conferencia_repassa_instante_da_resposta
+--
+-- ----------------------------------------------------------------------------
+-- 1. O diagnóstico: por que "sucesso" não provava nada
+-- ----------------------------------------------------------------------------
+--
+-- O `pg_cron` marca o job como bem-sucedido quando o `net.http_post` é
+-- ENFILEIRADO, não quando a edge responde. 17 dos 28 jobs eram desse tipo.
+-- Resultado: `cron.job_run_details` mostrava sucesso em série para chamadas que
+-- podiam nunca ter chegado ao destino, e ninguém tinha como saber.
+--
+-- Pior: `net._http_response` **não guarda a URL** (confirmado em
+-- information_schema — só `id`, `status_code`, `content_type`, `headers`,
+-- `content`, `timed_out`, `error_msg`, `created`). A URL vive só em
+-- `net.http_request_queue`, que é efêmera. Então mesmo achando uma resposta 500
+-- não era possível dizer de qual cron ela veio. Não havia trilha.
+--
+-- Daí a ordem da entrega: instrumentar ANTES de consertar. Sem registro, um
+-- conserto de cron volta a apodrecer invisível em duas semanas.
+--
+-- ----------------------------------------------------------------------------
+-- 2. O que passou a existir
+-- ----------------------------------------------------------------------------
+--
+-- `public.tarefas_agendadas`  — catálogo. Cada tarefa declara a PERGUNTA
+--   operacional que responde (coluna `pergunta`), o tipo (sql/http), a
+--   periodicidade, a tolerância de atraso em horas, e a `tabela_destino` +
+--   `coluna_carimbo` que permitem conferir se a rodada realmente escreveu.
+--   Tarefa sem pergunta é cron de enfeite; a coluna existe para forçar a
+--   pergunta a ser escrita.
+--
+-- `public.execucoes_agendadas` — histórico de rodadas. Distingue quatro
+--   desfechos, e a distinção é o ponto da tabela inteira:
+--     'sucesso'       rodou e fez algo
+--     'sucesso_vazio' rodou, olhou, não havia nada a fazer
+--     'falha'         rodou e não concluiu
+--     'em_curso'      disparou, a resposta ainda não voltou
+--   Antes, "rodou e não achou nada" e "não rodou" eram os dois silêncio. Era
+--   por isso que cron parada não era percebida.
+--
+-- `alerts` ganhou as colunas do padrão: `tarefa`, `linha_produto`, `onde`,
+--   `quanto`, `acao`, `janela`, `chave_dedupe`, `padrao_versao`,
+--   `primeira_deteccao`, `vistas`. `padrao_versao` permite conviver com o
+--   histórico antigo sem reescrevê-lo — alerta velho continua legível como
+--   texto corrido, alerta novo aparece com cada bloco rotulado na tela.
+--
+-- ----------------------------------------------------------------------------
+-- 3. Como o sucesso passou a ser verificado no destino
+-- ----------------------------------------------------------------------------
+--
+-- `disparar_tarefa_http` grava o `request_id` devolvido pelo `net.http_post`
+-- e a contagem do destino ANTES da chamada (`base_destino`). É isso que fecha
+-- o furo da URL ausente: a amarração passa a ser pelo id da requisição, que é
+-- nosso, e não pela resposta, que não se identifica.
+--
+-- `conferir_execucoes_http` (cron */5) casa `request_id` com
+-- `net._http_response` e decide:
+--   - 2xx + corpo sem `ok:false`            -> sucesso
+--   - 2xx + corpo com `ok:false`            -> FALHA (edge que mente no status)
+--   - sem resposta além do prazo, mas o destino cresceu -> sucesso com ressalva
+--   - sem resposta além do prazo e destino parado       -> falha
+--
+-- `fechar_execucao` rebaixa 'sucesso' para 'sucesso_vazio' quando itens e
+-- achados são ambos zero, e conta itens pelo MAIOR entre o que o corpo declara
+-- e o que o destino realmente cresceu. Edge que declara 50 mas grava 0 não
+-- passa por bem-sucedida.
+--
+-- ----------------------------------------------------------------------------
+-- 4. A duração media a chamada, não o atraso da conferência
+-- ----------------------------------------------------------------------------
+--
+-- Defeito encontrado DEPOIS de a instrumentação estar rodando, e achado
+-- justamente por ela: `drenar-alertas-criticos` gravou 300002 ms com HTTP 200 e
+-- `timed_out = false`. Não era lentidão — `fechar_execucao` media
+-- `now() - iniciado_em`, e quem fecha tarefa HTTP é a conferência de 5 em 5
+-- minutos. O número era o intervalo do cron, não a tarefa.
+--
+-- 300s falso é pior que número ausente: manda investigar desempenho que está
+-- bom. Como `_http_response.created` guarda quando a resposta chegou, a
+-- conferência passou a repassar esse instante (`p_fim`) e a duração virou
+-- "disparo -> resposta recebida". Mesma tarefa, mesma edge, mesmo 200:
+-- 299996 ms antes, 917 ms depois.
+--
+-- ----------------------------------------------------------------------------
+-- 5. Ausência virou alerta
+-- ----------------------------------------------------------------------------
+--
+-- `vigiar_tarefas_agendadas` (cron horário) compara a última rodada com a
+-- `tolerancia_horas` do catálogo e emite alerta para tarefa atrasada, para
+-- tarefa que está no catálogo mas não no `cron.job`, e para tarefa que nunca
+-- rodou. Substituiu `check_data_freshness`, que estava fixado numa empresa só,
+-- apontava para a `windsor-sync` já aposentada, e lia `net._http_response` sem
+-- ter como saber de quem era a resposta.
+--
+-- ----------------------------------------------------------------------------
+-- 6. Contaminação entre linhas de produto
+-- ----------------------------------------------------------------------------
+--
+-- Três marcas (COHAPM Jurídico, La Felicità, VISTTA) dividem um único
+-- `company_id`. Filtrar por empresa, portanto, NÃO separa linha de produto —
+-- e alerta de uma linha lido no contexto de outra já aconteceu aqui.
+--
+-- `linha_de_produto_do_nome` resolve a linha pelo token entre colchetes do nome
+-- da campanha ([LEV], [LAF], …) cruzando com `brand_identity.marca_tag`, e o
+-- resultado vai na coluna `linha_produto` de todo alerta, exibida como badge.
+-- Quando o token não resolve, o alerta diz que não resolveu em vez de chutar.
+--
+-- ----------------------------------------------------------------------------
+-- 7. `evaluate_alerts` parou de apagar o próprio histórico
+-- ----------------------------------------------------------------------------
+--
+-- A versão anterior fazia `delete from alerts where rule_id is not null` e
+-- reinseria tudo a cada rodada. Efeito: `created_at` era sempre "hoje", então
+-- não havia como saber se um alerta era novo ou estava aberto há duas semanas —
+-- e "há duas semanas" é justamente o que decide prioridade.
+--
+-- Agora é idempotente por `chave_dedupe`: primeira vez insere e grava
+-- `primeira_deteccao`; repetição incrementa `vistas` e atualiza os números,
+-- preservando a data original. O que deixou de valer é resolvido por
+-- `resolver_alertas_da_tarefa`, não apagado.
+--
+-- ----------------------------------------------------------------------------
+-- 8. Permissões — o catálogo é a prova, não o HTTP
+-- ----------------------------------------------------------------------------
+--
+-- As duas tabelas novas têm RLS ligado e revogam tudo de `anon` e
+-- `authenticated`. As 19 funções internas revogam de `PUBLIC` (não só dos dois
+-- papéis — lição de 20260813161344: revogar de um papel não remove o que ele
+-- herda de PUBLIC) e liberam só `service_role`.
+--
+-- Exceções deliberadas, as três que o front precisa:
+--   painel_tarefas_agendadas()  -> authenticated  (leitura da saúde das tarefas)
+--   reexecutar_tarefa(text)     -> authenticated  (botão de reexecutar)
+--   evaluate_alerts()           -> authenticated  (já era, mantido)
+--
+-- Conferido em `pg_proc` + `has_function_privilege`: 22 funções com
+-- `search_path=public`, `anon` sem execute em nenhuma.
+--
+-- ----------------------------------------------------------------------------
+-- 9. Limite do que foi provado
+-- ----------------------------------------------------------------------------
+--
+-- Não é possível provar numa sessão que uma cron diária dispara amanhã. O que
+-- se prova é que o alvo executa quando invocado, que o agendamento está
+-- registrado em `cron.job`, e que o histórico vai denunciar a falha se ela
+-- ocorrer.
+--
+-- Provado nesta sessão, além disso: as tarefas de 5 minutos e horárias rodaram
+-- SOZINHAS (6 rodadas de `conferir-chamadas-http` e 5 de
+-- `drenar-alertas-criticos` sem intervenção), `snapshot-config-campanhas`
+-- gravou 79 itens, e a idempotência recusou uma segunda chamada de
+-- `saude-dos-tokens-meta` com "periodo ja concluido com sucesso".
+--
+-- Consultas para repetir a verificação:
+--   select jobname, schedule, active, command from cron.job order by jobname;
+--   select * from public.painel_tarefas_agendadas();
+--   select tarefa, desfecho, duracao_ms, itens_processados, achados
+--     from public.execucoes_agendadas order by iniciado_em desc limit 20;
