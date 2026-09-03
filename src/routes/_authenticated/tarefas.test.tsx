@@ -63,6 +63,7 @@ function tarefa(over: Record<string, unknown> = {}) {
     achados: 2,
     mensagem_erro: null,
     atrasada: false,
+    aguardando_primeira: false,
     rodadas_7d: 7,
     falhas_7d: 0,
     agendada_no_cron: true,
@@ -135,6 +136,29 @@ describe("atrasadas", () => {
     expect(screen.getByText("atrasadas")).toBeInTheDocument();
   });
 
+  // O painel e o vigia tem de contar a mesma historia. Tarefa recem-cadastrada que ainda
+  // nao rodou nao e atraso: o vigia nao alerta, entao a tela nao pode pintar de vermelho.
+  // Discordancia entre as duas superficies e pior que qualquer uma estar errada, porque
+  // ensina o gestor a nao acreditar em nenhuma.
+  it("tarefa que ainda nao teve a primeira rodada nao entra como atrasada", async () => {
+    linhas = [
+      tarefa({
+        tarefa: "t-nova",
+        titulo: "Rotina recem-cadastrada",
+        desfecho: null,
+        ultima_em: null,
+        atrasada: false,
+        aguardando_primeira: true,
+        rodadas_7d: 0,
+      }),
+    ];
+    montar();
+    expect(await screen.findByText(/Aguardando a primeira rodada/)).toBeInTheDocument();
+    expect(screen.getByText("Aguardando a 1ª rodada")).toBeInTheDocument();
+    expect(screen.queryByText(/Atrasadas —/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Nunca rodou")).not.toBeInTheDocument();
+  });
+
   it("nao mostra a secao de atrasadas quando esta tudo em dia", async () => {
     linhas = [tarefa()];
     montar();
@@ -154,7 +178,15 @@ describe("atrasadas", () => {
   it("marca tarefa do catalogo que nao esta agendada no cron", async () => {
     linhas = [tarefa({ agendada_no_cron: false })];
     montar();
-    expect(await screen.findByText("sem agendamento")).toBeInTheDocument();
+    // Aparece duas vezes de proposito: no resumo do topo e no cracha da linha.
+    await waitFor(() => expect(screen.getAllByText("sem agendamento")).toHaveLength(2));
+  });
+
+  it("nao mostra o resumo de 'sem agendamento' quando todas estao agendadas", async () => {
+    linhas = [tarefa({ agendada_no_cron: true })];
+    montar();
+    await screen.findByText("Alertas de midia");
+    expect(screen.queryByText("sem agendamento")).not.toBeInTheDocument();
   });
 });
 

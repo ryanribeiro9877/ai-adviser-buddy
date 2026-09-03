@@ -1234,6 +1234,7 @@ export type Database = {
           mensagem_erro: string | null;
           horas_desde_ok: number | null;
           atrasada: boolean;
+          aguardando_primeira: boolean;
           rodadas_7d: number | null;
           falhas_7d: number | null;
           agendada_no_cron: boolean;

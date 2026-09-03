@@ -162,7 +162,31 @@
 -- `search_path=public`, `anon` sem execute em nenhuma.
 --
 -- ----------------------------------------------------------------------------
--- 9. Limite do que foi provado
+-- 9. Painel e vigia contando a mesma história
+-- ----------------------------------------------------------------------------
+--
+-- Segundo defeito achado pela própria instrumentação: a tela abriu com 19 tarefas
+-- em vermelho como "atrasadas" enquanto `vigiar_tarefas_agendadas`, lendo os
+-- mesmos dados, emitiu ZERO alerta.
+--
+-- O vigia estava certo — ele já tinha carência: tarefa sem rodada boa cujo
+-- cadastro é mais novo que a própria tolerância é pulada, porque ainda não deu
+-- tempo de ela dever ter rodado. As 19 são as diárias da manhã, e o registro
+-- entrou no ar de tarde. `painel_tarefas_agendadas` não tinha essa regra.
+--
+-- As duas superfícies discordarem é pior que qualquer uma das duas estar errada:
+-- o gestor abriria a tela com 19 alarmes, não acharia alerta nenhum
+-- correspondente, e a partir dali não acreditaria em nenhuma das duas. Painel de
+-- saúde que grita no primeiro dia sem motivo ensina o usuário a ignorar o painel,
+-- que é a doença que esta entrega existe para curar.
+--
+-- O painel passou a usar a mesma regra e ganhou o terceiro estado explícito
+-- `aguardando_primeira`. Depois do conserto: 0 atrasadas, 19 aguardando a
+-- primeira rodada, 10 em dia — que é o que o vigia já dizia.
+-- (aplicado como 20260903210923_painel_concorda_com_o_vigia_na_carencia)
+--
+-- ----------------------------------------------------------------------------
+-- 10. Limite do que foi provado
 -- ----------------------------------------------------------------------------
 --
 -- Não é possível provar numa sessão que uma cron diária dispara amanhã. O que

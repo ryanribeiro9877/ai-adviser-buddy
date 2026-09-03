@@ -76,8 +76,11 @@ function Tarefas() {
   };
 
   const itens = q.data ?? [];
+  // Tres grupos, nao dois. "Nunca rodou e ja passou da hora" e problema; "nunca rodou e a
+  // hora nao chegou" e informacao. Pintar os dois de vermelho ensina a ignorar o vermelho.
   const atrasadas = itens.filter((t) => t.atrasada);
-  const emDia = itens.filter((t) => !t.atrasada);
+  const aguardando = itens.filter((t) => !t.atrasada && t.aguardando_primeira);
+  const emDia = itens.filter((t) => !t.atrasada && !t.aguardando_primeira);
   const falhas7d = itens.reduce((s, t) => s + (t.falhas_7d ?? 0), 0);
   const semAgendamento = itens.filter((t) => !t.agendada_no_cron);
 
@@ -104,13 +107,19 @@ function Tarefas() {
           <div className="text-xs text-muted-foreground">atrasadas</div>
         </Card>
         <Card className="p-4">
+          <div className="text-2xl font-semibold">{aguardando.length}</div>
+          <div className="text-xs text-muted-foreground">aguardando a 1ª rodada</div>
+        </Card>
+        <Card className="p-4">
           <div className="text-2xl font-semibold">{falhas7d}</div>
           <div className="text-xs text-muted-foreground">falhas em 7 dias</div>
         </Card>
-        <Card className="p-4">
-          <div className="text-2xl font-semibold">{semAgendamento.length}</div>
-          <div className="text-xs text-muted-foreground">sem agendamento</div>
-        </Card>
+        {semAgendamento.length > 0 && (
+          <Card className="p-4">
+            <div className="text-2xl font-semibold text-destructive">{semAgendamento.length}</div>
+            <div className="text-xs text-muted-foreground">sem agendamento</div>
+          </Card>
+        )}
       </div>
 
       {q.isLoading && (
@@ -132,6 +141,17 @@ function Tarefas() {
             Atrasadas — deveriam ter rodado e não rodaram
           </h2>
           {atrasadas.map((t) => (
+            <LinhaTarefa key={t.tarefa} t={t} isAdmin={isAdmin} onReexecutar={reexecutar} />
+          ))}
+        </section>
+      )}
+
+      {aguardando.length > 0 && (
+        <section className="space-y-3">
+          <h2 className="text-sm font-semibold text-muted-foreground">
+            Aguardando a primeira rodada — cadastradas agora, ainda dentro do prazo
+          </h2>
+          {aguardando.map((t) => (
             <LinhaTarefa key={t.tarefa} t={t} isAdmin={isAdmin} onReexecutar={reexecutar} />
           ))}
         </section>
@@ -169,6 +189,7 @@ type Linha = {
   achados: number | null;
   mensagem_erro: string | null;
   atrasada: boolean;
+  aguardando_primeira: boolean;
   rodadas_7d: number | null;
   falhas_7d: number | null;
   agendada_no_cron: boolean;
@@ -211,7 +232,7 @@ function LinhaTarefa({
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-semibold">{t.titulo}</span>
           <Badge variant={t.atrasada || d?.tom === "erro" ? "destructive" : "outline"}>
-            {d?.rotulo ?? "Nunca rodou"}
+            {d?.rotulo ?? (t.aguardando_primeira ? "Aguardando a 1ª rodada" : "Nunca rodou")}
           </Badge>
           {t.empresa && <Badge variant="secondary">{t.empresa}</Badge>}
           {!t.agendada_no_cron && <Badge variant="outline">sem agendamento</Badge>}
