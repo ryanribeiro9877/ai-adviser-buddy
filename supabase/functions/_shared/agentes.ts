@@ -9,6 +9,12 @@
 // ter varias — e o que permite fundir criativos + criativos_drive + analise_visual_drive
 // sob o Estudio sem reescrever o executor.
 
+import {
+  ehPedidoLeituraCruzada,
+  ehPedidoUploadLote,
+  pedidoSoLegendasSemEmissao,
+} from "./intencao_turno.ts";
+
 export type AgenteRegistro = {
   codigo: string;
   nome: string;
@@ -218,4 +224,193 @@ export function agenteDoSubagente(cat: CatalogoAgentes, chave: string): AgenteRe
   const u = cat.unidades.find((x) => x.tipo === "subagente" && x.chave === chave);
   if (!u) return null;
   return cat.agentes.find((a) => a.codigo === u.agent_codigo) ?? null;
+}
+
+// ============================================================================
+// SELECAO DE FERRAMENTAS POR AGENTE (chat sincrono)
+// ============================================================================
+
+/**
+ * Agentes cujas ferramentas entram em TODO turno, escolhidos ou nao.
+ *
+ * AG-00 porque sem a memoria da conversa o fio se perde no meio do turno. AG-06 porque
+ * propose_action nao pode faltar: o gestor muda de leitura para ato dentro da mesma frase, e
+ * o guarda deveForcarEmissao devolve o turno ao modelo exigindo a chamada — se a ferramenta
+ * nao estiver na mesa, o guarda entra em laco e nenhum card sai. Foi assim que 19 turnos
+ * anunciaram cards que nunca existiram.
+ */
+export const NUCLEO_SEMPRE = ["AG-00", "AG-06"];
+
+/**
+ * Quem vem junto por dependencia de fluxo. Estudio escreve copy e o Guardiao valida antes de
+ * a resposta sair — e a cascata que gerar-legendas ja faz hoje para compliance-check.
+ */
+export const CASCATA: Record<string, string[]> = { "AG-03": ["AG-04"] };
+
+/**
+ * Rede de seguranca deterministica sobre a escolha do modelo.
+ *
+ * Os classificadores de intencao_turno.ts foram escritos depois de incidentes medidos, e cada
+ * um sabe de um caso que a leitura semantica erra. O Roteador e um modelo: ele pode ler
+ * "de qual pasta vieram os anuncios do CONJ.1" como pergunta de desempenho e deixar o Estudio
+ * de fora — que e exatamente o defeito de 02/09, quando 5 de 6 anuncios sairam "sem vinculo"
+ * embora os cards tivessem pasta e drive_file_id.
+ *
+ * Aqui a intencao ALARGA o conjunto, nunca estreita: em caso de divergencia entre o regex e o
+ * modelo, os dois entram. Errar por agente a mais custa contexto; errar por agente a menos
+ * custa a resposta.
+ */
+export function reforcarPorIntencao(agentes: string[], pergunta: string): string[] {
+  const p = String(pergunta ?? "");
+  const out = [...agentes];
+  const juntar = (...cods: string[]) => {
+    for (const c of cods) if (!out.includes(c)) out.push(c);
+  };
+  // Cruzar anuncio no ar com peca do Drive precisa dos dois lados na mesa.
+  if (ehPedidoLeituraCruzada(p)) juntar("AG-02", "AG-03");
+  // "crie as legendas" tem verbo de ato, mas o ato e escrever copy.
+  if (pedidoSoLegendasSemEmissao(p)) juntar("AG-03");
+  // Subir lote exige saber o que ainda falta subir, e isso mora no acervo.
+  if (ehPedidoUploadLote(p)) juntar("AG-03");
+  return out;
+}
+
+function expandirComNucleoECascata(refs: string[], cat: CatalogoAgentes): string[] {
+  const codigos = new Set<string>(NUCLEO_SEMPRE);
+  for (const ref of refs) {
+    const ag = acharAgente(cat, ref);
+    if (!ag) continue;
+    codigos.add(ag.codigo);
+    for (const extra of CASCATA[ag.codigo] ?? []) codigos.add(extra);
+  }
+  return [...codigos];
+}
+
+/**
+ * Ferramentas do turno. `null` significa "nao estreitar" — o chamador deve mandar o conjunto
+ * inteiro. Devolver null em vez de um conjunto vazio e proposital: um turno sem ferramenta
+ * responderia de cabeca, que e pior do que um turno com ferramenta demais.
+ */
+export function ferramentasDosAgentes(cat: CatalogoAgentes, refs: string[]): Set<string> | null {
+  if (!refs.length) return null;
+  const codigos = expandirComNucleoECascata(refs, cat);
+  const chaves = new Set<string>();
+  for (const u of cat.unidades) {
+    if (u.tipo === "ferramenta" && codigos.includes(u.agent_codigo)) chaves.add(u.chave);
+  }
+  // Catalogo sem ferramentas mapeadas (fallback local, ou seed incompleto): nao estreite nada.
+  return chaves.size ? chaves : null;
+}
+
+/** Bloco de identidade para o system prompt do turno: quem esta atuando e onde e a fronteira. */
+export function blocoIdentidadeAgentes(cat: CatalogoAgentes, refs: string[]): string {
+  const codigos = expandirComNucleoECascata(refs, cat);
+  const escolhidos = cat.agentes
+    .filter((a) => codigos.includes(a.codigo) && a.roteavel)
+    .sort((x, y) => x.ordem - y.ordem);
+  if (!escolhidos.length) return "";
+  const linhas = escolhidos.map((a) => {
+    const fronteira = a.nao_delegar_quando ? ` FORA DO SEU SETOR: ${a.nao_delegar_quando}` : "";
+    return `- ${a.codigo} ${a.nome} (${a.setor}): ${a.papel}${fronteira}`;
+  });
+  return `## AGENTES DESTE TURNO
+O Roteador delegou este pedido aos agentes abaixo. Voce atua como eles, com as ferramentas deles na mesa.
+${linhas.join("\n")}
+Se o pedido exigir setor que nao esta nesta lista, diga o que falta em vez de improvisar com a ferramenta mais parecida.`;
+}
+
+// ============================================================================
+// AG-01 ROTEADOR — delegacao por modelo
+// ============================================================================
+
+export type Delegacao = {
+  agentes: string[];
+  degradado: boolean;
+  motivo: string;
+  tokensIn: number;
+  tokensOut: number;
+};
+
+function jsonDoTexto(t: string): any {
+  const s = String(t ?? "");
+  const i = s.indexOf("{"), j = s.lastIndexOf("}");
+  if (i < 0 || j <= i) return null;
+  try {
+    return JSON.parse(s.slice(i, j + 1));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pergunta ao modelo quais agentes devem atender o turno.
+ *
+ * FALHA ABERTA por decisao: timeout, erro de rede ou JSON invalido devolvem lista vazia e
+ * `degradado`, e o chamador mantem o conjunto inteiro de ferramentas. O Roteador existe para
+ * economizar contexto, nao para ser mais um ponto que derruba o chat — um turno caro e melhor
+ * do que um turno perdido.
+ */
+export async function delegarAgentes(opts: {
+  pergunta: string;
+  catalogo: CatalogoAgentes;
+  chaveOpenRouter: string;
+  // deno-lint-ignore no-explicit-any
+  rota: { model: string; fallbacks?: string[] } & Record<string, any>;
+  // deno-lint-ignore no-explicit-any
+  montarBody: (rota: any, extra: Record<string, unknown>) => Record<string, unknown>;
+  timeoutMs?: number;
+}): Promise<Delegacao> {
+  const vazio = (motivo: string): Delegacao => ({ agentes: [], degradado: true, motivo, tokensIn: 0, tokensOut: 0 });
+  const pergunta = String(opts.pergunta ?? "").trim();
+  if (!pergunta || !opts.chaveOpenRouter) return vazio("sem pergunta ou sem chave");
+
+  const sys = `Voce e o ROTEADOR (AG-01) do Gestor de Trafego IA. Voce NAO responde ao gestor: voce le a mensagem, interpreta o que esta sendo pedido e escolhe QUEM vai atender.
+
+CATALOGO DE AGENTES
+${montarPromptDelegacao(opts.catalogo)}
+
+COMO ESCOLHER
+1. Identifique o que o gestor quer SABER ou quer QUE ACONTECA — nao o vocabulario que ele usou.
+2. Case com o DELEGUE QUANDO de cada agente. Se dois casarem, use o NAO DELEGUE para desempatar: a fronteira negativa vale mais que a semelhanca de termo.
+3. Escolha o MENOR conjunto que cobre o pedido. Agente a mais custa janela.
+4. Na duvida entre dois, inclua os dois — e melhor um agente sobrando do que o pedido sem dono.
+
+Responda APENAS com JSON valido, sem markdown:
+{"agentes":["AG-02"],"motivo":"uma frase curta"}`;
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? 8_000);
+  try {
+    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${opts.chaveOpenRouter}` },
+      body: JSON.stringify(opts.montarBody(opts.rota, {
+        messages: [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 4000) }],
+        max_tokens: 300,
+      })),
+      signal: ac.signal,
+    });
+    if (!resp.ok) return vazio(`http ${resp.status}`);
+    const j = await resp.json();
+    const bruto = jsonDoTexto(String(j?.choices?.[0]?.message?.content ?? ""));
+    const lista = Array.isArray(bruto?.agentes) ? bruto.agentes : null;
+    if (!lista?.length) return vazio("resposta sem lista de agentes");
+    const validos: string[] = [];
+    for (const ref of lista) {
+      const ag = acharAgente(opts.catalogo, String(ref));
+      if (ag && ag.roteavel && !validos.includes(ag.codigo)) validos.push(ag.codigo);
+    }
+    if (!validos.length) return vazio("nenhum agente do catalogo foi reconhecido");
+    return {
+      agentes: validos,
+      degradado: false,
+      motivo: String(bruto?.motivo ?? "").slice(0, 200),
+      tokensIn: Number(j?.usage?.prompt_tokens ?? 0),
+      tokensOut: Number(j?.usage?.completion_tokens ?? 0),
+    };
+  } catch (e) {
+    return vazio(String((e as any)?.name === "AbortError" ? "timeout" : (e as any)?.message ?? e));
+  } finally {
+    clearTimeout(timer);
+  }
 }

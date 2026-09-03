@@ -844,6 +844,13 @@ import {
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import {
+  blocoIdentidadeAgentes,
+  carregarCatalogoAgentes,
+  delegarAgentes,
+  ferramentasDosAgentes,
+  reforcarPorIntencao,
+} from "../_shared/agentes.ts";
+import {
   buscarGeolocalizacoesMeta,
   normalizarGeoDoPedido,
 } from "../_shared/geo_targeting.ts";
@@ -1029,6 +1036,10 @@ const HIST_CAP_ASSIST_COM_LEGENDA = 10000;
 // evita o abort prematuro da sintese que, em v28.32, caia no dump de JSON.
 const TOOLS_DEADLINE_MS = 55_000;
 const HARD_LIMIT_MS = 118_000;
+// AG-01 Roteador: teto curto de proposito. A delegacao roda em paralelo com a leitura de
+// historico e memoria, entao so custa parede se demorar mais que elas. Estourando, o turno
+// segue com as 54 ferramentas — perder contexto economizado e barato, perder o turno nao.
+const ROTEADOR_TIMEOUT_MS = 7_000;
 const RESERVA_GRAVACAO_MS = 8_000;
 const OPENROUTER_CALL_CAP_MS = 70_000;
 // Atalho meta-dicas: tetos do payload enviado ao LLM (persistencia em tool_results continua
@@ -6597,6 +6608,34 @@ Deno.serve(async (req) => {
     if (ultimoUserIdx < 0 && cronologico[i].role === "user") ultimoUserIdx = i;
     if (ultimoAssistantIdx >= 0 && ultimoUserIdx >= 0) break;
   }
+
+  // AG-01 ROTEADOR — o Gestor delega antes de trabalhar.
+  //
+  // Disparado AQUI e aguardado so na montagem do prompt: a viagem do modelo corre junto com a
+  // leitura de retornos, memoria e indice, em vez de somar ao teto de 118s. Isso inverte a
+  // decisao registrada em llm_roteador.ts ("sem hop extra de LLM no chat sincrono"), agora que
+  // o hop paga por si: o turno mediano carregava 54 definicoes de ferramenta e passa a carregar
+  // as do nucleo mais as dos agentes escolhidos.
+  //
+  // DUAS SITUACOES NAO ROTEIAM. Retomada, porque o turno original ja escolheu suas ferramentas
+  // e o checkpoint volta no meio do trabalho. E pedido com anexo, porque o anexo e visual e o
+  // estreitamento tiraria o Estudio justamente no turno em que ele e necessario. Nos dois casos
+  // o turno segue com o conjunto inteiro, como antes.
+  const podeRotear = !ehRetomada && rawAtts.length === 0;
+  const promessaAgentes = podeRotear
+    ? (async () => {
+      const cat = await carregarCatalogoAgentes(supa);
+      const d = await delegarAgentes({
+        pergunta: objetivoOriginal,
+        catalogo: cat,
+        chaveOpenRouter: OPENROUTER_KEY,
+        rota: resolverChamadaLlm({ tipo: "planner", pergunta: objetivoOriginal }),
+        montarBody: bodyOpenRouter,
+        timeoutMs: ROTEADOR_TIMEOUT_MS,
+      });
+      return { cat, d };
+    })().catch(() => null)
+    : Promise.resolve(null);
   // v28.11: REINJECAO DOS RETORNOS. Os 2 turnos de assistente mais recentes que tenham
   // tool_results voltam com um bloco de evidencia ANTES do proprio texto - antes, e nao
   // depois, porque o final da ultima resposta precisa continuar sendo a ultima coisa que o
@@ -6685,8 +6724,30 @@ Deno.serve(async (req) => {
   // e a pergunta atual sao identicos em todas as rodadas do turno. TTL ~5min, e as rodadas
   // ocorrem em segundos. Anthropic exige minimo ~1024 tokens por bloco: o system passa;
   // a pergunta so e marcada se for texto simples e suficientemente longa.
-  const cacheSystem = [{ type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento, company.id),
-    cache_control: { type: "ephemeral" } }];
+  // Delegacao do AG-01. Lista vazia (falha, timeout ou turno que nao roteia) mantem o conjunto
+  // inteiro: o Roteador economiza contexto, nao decide se o turno acontece.
+  const delegacao = await promessaAgentes;
+  const agentesDoTurno = delegacao?.d.agentes.length
+    ? reforcarPorIntencao(delegacao.d.agentes, objetivoOriginal)
+    : [];
+  const ferramentasDoTurno = agentesDoTurno.length && delegacao
+    ? ferramentasDosAgentes(delegacao.cat, agentesDoTurno)
+    : null;
+  const toolsDoTurno = ferramentasDoTurno
+    ? TOOLS.filter((t) => ferramentasDoTurno.has(String((t as any)?.function?.name ?? "")))
+    : TOOLS;
+  const blocoAgentes = agentesDoTurno.length && delegacao
+    ? blocoIdentidadeAgentes(delegacao.cat, agentesDoTurno)
+    : "";
+
+  // v20: prompt caching. O bloco de agentes vai DEPOIS do bloco marcado, e nao dentro dele:
+  // o prefixo cacheado precisa ser byte a byte o mesmo entre turnos, e a lista de agentes muda
+  // a cada pergunta. Misturar os dois trocaria o desconto de 0,1x por nada.
+  const cacheSystem = [
+    { type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento, company.id),
+      cache_control: { type: "ephemeral" } },
+    ...(blocoAgentes ? [{ type: "text", text: blocoAgentes }] : []),
+  ];
   const ultimoAssistantTxt = ultimoAssistantIdx >= 0
     ? String((cronologico[ultimoAssistantIdx] as any)?.content ?? "")
     : "";
@@ -6836,7 +6897,7 @@ Deno.serve(async (req) => {
       messages: usarCache ? messages : semCache(messages),
       max_tokens: maxTokens,
     });
-    if (comTools) { payload.tools = TOOLS; payload.tool_choice = "auto"; }
+    if (comTools) { payload.tools = toolsDoTurno; payload.tool_choice = "auto"; }
     // v21: na sintese o raciocinio e excluido para que TODO o orcamento va para o texto.
     if (!reasoningDesativado) payload.reasoning = semRaciocinio ? REASONING_SINTESE : REASONING_LOOP;
     // v28.32: AbortSignal — sem isso uma unica geracao com contexto grande segura o HTTP
@@ -7591,6 +7652,14 @@ Deno.serve(async (req) => {
     tokens_in: tokensIn, tokens_out: tokensOut, versao: VERSAO,
     modelo_roteado: modeloRoteado, modelo_pedido: rotaLlm.model,
     llm_rota: diagnosticoRota(rotaLlm),
+    // AG-01: sem isto nao da para saber se a delegacao acertou nem quanto contexto ela poupou.
+    agentes_do_turno: agentesDoTurno.length ? agentesDoTurno : null,
+    agentes_motivo: delegacao?.d.motivo || null,
+    agentes_degradado: delegacao ? delegacao.d.degradado : null,
+    agentes_catalogo_degradado: delegacao ? delegacao.cat.degradado : null,
+    agentes_tokens_in: delegacao?.d.tokensIn ?? null,
+    agentes_tokens_out: delegacao?.d.tokensOut ?? null,
+    ferramentas_no_turno: toolsDoTurno.length, ferramentas_totais: TOOLS.length,
     continuar_turno: continuarTurno, segmento_turno: segmentoAtual,
     retomada: ehRetomada, pedido_ato: pedidoAtoCards };
 
