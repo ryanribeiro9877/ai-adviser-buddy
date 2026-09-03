@@ -5,7 +5,7 @@
 -- ============================================================================
 --
 -- Espelho consolidado da entrega de 03/09. O SQL completo está versionado em
--- ../migrations/ (9 arquivos, 20260903200000 a 20260903208000); este arquivo
+-- ../migrations/ (13 arquivos, 20260903200000 a 20260903212000); este arquivo
 -- registra a DECISÃO e a EVIDÊNCIA, que é o que a pasta de espelhos guarda.
 --
 -- Correspondência com as versões aplicadas no remoto (apply_migration via MCP,
@@ -217,7 +217,60 @@
 -- (aplicado como 20260903211908_tolerancia_minima_para_nao_gerar_alerta_absurdo)
 --
 -- ----------------------------------------------------------------------------
--- 11. Limite do que foi provado
+-- 11. Regra estruturalmente morta passou a se denunciar
+-- ----------------------------------------------------------------------------
+--
+-- As 6 campanhas ativas estão TODAS com `category` nula, e as regras de custo por
+-- resultado exigem `category in ('leadgen','mensagem')`. Ou seja: elas nunca
+-- avaliam nenhuma campanha ativa. Não por falta de gasto ruim — por falta do dado
+-- que classifica a campanha.
+--
+-- O efeito é pior que um alerta errado: `evaluate_alerts` roda, termina sem erro e
+-- grava 'sucesso_vazio', que na tela se lê "rodou, nada a fazer". Mas "nada a
+-- fazer" e "não tenho como olhar" são coisas diferentes, e a segunda estava se
+-- disfarçando da primeira. É a queixa do gestor num nível mais fundo: não é a cron
+-- que está parada, é a REGRA que está morta.
+--
+-- Vigia de tarefa não pega isso, porque a tarefa está saudável. Quem pega é
+-- `vigiar_cobertura_das_regras` (cron 9:05, antes da avaliação das 9:15): em vez de
+-- perguntar "a rotina rodou?", pergunta "a rotina tinha como responder?".
+-- (aplicado como 20260903212426_vigia_da_cobertura_das_regras)
+--
+-- ----------------------------------------------------------------------------
+-- 12. A linha de produto passou a ser reconhecida no nome real
+-- ----------------------------------------------------------------------------
+--
+-- O primeiro alerta de cobertura saiu com "linha nao identificada" para todas as 6
+-- campanhas — porque o resolvedor lia só o token `[TAG]` da convenção documentada
+-- em `_shared/nomenclatura.ts`, e NENHUMA campanha real usa essa convenção. Os
+-- nomes são `COHAPM_JURIDICO_CONV_WA_2026-08`, `COHAPM_LAFELICITA_...`,
+-- `COHAPM_VISTTA_...` e três "Publicação do Instagram: …".
+--
+-- A proteção contra contaminação — que o gestor classificou como erro grave —
+-- estava, na prática, desligada nos dados reais. O resolvedor não mentia (declarava
+-- que não sabia, que é o comportamento certo), mas também não servia.
+--
+-- A armadilha: COHAPM prefixa os nomes das TRÊS marcas, porque é o nome da conta,
+-- não da marca. "Primeira tag encontrada" arquivaria La Felicità e VISTTA como
+-- COHAPM Jurídico — exatamente a contaminação que a função existe para evitar.
+--
+-- Regra: colchete tem precedência; sem colchete, casa `marca_nome` normalizado
+-- (sem acento/separador) ou `marca_tag` DELIMITADA — delimitador obrigatório porque
+-- tag curta em substring livre é fábrica de falso positivo ('LEV' dentro de
+-- "LEVE"/"relevante"). Vence o casamento mais longo; empate vai para o mais tardio.
+--
+-- Provado com os nomes reais e com os casos de borda:
+--   COHAPM_JURIDICO_CONV_WA_2026-08     -> COHAPM Juridico
+--   COHAPM_LAFELICITA_CONV_WA_2026-08   -> La Felicità      (não COHAPM)
+--   COHAPM_VISTTA_CONV_WA_SET26         -> Sistema Ocular   (não COHAPM)
+--   Publicação do Instagram: …          -> NULL (admite em vez de chutar)
+--   [LEV] Consignado - Formulario       -> Legal e Viver    (convenção preservada)
+--   [XXX] Marca inexistente             -> 'linha nao cadastrada (XXX)'
+--   Campanha LEVE e relevante           -> NULL (sem falso positivo)
+-- (aplicado como 20260903212949_linha_de_produto_entende_o_nome_real)
+--
+-- ----------------------------------------------------------------------------
+-- 13. Limite do que foi provado
 -- ----------------------------------------------------------------------------
 --
 -- Não é possível provar numa sessão que uma cron diária dispara amanhã. O que
