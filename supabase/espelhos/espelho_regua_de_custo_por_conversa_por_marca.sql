@@ -1,0 +1,194 @@
+-- ============================================================================
+-- espelho para git — NÃO re-executar (os objetos já existem em produção)
+-- ============================================================================
+-- Régua de custo por conversa, separada por marca — 03/09/2026
+--
+-- Espelho de DECISÃO das duas migrações abaixo. O SQL exato vive em `../migrations/`:
+--   20260903235500_regua_de_custo_por_conversa_por_marca.sql   (a camada de régua)
+--   20260903235600_alertas_leem_a_regua_da_marca.sql           (o motor passa a lê-la)
+--
+-- As duas só entregam valor juntas: a primeira cria réguas que ninguém lê, a segunda liga um
+-- leitor que sem elas não acharia nada.
+--
+--
+-- 1. O BURACO QUE APARECEU DEPOIS DE dd12675
+-- ----------------------------------------------------------------------------
+-- Com o denominador único, o custo por conversa virou número confiável — e ficou visível que
+-- não existia régua de `custo_por_conversa`. O motor caía em
+-- `coalesce(teto_vigente(...), alert_rules.threshold)` e julgava conversa contra os R$ 21,80
+-- da regra `cpl`, que é régua de FORMULÁRIO.
+--
+-- De onde vinha aquele 21,80, apurado em 03/09/2026: é o p75 do custo por conversa dos dias de
+-- março/2026 (`percentile_cont(0.75)` sobre `snapshot_date < '2026-04-01'` devolve exatamente
+-- 21.80). Aqueles dias são, todos eles, das oito campanhas `[SALT] [LF | CONV | OBRA + GEO +
+-- LISTA | WA]` — La Felicità, rodada por OUTRA AGÊNCIA, há seis meses. O número "genérico" que
+-- governava as três marcas era o p75 de uma marca só, de uma operação que não existe mais.
+-- COHAPM Jurídico (R$ 4,00) e Sistema Ocular (R$ 4,96) passavam como "dentro do limite" por
+-- estarem medidos contra o alvo de outra marca.
+--
+--
+-- 2. A SÉRIE, PELA CAMADA CANÔNICA
+-- ----------------------------------------------------------------------------
+-- Apurada por `base_de_resultado_da_campanha` + `resultados_da_base` (não recalculada à mão —
+-- recalcular seria recriar a divergência que dd12675 acabou de eliminar). O dia corrente foi
+-- excluído por ser parcial: em 03/09 as três campanhas somavam R$ 20,39 de gasto contra R$ 150
+-- a R$ 300 nos dias fechados, e incluí-lo esconderia disparos.
+--
+--   marca             dias  conversas  acumulado  mediana diária  diário min-máx  janela 3d
+--   COHAPM Jurídico      5         82       4,01            3,57     3,30 - 5,39  3,31 - 4,35
+--   La Felicità          5         32      17,68           14,77    13,18 -89,19  13,30 -21,53
+--   Sistema Ocular       2         20       5,25            5,02     4,55 - 5,49  4,55 - 5,25
+--
+-- Três leituras que mudaram a decisão:
+--
+--  (a) NENHUMA das três tem histórico longo. A operação atual começou em 29/08 (as duas
+--      primeiras) e em 01/09 (VISTTA). Cinco dias fechados não é histórico, é começo de série.
+--      Isso vale para as três, não só para a VISTTA — daí TODA régua aqui nascer `provisoria`.
+--
+--  (b) A dispersão DIÁRIA de La Felicità (13,18 a 89,19) não mede custo: mede contagem pequena.
+--      A marca teve de 1 a 12 conversas por dia; no dia de R$ 89,19 houve UMA conversa. Régua
+--      tirada dessa dispersão ficaria perto de R$ 60-90 e nunca dispararia. A janela de 3 dias
+--      da mesma marca varia só de 13,30 a 21,53 — 1,6x contra 6,8x do diário. É a janela de 3
+--      dias que descreve o custo; o dia isolado descreve o tamanho da amostra. As réguas saíram
+--      da janela de 3 dias e do acumulado, que são as grandezas que R1 e R5 de fato comparam.
+--
+--  (c) La Felicità é a única com uma segunda janela INDEPENDENTE: março/2026, outra agência,
+--      mesmo objetivo. Acumulado de então R$ 21,13, p75 diário R$ 21,80; hoje roda a R$ 17,68.
+--      Duas operações separadas por seis meses põem a marca na faixa de R$ 13 a R$ 22 —
+--      corroboração que Jurídico e VISTTA não têm.
+--
+--
+-- 3. AS RÉGUAS, UMA FRASE CADA
+-- ----------------------------------------------------------------------------
+--   COHAPM Jurídico  R$  7,00   A marca nunca passou de R$ 5,39 num dia nem de R$ 4,35 numa
+--                               janela de três dias, então R$ 7,00 só é alcançado se o custo
+--                               quase dobrar e ficar lá — o que não é oscilação, é mudança.
+--   La Felicità      R$ 26,00   Duas operações distintas, com seis meses de distância,
+--                               mantiveram essa marca entre R$ 13 e R$ 22 por conversa;
+--                               R$ 26,00 é o primeiro valor que fica fora das duas.
+--   Sistema Ocular   R$ 12,00   PROVISÓRIA e deliberadamente larga: dois dias fechados não
+--                               permitem medir dispersão nenhuma, então a faixa foi emprestada
+--                               da marca com mais dado e alargada por cima do nível da VISTTA
+--                               justamente porque a dispersão dela é DESCONHECIDA, não porque
+--                               se sabe que é grande.
+--
+-- POR QUE VISTTA GANHOU RÉGUA PROVISÓRIA EM VEZ DE FICAR SEM. Porque "sem régua" não era
+-- silêncio: sem régua ela caía nos R$ 21,80 de La Felicità/março. A escolha real não era entre
+-- um número e nenhum número — era entre um número declarado provisório e um número errado que
+-- ninguém sabia que estava lá. A segunda migração remove o fallback silencioso, e só DEPOIS
+-- disso "sem régua" passa a significar de fato ausência de veredito. Se o gestor preferir a
+-- VISTTA sem régua, hoje isso é uma chamada de função (`p_valor => null`), não uma migração.
+--
+-- DOIS NÍVEIS (atenção e crítico)? Sim — e eles JÁ EXISTIAM, não como dois números, mas como
+-- duas JANELAS sobre o mesmo número. R1 (`cpl`, severidade `high`) olha o acumulado da campanha.
+-- R5 (`pause_3d`, severidade `critical`) olha um criativo três dias seguidos acima da MESMA
+-- linha. Inventar um segundo limiar por marca seria inventar mais três números com os mesmos
+-- cinco dias de dado atrás deles. Por isso R5 também foi religado: ele exige `teto is not null`
+-- e o teto de conversa era sempre nulo — o nível crítico estava morto para conversa.
+--
+--
+-- 4. ONDE FOI APLICADO, E POR QUE NÃO NASCEU UM CAMINHO NOVO
+-- ----------------------------------------------------------------------------
+-- A doutrina do sistema manda chamar `teto_vigente` e usar SOMENTE a régua que o retorno disser
+-- que governa, nunca ler `targets` nem `metas_de_negocio` direto. Esta entrega NÃO abre um
+-- segundo caminho: estende o mesmo leitor.
+--
+--   metas_de_negocio  ganha `marca`, `provisoria`, `revisar_em`.
+--   teto_vigente_da_marca(empresa, métrica, marca)  é o resolvedor real.
+--       Precedência: régua da MARCA > régua da EMPRESA > consistência histórica (`targets`).
+--   teto_vigente(empresa, métrica)  passa a delegar com marca nula. Mesma assinatura, mesmo
+--       contrato, nenhum chamador precisou mudar.
+--   teto_vigente_da_campanha(campaign_id)  deriva métrica e marca do próprio objeto.
+--
+-- A unique antiga `(company_id, metric, tipo, vigente)` foi trocada por índice PARCIAL em
+-- `vigente`. Motivo: incluir `vigente` no corpo da chave só admitia UMA linha desativada por
+-- métrica, o que impediria guardar histórico de versões da régua.
+--
+-- O CUIDADO NO `teto_vigente` DE DOIS ARGUMENTOS. Para `custo_por_conversa` ele devolve
+-- `teto_que_governa: null` — igual a antes desta entrega, então nenhum consumidor mudou de
+-- comportamento — mas agora acompanhado de `governa: 'meta_de_negocio_por_marca'` e do mapa
+-- `reguas_por_marca` com as três. Devolver um número de empresa ali seria escolher uma marca por
+-- conta própria; devolver "nenhum" seria mentir por omissão, já que existem três réguas.
+--
+--
+-- 5. MUDAR OS NÚMEROS DEPOIS NÃO EXIGE MIGRATION NEM DEPLOY
+-- ----------------------------------------------------------------------------
+--   select public.definir_regua_de_marca(
+--            '57f755b9-c23d-4f58-a488-8173d697c010', 'custo_por_conversa',
+--            'COHAPM Juridico', 9.00, 'Rafael', 'três semanas fechadas mostram nível estável',
+--            false, null);
+--
+-- A versão anterior fica no banco com `vigente=false` (histórico de quem mudou, quando, e o que
+-- era antes). `p_valor => null` retira a régua. A função recusa marca que não exista e vigente em
+-- `brand_identity`, para que o texto gravado case exatamente com o que `linha_de_produto_do_nome`
+-- devolve — régua com acento digitado diferente nunca seria encontrada, e falharia em silêncio.
+-- Também recusa valor <= 0 e régua sem autor. As réguas nascem provisórias justamente porque se
+-- espera que mudem; sem essa superfície, cada ajuste seria uma migração, o que na prática
+-- significa que o ajuste não acontece.
+--
+--
+-- 6. PROVA, COM DADO DE PRODUÇÃO
+-- ----------------------------------------------------------------------------
+-- Reexecutável: `select * from public.prova_regua_de_conversa();`
+--
+--   marca            campanha                          custo    teto  veredito      distância
+--   COHAPM Jurídico  COHAPM_JURIDICO_CONV_WA_2026-08     4,00    7,00  não dispara     -42,8%
+--   La Felicità      COHAPM_LAFELICITA_CONV_WA_2026-08  16,87   26,00  não dispara     -35,1%
+--   Sistema Ocular   COHAPM_VISTTA_CONV_WA_SET26         4,96   12,00  não dispara     -58,6%
+--
+-- Nenhuma dispara hoje, e isso é o resultado desejado: as três marcas estão operando no nível a
+-- partir do qual as réguas foram derivadas. Uma régua que disparasse em todas estaria calibrada
+-- no nível de operação, não acima dele — a migração 235600 falha alto se isso acontecer.
+--
+-- MAS A LINHA NÃO ESTÁ MORTA — foi o que exigiu conferência separada, porque "não dispara em
+-- ninguém" e "nunca vai disparar" se parecem no relatório e são coisas opostas:
+--   * R5, anúncio-dia: 9,7% dos anúncio-dia do Jurídico e 14% dos de La Felicità COM conversa
+--     ficam ACIMA da régua da própria marca. O que não acontece é três dias SEGUIDOS, que é
+--     exatamente o filtro de ruído do R5. 0 de 67 anúncios avaliados disparam.
+--   * Back-test em janela independente (março/2026, La Felicità, outra agência): das 4 campanhas
+--     [SALT] com gasto sustentado, R$ 26,00 pegaria as duas piores (R$ 32,00 e R$ 26,60) e
+--     deixaria passar as duas saudáveis (R$ 24,22 e R$ 14,44). A régua discrimina.
+--
+-- Verificação de fiação, read-only, com o row source do R1: cada campanha recebe o teto da SUA
+-- marca e o rótulo `regua da marca <nome>, definida por <autor> em 03/09/2026 (PROVISORIA, a
+-- revisar em 24/09/2026)`. O alerta, quando sair, dirá de qual régua veio e que ela é provisória.
+--
+--
+-- 7. CONFLITO COM spend_no_leads: NÃO HÁ, E É ESTRUTURAL
+-- ----------------------------------------------------------------------------
+-- R1 exige `nullif(resultados, 0) is not null` (ou seja, resultados > 0) e `spend_no_leads` exige
+-- `resultados = 0`, os dois lendo o MESMO
+-- `resultados_da_base(base_de_resultado_da_campanha(...))` desde 20260903220726. As condições são
+-- complementares: nenhuma campanha satisfaz as duas. `prova_regua_de_conversa()` checa isso a cada
+-- execução, e o bloco de asserção da 235600 recusa a migração se algum dia deixar de valer —
+-- porque afirmar "não conflita" lendo o código é o tipo de coisa que envelhece em silêncio.
+--
+--
+-- 8. O QUE NÃO MUDOU (conferido depois de aplicar)
+-- ----------------------------------------------------------------------------
+--   * `alert_rules` intacta: cpl 21,80 / spend_no_leads 100 / frequency 3,5 / budget 20 /
+--     delivery_drop 50 / no_delivery 1 / pause_3d 0. Nenhum limiar de outra métrica foi tocado.
+--   * O fallback para `alert_rules.threshold` continua valendo para formulário e para qualquer
+--     base que não seja 'conversas'. Só na base 'conversas' ele foi removido.
+--   * R2, R3, R4, R6 e R7 são cópia verbatim da versão viva, conferidas trecho a trecho contra
+--     `pg_get_functiondef` antes de reescrever — inclusive o R4, que outro trabalho
+--     (20260903220726) já havia migrado para a base canônica na mesma janela.
+--   * Os sete outros chamadores de `teto_vigente` seguem rodando: os três STABLE
+--     (`montar_corpo_digest`, `get_report_export_data`, `decidir_sobre_conjunto`) foram
+--     exercitados de verdade — digest e export retornam, e `decidir_sobre_conjunto` roda nos 131
+--     conjuntos sem erro.
+--   * `evaluate_alerts()` executada após a mudança: 0 alertas vivos, nenhuma enxurrada.
+--
+-- Uma troca cosmética, declarada: a unidade no texto do R1 passa a vir de
+-- `unidade_da_base(base, 1)` em vez de um `case` escrito à mão — muda "formulário preenchido"
+-- para "formulário enviado" e tira mais uma cópia da camada canônica de dentro do motor.
+--
+--
+-- 9. LIMITE DESTA ENTREGA
+-- ----------------------------------------------------------------------------
+-- Os três números são provisórios e estão marcados como tais no banco, não só neste comentário:
+-- `metas_de_negocio.provisoria = true`, `revisar_em = 2026-09-24`. Cinco dias fechados (dois, no
+-- caso da VISTTA) descrevem nível, não dispersão. Em 24/09 haverá três semanas fechadas e a conta
+-- deve ser refeita — em particular a da VISTTA, cuja banda hoje é emprestada do Jurídico e não
+-- medida. Até lá o sistema alerta contra uma referência declarada como incerta, o que é diferente
+-- de alertar contra o p75 de outra marca sem avisar ninguém.
