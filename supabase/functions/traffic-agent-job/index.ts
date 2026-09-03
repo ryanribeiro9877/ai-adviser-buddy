@@ -321,14 +321,45 @@ const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? 
 
 // Orcamentos do JOB — v4.0: teto AGIL de 5 min de parede para o gestor.
 // Worker Supabase ~400s; GLOBAL_WALL cobre a experiencia ponta a ponta (todos os segmentos).
-const GLOBAL_WALL_MS = 300_000;     // 5 min desde created_at do job
+// 03/09/2026 — a parede sobe de 300s para 390s, e a escolha e medida, nao preferencia.
+//
+// O gestor deu duas saidas para o tier deep: "ou a parede sobe, ou o deep desce para high".
+// A medicao decidiu: baixar o esforco NAO resolvia. Nos dois jobs deep que morreram hoje a
+// sintese nem chegou a comecar com orcamento util — a coleta (planner + 2 especialistas)
+// consumiu ~220s dos 300s e sobraram 79s e 32s. Um bloco final de relatorio nao cabe em 32s
+// em esforco nenhum, entao `high` teria trocado a qualidade da resposta por nada.
+//
+// 390s cabe no worker do Supabase (~400s) e reparte assim: coleta ate os 270s do teto por
+// invocacao, sintese no segmento seguinte com ~110s de parede — acima da reserva de 75s que
+// o proprio job declara precisar. O teto AGIL de 5 min continua valendo para lite/standard,
+// que sao a maioria; quem paga os 6,5 min e so a pesquisa profunda, que o gestor pede
+// explicitamente quando quer profundidade.
+const GLOBAL_WALL_MS = 390_000;     // 6,5 min desde created_at do job
 const JOB_LIMIT_MS = 270_000;       // teto por invocacao (ainda limitado pelo global)
 const RESERVA_FINAL_MS = 10_000;
 const SINT_RESERVA_MS = 75_000;     // reserva minima para escrever a resposta
 // Segmentos: no maximo 2 — o 2o so para resgate de sintese (429/timeout), nao maratona.
 const MAX_SEGMENTOS = 2;
 const DEVOLUCOES_MAX = 0;           // v4.0: deep nao reexecuta (custo > ganho sob teto 5min)
-const CHECKPOINT_MIN_MS = 55_000;   // se falta so escrever e o prazo aperta, segmenta
+// 03/09/2026: o gate de checkpoint era 55s enquanto a reserva declarada da sintese era 75s —
+// o job autorizava a si mesmo a entrar na sintese com 20s A MENOS do que ele proprio declara
+// precisar. O estrago esta medido: com a devolucao do tier deep tendo comido o orcamento,
+// sobraram ~56s, 56 > 55 nao segmentou, `callTimeout` virou 49.541ms e a resposta voltou
+// vazia (`sintese_vazia`) com dois especialistas ja pagos. DERIVAR da reserva, em vez de
+// repetir o numero, e o que impede os dois de divergirem de novo.
+const CHECKPOINT_MIN_MS = SINT_RESERVA_MS;
+// Quanto a rodada de devolucao custa, medido em producao: no job 831103bd os quatro rodizios
+// de especialista (2 originais + 2 reexecutados) consumiram ~270s dos 300s da parede, ~67s
+// cada. Reexecutar dois custa ~135s; 90s e o piso conservador abaixo do qual nem se tenta.
+//
+// Sem este numero, o gate da devolucao olhava so a reserva da sintese (75s), comecava a
+// devolucao com 150s de parede e devolvia o controle com 20s — a sintese entao morria em
+// `openrouter_timeout_19627`. Devolucao e melhoria de qualidade; entregar RESPOSTA e o
+// minimo. Quando os dois nao cabem, a resposta ganha.
+const DEVOLUCAO_MIN_MS = 90_000;
+// Custo medido de abrir outro segmento (gravar checkpoint + reinvocar + reconstruir estado):
+// no job 1403d076 a parede caiu de 79s para 32s entre o checkpoint e a chamada de sintese.
+const CUSTO_REINVOCACAO_MS = 45_000;
 // v3.5/v4.0: caps por tier de capacidade (roteador deterministico).
 const LITE_MAX_ESPECIALISTAS = 1;
 const STANDARD_MAX_ESPECIALISTAS = 2;
@@ -1695,10 +1726,32 @@ function ehRateLimitErro(s: string): boolean {
   return /openrouter_http_429|rate.?limit|(^|[^0-9])429([^0-9]|$)/i.test(s);
 }
 
-/** Falha de sintese que merece worker novo (orcamento cheio), sem refazer coleta. */
+/**
+ * Credencial ou cobranca: nao adianta retentar, a segunda tentativa recebe a mesma recusa.
+ *
+ * O reconhecimento e ANCORADO de proposito. O teste anterior era `/401|403/` solto sobre a
+ * string inteira de finish, e as strings de erro deste arquivo carregam numeros: um
+ * `openrouter_timeout_40300` (teto de 40,3s, valor que `callTimeout` produz sozinho, do mesmo
+ * jeito que produziu 49.541) casava com "403" e seria descartado como proibicao — o job
+ * jogaria fora uma coleta inteira por causa de um relogio.
+ */
+function ehErroDeCredencial(s: string): boolean {
+  return /openrouter_http_40[13]\b|invalid.?api|billing|forbidden|unauthorized/i.test(s);
+}
+
+/**
+ * Falha de sintese que merece worker novo (orcamento cheio), sem refazer coleta.
+ *
+ * `openrouter_timeout_*` entrou em 03/09. A sintese do tier deep morreu com
+ * `erro_llm:openrouter_timeout_49541` e o job encerrou em `sintese_vazia`: o gestor ficou sem
+ * resposta por causa de um relogio, com dois especialistas e uma devolucao JA PAGOS. Timeout
+ * e a falha mais resgatavel que existe — nada foi recusado, so faltou tempo, e e exatamente
+ * isso que o segmento seguinte tem de sobra.
+ */
 function ehSinteseResgatavel(finish: string): boolean {
-  if (/401|403|invalid.?api|billing|forbidden/i.test(finish)) return false;
+  if (ehErroDeCredencial(finish)) return false;
   return ehRateLimitErro(finish)
+    || /openrouter_timeout/i.test(finish)
     || /sintese_timeout|sintese_segmentada_vazia|sem_finish/i.test(finish)
     || /^stop(\+|$)/i.test(finish);
 }
@@ -2944,11 +2997,27 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   // Parede global desde created_at: segmentos nao podem somar 3x o orcamento (v4.0).
   const { data: jobMeta } = await supa.from("chat_jobs").select("created_at").eq("id", jobId).maybeSingle();
   const createdMs = jobMeta?.created_at ? new Date(String(jobMeta.created_at)).getTime() : t0;
+  const prazoDeParede = () => GLOBAL_WALL_MS - (Date.now() - createdMs) - RESERVA_FINAL_MS;
   const prazo = () => {
     const porInvocacao = JOB_LIMIT_MS - (Date.now() - t0) - RESERVA_FINAL_MS;
-    const porParede = GLOBAL_WALL_MS - (Date.now() - createdMs) - RESERVA_FINAL_MS;
-    return Math.min(porInvocacao, porParede);
+    return Math.min(porInvocacao, prazoDeParede());
   };
+  /**
+   * Vale abrir outro segmento?
+   *
+   * So quando quem aperta e o teto POR INVOCACAO. Se quem aperta e a parede global, o
+   * segmento 2 nasce com o MESMO relogio — `prazo()` e o minimo entre os dois e a parede
+   * conta desde `created_at` — e a reinvocacao vira custo puro. Foi o que aconteceu em
+   * 831103bd: o job segmentou com a parede quase vencida e o segmento 2 comecou com 20s,
+   * tempo suficiente apenas para a sintese estourar em `openrouter_timeout_19627`.
+   * Sem reserva de parede, e melhor escrever agora com o que ha do que reinvocar para nada.
+   *
+   * E a reinvocacao nao e de graca: no job 1403d076 ela consumiu 47s entre o checkpoint e a
+   * sintese do segmento 2 (parede de 79s virou 32s). Por isso o gate exige a reserva da
+   * sintese MAIS esse custo — segmentar com 79s de parede era trocar 79s por 32s.
+   */
+  const valeSegmentar = () =>
+    prazo() < CHECKPOINT_MIN_MS && prazoDeParede() >= CHECKPOINT_MIN_MS + CUSTO_REINVOCACAO_MS;
   const segmento: number = Number(retomada?.segmento ?? 1);
   JOB_SESSION_ID = convId || null;
   JOB_MODELO_ROTEADO = MODEL;
@@ -3017,7 +3086,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           if (!devolver2.length) break;
           rodada++;
           // v4.0: checkpoint de devolucao virou direto_para_sintese — nao reabre coleta no segmento 2
-          if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+          if (cap.permitirCheckpoint && valeSegmentar() && segmento < MAX_SEGMENTOS) {
             await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
               pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel,
               segmento: segmento + 1, direto_para_sintese: true, escopo });
@@ -3041,7 +3110,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       tel.segmento = segmento;
       // Mesmo guarda do caminho fresco: devolucao no segmento 2 pode consumir o prazo
       // inteiro (caso d568e16d) — nao tente sintese com 0s; abra segmento so para escrever.
-      if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+      if (cap.permitirCheckpoint && valeSegmentar() && segmento < MAX_SEGMENTOS) {
         await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
           pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel,
           segmento: segmento + 1, direto_para_sintese: true, escopo });
@@ -3094,15 +3163,19 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     // FASE 2.5 - VALIDACAO + DEVOLUCAO (v4.0: deep/standard = 0 por padrao)
     let rodada = 0;
     const falhosDefinitivos: string[] = [];
-    if (cap.devolucoesMax > 0 && prazo() >= SINT_RESERVA_MS) {
-      while (rodada < cap.devolucoesMax && prazo() >= SINT_RESERVA_MS) {
+    // A devolucao so comeca se couber ELA E a sintese. O gate antigo exigia apenas a reserva
+    // da sintese e por isso entrava com 150s, gastava 135s reexecutando e deixava 20s para
+    // escrever — dois jobs deep seguidos morreram assim, em `sintese_vazia`.
+    if (cap.devolucoesMax > 0 && prazo() >= SINT_RESERVA_MS + DEVOLUCAO_MIN_MS) {
+      while (rodada < cap.devolucoesMax && prazo() >= SINT_RESERVA_MS + DEVOLUCAO_MIN_MS) {
         const devolver = await validarRelatorios(pergunta, plano, relatorios, tel);
         if (!devolver.length) break;
         rodada++;
         await pushProgresso(jobId, "devolucao", `rodada ${rodada}: ${devolver.map((d) => d.nome).join(", ")}`);
-        // sob teto 5 min: se o prazo apertar, escreve — nao abre segmento so para recolher
-        if (prazo() < CHECKPOINT_MIN_MS) {
-          tel.devolucao_interrompida = "reserva_sintese";
+        // sob teto 5 min: se o prazo apertar, escreve — nao abre segmento so para recolher.
+        // Reconferido DEPOIS de validarRelatorios porque a propria coordenacao consome parede.
+        if (prazo() < SINT_RESERVA_MS + DEVOLUCAO_MIN_MS) {
+          tel.devolucao_interrompida = `sem_orcamento_para_reexecutar (prazo ${Math.round(prazo() / 1000)}s)`;
           break;
         }
         await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver.map((d) => d.nome).join(", ")}`);
@@ -3131,7 +3204,9 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         }
       }
     } else {
-      tel.devolucao_pulada = prazo() < SINT_RESERVA_MS ? "reserva_sintese" : `capacidade_${cap.tier}`;
+      tel.devolucao_pulada = prazo() < SINT_RESERVA_MS + DEVOLUCAO_MIN_MS
+        ? `sem_orcamento_para_devolucao_e_sintese (prazo ${Math.round(prazo() / 1000)}s < ${(SINT_RESERVA_MS + DEVOLUCAO_MIN_MS) / 1000}s)`
+        : `capacidade_${cap.tier}`;
       await pushProgresso(jobId, "subagentes", `capacidade ${rotuloTier}: seguindo direto para a resposta (sem devolucao)`);
     }
     if (falhosDefinitivos.length) {
@@ -3145,7 +3220,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     tel.segmento = segmento;
 
     // Checkpoint/segmentos so em tiers que permitem (lite nunca)
-    if (cap.permitirCheckpoint && prazo() < CHECKPOINT_MIN_MS && segmento < MAX_SEGMENTOS) {
+    if (cap.permitirCheckpoint && valeSegmentar() && segmento < MAX_SEGMENTOS) {
       await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
         pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel,
         segmento: segmento + 1, direto_para_sintese: true, escopo });

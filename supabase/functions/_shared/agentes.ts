@@ -329,7 +329,26 @@ export type Delegacao = {
   motivo: string;
   tokensIn: number;
   tokensOut: number;
+  /**
+   * Parede da viagem ao modelo, em ms. Sem isto o teto do chamador e chute: em 03/09 o
+   * Roteador falhou por `timeout` em 5 turnos de 5 e nao havia UM numero no banco dizendo
+   * quanto ele tinha demorado — a unica saida foi remedir por fora, com outra carga.
+   */
+  ms: number;
+  /** Raciocinio gasto para produzir o veredito. Denuncia teto de tokens curto demais. */
+  reasoningTokens: number;
 };
+
+/**
+ * Teto de tokens do veredito do Roteador.
+ *
+ * 1200 nao servia: o veredito visivel tem ~40 tokens, mas o raciocinio do padrao da casa
+ * cabe no MESMO orcamento e foi medido em ate 1.906 tokens numa unica classificacao. Quando
+ * o raciocinio nao cabe, o modelo devolve `finish_reason: length` com content VAZIO — e um
+ * turno sem delegacao carrega as 56 ferramentas em vez das do setor. 2500 e cinto de
+ * seguranca, nao gasto: com esforco de triagem o consumo medido fica abaixo de 400.
+ */
+const ROTEADOR_MAX_TOKENS = 2500;
 
 function jsonDoTexto(t: string): any {
   const s = String(t ?? "");
@@ -360,7 +379,11 @@ export async function delegarAgentes(opts: {
   montarBody: (rota: any, extra: Record<string, unknown>) => Record<string, unknown>;
   timeoutMs?: number;
 }): Promise<Delegacao> {
-  const vazio = (motivo: string): Delegacao => ({ agentes: [], degradado: true, motivo, tokensIn: 0, tokensOut: 0 });
+  const t0 = Date.now();
+  const vazio = (motivo: string): Delegacao => ({
+    agentes: [], degradado: true, motivo, tokensIn: 0, tokensOut: 0,
+    ms: Date.now() - t0, reasoningTokens: 0,
+  });
   const pergunta = String(opts.pergunta ?? "").trim();
   if (!pergunta || !opts.chaveOpenRouter) return vazio("sem pergunta ou sem chave");
 
@@ -389,16 +412,20 @@ Responda APENAS com JSON valido, sem markdown:
         // 03/09/2026: 300 nao serve mais. max_tokens cobre raciocinio + texto, e o padrao da
         // casa (Grok 4.6) raciocina em TODA chamada — nao ha como desligar. Com 300 o modelo
         // gastaria o teto pensando e devolveria content vazio, o que aqui significa turno com
-        // as 54 ferramentas em vez das do setor. O JSON de resposta continua tendo ~40 tokens.
-        max_tokens: 1200,
+        // as 56 ferramentas em vez das do setor. O JSON de resposta continua tendo ~40 tokens.
+        max_tokens: ROTEADOR_MAX_TOKENS,
       })),
       signal: ac.signal,
     });
     if (!resp.ok) return vazio(`http ${resp.status}`);
     const j = await resp.json();
+    const raciocinio = Number(j?.usage?.completion_tokens_details?.reasoning_tokens ?? 0);
+    const finish = String(j?.choices?.[0]?.finish_reason ?? "");
     const bruto = jsonDoTexto(String(j?.choices?.[0]?.message?.content ?? ""));
     const lista = Array.isArray(bruto?.agentes) ? bruto.agentes : null;
-    if (!lista?.length) return vazio("resposta sem lista de agentes");
+    // O motivo carrega finish_reason e raciocinio: `length` aqui significa TETO CURTO, e nao
+    // modelo confuso. Sem essa distincao os dois defeitos parecem o mesmo no banco.
+    if (!lista?.length) return vazio(`resposta sem lista de agentes (finish ${finish || "?"}, raciocinio ${raciocinio})`);
     const validos: string[] = [];
     for (const ref of lista) {
       const ag = acharAgente(opts.catalogo, String(ref));
@@ -411,6 +438,8 @@ Responda APENAS com JSON valido, sem markdown:
       motivo: String(bruto?.motivo ?? "").slice(0, 200),
       tokensIn: Number(j?.usage?.prompt_tokens ?? 0),
       tokensOut: Number(j?.usage?.completion_tokens ?? 0),
+      ms: Date.now() - t0,
+      reasoningTokens: raciocinio,
     };
   } catch (e) {
     return vazio(String((e as any)?.name === "AbortError" ? "timeout" : (e as any)?.message ?? e));

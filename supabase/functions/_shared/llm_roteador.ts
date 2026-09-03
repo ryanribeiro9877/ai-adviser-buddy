@@ -71,10 +71,87 @@ export type EsforcoRaciocinio = "low" | "medium" | "high" | "xhigh";
 
 /** Profundidade que o traffic-agent-job ja classificava antes desta mudanca. */
 export type TierProfundidade = "lite" | "standard" | "deep";
-export type ModoRaciocinio = "padrao" | "profundo";
+export type ModoRaciocinio = "triagem" | "interativo" | "padrao" | "profundo";
 
+/**
+ * Faixa de esforco por NATUREZA DA TAREFA, nao por agente nem por ponto de chamada.
+ *
+ * `triagem` nasceu de uma medicao, nao de uma preferencia. O AG-01 devolve `{"agentes":[...]}`
+ * — um veredito de ~40 tokens visiveis — e em `high` o Grok 4.6 gastava ~1.900 tokens de
+ * raciocinio para produzi-lo, estourando o teto de 1200 do proprio chamador: raciocinio
+ * grande demais para caber, e resposta vazia toda vez (agentes_degradado em 5 de 5 turnos).
+ * Escolher entre oito agentes catalogados nao e um problema que melhora pensando mais.
+ *
+ * `low` e o PISO, nao uma escolha de gosto: o raciocinio do padrao da casa e `mandatory:true`
+ * — `enabled:false` e effort "none" sao recusados pelo modelo. Nao da para desligar.
+ *
+ * O que NAO e triagem continua onde o gestor pediu: analise em `high`, pesquisa profunda em
+ * `xhigh`. A faixa existe para separar CLASSIFICAR de ANALISAR, nao para economizar no que o
+ * gestor le.
+ */
+export const ESFORCO_TRIAGEM: EsforcoRaciocinio = "low";
+/**
+ * `interativo` e a faixa de quem escreve COM O GESTOR ESPERANDO, dentro de um teto duro.
+ *
+ * Nao e triagem — aqui sai a analise que o gestor le — e por isso tem nome proprio: a razao de
+ * ser `low` nao e a tarefa ser simples, e o relogio nao caber. Medido em 03/09 no corpo real do
+ * loop de ferramentas (52k de contexto, ferramentas de verdade, duas repeticoes por faixa):
+ *
+ *   esforco | parede por ida | raciocinio | tokens VISIVEIS | resposta
+ *   high    | 54,2-57,9s     | 2.405-2.472| 927-1.009       | 2.855-2.973 chars, com numeros
+ *   medium  | 43,3-43,7s     | 1.697-2.057| 750-944         | 2.128-2.682 chars, com numeros
+ *   low     | 23,3s          |   284      | 773             | 2.358 chars, com numeros
+ *
+ * A leitura que decide: o raciocinio cai 9x de high para low, e a RESPOSTA VISIVEL nao se mexe
+ * — 773 tokens contra 927, ambas com tabela, numero e leitura critica. O gestor paga 33s a mais
+ * por ida para receber texto do mesmo tamanho e da mesma natureza.
+ *
+ * E o turno faz 3-4 idas. Em `high` isso e 168-224s contra teto de 118s: o turno NAO TERMINA, e
+ * foi exatamente isso que producao mostrou — 110,1s de mediana, `continuar_turno+seg1`, e o
+ * gestor recebendo "Vou localizar os anuncios..." em vez da analise. `medium` tambem nao cabe
+ * (3 x 43,5 = 130s). So `low` cabe, com folga.
+ *
+ * Ou seja: aqui `low` nao troca qualidade por tempo — troca RACIOCINIO INVISIVEL por um turno
+ * que chega ao fim. Em `high` a qualidade media era zero, porque nao havia resposta.
+ */
+export const ESFORCO_INTERATIVO: EsforcoRaciocinio = "low";
 export const ESFORCO_PADRAO: EsforcoRaciocinio = "high";
 export const ESFORCO_PROFUNDO: EsforcoRaciocinio = "xhigh";
+
+/**
+ * Tipos cujo produto e um VEREDITO CURTO E ESTRUTURADO consumido por codigo — nunca prosa
+ * que chega ao gestor. Sao os dois blocos que, antes do padrao unico, rodavam com o
+ * raciocinio explicitamente DESLIGADO (`REASONING_OFF` no traffic-agent-job): o padrao unico
+ * os promoveu a `high` sem que ninguem pedisse, e e essa promocao silenciosa que a faixa
+ * desfaz.
+ *
+ * `sintese`, `subagente`, `chat_loop` e `visao` NAO entram: e neles que a qualidade que o
+ * gestor quer aparece.
+ */
+const TIPOS_DE_TRIAGEM: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
+  "planner",
+  "coordenacao",
+]);
+
+/**
+ * Tipos que rodam com o gestor esperando, sob teto duro de parede (os 118s do turno).
+ *
+ * `chat_loop` esta aqui e `sintese`/`subagente` NAO estao — a diferenca e o relogio, nao a
+ * importancia. O job e assincrono: se a escrita demora 60s, ninguem esta olhando a tela, e por
+ * isso o gestor pode continuar comprando raciocinio caro la. No chat, 60s por ida significa
+ * turno que nao termina.
+ */
+const TIPOS_INTERATIVOS: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
+  "chat_loop",
+]);
+
+export function ehTarefaDeTriagem(tipo: TipoTarefaLlm): boolean {
+  return TIPOS_DE_TRIAGEM.has(tipo);
+}
+
+export function ehTarefaInterativa(tipo: TipoTarefaLlm): boolean {
+  return TIPOS_INTERATIVOS.has(tipo);
+}
 
 export type RotaLlm = {
   model: string;
@@ -107,13 +184,28 @@ export function roteadorLegado(): boolean {
   return envGet("LLM_ROTEADOR").toLowerCase() === "legado";
 }
 
-/** Modo de raciocinio a partir do tier que o job ja calcula (ou de um booleano explicito). */
-export function modoRaciocinio(opts: { tier?: TierProfundidade; profundo?: boolean }): ModoRaciocinio {
+/**
+ * Modo de raciocinio a partir do TIPO e do tier que o job ja calcula.
+ *
+ * A natureza da tarefa vence o tier de propósito: o planner de um job `deep` continua sendo
+ * classificacao. Deixar `deep` promover a triagem a `xhigh` seria pagar o raciocinio mais
+ * caro da casa para escolher um nome de especialista — e foi por essa porta que o Roteador
+ * do chat virou codigo morto.
+ */
+export function modoRaciocinio(
+  opts: { tipo?: TipoTarefaLlm; tier?: TierProfundidade; profundo?: boolean },
+): ModoRaciocinio {
+  if (opts.tipo && ehTarefaDeTriagem(opts.tipo)) return "triagem";
+  // O teto do turno tambem vence o tier: um `chat_loop` marcado `deep` continua tendo 118s de
+  // parede, e `xhigh` la significaria uma unica ida consumindo metade do orcamento do turno.
+  if (opts.tipo && ehTarefaInterativa(opts.tipo)) return "interativo";
   if (typeof opts.profundo === "boolean") return opts.profundo ? "profundo" : "padrao";
   return opts.tier === "deep" ? "profundo" : "padrao";
 }
 
 export function esforcoDoModo(modo: ModoRaciocinio): EsforcoRaciocinio {
+  if (modo === "triagem") return ESFORCO_TRIAGEM;
+  if (modo === "interativo") return ESFORCO_INTERATIVO;
   return modo === "profundo" ? ESFORCO_PROFUNDO : ESFORCO_PADRAO;
 }
 

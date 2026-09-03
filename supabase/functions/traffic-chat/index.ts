@@ -1044,8 +1044,17 @@ const TOOLS_DEADLINE_MS = 55_000;
 const HARD_LIMIT_MS = 118_000;
 // AG-01 Roteador: teto curto de proposito. A delegacao roda em paralelo com a leitura de
 // historico e memoria, entao so custa parede se demorar mais que elas. Estourando, o turno
-// segue com as 54 ferramentas — perder contexto economizado e barato, perder o turno nao.
-const ROTEADOR_TIMEOUT_MS = 7_000;
+// segue com as 56 ferramentas — perder contexto economizado e barato, perder o turno nao.
+//
+// 03/09/2026: 7s reprovou em 5 turnos de 5 (`agentes_motivo: "timeout"`), e nao havia UM
+// numero no banco dizendo quanto a chamada tinha demorado — por isso `agentes_ms` passa a ser
+// gravado. A viagem isolada foi remedida em 0,4-1,1s no corpo EXATO de producao (esforco
+// high, teto 1200, provider sort=price, rede de fallback), entao o relogio do modelo nunca
+// foi o problema: o que estourava era esta janela competindo com a leitura de historico,
+// memoria e registro no mesmo isolate. 12s cobre essa contencao com folga de uma ordem de
+// grandeza sobre o tempo de modelo medido, e continua sendo tempo que o turno NAO paga: a
+// promessa e aguardada so na montagem do prompt, depois de I/O que ja custa segundos.
+const ROTEADOR_TIMEOUT_MS = 12_000;
 const RESERVA_GRAVACAO_MS = 8_000;
 const OPENROUTER_CALL_CAP_MS = 70_000;
 // Atalho meta-dicas: tetos do payload enviado ao LLM (persistencia em tool_results continua
@@ -6675,6 +6684,13 @@ Deno.serve(async (req) => {
     pedido: objetivoOriginal,
   };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
+  // 03/09/2026: ONDE o turno gasta a parede. Sem esta separacao, "o turno demora 110s" nao
+  // distingue modelo lento de ferramenta lenta, e a decisao de baixar o esforco de raciocinio
+  // (que custa qualidade da resposta) seria um chute. Medido isoladamente, o padrao da casa
+  // responde em <1,2s mesmo com 52k de contexto nos tres esforcos — entao a suspeita e que a
+  // parede esteja na coleta, e isto prova ou desmente.
+  let msModelo = 0, msFerramentas = 0;
+  const msPorFerramenta: Record<string, number> = {};
   const rotaLlm = resolverChamadaLlm({
     tipo: "chat_loop",
     pergunta: msgText,
@@ -6784,6 +6800,7 @@ Deno.serve(async (req) => {
     const timer = setTimeout(() => ac.abort(), capMs);
     let resp: Response;
     let text: string;
+    const tModelo = Date.now();
     try {
       resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -6800,6 +6817,8 @@ Deno.serve(async (req) => {
       return { erro: "openrouter_fetch_failed", detalhe: String((e as any)?.message ?? e).slice(0, 200) };
     } finally {
       clearTimeout(timer);
+      // Conta a viagem mesmo quando ela falha: timeout de modelo tambem e parede gasta.
+      msModelo += Date.now() - tModelo;
     }
     if (!resp.ok) {
       // v21: degradacao em 2 passos. Tira o reasoning primeiro (parametro novo, nao provado)
@@ -7065,10 +7084,16 @@ Deno.serve(async (req) => {
         }
         (ctx as { restanteMs?: number }).restanteMs = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
         let result: unknown;
+        const tFerr = Date.now();
         try {
           result = await runTool(tc.function?.name, args, ctx);
         } catch (e) {
           result = { erro: String((e as { message?: string })?.message ?? e).slice(0, 200) };
+        }
+        {
+          const gasto = Date.now() - tFerr;
+          msFerramentas += gasto;
+          msPorFerramenta[nomeTc] = (msPorFerramenta[nomeTc] ?? 0) + gasto;
         }
         toolsUsed.push({ tool: tc.function?.name, args });
         // v28.11: um unico corte, usado nos dois destinos - o que o modelo le e o que fica
@@ -7542,6 +7567,14 @@ Deno.serve(async (req) => {
     agentes_catalogo_degradado: delegacao ? delegacao.cat.degradado : null,
     agentes_tokens_in: delegacao?.d.tokensIn ?? null,
     agentes_tokens_out: delegacao?.d.tokensOut ?? null,
+    // Parede e raciocinio da delegacao. Sem os dois, "o Roteador cabe no teto?" e "o teto de
+    // tokens e suficiente?" so podiam ser respondidos remedindo por fora, com outra carga —
+    // que foi o que atrasou o diagnostico de 03/09.
+    agentes_ms: delegacao?.d.ms ?? null,
+    agentes_reasoning_tokens: delegacao?.d.reasoningTokens ?? null,
+    // Reparticao da parede do turno. `ms_total` sozinho nao acusa culpado; estes tres sim.
+    ms_modelo: msModelo, ms_ferramentas: msFerramentas,
+    ms_por_ferramenta: msPorFerramenta,
     ferramentas_no_turno: toolsDoTurno.length,
     ferramentas_totais: chavesDaSuperficie(catFerr, "chat").length,
     registro_ferramentas_degradado: catFerr.degradado,
