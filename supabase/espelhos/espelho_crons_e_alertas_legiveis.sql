@@ -186,7 +186,38 @@
 -- (aplicado como 20260903210923_painel_concorda_com_o_vigia_na_carencia)
 --
 -- ----------------------------------------------------------------------------
--- 10. Limite do que foi provado
+-- 10. Tolerância zero não vigia de perto, ela grita sem parar
+-- ----------------------------------------------------------------------------
+--
+-- Terceiro defeito, e o mais irônico: o primeiro alerta gravado no padrão novo
+-- era ele mesmo ilegível.
+--
+--   [critical] "Rotina do sistema parada: Foto diaria da configuracao das campanhas"
+--   "... nao conclui uma rodada ha 0 horas"
+--   "ultima rodada boa em 03/09/2026 17:07 (tolerancia: 0h)"
+--
+-- Emitido 17:31 para uma tarefa que rodou com sucesso 17:07. Com
+-- `tolerancia_horas = 0`, qualquer tempo decorrido já passa da tolerância, e a
+-- escala de gravidade desanda junto: `v_horas >= tolerancia * 4` vira
+-- `v_horas >= 0`, sempre verdadeiro. Tolerância zero não significa "vigie de
+-- perto", significa "grite CRÍTICO sem parar".
+--
+-- Duas camadas, porque uma só não basta: o banco passou a recusar o cadastro
+-- (`tolerancia_horas` NOT NULL + CHECK >= 1 — tarefa sem tolerância declarada
+-- não é vigiável, e o certo é recusar o cadastro em vez de alertar errado
+-- depois), e o vigia usa piso defensivo de 1h ao ler o valor, além de dizer
+-- "menos de uma hora" em vez de "ha 0 horas", que não é frase que alguém
+-- escreveria.
+--
+-- Ressalva honesta: o catálogo hoje mostra 30h para essa tarefa e o próprio
+-- vigia resolveu o alerta na rodada seguinte. Como o valor virou 0 naquele
+-- instante não ficou explicado — provavelmente um estado intermediário da carga
+-- do catálogo. A trava torna a pergunta irrelevante para o futuro, mas o registro
+-- fica: o número saiu errado e não sabemos exatamente por quê.
+-- (aplicado como 20260903211908_tolerancia_minima_para_nao_gerar_alerta_absurdo)
+--
+-- ----------------------------------------------------------------------------
+-- 11. Limite do que foi provado
 -- ----------------------------------------------------------------------------
 --
 -- Não é possível provar numa sessão que uma cron diária dispara amanhã. O que
