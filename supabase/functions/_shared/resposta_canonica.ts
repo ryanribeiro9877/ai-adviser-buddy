@@ -499,6 +499,7 @@ export function resolverRespostaCanonica(opts: {
 //       from "../_shared/resposta_canonica.ts";
 //     import { compor, conferirIntegridade, instrucaoDeComposicao, linhaDeComposicao }
 //       from "../_shared/composicao_hibrida.ts";
+//     import { extrairValoresDoMolde } from "../_shared/valores_do_molde.ts";
 //
 // ----------------------------------------------------------------------------
 // (2) PONTO A — curto-circuito dos que emitem sozinhos, e a instrucao dos componiveis
@@ -562,9 +563,15 @@ export function resolverRespostaCanonica(opts: {
 // A ORDEM AQUI NAO E NEGOCIAVEL, e o motivo esta na proxima secao.
 //
 //     if (moldeDoTurno.confianca === "exata" && registroDeMoldes) {
+//       // `toolResults` ja existe no escopo (declarado na linha ~6664) e a esta altura esta
+//       // completo. `extrairValoresDoMolde` nunca devolve mapa parcial: ou o conjunto todo,
+//       // ou defeitos nomeados — e nesse caso `resolverRespostaCanonica` cai para LLM.
+//       const ext = extrairValoresDoMolde({
+//         codigo: moldeDoTurno.codigo, toolResults, ctx: { hojeIso },
+//       });
 //       const resol = resolverRespostaCanonica({
 //         molde: moldeDoTurno, registro: registroDeMoldes,
-//         valores: valoresDoMolde,   // montado das RPCs/toolResults deste turno
+//         valores: ext.ok ? ext.valores : {},
 //         ctx: { hojeIso, degradado: registroDeMoldes.degradado },
 //       });
 //       const c = compor({ resolucao: resol, gerado: reply, instruiuOmitir });
@@ -607,18 +614,21 @@ export function resolverRespostaCanonica(opts: {
 //       sintese, este filtro tem de passar a receber `integ.inicio_do_gerado` e julgar so o
 //       slice. Mover sem isso reintroduz o incidente de 20/08 com aparencia de determinismo.
 //
-//   [2] MOLDE CALCULADO DEPENDE DE RPC — e o hibrido RESOLVE isso, com uma ressalva nova.
+//   [2] MOLDE CALCULADO DEPENDE DE RPC — resolvido, com 2 dos 7 fora.
 //
 //       Na versao binaria isto era um beco: o unico ponto de ligacao era antes das RPCs, e
 //       molde calculado sem numero cai para o LLM com "campo obrigatorio sem valor". O ponto
-//       B esta DEPOIS das ferramentas, entao os 6 moldes calculados e os 2 de ato passam a
-//       ter valor disponivel — e sao exatamente os 7 componiveis.
+//       B esta DEPOIS das ferramentas, entao o valor esta disponivel.
 //
-//       A ressalva nova: `valoresDoMolde` nao existe hoje: alguem tem de montar o mapa
-//       campo->valor a partir dos toolResults, e a origem de cada campo esta declarada em
-//       `moldes_de_resposta.campos[].origem` justamente para isso. Enquanto esse mapa nao
-//       existir, o ponto B resolve para llm com "campo obrigatorio sem valor" e — atencao —
-//       com `instruiuOmitir` verdadeiro, o que cai na armadilha [3].
+//       `extrairValoresDoMolde` (_shared/valores_do_molde.ts) faz o mapa campo->valor a
+//       partir dos toolResults, e cobre 5 dos 7 componiveis: ATO_CONFIRMACAO_CARD e
+//       ATO_CARD_NAO_EMITIDO por propose_action, EST_ALERTAS_ABERTOS por get_alerts +
+//       get_recommendations, EST_CAMPANHAS_ATIVAS por get_overview e EST_SAUDE_INTEGRACOES
+//       por saude_das_integracoes.
+//
+//       NUM_EXPOSICAO_ORCAMENTO e NUM_CUSTO_LLM_PERIODO ficaram sem extrator (motivos em
+//       `SEM_EXTRATOR`) e NAO recebem a instrucao de omitir, porque `instrucaoDeComposicao`
+//       exige extrator. Sem esse portao eles cairiam na armadilha [3] em TODO turno.
 //
 //   [3] RESPOSTA MUTILADA: instruir a omitir e nao entregar o bloco.
 //

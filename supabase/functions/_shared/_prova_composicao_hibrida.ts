@@ -228,16 +228,23 @@ console.log(`\n[4] instrucao ao modelo: so onde precisa, e curta\n`);
   const repetida = new Set([0, 1, 2, 3, 4].map(() => instrucaoDeComposicao(resolverCard())));
   assert(repetida.size === 1, "a instrucao tem de ser identica entre chamadas");
 
-  // Duas variantes no total, nao catorze regras.
+  // Duas variantes no total, nao catorze regras. Os codigos tem de ser REAIS e com extrator:
+  // desde que `instrucaoDeComposicao` passou a exigir extrator, molde sintetico devolve "" —
+  // que e exatamente o portao contra resposta mutilada, provado em _prova_valores_do_molde [5].
   const variantes = new Set<string>();
-  for (const classe of ["confirmacao_de_ato", "molde_calculado"] as const) {
+  for (const [codigo, classe] of [
+    ["ATO_CONFIRMACAO_CARD", "confirmacao_de_ato"],
+    ["EST_CAMPANHAS_ATIVAS", "molde_calculado"],
+  ] as const) {
     const r = resolverRespostaCanonica({
-      molde: { codigo: "X", classe, confianca: "exata", parametros: {} },
-      registro: { moldes: [{ ...moldeCard, codigo: "X", classe }], degradado: false },
+      molde: { codigo, classe, confianca: "exata", parametros: {} },
+      registro: { moldes: [{ ...moldeCard, codigo, classe }], degradado: false },
       valores: valoresCard,
       ctx,
     });
-    variantes.add(instrucaoDeComposicao(r));
+    const linha = instrucaoDeComposicao(r);
+    assert(linha !== "", `${codigo}: molde com extrator tem de receber instrucao`);
+    variantes.add(linha);
   }
   assert(variantes.size === 2, `deveria haver 2 variantes de instrucao, ha ${variantes.size}`);
 

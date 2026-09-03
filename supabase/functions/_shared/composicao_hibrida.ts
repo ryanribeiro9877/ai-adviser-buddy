@@ -50,6 +50,7 @@
 
 import type { Molde } from "./molde_pergunta.ts";
 import type { GrupoDeComposicao, Resolucao } from "./resposta_canonica.ts";
+import { temExtrator } from "./valores_do_molde.ts";
 
 /**
  * Separador entre bloco e analise.
@@ -288,10 +289,28 @@ function rotuloDoBloco(classe: string): string {
  *
  * Devolve "" quando nao ha composicao, e nesse caso NADA e acrescentado ao prompt: silencio e
  * mais barato e mais seguro que uma instrucao condicional que o modelo tem de interpretar.
+ *
+ * ============================================================================
+ * O PORTAO QUE IMPEDE A RESPOSTA MUTILADA POR CONSTRUCAO
+ * ============================================================================
+ *
+ * A instrucao SO sai se existir extrator para o molde. O motivo e a assimetria dos dois
+ * tempos da composicao: esta linha entra no prompt ANTES da geracao, e o bloco s'o pode ser
+ * resolvido DEPOIS das ferramentas. Mandar o modelo omitir um bloco que o codigo nao sabe
+ * alimentar produziria mutilacao em TODO turno daquele molde, nao em caso de borda.
+ *
+ * Dois dos sete componiveis nao tem extrator hoje (NUM_EXPOSICAO_ORCAMENTO e
+ * NUM_CUSTO_LLM_PERIODO, motivos em `SEM_EXTRATOR`). Sem este portao, ligar a camada faria
+ * exatamente esses dois moldes mutilarem a resposta sempre — e por serem moldes de NUMERO,
+ * mutilar neles e perder justamente o dado que o gestor pediu.
+ *
+ * Com o portao, molde sem extrator se comporta como hoje: nada no prompt, nada anexado,
+ * resposta inteiramente gerada. Degrada para o estado atual em vez de degradar para pior.
  */
 export function instrucaoDeComposicao(resolucao: Resolucao): string {
   if (resolucao.caminho !== "canonico") return "";
   if (resolucao.composicao !== "segmento_componivel") return "";
+  if (!temExtrator(resolucao.molde)) return "";
   const rotulo = rotuloDoBloco(resolucao.classe);
   return `Nao escreva ${rotulo}: ja vai anexado no topo, travado por codigo. ` +
     `Escreva so a analise em volta, sem repetir esses dados.`;
