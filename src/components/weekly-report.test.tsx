@@ -50,6 +50,8 @@ function relatorio(over: Record<string, unknown> = {}) {
     investimento: 1500,
     formularios: 30,
     custo_por_formulario: 50,
+    conversas: 0,
+    custo_por_conversa: null,
     cliques_link: 600,
     custo_por_clique: 2.5,
     visualizacoes_pagina: 450,
@@ -57,6 +59,23 @@ function relatorio(over: Record<string, unknown> = {}) {
     conversao_view_form_pct: 6.7,
     por_campanha: [],
     nao_disponivel: [],
+    ...over,
+  };
+}
+
+/** Linha de campanha no formato que a RPC devolve: base e custo já resolvidos. */
+function linhaCampanha(over: Record<string, unknown> = {}) {
+  return {
+    campanha: "Leads Julho",
+    gasto: 900,
+    formularios: 18,
+    conversas: 0,
+    cliques_link: 120,
+    resultados: 18,
+    unidade: "formularios",
+    rotulo_da_base: "por formulario enviado",
+    base_de_resultado: "formularios",
+    custo_por_resultado: 50,
     ...over,
   };
 }
@@ -147,7 +166,7 @@ describe("texto do WhatsApp", () => {
   it("lista as campanhas quando há", async () => {
     resposta = {
       data: relatorio({
-        por_campanha: [{ campanha: "Leads Julho", gasto: 900, formularios: 18 }],
+        por_campanha: [linhaCampanha({ campanha: "Leads Julho", gasto: 900 })],
       }),
       error: null,
     };
@@ -155,7 +174,49 @@ describe("texto do WhatsApp", () => {
     const txt = await copiar();
     expect(txt).toContain("Por campanha:");
     expect(txt).toContain("• Leads Julho: R$");
-    expect(txt).toContain("18 formulários");
+    expect(txt).toContain("18 formularios");
+    expect(txt).toContain("por formulario enviado");
+  });
+
+  it("campanha de CONVERSA sai com a base dela, não como formulário zerado", async () => {
+    // Era aqui que a tela divergia do banco: ela dividia gasto por formularios,
+    // e campanha de conversa tem formularios = 0. O custo real (R$ 4,19 por
+    // conversa) virava travessão, ou pior, um custo por formulário inventado.
+    resposta = {
+      data: relatorio({
+        conversas: 39,
+        custo_por_conversa: 4.19,
+        por_campanha: [
+          linhaCampanha({
+            campanha: "WA Jurídico",
+            gasto: 163.28,
+            formularios: 0,
+            conversas: 39,
+            resultados: 39,
+            unidade: "conversas iniciadas",
+            rotulo_da_base: "por conversa iniciada",
+            base_de_resultado: "conversas",
+            custo_por_resultado: 4.19,
+          }),
+        ],
+      }),
+      error: null,
+    };
+    montar();
+    const txt = await copiar();
+    expect(txt).toContain("💬 Conversas iniciadas: 39");
+    expect(txt).toContain("🗨️ Custo por conversa: R$");
+    expect(txt).toContain("39 conversas iniciadas");
+    expect(txt).toContain("por conversa iniciada");
+    // O custo da linha vem da RPC, não de gasto ÷ formulários.
+    const linha = (await screen.findByText("WA Jurídico")).closest("tr")!;
+    expect(linha.textContent).toContain("4,19");
+    expect(linha.textContent).toContain("39");
+  });
+
+  it("conta SEM conversa não ganha linha de conversa zerada", async () => {
+    montar();
+    expect(await copiar()).not.toContain("Conversas iniciadas");
   });
 
   it("sem campanha, não gera seção vazia", async () => {

@@ -2,6 +2,10 @@
 // Usa ExcelJS porque o SheetJS CE não escreve estilo; os exports de tabela simples
 // seguem em SheetJS. Import dinâmico: a lib só é baixada quando alguém exporta.
 
+// gasto_form / gasto_conv / gasto_clk repartem o gasto do dia pela BASE de
+// resultado da campanha. Existem porque "custo por formulário" do período era
+// gasto TOTAL ÷ formulários: numa conta com tráfego e engajamento no ar, isso
+// cobra do formulário um dinheiro que nunca teve chance de virar formulário.
 export type SerieDia = {
   d: string;
   gasto: number;
@@ -11,6 +15,9 @@ export type SerieDia = {
   views: number;
   forms: number;
   conv: number;
+  gasto_form: number;
+  gasto_conv: number;
+  gasto_clk: number;
 };
 export type Campanha = {
   nome: string;
@@ -72,6 +79,9 @@ function porSemana(serie: SerieDia[]) {
         views: 0,
         forms: 0,
         conv: 0,
+        gasto_form: 0,
+        gasto_conv: 0,
+        gasto_clk: 0,
       } as { inicio: string; fim: string } & Omit<SerieDia, "d">);
     cur.gasto += d.gasto;
     cur.imp += d.imp;
@@ -80,6 +90,9 @@ function porSemana(serie: SerieDia[]) {
     cur.views += d.views;
     cur.forms += d.forms;
     cur.conv += d.conv;
+    cur.gasto_form += d.gasto_form ?? 0;
+    cur.gasto_conv += d.gasto_conv ?? 0;
+    cur.gasto_clk += d.gasto_clk ?? 0;
     sem.set(chave, cur);
   }
   return [...sem.values()].sort((a, b) => a.inicio.localeCompare(b.inicio));
@@ -167,6 +180,9 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
     "Conversas",
     "Custo/form",
     "CTR",
+    "Investido em formulário",
+    "Investido em conversa",
+    "Investido em tráfego",
   ];
   const hSerie = cabecalho(wsSerie, colsSerie);
   const primeiraSerie = hSerie.number + 1;
@@ -182,8 +198,13 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
       d.forms,
       d.conv,
       // Derivadas por fórmula: mudar o gasto na planilha recalcula tudo.
-      { formula: `IFERROR(B${n}/G${n},"-")` },
+      // O custo por formulário divide o investido EM FORMULÁRIO (K), não o
+      // investimento do dia inteiro: tráfego e engajamento não geram formulário.
+      { formula: `IFERROR(K${n}/G${n},"-")` },
       { formula: `IFERROR(D${n}/C${n},"-")` },
+      d.gasto_form ?? 0,
+      d.gasto_conv ?? 0,
+      d.gasto_clk ?? 0,
     ]);
   }
   const ultimaSerie = wsSerie.rowCount;
@@ -197,8 +218,11 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
     { formula: `SUM(F${primeiraSerie}:F${ultimaSerie})` },
     { formula: `SUM(G${primeiraSerie}:G${ultimaSerie})` },
     { formula: `SUM(H${primeiraSerie}:H${ultimaSerie})` },
-    { formula: `IFERROR(B${linhaTotal}/G${linhaTotal},"-")` },
+    { formula: `IFERROR(K${linhaTotal}/G${linhaTotal},"-")` },
     { formula: `IFERROR(D${linhaTotal}/C${linhaTotal},"-")` },
+    { formula: `SUM(K${primeiraSerie}:K${ultimaSerie})` },
+    { formula: `SUM(L${primeiraSerie}:L${ultimaSerie})` },
+    { formula: `SUM(M${primeiraSerie}:M${ultimaSerie})` },
   ]);
   zebrar(wsSerie, primeiraSerie, ultimaSerie);
   const rTotal = wsSerie.getRow(linhaTotal);
@@ -212,6 +236,7 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
   [3, 4, 5, 6, 7, 8].forEach((i) => (wsSerie.getColumn(i).numFmt = F_INT));
   wsSerie.getColumn(9).numFmt = F_MOEDA;
   wsSerie.getColumn(10).numFmt = F_PCT;
+  [11, 12, 13].forEach((i) => (wsSerie.getColumn(i).numFmt = F_MOEDA));
   wsSerie.columns.forEach((c, i) => (c.width = i === 0 ? 13 : 15));
 
   // ============ 2) Resumo (referencia a linha TOTAL da Série diária) ============
@@ -242,22 +267,36 @@ export async function montarWorkbook(dados: DadosExport, empresa: string) {
     { nome: "Formulários", formula: `${T}G${linhaTotal}`, fmt: F_INT },
     { nome: "Conversas (WhatsApp)", formula: `${T}H${linhaTotal}`, fmt: F_INT },
     {
+      // Numerador é o investido EM FORMULÁRIO (coluna K), não o total. Com o
+      // total, a Legal é Viver aparecia com R$ 7,63 por formulário em 27/08 a
+      // 02/09; o número verdadeiro é R$ 1,40 — os R$ 1,28 mil de diferença
+      // estavam em tráfego e engajamento, que não produzem formulário.
       nome: "Custo por formulário",
-      formula: `IFERROR(${T}B${linhaTotal}/${T}G${linhaTotal},"-")`,
+      formula: `IFERROR(${T}K${linhaTotal}/${T}G${linhaTotal},"-")`,
       fmt: F_MOEDA,
       teto: tetos.custo_por_formulario,
     },
     {
+      // Este divide o total mesmo: clique no link é entrega de mídia, e toda
+      // campanha produz clique. Não é base de resultado de ninguém.
       nome: "Custo por clique no link",
       formula: `IFERROR(${T}B${linhaTotal}/${T}E${linhaTotal},"-")`,
       fmt: F_MOEDA,
     },
     {
-      // Sem teto aqui de propósito: no total, o investimento das campanhas de LP
-      // entra no divisor e o número fica alto por construção. O teto de conversa
-      // (R$ 1,55) só faz sentido por campanha — está na aba "Campanhas".
-      nome: "Custo por conversa (total ÷ conversas)",
-      formula: `IFERROR(${T}B${linhaTotal}/${T}H${linhaTotal},"-")`,
+      // Agora divide o investido EM CONVERSA (coluna L). Enquanto dividia o
+      // total, o número era alto por construção e por isso ia sem teto; com o
+      // numerador certo ele é comparável ao teto que o gestor decidiu.
+      nome: "Custo por conversa",
+      formula: `IFERROR(${T}L${linhaTotal}/${T}H${linhaTotal},"-")`,
+      fmt: F_MOEDA,
+      teto: tetos.custo_por_conversa,
+    },
+    {
+      // Declarado em vez de escondido: é o dinheiro que não tem base de lead
+      // nenhuma. Sem esta linha, quem soma as partes não fecha com o total.
+      nome: "Investido em tráfego e engajamento (sem base de lead)",
+      formula: `${T}M${linhaTotal}`,
       fmt: F_MOEDA,
     },
     { nome: "CTR", formula: `IFERROR(${T}D${linhaTotal}/${T}C${linhaTotal},"-")`, fmt: F_PCT },

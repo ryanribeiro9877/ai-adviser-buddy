@@ -27,8 +27,24 @@ beforeAll(async () => {
 //  2. toda divisao vai dentro de IFERROR(...,"-") - um "#DIV/0!" num relatorio
 //     que vai para fora e uma falha visivel e constrangedora.
 
+// Dia típico de conta MISTA: dos R$ 100 gastos, só R$ 40 foram para campanha
+// medida por formulário. É essa repartição que separa o custo por formulário
+// verdadeiro (40÷5 = R$ 8) do que a planilha mostrava antes (100÷5 = R$ 20).
 function dia(d: string, over: Partial<SerieDia> = {}): SerieDia {
-  return { d, gasto: 100, imp: 1000, clk: 50, lclk: 40, views: 30, forms: 5, conv: 2, ...over };
+  return {
+    d,
+    gasto: 100,
+    imp: 1000,
+    clk: 50,
+    lclk: 40,
+    views: 30,
+    forms: 5,
+    conv: 2,
+    gasto_form: 40,
+    gasto_conv: 25,
+    gasto_clk: 35,
+    ...over,
+  };
 }
 
 function dados(over: Partial<DadosExport> = {}): DadosExport {
@@ -169,6 +185,28 @@ describe("montarWorkbook — métricas por FÓRMULA (a razão do ExcelJS)", () =
       expect(f, f).toMatch(/"[^"]+"/); // ha um fallback textual
       expect(f, f).not.toMatch(/,\s*0\s*\)/); // e ele nao e zero
     }
+  });
+
+  it("custo por formulário divide o investido EM FORMULÁRIO, não o total", async () => {
+    // O defeito: numa conta com tráfego e engajamento no ar, dividir o gasto
+    // TOTAL pelos formulários cobra do formulário um dinheiro que nunca teve
+    // chance de virar formulário. Medido em 03/09/2026 na Legal é Viver:
+    // R$ 7,63 por formulário no relatório contra R$ 1,40 verdadeiros — 5,4x,
+    // no número que o gestor usa para dimensionar verba.
+    const wb = await montarWorkbook(dados(), "X");
+    const doResumo = formulas(wb.getWorksheet("Resumo")!);
+    const custoForm = doResumo.filter((f) => f.includes("/") && /K\d+/.test(f) && /G\d+/.test(f));
+    expect(custoForm.length, "custo por formulário deve dividir K por G").toBeGreaterThan(0);
+    // E nenhuma fórmula do Resumo divide o investimento total por formulários.
+    for (const f of doResumo) {
+      expect(f, f).not.toMatch(/B\d+\/'Série diária'!G\d+/);
+    }
+  });
+
+  it("custo por conversa divide o investido EM CONVERSA", async () => {
+    const wb = await montarWorkbook(dados(), "X");
+    const doResumo = formulas(wb.getWorksheet("Resumo")!);
+    expect(doResumo.some((f) => /L\d+/.test(f) && /H\d+/.test(f))).toBe(true);
   });
 
   it("série com UM dia só ainda produz fórmula de total válida", async () => {

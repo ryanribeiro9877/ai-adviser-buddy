@@ -24,17 +24,36 @@ import {
 // todo número aqui é anulável e os formatadores devolvem "—" em vez de quebrar.
 type Numero = number | null | undefined;
 
+// Cada campanha declara a BASE do seu resultado e já traz o custo calculado pela
+// RPC. A tela não divide gasto por formulários: campanha de conversa tem
+// formulários zero, e essa divisão devolvia "—" (ou um número inflado) para
+// campanha que estava entregando conversa. O denominador é decisão do banco.
+type LinhaCampanha = {
+  campanha: string;
+  gasto: Numero;
+  formularios: Numero;
+  conversas: Numero;
+  cliques_link: Numero;
+  resultados: Numero;
+  unidade: string;
+  rotulo_da_base: string;
+  base_de_resultado: string;
+  custo_por_resultado: Numero;
+};
+
 type Relatorio = {
   periodo: { inicio: string; fim: string; dias_com_dado: number; dias_no_periodo: number };
   investimento: Numero;
   formularios: Numero;
   custo_por_formulario: Numero;
+  conversas: Numero;
+  custo_por_conversa: Numero;
   cliques_link: Numero;
   custo_por_clique: Numero;
   visualizacoes_pagina: Numero;
   ctr_pct: Numero;
   conversao_view_form_pct: Numero;
-  por_campanha: { campanha: string; gasto: Numero; formularios: Numero }[];
+  por_campanha: LinhaCampanha[];
   nao_disponivel: string[];
 };
 
@@ -74,16 +93,29 @@ function textoWhatsApp(r: Relatorio): string {
     `💰 Investimento: ${brl(r.investimento)}`,
     `📝 Formulários: ${int(r.formularios)}`,
     `🎯 Custo por formulário: ${brl(r.custo_por_formulario)}`,
+  ];
+  // Conta só de formulário não ganha duas linhas de conversa zerada; conta com
+  // conversa não pode ter a conversa escondida atrás do custo por formulário.
+  if (finito(r.conversas) && r.conversas > 0) {
+    L.push(
+      `💬 Conversas iniciadas: ${int(r.conversas)}`,
+      `🗨️ Custo por conversa: ${brl(r.custo_por_conversa)}`,
+    );
+  }
+  L.push(
     `🔗 Cliques no link: ${int(r.cliques_link)}`,
     `💸 Custo por clique: ${brl(r.custo_por_clique)}`,
     `👀 Visualizações da página: ${int(r.visualizacoes_pagina)}`,
     `📊 CTR: ${pct(r.ctr_pct)}`,
     `📈 Conversão (visualização → formulário): ${pct(r.conversao_view_form_pct)}`,
-  ];
+  );
   if (r.por_campanha?.length) {
     L.push(``, `Por campanha:`);
     for (const c of r.por_campanha) {
-      L.push(`• ${c.campanha}: ${brl(c.gasto)} · ${int(c.formularios)} formulários`);
+      const custo = finito(c.custo_por_resultado)
+        ? ` · ${brl(c.custo_por_resultado)} ${c.rotulo_da_base}`
+        : "";
+      L.push(`• ${c.campanha}: ${brl(c.gasto)} · ${int(c.resultados)} ${c.unidade}${custo}`);
     }
   }
   if (r.nao_disponivel?.length) {
@@ -165,11 +197,18 @@ export function WeeklyReport({
     }
   };
 
+  const temConversa = r ? finito(r.conversas) && r.conversas > 0 : false;
   const METRICAS = r
     ? [
         { emoji: "💰", label: "Investimento", valor: brl(r.investimento) },
         { emoji: "📝", label: "Formulários", valor: int(r.formularios) },
         { emoji: "🎯", label: "Custo por formulário", valor: brl(r.custo_por_formulario) },
+        ...(temConversa
+          ? [
+              { emoji: "💬", label: "Conversas iniciadas", valor: int(r.conversas) },
+              { emoji: "🗨️", label: "Custo por conversa", valor: brl(r.custo_por_conversa) },
+            ]
+          : []),
         { emoji: "🔗", label: "Cliques no link", valor: int(r.cliques_link) },
         { emoji: "💸", label: "Custo por clique", valor: brl(r.custo_por_clique) },
         { emoji: "👀", label: "Visualizações da página", valor: int(r.visualizacoes_pagina) },
@@ -265,8 +304,8 @@ export function WeeklyReport({
                   <TableRow>
                     <TableHead>Campanha</TableHead>
                     <TableHead className="text-right">Investimento</TableHead>
-                    <TableHead className="text-right">Formulários</TableHead>
-                    <TableHead className="text-right">Custo por formulário</TableHead>
+                    <TableHead className="text-right">Resultados</TableHead>
+                    <TableHead className="text-right">Custo por resultado</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -277,12 +316,14 @@ export function WeeklyReport({
                       </TableCell>
                       <TableCell className="text-right tabular-nums">{brl(c.gasto)}</TableCell>
                       <TableCell className="text-right tabular-nums">
-                        {int(c.formularios)}
+                        {int(c.resultados)}
+                        <span className="ml-1 text-xs text-muted-foreground">{c.unidade}</span>
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
-                        {finito(c.formularios) && c.formularios > 0 && finito(c.gasto)
-                          ? brl(c.gasto / c.formularios)
-                          : SEM_DADO}
+                        {brl(c.custo_por_resultado)}
+                        <span className="ml-1 text-xs text-muted-foreground">
+                          {c.rotulo_da_base}
+                        </span>
                       </TableCell>
                     </TableRow>
                   ))}
