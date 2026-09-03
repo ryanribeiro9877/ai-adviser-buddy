@@ -257,6 +257,13 @@ import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
 import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto, statusObjetoOperacional } from "../_shared/memoria_conjunto.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import {
+  agenteDoSubagente,
+  carregarCatalogoAgentes,
+  montarPromptDelegacao,
+  subagentesDosAgentes,
+  type CatalogoAgentes,
+} from "../_shared/agentes.ts";
+import {
   FOCO_CRIATIVOS_DRIVE,
   FOCO_ESTRUTURA_CONJUNTOS_DRIVE,
   aplicarRecorteAcervo,
@@ -1848,8 +1855,33 @@ function planoFallbackSeguro(
   }));
 }
 
+// Catalogo de agentes: uma leitura por invocacao da edge, reaproveitada entre segmentos do
+// mesmo job. O Roteador nao pode pagar um SELECT por turno dentro da parede de 5 min.
+let _catalogo: CatalogoAgentes | null = null;
+async function catalogoAgentes(): Promise<CatalogoAgentes> {
+  if (_catalogo) return _catalogo;
+  _catalogo = await carregarCatalogoAgentes(supa);
+  return _catalogo;
+}
+
+// Quando um agente cobre mais de um subagente e o tier nao comporta todos, esta ordem decide
+// quem entra. Vale so como desempate: com orcamento sobrando, todos os subagentes do agente
+// escolhido rodam.
+const PRIORIDADE_DENTRO_DO_AGENTE = [
+  "desempenho_campanhas",
+  "criativos_drive",
+  "criativos",
+  "alertas_recomendacoes",
+  "compliance",
+  "whatsapp_waba",
+  "estrutura_conta",
+  "analise_visual_drive",
+  "conhecimento",
+];
+
 async function planejar(pergunta: string, tel: any, cap?: Capacidade, escopo?: EscopoPedido): Promise<{ plano: { nome: string; foco: string }[]; degradado: boolean }> {
   const nomes = Object.keys(SUBAGENTES);
+  const cat = await catalogoAgentes();
   const maxEsp = cap?.maxEspecialistas ?? nomes.length;
   if (cap?.forcarPlano?.length) {
     const plano = cap.forcarPlano.filter((p) => nomes.includes(p.nome)).slice(0, maxEsp).map((p) => ({
@@ -1874,22 +1906,25 @@ async function planejar(pergunta: string, tel: any, cap?: Capacidade, escopo?: E
     : ehPedidoOrigemDriveDosAnuncios(pergunta)
       ? "\nORIGEM DRIVE DOS ANUNCIOS NO AR: inclua desempenho_campanhas com origem_drive_dos_anuncios. NAO trate como inventario de pecas novas (criativos_drive so se o gestor pedir peca ainda nao publicada)."
       : "";
-  const sys = `Voce e o ROTEADOR de um gestor de trafego Meta Ads. Leia a pergunta de forma FRIA e LITERAL: nao amplie o brief, nao troque a janela, nao acrescente historico que o gestor nao pediu.
-Encaminhe ao MENOR conjunto de especialistas que cobre as perguntas atomicas do contrato.
-Especialistas disponiveis (use exatamente estes nomes):
-- desempenho_campanhas: numeros de midia (gasto, CTR, custos, ranking, series, metas)
-- criativos: conteudo real das pecas (legendas, titulos, CTA, hooks, formatos) E ranking por alcance/gasto/conversas
-- compliance: auditoria das legendas contra as regras de credito (FIN/CRI/LGL)
-- estrutura_conta: CBO/ABO, orcamento por conjunto, lance, targeting, optimization_goal
-- whatsapp_waba: inventario WhatsApp (get_waba_status + get_whatsapp_da_pagina): WABA Cloud/ON_PREMISE vs CTWA vs Graph (nao e o seletor); de_pe, meio JUR/LF/VISTTA; templates so se pedido
-- alertas_recomendacoes: alertas ativos, recomendacoes pendentes e DICAS DA META (Opportunity Score, boost, musica)
-- criativos_drive: pasta de criativos NOVOS no Google Drive (inventario, formatos, eixos, comparacao com vencedores)\n- analise_visual_drive: analise VISUAL arquivo a arquivo das pecas do Drive (produto, texto visivel, riscos, veredito aproveitavel) - so quando pedirem CLASSIFICAR/ANALISAR CONTEUDO das pecas
-- conhecimento: fundamento tecnico puro (so quando a pergunta exige conceito alem do operacional)
-REGRAS DE ATRIBUICAO: taxa de clique/insight de CAMPANHA -> desempenho_campanhas; taxa de clique de TEMPLATE WhatsApp -> whatsapp_waba; texto/ideia de anuncio + ranking alcance/conversas de peca -> criativos; "pode anunciar isso?"/violacao -> compliance; Drive/pasta de materiais/criativos novos ainda nao publicados -> criativos_drive; CLASSIFICAR/ANALISAR o CONTEUDO das pecas do Drive (aproveitavel ou nao, o que a peca diz, produto da peca) -> analise_visual_drive; dica/recomendacao/boost/musica/Opportunity Score da Meta -> SOMENTE alertas_recomendacoes (NAO acrescente criativos so porque a dica menciona musica). NAO inclua especialista cujo dominio a pergunta nao toca.${hintCap}${hintEscopo}${hintDrive}
-SPLIT DE CUSTO: voce so escolhe especialistas. O backend manda coleta (tools) em modelo barato e a sintese final em modelo mais forte quando o pedido e profundo.
+  // O catalogo abaixo e GERADO da tabela public.agents. Nao escreva descricao de agente aqui:
+  // o prompt e o registro divergiriam, e a delegacao passaria a seguir um catalogo morto.
+  const sys = `Voce e o ROTEADOR (AG-01) do Gestor de Trafego IA. Voce NAO responde ao gestor: voce le a mensagem, interpreta o que esta sendo pedido e DELEGA ao especialista certo.
+Leia a pergunta de forma FRIA e LITERAL: nao amplie o brief, nao troque a janela, nao acrescente historico que o gestor nao pediu.
+Encaminhe ao MENOR conjunto de agentes que cobre as perguntas atomicas do contrato.
+
+CATALOGO DE AGENTES
+${montarPromptDelegacao(cat)}
+
+COMO ESCOLHER
+1. Identifique o que o gestor quer SABER ou quer QUE ACONTECA — nao o vocabulario que ele usou.
+2. Case com o DELEGUE QUANDO de cada agente. Se dois casarem, use o NAO DELEGUE para desempatar: a fronteira negativa vale mais que a semelhanca de termo.
+3. Um agente cujo setor a pergunta nao toca NAO entra. Especialista a mais custa janela e polui a sintese.
+4. Escreva um foco curto e especifico para cada um, citando a janela e o universo do contrato.${hintCap}${hintEscopo}${hintDrive}
+
+SPLIT DE CUSTO: voce so escolhe agentes. O backend manda a coleta em modelo barato e a sintese final em modelo mais forte quando o pedido e profundo.
 Responda APENAS com JSON valido, sem markdown, no formato:
-{"subagentes":[{"nome":"...","foco":"instrucao curta e especifica do que ELE deve levantar, citando janela e universo"}]}
-Para overview amplo, 3 especialistas bastam — nao dispare a equipe inteira.`;
+{"agentes":[{"agente":"AG-02","foco":"o que ELE deve levantar, com janela e universo"}]}
+Use o codigo (AG-02) ou o nome (Analista). Para overview amplo, 3 agentes bastam — nao dispare a equipe inteira.`;
   const r = await chamarLLM(
     [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 12000) }],
     { maxTokens: PLANNER_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "planner", timeoutMs: cap?.openRouterTimeoutMs ?? OPENROUTER_TIMEOUT_MS },
@@ -1897,15 +1932,37 @@ Para overview amplo, 3 especialistas bastam — nao dispare a equipe inteira.`;
   if (r.erro) {
     return { plano: planoFallbackSeguro(nomes, cap, pergunta), degradado: true };
   }
-  const u = usoDe(r.parsed); tel.planner = { tokens_in: u.tin, tokens_out: u.tout, tier: cap?.tier };
+  const u = usoDe(r.parsed); tel.planner = { tokens_in: u.tin, tokens_out: u.tout, tier: cap?.tier, catalogo_degradado: cat.degradado };
   const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
-  const lista = Array.isArray(bruto?.subagentes) ? bruto.subagentes : null;
+  // "subagentes" continua aceito: um modelo pode devolver o formato antigo, e derrubar o plano
+  // por causa da chave do JSON trocaria uma resposta boa por um fallback generico.
+  const lista = Array.isArray(bruto?.agentes)
+    ? bruto.agentes
+    : Array.isArray(bruto?.subagentes)
+      ? bruto.subagentes
+      : null;
   if (!lista?.length) {
     return { plano: planoFallbackSeguro(nomes, cap, pergunta), degradado: true };
   }
-  const plano = lista
-    .map((x: any) => ({ nome: String(x?.nome ?? "").trim(), foco: String(x?.foco ?? "").trim().slice(0, 800) }))
-    .filter((x: any) => nomes.includes(x.nome));
+  // Um agente vira uma ou mais unidades de execucao (Analista = desempenho + estrutura), e o
+  // foco escrito para o agente desce para cada uma delas.
+  const plano: { nome: string; foco: string }[] = [];
+  const agentesEscolhidos: string[] = [];
+  for (const x of lista as any[]) {
+    const ref = String(x?.agente ?? x?.nome ?? "").trim();
+    const foco = String(x?.foco ?? "").trim().slice(0, 800);
+    if (!ref) continue;
+    const expandido = subagentesDosAgentes(cat, [ref], PRIORIDADE_DENTRO_DO_AGENTE);
+    if (expandido.length) {
+      agentesEscolhidos.push(ref);
+      for (const chave of expandido) {
+        if (nomes.includes(chave)) plano.push({ nome: chave, foco });
+      }
+    } else if (nomes.includes(ref)) {
+      plano.push({ nome: ref, foco });
+    }
+  }
+  if (agentesEscolhidos.length) tel.planner.agentes = agentesEscolhidos;
   if (!plano.length) {
     return { plano: planoFallbackSeguro(nomes, cap, pergunta), degradado: true };
   }
@@ -1932,8 +1989,16 @@ async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx:
   const perfil = isLegal
     ? "empresa de credito consignado; aplique categoria especial somente quando o objeto lido confirmar esse produto"
     : "COHAPM/cooperativa habitacional; nao aplique doutrina, benchmark, identidade ou produto de credito da Legal e Viver";
-  const sys = `Voce e o subagente '${nome}' do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).
-MISSAO: ${cfg.missao}
+  // Identidade do agente no proprio prompt: o subagente executa em nome de um agente nomeado,
+  // e a fronteira negativa do registro reforca o escopo estrito na hora da execucao — nao so
+  // na hora da delegacao.
+  const ag = agenteDoSubagente(await catalogoAgentes(), nome);
+  const identidade = ag
+    ? `Voce e o ${ag.codigo} ${ag.nome}, especialista em ${ag.setor}, atuando pela unidade '${nome}'`
+    : `Voce e o subagente '${nome}'`;
+  const fronteira = ag?.nao_delegar_quando ? `\nFORA DO SEU SETOR: ${ag.nao_delegar_quando}` : "";
+  const sys = `${identidade} do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).
+MISSAO: ${cfg.missao}${fronteira}
 FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
 FIDELIDADE AO PEDIDO: interprete a pergunta de forma fria e literal. Nao amplie janela, nao misture campanhas fora do universo do CONTRATO DO PEDIDO, nao responda perguntas que nao foram feitas. Se o contrato traz date_from, use-o em get_funnel/get_ads_ranking/get_campaign_detail.
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio, registre em LACUNAS e siga so com a sua parte.
