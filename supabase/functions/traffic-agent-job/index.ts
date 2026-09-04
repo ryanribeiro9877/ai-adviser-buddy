@@ -2243,7 +2243,7 @@ async function chamarSinteseParte(
   messages: any[],
   maxTok: number,
   callTimeout: number,
-): Promise<{ erro?: string; pedaco?: string; finish?: string; tin: number; tout: number }> {
+): Promise<{ erro?: string; pedaco?: string; finish?: string; tin: number; tout: number; reas: number }> {
   const r = await chamarLLM(messages, {
     maxTokens: maxTok,
     reasoning: REASONING_OFF,
@@ -2253,7 +2253,7 @@ async function chamarSinteseParte(
     tipo: "sintese",
     faixaForcada: JOB_FAIXA_SINTESE,
   });
-  if (r.erro) return { erro: r.erro, tin: 0, tout: 0 };
+  if (r.erro) return { erro: r.erro, tin: 0, tout: 0, reas: 0 };
   const u = usoDe(r.parsed);
   const msg = r.parsed?.choices?.[0]?.message;
   return {
@@ -2261,6 +2261,7 @@ async function chamarSinteseParte(
     finish: String(r.parsed?.choices?.[0]?.finish_reason ?? ""),
     tin: u.tin,
     tout: u.tout,
+    reas: u.reas,
   };
 }
 
@@ -2362,7 +2363,41 @@ async function sintetizar(
   ];
   const perCallTimeout = opts?.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
   const hardDeadline = Date.now() + Math.min(SINT_FASE_HARD_MS, Math.max(prazo(), 8_000));
-  let texto = "", partes = 0, tin = 0, tout = 0, finish = "";
+  let texto = "", partes = 0, tin = 0, tout = 0, reas = 0, finish = "";
+  /**
+   * TELEMETRIA QUE FECHOU A INVESTIGACAO DA DISPERSAO (04/09/2026).
+   *
+   * Sem estes campos nao dava para separar "o teto mordeu" de "o modelo parou sozinho".
+   * `max_tokens_1a_parte` e o teto que o relogio concedeu (com piso de MIN_TOKENS_COM_RACIOCINIO),
+   * `restante_ms_1a_parte` e o orcamento no inicio, `reasoning_tokens` diz quanto do gasto virou
+   * raciocinio em vez de texto.
+   *
+   * O QUE ELES MOSTRARAM — 6 execucoes da MESMA pergunta, tudo controlado:
+   *
+   *   chars  sint_tin  tout   raciocinio  teto  restante  finish  coleta_visivel
+   *   13254   21.205  11.010     ~7.010   8000    160s    length      1.143
+   *    1207   21.205   4.946     ~4.626   8000    160s    stop        1.231
+   *     924   21.205   4.768     ~4.518   8000    160s    stop        1.009
+   *     622   21.205   3.309      3.089   8000    160s    stop        1.391
+   *     249   21.205   1.813      1.751   8000    160s    stop        1.230
+   *     119   21.205   2.358      2.319   8000    160s    stop          400
+   *
+   * `tokens_in` IDENTICO nas seis. Teto identico (8.000 = ~32k chars, folgadissimo). Orcamento
+   * identico (160s, a fase inteira). Rota identica nas seis: premium / xhigh / x-ai/grok-4.6.
+   * `finish: stop` em cinco — e o proprio codigo ja tinha medido que o teto, quando morde, devolve
+   * `length` e nunca `stop`. Ou seja: o modelo PAROU SOZINHO com 8.000 tokens disponiveis.
+   *
+   * Conclusao: NAO HA CAUSA IDENTIFICAVEL no pipeline. As quatro hipoteses morreram na mesma
+   * tabela — nao e a pergunta (identica), nao e o volume de entrada (identico ao token), nao e o
+   * relogio (teto e orcamento cheios), e nao e o raciocinio comendo o canal (ele corre por fora do
+   * teto, e a corrida com MAIS raciocinio foi justamente a mais longa). A dispersao e do modelo.
+   *
+   * Fica registrado tambem o que NAO explica a dispersao mas explica o piso baixo: a entrada da
+   * sintese e ~94% instrucao permanente (63.750 chars de memoria institucional + estilo, ~19k
+   * tokens) contra ~1.200 tokens de coleta fresca. E os especialistas gastam 4-5x mais em
+   * raciocinio do que em relatorio visivel (ex.: 4.354 de raciocinio para 1.143 de texto).
+   */
+  let maxTokPrimeira = 0, restantePrimeira = 0;
   while (partes < SINT_MAX_PARTES) {
     const restanteMs = Math.min(prazo(), hardDeadline - Date.now());
     if (restanteMs <= 0) {
@@ -2370,6 +2405,7 @@ async function sintetizar(
       break;
     }
     const maxTok = Math.max(1500, Math.min(SINT_MAX_TOKENS, Math.floor((restanteMs / 1000) * TOKENS_POR_SEGUNDO)));
+    if (partes === 0) { maxTokPrimeira = maxTok; restantePrimeira = restanteMs; }
     const callTimeout = Math.min(perCallTimeout, Math.max(5_000, restanteMs));
     const r = await chamarSinteseParte(messages, maxTok, callTimeout);
     if (r.erro) {
@@ -2377,7 +2413,7 @@ async function sintetizar(
       finish = `erro_llm:${r.erro}`;
       break;
     }
-    tin += r.tin; tout += r.tout;
+    tin += r.tin; tout += r.tout; reas += r.reas;
     const pedaco = String(r.pedaco ?? "");
     finish = String(r.finish ?? "");
     texto += pedaco;
@@ -2387,7 +2423,11 @@ async function sintetizar(
     messages.push({ role: "assistant", content: pedaco });
     messages.push({ role: "user", content: "Continue EXATAMENTE do ponto onde parou, na proxima palavra. Nao repita nada, nao reescreva titulos, nao cumprimente." });
   }
-  tel.sintese = { partes, tokens_in: tin, tokens_out: tout, finish_reason: finish };
+  tel.sintese = {
+    partes, tokens_in: tin, tokens_out: tout, reasoning_tokens: reas, finish_reason: finish,
+    max_tokens_1a_parte: maxTokPrimeira, restante_ms_1a_parte: restantePrimeira,
+    chars_visiveis: texto.length,
+  };
   if (finish === "length" || finish.includes("sintese_timeout_parcial")) {
     texto += "\n\n*(resposta encerrada no limite de tamanho do processamento; peca a parte que faltou que eu completo)*";
   }
