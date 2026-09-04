@@ -21,6 +21,25 @@
 //     proposito, nunca por esquecimento.
 // (3) NUCLEO EXPLICITO: fatos cuja ausencia permite uma classe de erro INDEPENDENTEMENTE da
 //     pergunta nunca saem. Escolhidos pelo que protegem, nao pelo tamanho.
+//
+// O QUE A MEDICAO MOSTROU — E O QUE ELA NAO MOSTROU (04/09/2026)
+// A hipotese que motivou esta mudanca era que o atacado de instrucao estivesse ESPREMENDO a
+// resposta. Ela foi testada com a MESMA pergunta dos dois lados e NAO se confirmou:
+//
+//   antes (n=6, 21.205 tok de entrada):  119   249   622   924  1.207  13.254   mediana    773
+//   depois (n=8,  ~8.500 tok de entrada): 100   744   940  1.026 1.282  2.148  2.502  15.557
+//                                                                        mediana  1.154
+//
+//   Mann-Whitney U = 16 (critico 8 para n=6 vs n=8, alfa 0,05) -> NAO significativo.
+//
+// Ou seja: as faixas se sobrepoem quase inteiras, o extremo curto continua acontecendo (100 chars
+// depois, contra 119 antes) e o extremo longo tambem. A dispersao e do modelo, como ja havia sido
+// estabelecido na investigacao da bimodalidade, e cortar 60% da instrucao NAO a reduziu.
+//
+// NAO REABRA ESTA LINHA esperando saida melhor: o custo era de contexto, nao de qualidade.
+// O que esta mudanca de fato entrega e JANELA — ~12.700 tokens que antes eram instrucao repetida
+// e agora estao livres para a coleta, o que importa porque a coleta e que disputa a parede de
+// tempo do job. Se um dia alguem quiser gastar essa folga aumentando a coleta, ela existe.
 
 import type { FatoMemoria } from "./agent_memory.ts";
 import { formatarMemoria } from "./agent_memory.ts";
