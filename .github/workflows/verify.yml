@@ -45,7 +45,7 @@ jobs:
         run: bun run typecheck
 
       - name: Lint
-        # --max-warnings deliberadamente ausente: os 7 warnings restantes são
+        # --max-warnings deliberadamente ausente: os 10 warnings restantes são
         # react-refresh (DX de dev) e travar neles hoje só ensinaria a gente a
         # ignorar o CI. Erro continua derrubando.
         run: bun run lint
@@ -81,8 +81,16 @@ jobs:
         with:
           deno-version: v2.9.3
 
-      - name: deno check nas 24 edges
-        # Passa em 24/24 desde a auditoria de 13/08. Falha aqui é regressão real.
+      - name: deno check nas 31 edges
+        # Passa em 31/31. O "24/24 desde a auditoria de 13/08" que ficou escrito aqui valeu
+        # por dois dias: entre 15/08 e 02/09 quatro mudanças independentes deixaram 5 edges
+        # sem compilar (nível "campanha" só no produtor; fallback de conta com 4 de 13 chaves;
+        # cast que matava o estreitamento de token/ref; `new Map` sem anotação de tupla) e o
+        # job ficou vermelho semanas sem ninguém ler o log. Falha aqui é regressão real — e
+        # este número também é uma afirmação, que envelhece se ninguém a conferir.
+        #
+        # O passo checa `supabase/functions/*/index.ts` do checkout, então uma edge de rascunho
+        # não commitada não é vista aqui — conferir contra `git ls-files`, não contra o disco.
         run: |
           set -e
           falhas=0
@@ -99,7 +107,8 @@ jobs:
           [ "$falhas" -eq 0 ]
 
       - name: Provas do _shared
-        # As 4 provas usam Deno.exit(1)/throw, então exit code já é o veredito.
+        # As 34 provas usam Deno.exit(1)/throw, então exit code já é o veredito. Eram 4 quando
+        # esta linha foi escrita. Passo BLOQUEANTE: `set -e` derruba o job na primeira que cair.
         run: |
           set -e
           for f in supabase/functions/_shared/_prova_*.ts; do
@@ -110,9 +119,11 @@ jobs:
 
       - name: deno lint (informativo)
         # O eslint ignora supabase/functions (código Deno tem toolchain própria);
-        # este passo é o dono legítimo desses achados. NÃO bloqueia: são 498
-        # problemas, ~490 de no-explicit-any, e um job que nasce vermelho ensina
-        # a ignorar o CI. Vira bloqueante quando o `any` for reduzido.
+        # este passo é o dono legítimo desses achados. NÃO bloqueia: são 898
+        # problemas (medidos em 03/09/2026), a esmagadora maioria de no-explicit-any, e um job
+        # que nasce vermelho ensina a ignorar o CI. Vira bloqueante quando o `any` for
+        # reduzido. Estava escrito "498" aqui desde 13/08 — como o passo é informativo,
+        # ninguém confere o log, e o número dobrou sem ninguém corrigir.
         continue-on-error: true
         run: deno lint supabase/functions
 
