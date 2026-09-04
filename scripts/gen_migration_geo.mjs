@@ -1,8 +1,6 @@
 import fs from "fs";
 const arr = JSON.parse(fs.readFileSync("scripts/bairros_canon.json", "utf8"));
-const sqlArr = arr
-  .map((n) => `    '${String(n).replace(/'/g, "''")}'`)
-  .join(",\n");
+const sqlArr = arr.map((n) => `    '${String(n).replace(/'/g, "''")}'`).join(",\n");
 const sql = `-- name: geo_preset_juridico_salvador
 -- data: 2026-08-21
 -- efeito:

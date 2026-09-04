@@ -43,6 +43,4 @@ if (unexpected.length) {
   process.exit(1);
 }
 
-console.log(
-  `[check-deadcode] ok: ${lines.length} entry/gen allowlisted, 0 unexpected.`,
-);
+console.log(`[check-deadcode] ok: ${lines.length} entry/gen allowlisted, 0 unexpected.`);

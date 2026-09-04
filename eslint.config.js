@@ -27,6 +27,13 @@ export default tseslint.config(
       // propriedade e redeployar produção por let→const não se paga.
       "supabase/functions",
       "docs/edges-descontinuadas",
+      // Mesmo critério, outro diretório: os scripts de conferência em
+      // tmp_edge_cmp/ também são Deno (`Deno.readTextFile`, `Deno.exit`), mas
+      // ficam FORA de supabase/functions e por isso escapavam da linha acima.
+      // Bastou um deles ser versionado (prova_faixa_esforco.ts) para `eslint .`
+      // nascer vermelho de novo — 16 erros, entre eles no-explicit-any — que é
+      // exatamente o efeito que a exclusão de cima existe para evitar.
+      "tmp_edge_cmp",
     ],
   },
   {

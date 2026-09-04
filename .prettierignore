@@ -12,3 +12,4 @@ routeTree.gen.ts
 # divergencias que nao sao defeito nenhum.
 supabase/functions
 docs/edges-descontinuadas
+tmp_edge_cmp
