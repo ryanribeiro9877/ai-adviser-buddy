@@ -5,7 +5,11 @@ import { acharModelo, atendeCapacidade, CATALOGO_ECONOMIA, CATALOGO_PREMIUM, CAT
 import {
   bodyOpenRouter,
   diagnosticoRota,
+  ehTarefaDeTriagem,
+  ehTarefaInterativa,
+  esforcoDoModo,
   MODELO_PADRAO,
+  type ModoRaciocinio,
   resolverChamadaLlm,
   type TipoTarefaLlm,
 } from "./llm_roteador.ts";
@@ -66,48 +70,100 @@ assert(
 assert(visao.fallbacks[0] === "google/gemini-2.5-flash", `preferido antigo deve abrir a rede: ${visao.fallbacks[0]}`);
 
 // ---------------------------------------------------------------------------
-// 2. Esforco de raciocinio: profundo = xhigh, padrao = high.
+// 2. Esforco de raciocinio: quem dita e o MODO, e a NATUREZA da tarefa vence o tier.
+//
+// Esta secao pergunta o contrato as funcoes que decidem (ehTarefaDeTriagem /
+// ehTarefaInterativa / esforcoDoModo) em vez de fixar "high"/"xhigh" por tipo. A versao
+// anterior afirmava que TODO tipo saia em `padrao`/`high`: virou mentira no dia em que
+// `triagem` (planner/coordenacao) e `interativo` (chat_loop) nasceram, e o job ficou vermelho
+// semanas afirmando isso. Com as faixas ainda sendo medidas, literal aqui e manutencao a cada
+// reajuste — o que se afirma e a REGRA, nao o valor de hoje.
 // ---------------------------------------------------------------------------
+const modoNatural = (tipo: TipoTarefaLlm): ModoRaciocinio | null =>
+  ehTarefaDeTriagem(tipo) ? "triagem" : ehTarefaInterativa(tipo) ? "interativo" : null;
+
 for (const tipo of TIPOS) {
-  const padrao = resolverChamadaLlm({ tipo });
-  assert(padrao.modo === "padrao", `${tipo}: modo default deve ser padrao`);
-  assert(padrao.esforco === "high", `${tipo}: esforco padrao=${padrao.esforco}`);
+  const natural = modoNatural(tipo);
+  const conferir = (r: { modo: ModoRaciocinio; esforco: string | null }, esperado: ModoRaciocinio, ctx: string) => {
+    assert(r.modo === esperado, `${tipo} ${ctx}: modo=${r.modo}, esperado ${esperado}`);
+    assert(
+      r.esforco === esforcoDoModo(esperado),
+      `${tipo} ${ctx}: esforco=${r.esforco}, esperado ${esforcoDoModo(esperado)} (esforco vem do modo)`,
+    );
+  };
 
-  const lite = resolverChamadaLlm({ tipo, tier: "lite" });
-  const std = resolverChamadaLlm({ tipo, tier: "standard" });
-  assert(lite.esforco === "high" && std.esforco === "high", `${tipo}: lite/standard devem ser high`);
+  // Sem tier: natureza propria manda; quem nao tem sai no `padrao` da casa.
+  const esperadoDefault = natural ?? "padrao";
+  conferir(resolverChamadaLlm({ tipo }), esperadoDefault, "default");
 
-  const deep = resolverChamadaLlm({ tipo, tier: "deep" });
-  assert(deep.modo === "profundo", `${tipo}: tier deep deve virar modo profundo`);
-  assert(deep.esforco === "xhigh", `${tipo}: esforco deep=${deep.esforco}`);
+  // lite/standard nao promovem ninguem.
+  for (const tier of ["lite", "standard"] as const) {
+    conferir(resolverChamadaLlm({ tipo, tier }), esperadoDefault, `tier=${tier}`);
+  }
 
-  const explicito = resolverChamadaLlm({ tipo, profundo: true });
-  assert(explicito.esforco === "xhigh", `${tipo}: profundo explicito=${explicito.esforco}`);
-  const negado = resolverChamadaLlm({ tipo, tier: "deep", profundo: false });
-  assert(negado.esforco === "high", `${tipo}: profundo=false vence o tier`);
+  // deep e `profundo: true` promovem — menos quem tem natureza propria: triagem de um job deep
+  // continua triagem (pagar xhigh para escolher o nome de um especialista foi o que matou o
+  // Roteador do chat), e chat_loop continua interativo porque o teto de 118s do turno nao muda
+  // com o tier de proposito.
+  const esperadoPromovido = natural ?? "profundo";
+  conferir(resolverChamadaLlm({ tipo, tier: "deep" }), esperadoPromovido, "tier=deep");
+  conferir(resolverChamadaLlm({ tipo, profundo: true }), esperadoPromovido, "profundo=true");
+
+  // `profundo: false` vence o tier deep — e a natureza vence os dois.
+  conferir(resolverChamadaLlm({ tipo, tier: "deep", profundo: false }), esperadoDefault, "deep+profundo=false");
 }
+
+// Sem isto, o bloco acima viraria tautologia: se as duas listas de natureza esvaziassem, todo
+// `esperado` cairia em padrao/profundo e a prova deixaria de exercer "natureza vence tier"
+// continuando verde. O contrato so esta provado se os tres casos existirem de verdade.
+assert(TIPOS.some(ehTarefaDeTriagem), "nenhum tipo de triagem em TIPOS: 'natureza vence tier' nao foi exercido");
+assert(TIPOS.some(ehTarefaInterativa), "nenhum tipo interativo em TIPOS: 'natureza vence tier' nao foi exercido");
+assert(
+  TIPOS.some((t) => modoNatural(t) === null),
+  "nenhum tipo neutro em TIPOS: a promocao por tier deep nao foi exercida",
+);
 
 // O esforco entra no body como effort (unico controle que o padrao da casa aceita) e
 // SOBREPOE o reasoning que a edge mandou — as constantes antigas desligavam o raciocinio.
 const chat = resolverChamadaLlm({ tipo: "chat_loop", pergunta: "qual o gasto de ontem?" });
 const body = bodyOpenRouter(chat, { max_tokens: 10, messages: [], reasoning: { enabled: false } });
 assert(body.model === MODELO_PADRAO, "body.model");
-assert(JSON.stringify(body.reasoning) === '{"effort":"high"}', `body.reasoning=${JSON.stringify(body.reasoning)}`);
+// O que importa aqui e a FIACAO — o esforco da rota chega ao body e sobrepoe o
+// `reasoning: { enabled: false }` que a edge mandou. O valor da faixa e assunto da secao 2;
+// fixar "high" aqui era o que fazia esta linha cair junto quando chat_loop virou interativo.
+assert(chat.esforco != null, "roteador nao-legado tem de ditar esforco");
+assert(
+  JSON.stringify(body.reasoning) === JSON.stringify({ effort: chat.esforco }),
+  `body.reasoning=${JSON.stringify(body.reasoning)} deveria carregar effort=${chat.esforco} da rota`,
+);
 assert(Array.isArray(body.models) && (body.models as string[]).includes(chat.fallbacks[0]), "fallbacks no body");
 assert((body.provider as { sort: string }).sort === "price", "provider no body");
 
+// Sintese e tipo neutro, entao tier deep a promove. O modo esperado sai de modoNatural em vez
+// de "profundo" escrito a mao: ha medicao de faixa em curso e a sintese do tier profundo e
+// justamente uma das candidatas a mudar de banda.
+const modoSinteseDeep = modoNatural("sintese") ?? "profundo";
 const deepSint = resolverChamadaLlm({ tipo: "sintese", tier: "deep" });
 const bodyDeep = bodyOpenRouter(deepSint, { max_tokens: 8, reasoning: { max_tokens: 600 } });
-assert(JSON.stringify(bodyDeep.reasoning) === '{"effort":"xhigh"}', `deep body=${JSON.stringify(bodyDeep.reasoning)}`);
+assert(
+  JSON.stringify(bodyDeep.reasoning) === JSON.stringify({ effort: esforcoDoModo(modoSinteseDeep) }),
+  `deep body=${JSON.stringify(bodyDeep.reasoning)}, esperado effort=${esforcoDoModo(modoSinteseDeep)}`,
+);
 assert(bodyDeep.provider == null, "premium nao forca sort=price");
 
 // Telemetria: sem esforco/modo no diagnostico nao da para auditar o modo profundo.
 const diag = diagnosticoRota(deepSint);
-assert(diag.esforco_raciocinio === "xhigh", `diagnostico esforco=${diag.esforco_raciocinio}`);
-assert(diag.modo_raciocinio === "profundo", `diagnostico modo=${diag.modo_raciocinio}`);
+assert(
+  diag.esforco_raciocinio === esforcoDoModo(modoSinteseDeep),
+  `diagnostico esforco=${diag.esforco_raciocinio}, esperado ${esforcoDoModo(modoSinteseDeep)}`,
+);
+assert(diag.modo_raciocinio === modoSinteseDeep, `diagnostico modo=${diag.modo_raciocinio}`);
 assert(diag.padrao_da_casa === true, "diagnostico padrao_da_casa");
 assert(diag.modelo_pedido === MODELO_PADRAO, "diagnostico modelo_pedido");
-assert(String(diag.motivo_rota).includes("raciocinio xhigh"), "motivo declara o esforco");
+assert(
+  String(diag.motivo_rota).includes(`raciocinio ${esforcoDoModo(modoSinteseDeep)}`),
+  `motivo declara o esforco: ${diag.motivo_rota}`,
+);
 
 // ---------------------------------------------------------------------------
 // 3. Modo legado continua respeitado (escape do gestor).
