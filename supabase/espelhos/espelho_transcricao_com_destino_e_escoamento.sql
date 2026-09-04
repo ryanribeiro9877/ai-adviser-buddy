@@ -1,0 +1,147 @@
+-- espelho para git — NÃO re-executar (os objetos já existem em produção)
+--
+-- TRANSCRIÇÃO DE ÁUDIO: DAR DESTINO ANTES DE GASTAR, DEPOIS ESCOAR O ACERVO
+-- Espelho de decisão das migrações 20260903250000–20260903253000 (SQL em ../migrations/)
+-- e das duas versões da edge `drive-audio-transcribe` implantadas em 03/09/2026.
+--
+-- ============================================================================
+-- O DIAGNÓSTICO QUE MUDOU O PEDIDO
+-- ============================================================================
+-- A pergunta que chegou era de custo: vale gastar para transcrever os 172 vídeos que só
+-- tinham análise por miniatura? A apuração respondeu outra coisa. O impedimento nunca foi
+-- preço — o acervo inteiro custa menos que um cafezinho. O impedimento é que a transcrição
+-- **não tinha destino**: `get_acervo_para_anuncio`, que é por onde o agente escolhe peça
+-- para anúncio, carregava `transcricao_audio` na CTE e **não a emitia** no
+-- `jsonb_build_object` final. Havia 19 transcrições prontas desde sempre e nenhuma chegava
+-- a quem decide. Gastar antes de abrir a saída seria comprar dado para o mesmo silêncio, e
+-- por isso a ordem do trabalho foi saída primeiro, gasto depois.
+--
+-- ============================================================================
+-- (1) ESTADO DO ÁUDIO VIRA CONCEITO ÚNICO — `estado_do_audio_da_peca`
+-- ============================================================================
+-- O contador de `pedido_de_anuncio_completo_sem_estado_destino` media transcrição por
+-- `coalesce(btrim(transcricao_audio),'') <> ''`. Parece certo e está errado: vídeo **ouvido
+-- e sem locução** também tem transcrição vazia, então os 5 Reels do Sistema Ocular rotulados
+-- `sem_fala_util` eram contados como fala não avaliada. O sistema pedia ao gestor que
+-- resolvesse uma pendência que não existia.
+--
+-- O remendo óbvio seria acrescentar um `or transcricao_fonte like 'sem_fala_util%'` no
+-- contador. Não foi feito assim porque o mesmo padrão aparecia em três lugares e a diferença
+-- entre os rótulos é sutil o bastante para o próximo leitor errar de novo. Virou função:
+--
+--   estado_do_audio_da_peca(transcricao, fonte, mime) →
+--     'nao_se_aplica'  imagem/vetor: não há faixa de áudio, não é lacuna
+--     'transcrito'     há texto
+--     'sem_fala'       foi ouvido e não tem locução  (sem_fala_util | sem_fala_detectada)
+--     'falha_tecnica'  NÃO foi ouvido                (sem_audio_ou_corrompido | acima_do_limite_de_memoria)
+--     'nao_avaliado'   ninguém tentou ainda
+--
+--   audio_conferido(...) = estado in ('transcrito','sem_fala')
+--
+-- A distinção que importa e que o booleano antigo apagava: **'sem_fala' é resposta,
+-- 'falha_tecnica' é lacuna.** Uma fecha a pendência, a outra a mantém aberta. Consumidores
+-- corrigidos: o contador, `checar_par_texto_e_peca` (que agora só declara lacuna quando há
+-- lacuna de verdade, em vez de acusar ausência de fala como buraco) e a fila de escoamento.
+--
+-- ============================================================================
+-- (2) A SAÍDA — `get_acervo_para_anuncio` passa a emitir a transcrição
+-- ============================================================================
+-- Campo `transcricao_do_audio`, nomeado pela convenção dos vizinhos (`analise_visual`,
+-- `texto_visivel`), mais `estado_do_audio` para que ausência de texto seja interpretável.
+--
+-- **Truncagem decidida por medição, não por precaução.** As transcrições medidas têm mediana
+-- de ~180 e máximo de ~600 caracteres. Emitir inteiro numa leitura de acervo com ~170 itens
+-- somaria dezenas de milhares de caracteres à resposta. Ficou: **110 caracteres na leitura
+-- ampla** (mesmo critério do `left(motivo,110)` já usado em `analise_visual`) e **texto
+-- inteiro quando a chamada filtra por `p_drive_file_ids`** — quem pede peça específica está
+-- avaliando aquela peça e precisa do conteúdo, quem varre o acervo está triando.
+--
+-- Ponto fino que quase custou a entrega: `traffic-chat` aplica **lista branca por item** no
+-- JSON que repassa ao modelo, e a edge não pode ser tocada nesta frente (trabalho de outro
+-- agente). Campo novo por item chegaria e seria descartado no caminho. Por isso a função
+-- também emite `cobertura_de_audio` no **topo** do objeto, fora do item — contagem por
+-- estado, que atravessa a lista branca e garante que o agente ao menos saiba que o áudio
+-- existe e em que estado está, mesmo antes de a edge liberar o campo por item.
+--
+-- ============================================================================
+-- (3) A FILA — deduplicada por arquivo
+-- ============================================================================
+-- `videos_com_audio_pendente` / `contar_videos_com_audio_pendente`: `drive_midia_analises`
+-- tem uma linha por (arquivo × versão de critério), então a fila ingênua pagaria transcrição
+-- duas vezes pelo mesmo arquivo. `distinct on (drive_file_id)` preferindo a análise mais
+-- recente por critério, e só o que está em `nao_avaliado`.
+--
+-- ============================================================================
+-- (4) O ESCOAMENTO, E O DEFEITO QUE SÓ APARECEU ESCOANDO
+-- ============================================================================
+-- 97 vídeos passaram e a fila **travou em 33**: toda corrida seguinte devolvia HTTP 546
+-- (limite de recursos do worker) sem processar nada. A edge baixa o vídeo INTEIRO para
+-- memória e o mp4box faz cópias internas ao segmentar — e morria **depois** de baixar, então
+-- um único arquivo grande derrubava a corrida e bloqueava todos os pequenos atrás dele.
+-- Entre os bloqueados estavam justamente os vídeos do Jurídico, que são o material de
+-- interesse de compliance.
+--
+-- O culpado, medido: um `.mov` de banco de imagens de **705,4 MB** na pasta "Brutos". Não é
+-- peça de anúncio, é material bruto. A edge passou a checar `meta.size` **antes** de baixar,
+-- com teto de 60 MB — empírico, logo acima dos 55,2 MB do maior arquivo que comprovadamente
+-- passou entre os 97. Quem excede recebe rótulo próprio `acima_do_limite_de_memoria:` e sai
+-- da fila. **Não** é tratado como `sem_fala`: vídeo sem locução foi ouvido; vídeo grande
+-- demais não foi ouvido por limitação nossa, e a lacuna continua aberta e declarada.
+--
+-- Cobertura final dos 172, por arquivo único:
+--   145 transcrito · 23 sem_fala · 4 falha_tecnica (todos por tamanho) · 0 pendente
+--
+-- Custo: **~US$ 0,15** contra estimativa de US$ 0,41–0,59. A estimativa velha usava tamanho
+-- de arquivo como proxy de duração e errou para cima — os vídeos são curtos (~20 s de
+-- mediana). O que foi **medido**: 528 s cronometrados pelo mp4box em 25 peças e a calibragem
+-- de 22,1 caracteres de transcrição por segundo daí derivada. O que foi **inferido**: os
+-- 49,4 min do acervo inteiro, projetados por essa calibragem, porque `pg_net` já havia
+-- descartado as respostas das corridas antigas e a duração não é persistida.
+--
+-- ============================================================================
+-- (5) O ACHADO DE COMPLIANCE — e o portão que quase mentiu
+-- ============================================================================
+-- A primeira comparação áudio × tela deu zero risco em tudo, e o número era **falso**: a
+-- consulta lia `->>'aprovado'`, chave que `checar_promessas_proibidas` não devolve (ela
+-- devolve `bloqueios`/`atencoes`). Todo teste dava NULL e NULL virava "sem risco". Só um
+-- controle positivo revelou — e o primeiro controle positivo **também** não disparou, porque
+-- as 10 regras são regex sensíveis à ordem das palavras e "garantimos a aprovação" não casa
+-- o padrão `aprovac...garantid`. Com frase que casa de fato: 3 bloqueios no controle, 0 no
+-- neutro. Portão vivo, comparação válida. A própria função avisa disso no campo `nota`
+-- ("ausência de casamento NÃO é aprovação") e o aviso estava certo.
+--
+-- Resultado com o portão comprovadamente vivo: **0 bloqueios no áudio** de COHAPM (121) e
+-- Legal é Viver (24); 5 bloqueios na **tela** da Legal é Viver. Nenhum risco que o áudio
+-- revele e a tela esconda — *segundo as regras existentes*.
+--
+-- E é essa ressalva que é o achado. As 10 regras ativas são todas de **oferta de crédito**
+-- (SPC/Serasa, negativado, taxa sem CET, aprovação na hora). O Jurídico da COHAPM não vende
+-- crédito, vende serviço advocatício, e são **42 vídeos com áudio, 28 deles com a tela
+-- completamente vazia** — antes desta transcrição, esses 28 não tinham texto nenhum para
+-- nenhum portão ler. O que o áudio diz: **42 de 42** prometem "análise jurídica gratuita",
+-- **19** acusam prática abusiva/armadilha/ilegal, **8** afirmam direito de forma
+-- incondicional ("você tem direito a uma aposentadoria", "essas doenças dão direito à
+-- isenção do Imposto de Renda", "tem direito a um BPC Loas e receber um salário mínimo por
+-- toda a vida") para benefícios que na lei são **condicionais**.
+--
+-- Nenhuma dessas frases casa nenhuma das 10 regras, porque não existe regra para publicidade
+-- de serviço jurídico — território de captação de clientela e promessa de resultado. O
+-- portão devolve "0 bloqueios" com honestidade técnica e leitura enganosa. **O risco não
+-- está no áudio contra a tela; está na régua, que não cobre metade do que a operação
+-- anuncia.** Escrever regras para essa classe é trabalho para o gestor decidir, não para
+-- este agente presumir.
+--
+-- ============================================================================
+-- (6) PREÇO EM `model_prices`
+-- ============================================================================
+-- `gpt-4o-mini-transcribe` não tinha linha, então a apuração teve de recorrer a preço
+-- publicado externamente. Registrado US$ 1,25/1M de token de áudio + US$ 5,00/1M de saída.
+-- **Quase entrou errado:** a primeira gravação ia com 3,00, que é o preço do mesmo modelo na
+-- tabela da **Realtime API** — e `transcribe-audio` chama `/v1/audio/transcriptions`, onde
+-- vale 1,25. Conferido contra três fontes independentes antes de gravar. O campo `fonte`
+-- registra que é preço publicado e **não** fatura conferida: o escoamento mediu duração
+-- real, não valor faturado.
+--
+-- Melhoria deixada em aberto: a resposta de `/v1/audio/transcriptions` traz `usage` com
+-- `input_tokens`/`seconds` faturados. Persistir isso tornaria a próxima apuração medição em
+-- vez de derivação.

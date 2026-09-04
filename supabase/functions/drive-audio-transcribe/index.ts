@@ -8,12 +8,24 @@
 // mesmo para um video de 40MB — e mandamos so o audio ao transcribe-audio por multipart.
 // Medido em campo: video 18 = 22,7MB -> audio 1,03MB -> OpenAI 200, 485 chars.
 //
+// v3 (03/09/2026) — FILA POR ARQUIVO E CUSTO MEDIDO.
+// - A selecao saiu daqui e virou `public.videos_com_audio_pendente`, que deduplica por
+//   drive_file_id e consulta `public.estado_do_audio_da_peca`. Motivo: o filtro antigo
+//   (`base_da_analise like '%criterio%'`) deixava de fora todo video analisado so por
+//   thumbnail — 143 da COHAPM e 5 da Legal, nunca ouvidos — e remover o filtro sem
+//   deduplicar teria mandado de novo para a OpenAI os 19 arquivos da Legal que ja tem
+//   transcricao na outra linha deles, pagando duas vezes pelo mesmo audio.
+// - A resposta passa a trazer a DURACAO REAL do audio (lida do container pelo mp4box, sem
+//   chamada extra), porque a cobranca da OpenAI e por minuto. O preco nao e aplicado aqui:
+//   fica em public.model_prices, para nao existirem duas verdades de preco.
+//
 // AUTONOMIA / IDEMPOTENCIA:
-// - A selecao reprocessa pendentes em toda corrida: pega linhas sem transcricao_audio cujo
-//   transcricao_fonte e NULL ou comeca com 'nao_transcrito:' / 'pendente_'. Assim os antigos
-//   'acima do teto de 15MB' entram de novo. NUNCA toca linha que ja tem texto.
-// - Falha real e honesta e marcada como permanente ('sem_audio_ou_corrompido:' /
-//   'sem_fala_detectada:') e sai do conjunto de retry — nunca fingimos sucesso.
+// - A fila reprocessa pendentes em toda corrida e NUNCA inclui arquivo cujo audio ja foi
+//   resolvido, seja com texto, seja com veredito permanente.
+// - Falha real e honesta e marcada como permanente e sai da fila — nunca fingimos sucesso.
+//   Os dois desfechos permanentes sao DISTINGUIVEIS de proposito: 'sem_fala_util:' quando o
+//   transcritor rodou e nao ha locucao, e 'sem_audio_ou_corrompido:' quando o audio nem
+//   pode ser lido. Ausencia de fala nao e defeito de arquivo.
 // - Erro transitorio (Drive/transcriber 5xx) NAO marca a linha: a proxima corrida repete.
 // - Processa um lote por chamada (limit, padrao 6) com orcamento de parede; o cron diario
 //   converge o backlog e depois vira no-op.
@@ -27,6 +39,18 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const GOOGLE_SA_KEY_B64 = (Deno.env.get("GOOGLE_SA_KEY_B64") ?? "").trim();
 // Teto do endpoint da OpenAI. Acima disso e sem faixa de audio extraivel, e falha honesta.
 const OPENAI_MAX_BYTES = 25 * 1024 * 1024;
+
+// TETO DE MEMORIA DO RUNTIME, medido em 03/09/2026 e nao chutado. Esta edge baixa o video
+// INTEIRO para um Uint8Array e o mp4box faz copias internas para segmentar; o consumo de
+// pico e um multiplo do arquivo. No escoamento do acervo, 97 videos passaram e o maior
+// deles tinha 55,2MB; acima disso a funcao morria com HTTP 546 (limite de recursos do
+// worker) — e, pior, morria DEPOIS de baixar, entao um .MOV bruto de pasta "Brutos"
+// derrubava a corrida inteira e bloqueava a fila para os videos pequenos atras dele.
+// Foi assim que o escoamento travou em 33 pendentes: cada corrida morria no mesmo arquivo.
+// O teto ficou logo acima do maior que comprovadamente passa. Quem excede NAO e tratado
+// como sem fala nem como arquivo corrompido: recebe rotulo proprio, porque a causa e o
+// limite do runtime e a lacuna e nossa, nao do material.
+const LIMITE_MEMORIA_BYTES = 60 * 1024 * 1024;
 const LIMIT_PADRAO = 6;
 const ORCAMENTO_MS = 130_000;
 
@@ -119,15 +143,23 @@ async function driveDownload(fileId: string): Promise<Uint8Array> {
 // Demux da faixa de audio de um MP4 para um MP4 fragmentado so-de-audio (sem reencode).
 // mp4box parsa o container, isola o track 'soun' e re-segmenta so ele; init segment + media
 // segments concatenados = um .mp4 valido que o ffmpeg da OpenAI le sem problema.
-function extrairAudio(input: Uint8Array): { out: Uint8Array | null; codec: string | null; erro: string | null } {
+function extrairAudio(input: Uint8Array): { out: Uint8Array | null; codec: string | null; erro: string | null; duracaoSeg: number | null } {
   const mp4 = MB.createFile();
   const parts: Uint8Array[] = [];
   let audioId = -1;
   let codec: string | null = null;
   let erro: string | null = null;
+  // DURACAO MEDIDA, nao estimada. A OpenAI cobra transcricao por MINUTO de audio, e ate
+  // 03/09/2026 o custo desta rotina so existia como estimativa derivada de tamanho de
+  // arquivo. O mp4box ja parsa o container aqui, entao a duracao real sai de graca - e com
+  // ela o custo da corrida deixa de ser chute.
+  let duracaoSeg: number | null = null;
   mp4.onError = (e: unknown) => { erro = String(e); };
   // deno-lint-ignore no-explicit-any
   mp4.onReady = (info: any) => {
+    const ts = Number(info.timescale ?? 0);
+    const dur = Number(info.duration ?? 0);
+    if (ts > 0 && dur > 0) duracaoSeg = dur / ts;
     const a = info.tracks?.find((t: any) => t.type === "audio" || String(t.codec || "").startsWith("mp4a"));
     if (!a) { erro = "sem faixa de audio"; return; }
     audioId = a.id;
@@ -144,16 +176,16 @@ function extrairAudio(input: Uint8Array): { out: Uint8Array | null; codec: strin
     mp4.appendBuffer(ab);
     mp4.flush();
   } catch (e) {
-    return { out: null, codec, erro: erro ?? `mp4box_throw: ${String(e)}` };
+    return { out: null, codec, erro: erro ?? `mp4box_throw: ${String(e)}`, duracaoSeg };
   }
-  if (erro) return { out: null, codec, erro };
-  if (audioId === -1) return { out: null, codec, erro: "faixa de audio nao isolada" };
+  if (erro) return { out: null, codec, erro, duracaoSeg };
+  if (audioId === -1) return { out: null, codec, erro: "faixa de audio nao isolada", duracaoSeg };
   const total = parts.reduce((n, p) => n + p.length, 0);
-  if (total === 0) return { out: null, codec, erro: "segmentacao de audio vazia" };
+  if (total === 0) return { out: null, codec, erro: "segmentacao de audio vazia", duracaoSeg };
   const out = new Uint8Array(total);
   let o = 0;
   for (const p of parts) { out.set(p, o); o += p.length; }
-  return { out, codec, erro: null };
+  return { out, codec, erro: null, duracaoSeg };
 }
 
 async function transcrever(key: string, bytes: Uint8Array, mime: string, nomeArquivo: string) {
@@ -183,6 +215,7 @@ type ResultadoPeca = {
   caracteres?: number;
   tamanho_video?: number;
   tamanho_audio?: number;
+  duracao_seg?: number;
   transcricao_fonte?: string;
   erro?: string;
 };
@@ -194,6 +227,13 @@ async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPec
   try { meta = await driveMeta(fileId); }
   catch (e) { return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: `drive_meta: ${String(e)}` }, transitorio: true }; }
   const sizeVideo = Number(meta.size ?? 0);
+
+  // Guarda ANTES de baixar: o objetivo e nao gastar banda nem morrer com o arquivo na mao.
+  if (sizeVideo > LIMITE_MEMORIA_BYTES) {
+    const fonte = `acima_do_limite_de_memoria: video de ${sizeVideo} bytes (${(sizeVideo / 1048576).toFixed(1)}MB); esta edge carrega o arquivo inteiro em memoria e o maior que comprovadamente passou tem 55,2MB. Nao e ausencia de fala nem arquivo corrompido - e limite do runtime, e a fala segue NAO avaliada.`;
+    await supa.from("drive_midia_analises").update({ transcricao_fonte: fonte }).eq("id", row.id);
+    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, transcricao_fonte: fonte }, transitorio: false };
+  }
 
   let bytes: Uint8Array;
   try { bytes = await driveDownload(fileId); }
@@ -207,9 +247,11 @@ async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPec
   let nomeArquivo = "audio.mp4";
   let metodo = "video-inteiro";
   let audioLen: number | undefined;
+  let duracaoSeg: number | undefined;
 
   if (ehVideo) {
     const ex = extrairAudio(bytes);
+    if (ex.duracaoSeg && ex.duracaoSeg > 0) duracaoSeg = ex.duracaoSeg;
     if (ex.out && !ex.erro) {
       payload = ex.out;
       payloadMime = "audio/mp4";
@@ -238,13 +280,18 @@ async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPec
   const t = await transcrever(key, payload, payloadMime, nomeArquivo);
   if (!t.ok) {
     // Erro do transcriber: nao marca a linha, deixa para a proxima corrida.
-    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, metodo, erro: `transcribe-audio ${t.status}: ${JSON.stringify(t.parsed ?? t.raw).slice(0, 220)}` }, transitorio: true };
+    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, metodo, erro: `transcribe-audio ${t.status}: ${JSON.stringify(t.parsed ?? t.raw).slice(0, 220)}` }, transitorio: true };
   }
   const text = String(t.parsed?.text ?? "").trim();
   if (!text) {
-    const fonte = `sem_fala_detectada: resposta vazia de transcribe-audio (${t.parsed?.provider ?? "fonte desconhecida"}) via ${metodo}`;
+    // ROTULO ALINHADO (03/09/2026): o transcritor rodou e nao ha locucao. Isto e o MESMO
+    // desfecho dos 5 Reels do Sistema Ocular, que ja estavam gravados como
+    // `sem_fala_util:`. Antes esta linha gravava `sem_fala_detectada:`, criando dois
+    // rotulos para o mesmo fato - e ausencia de fala NAO pode ficar parecida com falha
+    // tecnica, que segue com rotulo proprio (`sem_audio_ou_corrompido:`).
+    const fonte = `sem_fala_util: resposta vazia de transcribe-audio (${t.parsed?.provider ?? "fonte desconhecida"}) via ${metodo}`;
     await supa.from("drive_midia_analises").update({ transcricao_fonte: fonte }).eq("id", row.id);
-    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, metodo, transcricao_fonte: fonte }, transitorio: false };
+    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, metodo, transcricao_fonte: fonte }, transitorio: false };
   }
 
   const fonte = `transcribe-audio / ${t.parsed?.provider ?? "desconhecido"} / ${t.parsed?.model ?? "modelo nao informado"} (via ${metodo})`;
@@ -255,7 +302,7 @@ async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPec
     .eq("id", row.id);
   if (writeError) return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: `gravacao: ${writeError.message}` }, transitorio: true };
 
-  return { res: { peca: row.nome, drive_file_id: fileId, transcrito: true, metodo, caracteres: text.length, tamanho_video: sizeVideo, tamanho_audio: audioLen, transcricao_fonte: fonte }, transitorio: false };
+  return { res: { peca: row.nome, drive_file_id: fileId, transcrito: true, metodo, caracteres: text.length, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, transcricao_fonte: fonte }, transitorio: false };
 }
 
 Deno.serve(async (req) => {
@@ -269,21 +316,30 @@ Deno.serve(async (req) => {
   const requestedId = String(body?.drive_file_id ?? "").trim();
   const limit = Math.max(1, Math.min(20, Number(body?.limit ?? LIMIT_PADRAO)));
 
-  // Conjunto de retry: sem texto e ainda "aberto" (fonte nula, teto antigo, ou pendente_*).
-  // NUNCA inclui linhas com transcricao_audio preenchida (idempotente).
-  let query = supa
-    .from("drive_midia_analises")
-    .select("id,drive_file_id,nome,mime,base_da_analise")
-    .like("mime", "video%")
-    .like("base_da_analise", "%criterio%")
-    .is("transcricao_audio", null)
-    .or("transcricao_fonte.is.null,transcricao_fonte.like.nao_transcrito:*,transcricao_fonte.like.pendente_*")
-    .order("nome")
-    .limit(requestedId ? 1 : limit);
-  if (requestedId) query = query.eq("drive_file_id", requestedId);
-
-  const { data: rows, error: readError } = await query;
-  if (readError) return json({ error: "leitura_falhou", detalhe: readError.message }, 500);
+  // FILA POR ARQUIVO, e nao por linha de analise (03/09/2026). A selecao antiga
+  // (`base_da_analise like '%criterio%'` + `transcricao_audio is null`) tinha dois
+  // defeitos: deixava de fora todo video analisado so por thumbnail, e, se o filtro de
+  // base fosse simplesmente removido, mandaria de novo para a OpenAI os arquivos que ja
+  // tem transcricao na OUTRA linha deles - pagando duas vezes pelo mesmo audio.
+  // `videos_com_audio_pendente` deduplica por drive_file_id e consulta o estado canonico,
+  // entao exclui de graca `sem_fala_util` e falha permanente de extracao.
+  let rows: any[] | null = null;
+  if (requestedId) {
+    const { data, error } = await supa
+      .from("drive_midia_analises")
+      .select("id,drive_file_id,nome,mime,base_da_analise")
+      .like("mime", "video%")
+      .is("transcricao_audio", null)
+      .eq("drive_file_id", requestedId)
+      .order("analisado_em", { ascending: false })
+      .limit(1);
+    if (error) return json({ error: "leitura_falhou", detalhe: error.message }, 500);
+    rows = data;
+  } else {
+    const { data, error } = await supa.rpc("videos_com_audio_pendente", { p_limit: limit });
+    if (error) return json({ error: "leitura_falhou", detalhe: error.message }, 500);
+    rows = data;
+  }
   if (!rows || rows.length === 0) {
     return json({ ok: true, processados: 0, transcritos: 0, nota: requestedId ? "peca nao encontrada ou ja transcrita" : "nenhum video pendente" });
   }
@@ -302,20 +358,30 @@ Deno.serve(async (req) => {
     }
   }
 
-  // Quantos pendentes ainda restam (para o cron/observabilidade saber se convergiu).
-  const { count: restantes } = await supa
-    .from("drive_midia_analises")
-    .select("id", { count: "exact", head: true })
-    .like("mime", "video%")
-    .like("base_da_analise", "%criterio%")
-    .is("transcricao_audio", null)
-    .or("transcricao_fonte.is.null,transcricao_fonte.like.nao_transcrito:*,transcricao_fonte.like.pendente_*");
+  // Quantos ARQUIVOS pendentes ainda restam (para o cron/observabilidade saber se
+  // convergiu). Mesma fonte da fila, para os dois numeros nunca discordarem.
+  const { data: restantes } = await supa.rpc("contar_videos_com_audio_pendente");
+
+  // CUSTO DA CORRIDA COM DURACAO MEDIDA. A OpenAI cobra por minuto de audio, entao o que
+  // importa e o tempo, nao o numero de arquivos nem os bytes. A duracao sai do mp4box, que
+  // ja parsa o container para extrair a faixa - nao ha chamada extra para medir isto.
+  // O preco NAO e aplicado aqui de proposito: ele vive em public.model_prices, e duplicar
+  // numero de preco em codigo e como esta base envelhece.
+  const comDuracao = resultados.filter((r) => typeof r.duracao_seg === "number");
+  const segundos = comDuracao.reduce((n, r) => n + (r.duracao_seg ?? 0), 0);
 
   return json({
     ok: true,
     processados: resultados.length,
     transcritos,
     pendentes_restantes: restantes ?? null,
+    audio_medido: {
+      pecas_com_duracao_medida: comDuracao.length,
+      pecas_sem_duracao_medida: resultados.length - comDuracao.length,
+      segundos: Math.round(segundos),
+      minutos: Number((segundos / 60).toFixed(3)),
+      nota: "duracao real lida do container pelo mp4box; multiplique por model_prices para o custo",
+    },
     resultados,
     mcp_chamador: auth.chamador,
   });
