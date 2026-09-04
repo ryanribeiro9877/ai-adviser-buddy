@@ -416,6 +416,52 @@ const JOB_LIMIT_MS = 270_000;       // teto por invocacao (ainda limitado pelo g
 const RESERVA_FINAL_MS = 10_000;
 // 150s, nao 75s: a sintese `xhigh` com relatorio cheio na entrada leva 121,9s medidos. Com 75s
 // ela era cortada no meio e voltava `sintese_vazia` — o erro que quebrou o deep em producao.
+/**
+ * ITEM (d) MEDIDO EM 04/09/2026, E O VEREDITO DE (a): NAO CABE. n=41 sintese deep, tudo que existe.
+ *
+ * PRIMEIRO, UMA CORRECAO DO REGISTRO. Estava escrito aqui que a reserva era "curta na cauda: 106s
+ * de mediana, 201,5s no p90, 239,9s no maximo". Esses numeros existem, mas NAO sao a duracao de uma
+ * sintese: sao o intervalo do PRIMEIRO carimbo "escrevendo a resposta final" ate o `finished_at`,
+ * que em job que resgatou engloba uma tentativa morta, os 45s de reinvocacao e a tentativa boa.
+ * Medido nas duas definicoes, sobre os mesmos 41 jobs:
+ *
+ *   por tentativa (o que esta reserva protege)  p50  58,2s   p90 119,1s   max 200,1s
+ *   multi-tentativa (o que foi registrado)      p50  87,6s   p90 194,8s   max 301,7s
+ *
+ * Dimensionar uma reserva POR INVOCACAO contra o intervalo multi-tentativa e comparar coisas
+ * diferentes, e foi isso que fez a reserva parecer curta. Por tentativa ela nao e: das 27 sinteses
+ * que CONCLUIRAM sem erro, a mais longa levou 116,4s, e ZERO passaram de 150s. Sobrou folga de
+ * 33,6s no pior caso.
+ *
+ * E MESMO ASSIM (a) NAO CABE. Tres razoes, nesta ordem:
+ *
+ *   1. A AMOSTRA VEM DO REGIME QUE (a) ELIMINA. As 27 conclusoes tem entrada de 8,3k a 21,2k tokens
+ *      — coleta magra, que e exatamente o que (a) existe para acabar. As 6 conclusoes com entrada
+ *      maior sao de telemetria pre-`xhigh` (v4.0/v4.3/v4.7/v4.10) e vieram MAIS RAPIDAS (mediana
+ *      35,1s), ou seja, sao de outro regime de raciocinio e nao servem de fiador. Usar a cauda da
+ *      coleta magra para dimensionar a reserva da coleta cheia e supor que a mudanca nao muda nada.
+ *   2. A CAUDA E CENSURADA. 14 das 41 (34%) nao concluiram, e nessas a duracao gravada E o timeout
+ *      concedido — limite inferior do que a chamada precisava, nunca o que ela levaria. Um p90
+ *      calculado so sobre quem cabe responde "quem cabe, cabe". E a leitura enviesada por
+ *      sobrevivente, que e a forma exata do erro que ja mentiu duas vezes neste problema.
+ *   3. O UNICO DADO DO REGIME DE (a) SAO DUAS MORTES. Quando a coleta veio completa (~100k tokens
+ *      de entrada), a sintese nao fechou em 150s (`openrouter_timeout_150000`, job aos 367s) nem em
+ *      200s (`openrouter_timeout_200000`, job aos 395s) — ver o bloco de `valeSegmentar`. A conta
+ *      que (a) monta e coleta ~245s + reinvocacao 45s + sintese >200s, que passa de 460s contra
+ *      parede de 480s menos `RESERVA_FINAL_MS`. Sem margem. Foi o que a tentativa de 370s por
+ *      invocacao produziu: job aos 467s e erro no lugar de resposta curta.
+ *
+ * ENTAO (a) FICA FORA, e nao por falta de vontade: o teste dela ja foi rodado por outro caminho e
+ * deu erro. Trocar "resposta curta que declara a lacuna" por "sintese_vazia" e piorar.
+ *
+ * O QUE FALTA PARA (a) SER DECIDIVEL ALGUM DIA, e e uma so coisa: medir a duracao da sintese CONTRA
+ * O TAMANHO DA ENTRADA nas que FALHAM. Hoje nao da — `tel.sintese.tokens_in` sai de `usage` da
+ * resposta, entao vale 0 justamente quando a chamada morre, e as 14 censuradas gravam entrada zero.
+ * Por isso entra `tel.sintese_entrada`, medida ANTES da chamada e portanto sobrevivente ao erro.
+ * Com ela, a proxima amostra responde se a sintese escala com a coleta — a pergunta de que (a)
+ * depende. NAO baixe esta reserva por causa dos 116,4s: os 33,6s de folga sao a margem que separa
+ * conclusao de `sintese_vazia`, e o registro deste arquivo mostra o que custou aperta-la duas vezes.
+ */
 const SINT_RESERVA_MS = 150_000;    // reserva minima para escrever a resposta (medida, nao arbitrada)
 // Segmentos: no maximo 2 — o 2o so para resgate de sintese (429/timeout), nao maratona.
 const MAX_SEGMENTOS = 2;
@@ -496,12 +542,13 @@ const CHAMADA_MINIMA_MS = 45_000;
  *
  * O QUE FOI FEITO E O QUE NAO FOI (autorizacao do gestor, 04/09/2026):
  *
- *   (a) DESCONTAR A RESERVA DA PAREDE, NAO DA INVOCACAO — NAO IMPLEMENTADA, CONDICIONADA A (d).
- *       A ideia: a reserva existe para garantir a escrita, a escrita pode rodar no segmento
- *       seguinte com relogio de invocacao zerado, e reservar contra `prazoDeParede()` em vez de
- *       `prazo()` daria ~245s de pista sem tocar nos 480s nem no teto de 270s. So que a pista que
- *       (a) abre e paga com o que a sintese ainda vai precisar, e quanto ela precisa na CAUDA e a
- *       pergunta de (d). O veredito fica registrado junto de `SINT_RESERVA_MS`.
+ *   (a) DESCONTAR A RESERVA DA PAREDE, NAO DA INVOCACAO — MEDIDA E DESCARTADA. NAO REFACA.
+ *       A ideia: reservar contra `prazoDeParede()` em vez de `prazo()` daria ~245s de pista sem
+ *       tocar nos 480s nem no teto de 270s. (d) foi medido (n=41, ver `SINT_RESERVA_MS`) e o
+ *       veredito e NAO CABE: a cauda que autorizaria (a) vem toda de coleta magra, 34% das sinteses
+ *       sao censuradas e portanto invisiveis nesse p90, e o unico dado do regime que (a) cria sao
+ *       duas mortes (`openrouter_timeout_150000` e `_200000`, com ~100k de entrada). A conta de (a)
+ *       — coleta ~245s + reinvocacao 45s + sintese >200s — passa de 460s numa parede de 480s.
  *   (b) NAO COBRAR `CUSTO_REINVOCACAO_MS` QUANDO NAO HA REINVOCACAO POSSIVEL — IMPLEMENTADA.
  *       Ver `reservaColetaMs` em `processarJob`: os 45s so entram quando a reinvocacao pode de
  *       fato ocorrer (`cap.permitirCheckpoint && segmento < MAX_SEGMENTOS`). Cobrar de quem nao
@@ -513,10 +560,12 @@ const CHAMADA_MINIMA_MS = 45_000;
  *       proprio guardado justamente para isso, e o que ja foi pago vira relatorio em vez de ir
  *       fora. Sem relatorio, o especialista entra na sintese como lacuna DECLARADA — nunca como
  *       relatorio enxuto, que era o rotulo que fingia cobertura.
- *   (d) A CAUDA DA SINTESE — a medir com amostra grande. A reserva de 150s esta bem dimensionada
- *       para a mediana (106s) e curta na cauda (201,5s no p90, 239,9s no maximo) na amostra de
- *       n=39. Alargar coleta sem olhar esta cauda troca "resposta curta" por "erro" — foi o que
- *       aconteceu com 370s por invocacao. O veredito fica junto de `SINT_RESERVA_MS`.
+ *   (d) A CAUDA DA SINTESE — MEDIDA, n=41 (toda a populacao existente). E ela derrubou (a).
+ *       Achado de instrumento: os "201,5s no p90 / 239,9s no maximo" que estavam registrados aqui
+ *       nao eram duracao de sintese, eram o intervalo MULTI-TENTATIVA (tentativa morta + 45s de
+ *       reinvocacao + tentativa boa). Por tentativa, que e o que a reserva protege, o p90 e 119,1s
+ *       e nenhuma das 27 sinteses concluidas passou de 116,4s. A reserva de 150s nao e curta — mas
+ *       tambem nao autoriza (a), pelas razoes registradas junto de `SINT_RESERVA_MS`.
  */
 // v3.5/v4.0: caps por tier de capacidade (roteador deterministico).
 const LITE_MAX_ESPECIALISTAS = 1;
@@ -2686,6 +2735,28 @@ async function sintetizar(
 ) {
   const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo, opts?.companyId);
   const blocos = relatorios.map((r) => `=== RELATORIO ${r.nome} [${rotuloRelatorio(r)}] ===\n${r.relatorio}`).join("\n\n");
+  /**
+   * TAMANHO DA ENTRADA, MEDIDO ANTES DA CHAMADA — a medida que faltava para decidir o item (a).
+   *
+   * `tel.sintese.tokens_in` vem do `usage` da RESPOSTA. Quando a chamada morre no timeout nao ha
+   * resposta, e o campo grava 0: nas 14 sinteses censuradas da medicao de (d), a entrada aparece
+   * como zero. Ou seja, o instrumento e cego exatamente nos casos que importam — foi por isso que
+   * (a) nao pode ser decidida por medicao e teve de ser descartada pelo registro de duas mortes.
+   *
+   * Estes campos sao calculados aqui, antes de qualquer chamada, e por isso sobrevivem ao erro.
+   * `chars_relatorios` e o que (a) mexeria: coleta mais funda entra por aqui. Com ele e o `ms` da
+   * escrita da para responder se a sintese escala com a coleta, que e a pergunta de (a).
+   *
+   * Fica ANTES do desvio para a versao segmentada de proposito: os dois caminhos precisam gravar.
+   */
+  tel.sintese_entrada = {
+    chars_relatorios: blocos.length,
+    chars_instrucao: sys.length,
+    relatorios: relatorios.length,
+    // Estimativa declarada como estimativa. `TOKENS_POR_SEGUNDO` nao serve aqui; a razao de ~4
+    // chars por token e a que o proprio arquivo ja usa ao dizer "8.000 tokens = ~32k chars".
+    tokens_estimados: Math.round((blocos.length + sys.length) / 4),
+  };
   // v3.8: pacote enorme → sintese segmentada (menos 429 numa unica chamada monstro).
   if (relatorios.length >= 4 && blocos.length >= SINT_CHARS_SEGMENTAR && prazo() > 60_000) {
     return await sintetizarSegmentada(companyName, pergunta, relatorios, estilo, memoria, prazo, tel, opts);
@@ -3602,6 +3673,10 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    *   que portanto nao existe no banco antigo), e `erro` do especialista passou a poder dizer
    *   `orcamento_insuficiente_para_escrita` — que e ausencia de relatorio, nao falha de provider.
    *   Sem o corte de versao, uma consulta de taxa de falha somaria as duas coisas.
+   *   Entram na mesma versao os instrumentos que a medicao de (d) mostrou faltar: `sintese.ms`
+   *   (duracao da escrita, que so existia por arqueologia do `progresso`) e `sintese_entrada`
+   *   (tamanho da entrada medido ANTES da chamada, que sobrevive ao timeout — `sintese.tokens_in`
+   *   vem do `usage` da resposta e por isso grava 0 exatamente nas sinteses que morrem).
    */
   tel.versao = "job-v4.20";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
