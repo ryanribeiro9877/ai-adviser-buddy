@@ -334,10 +334,26 @@ const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? 
 // o proprio job declara precisar. O teto AGIL de 5 min continua valendo para lite/standard,
 // que sao a maioria; quem paga os 6,5 min e so a pesquisa profunda, que o gestor pede
 // explicitamente quando quer profundidade.
+//
+// 03/09/2026 (noite) — CONFERENCIA DA PAREDE com os orcamentos alargados. Com os tempos
+// medidos (2 especialistas em paralelo ~140s, reinvocacao 45s, sintese ~122s), o caminho
+// profundo fecha em ~317s e sobram ~73s de folga dentro dos 390s. MAS a folga e condicional:
+// se a coleta passar de ~190s, `valeSegmentar()` deixa de valer (a parede restante nao cobre
+// reserva + reinvocacao), a sintese entra com o que sobrou e volta a ser cortada. Nao da para
+// comprar mais parede: 390s ja encosta no limite do worker do Supabase (~400s). Ou seja, o
+// deep hoje cabe, e cabe SEM margem para um terceiro especialista.
 const GLOBAL_WALL_MS = 390_000;     // 6,5 min desde created_at do job
 const JOB_LIMIT_MS = 270_000;       // teto por invocacao (ainda limitado pelo global)
 const RESERVA_FINAL_MS = 10_000;
-const SINT_RESERVA_MS = 75_000;     // reserva minima para escrever a resposta
+/**
+ * Reserva minima para ESCREVER a resposta — agora medida, nao arbitrada.
+ *
+ * 03/09/2026, sonda `tmp-medir-orcamento`, sintese em `xhigh` sobre pacote realista de
+ * relatorios: a chamada COMPLETA (`finish: stop`, 5.744 tokens visiveis, 14.138 chars)
+ * levou 121,9s. Os 75s antigos nao eram reserva para escrever: eram menos da metade do
+ * necessario, e por isso a sintese do deep morria em `openrouter_timeout_*` ou saia curta.
+ */
+const SINT_RESERVA_MS = 150_000;
 // Segmentos: no maximo 2 — o 2o so para resgate de sintese (429/timeout), nao maratona.
 const MAX_SEGMENTOS = 2;
 const DEVOLUCOES_MAX = 0;           // v4.0: deep nao reexecuta (custo > ganho sob teto 5min)
@@ -366,7 +382,24 @@ const STANDARD_MAX_ESPECIALISTAS = 2;
 const DEEP_MAX_ESPECIALISTAS = 3;
 const LITE_OPENROUTER_TIMEOUT_MS = 45_000;
 const STANDARD_OPENROUTER_TIMEOUT_MS = 60_000;
-const OPENROUTER_TIMEOUT_MS = 75_000;
+/**
+ * Teto POR CHAMADA do caminho profundo — e o orcamento que estava realmente apertando.
+ *
+ * O gestor decidiu preservar o raciocinio (`xhigh` na sintese, `high` nos especialistas) e
+ * alargar o orcamento. Medido em 03/09 qual orcamento faltava, e nao era token:
+ *
+ *   especialista (high, teto 4.000): 127,6s para 4.000 visiveis + 6.575 de raciocinio
+ *   sintese      (xhigh, teto 16k) : 121,9s para 5.744 visiveis + 2.480 de raciocinio
+ *
+ * Contra isso, 75s. Toda chamada do deep era cortada na metade do caminho — e o corte tem
+ * assinatura no banco: os dois especialistas do job das 18:33 terminaram em `finish: erro_llm`
+ * com 845 e 409 tokens visiveis, e a sintese recebeu esses dois relatorios magros. Nao era o
+ * modelo que escrevia pouco: era o relogio que o interrompia.
+ *
+ * 150s cobre os 128s medidos com margem. Vale so para o deep — lite (45s) e standard (60s)
+ * continuam onde estavam, porque neles ninguem mediu necessidade maior.
+ */
+const OPENROUTER_TIMEOUT_MS = 150_000;
 const LITE_DEVOLUCOES_MAX = 0;
 const STANDARD_DEVOLUCOES_MAX = 0;
 // deep usa DEVOLUCOES_MAX (0 em v4.0)
@@ -379,18 +412,44 @@ const TOKENS_POR_SEGUNDO = 60;
 const PLANNER_MAX_TOKENS = 800;
 // Subagente: v4.0 — menos iteracoes/reasoning; prioriza tools locais e fecha o relatorio.
 const SUB_MAX_ITER = 6;
-const SUB_MAX_TOKENS = 4000;
+/**
+ * Teto de saida VISIVEL do relatorio do especialista.
+ *
+ * O gestor pediu mais espaco em vez de menos raciocinio, e a medicao confirma que o teto morde
+ * de verdade quando o especialista tem material e tempo: com teto 4.000 e esforco `high`, a
+ * sonda voltou `finish: length` com exatamente 4.000 tokens visiveis (8.840 chars) — cortado no
+ * limite, com mais relatorio para escrever.
+ *
+ * O aumento e deliberadamente modesto porque cada token visivel custa parede: a mesma chamada
+ * gerou 10.575 tokens (4.000 visiveis + 6.575 de raciocinio) em 127,6s, ou ~83 tok/s de
+ * GERACAO TOTAL. Mil tokens visiveis a mais custam ~12s de parede por especialista. 5.000 cabe
+ * nos 390s da parede com os dois especialistas em paralelo; 8.000 nao cabe, e seria trocar
+ * relatorio mais gordo por job que nao termina.
+ */
+const SUB_MAX_TOKENS = 5000;
 const SUB_RELATORIO_MAX_PARTES = 2;
 const SUB_REASONING = { max_tokens: 600 };
 // Sintese: partes de ate 8000 tokens, com continuacao interna ate 3 partes.
 const SINT_MAX_TOKENS = 8_000;
 const SINT_MAX_PARTES = 3;
 const REASONING_OFF = { enabled: false };
-// 03/09/2026: piso de max_tokens quando o roteador dita esforco de raciocinio. O padrao da
-// casa (Grok 4.6) raciocina em TODA chamada — nao ha como desligar — e o raciocinio sai do
-// mesmo max_tokens do texto. Os tetos pequenos foram escritos para modelos com o raciocinio
-// desligado: 800 no planner e 1500 na visao devolveriam content vazio, e no pipeline de visao
-// isso nao vira erro — vira peca gravada como "indeterminado / incerto" sem ninguem notar.
+// 03/09/2026: piso de max_tokens quando o roteador dita esforco de raciocinio.
+//
+// CORRECAO MEDIDA (03/09, noite): a versao anterior deste comentario dizia que "o raciocinio
+// sai do mesmo max_tokens do texto". E FALSO neste provedor, e a diferenca importa. Medido:
+// com teto 2.100 o modelo gastou 3.971 tokens de raciocinio e entregou exatamente 2.100
+// visiveis; com teto 4.000, gastou 6.575 de raciocinio e entregou exatamente 4.000 visiveis.
+// O raciocinio corre POR FORA do teto — `max_tokens` limita so o canal visivel, e quando ele
+// morde o `finish_reason` vem `length`, nunca `stop`.
+//
+// A consequencia pratica de guardar isso aqui: uma sintese que volta curta com `finish: stop`
+// NAO foi truncada pelo teto, e alargar o teto nao a conserta. Foi o caso do job das 18:33
+// (100 chars, `stop`, teto efetivo >= 4.000 por causa deste piso) — o que faltava la era tempo
+// de chamada e relatorio de entrada, nao token de saida.
+//
+// O piso continua util pelo motivo original: tetos escritos para modelos sem raciocinio (800
+// no planner, 1500 na visao) sao pequenos demais para caber uma resposta util, e no pipeline
+// de visao um content vazio nao vira erro — vira peca gravada como "indeterminado".
 const MIN_TOKENS_COM_RACIOCINIO = 4000;
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
@@ -601,8 +660,14 @@ async function enriquecerEscopoComDatas(companyId: string, escopo: EscopoPedido)
 
 // Parede da fase de sintese: alem do timeout por chamada OpenRouter, a fase inteira
 // nao pode ficar "escrevendo" alem disto (worker morto deixa job running para sempre).
-// v4.0: 90s — cabe no teto de 5 min com coleta magra.
-const SINT_FASE_HARD_MS = 90_000;
+//
+// 03/09/2026: 90s subiu para 160s. Nao adiantaria dar 150s de timeout POR CHAMADA e manter a
+// FASE em 90s — quem chegasse primeiro cortaria, e o corte de fase e pior porque `restanteMs`
+// tambem alimenta `maxTok` (`restante_s * 60`): com 90s o teto de saida nascia em 5.400 e a
+// sintese completa medida precisou de 5.744 visiveis, ou seja, era truncada em `length` antes
+// mesmo de o relogio bater. 160s da folga sobre os 121,9s medidos e faz `maxTok` nascer em
+// 8.000 (o proprio SINT_MAX_TOKENS), que e o teto que a medicao mostrou suficiente.
+const SINT_FASE_HARD_MS = 160_000;
 // Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
 const SINT_CHARS_SEGMENTAR = 70_000;
 const SINT_COOLDOWN_POS_429_MS = 6_000;
@@ -2057,12 +2122,34 @@ REGRAS: todo numero vem de ferramenta CHAMADA AGORA; distinga zero / nao existe 
 Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, terminando com 'LACUNAS:' (ou 'nenhuma').`;
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
+  /**
+   * Teto de UMA chamada do especialista, preso ao que ainda sobra para coletar.
+   *
+   * 03/09/2026 (noite): o guarda de reserva la embaixo so e consultado ENTRE chamadas, entao
+   * ele nunca segurou nada — bastava uma chamada de 150s comecar com 160s de folga para a
+   * coleta terminar 140s alem do combinado. Foi assim nos tres jobs da noite: a sintese entrou
+   * com 118,8s, 118,3s e 103,1s, sempre abaixo dos 121,9s medidos, sempre por overshoot da
+   * ultima chamada. Prender o timeout ao orcamento restante fecha esse vazamento: a chamada
+   * nao pode mais prometer mais tempo do que a coleta ainda tem.
+   *
+   * O piso de 20s existe para nao disparar chamada natimorta: abaixo disso o guarda ja quebrou
+   * o laco e o especialista escreve com o que tem.
+   */
+  const tetoDaChamada = () => Math.max(
+    20_000,
+    Math.min(OPENROUTER_TIMEOUT_MS, prazo() - (SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS)),
+  );
   let tin = 0, tout = 0, reas = 0, relatorio = "", finish = "";
   for (let iter = 0; iter < SUB_MAX_ITER; iter++) {
     // Reserva da sintese: para de coletar e escreve com o que tem.
-    if (prazo() < SINT_RESERVA_MS) { finish = finish || "reserva_sintese"; break; }
+    // 03/09/2026 (noite): o guarda reservava a sintese mas ESQUECIA a reinvocacao no meio.
+    // Quando a coleta para, o job faz checkpoint e volta noutro worker, e essa volta custou 45s
+    // medidos. Entao parar com 150s de parede nao entrega 150s a sintese: entrega ~105s. Foi
+    // exatamente o que os jobs e56b8bb1 e 9a7b8f7b mostraram — sintese cortada em 118,8s e
+    // 118,3s, contra os 121,9s que ela precisa. Faltavam ~4s, e faltavam aqui.
+    if (prazo() < SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS) { finish = finish || "reserva_sintese"; break; }
     if (prazo() <= 0) { finish = "prazo_do_job"; break; }
-    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome });
+    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
     if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; break; }
     const u = usoDe(r.parsed); tin += u.tin; tout += u.tout; reas += u.reas;
     finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
@@ -2096,7 +2183,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   if (!relatorio) {
     // Estourou iteracoes/prazo coletando: forca o relatorio com o que ha.
     messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
-    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome });
+    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
     if (!rf.erro) {
       const u = usoDe(rf.parsed); tin += u.tin; tout += u.tout;
       relatorio = String(rf.parsed?.choices?.[0]?.message?.content ?? "");
@@ -2111,7 +2198,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     messages.push({ role: "assistant", content: relatorio });
     messages.push({ role: "user", content: "Seu relatorio foi cortado por limite de tamanho. Continue EXATAMENTE do ponto onde parou, na proxima palavra. Nao repita nada, nao reescreva secoes; ao concluir, termine com a linha LACUNAS:." });
     const maxTok = Math.max(1500, Math.min(SUB_MAX_TOKENS, Math.floor((prazo() / 1000) * TOKENS_POR_SEGUNDO)));
-    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome });
+    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
     if (rc.erro) break;
     const u = usoDe(rc.parsed); tin += u.tin; tout += u.tout;
     const pedaco = String(rc.parsed?.choices?.[0]?.message?.content ?? "");
@@ -2152,7 +2239,7 @@ async function chamarSinteseParte(
   messages: any[],
   maxTok: number,
   callTimeout: number,
-): Promise<{ erro?: string; pedaco?: string; finish?: string; tin: number; tout: number }> {
+): Promise<{ erro?: string; pedaco?: string; finish?: string; tin: number; tout: number; raciocinio: number; teto: number }> {
   const r = await chamarLLM(messages, {
     maxTokens: maxTok,
     reasoning: REASONING_OFF,
@@ -2162,7 +2249,7 @@ async function chamarSinteseParte(
     tipo: "sintese",
     faixaForcada: JOB_FAIXA_SINTESE,
   });
-  if (r.erro) return { erro: r.erro, tin: 0, tout: 0 };
+  if (r.erro) return { erro: r.erro, tin: 0, tout: 0, raciocinio: 0, teto: maxTok };
   const u = usoDe(r.parsed);
   const msg = r.parsed?.choices?.[0]?.message;
   return {
@@ -2170,6 +2257,12 @@ async function chamarSinteseParte(
     finish: String(r.parsed?.choices?.[0]?.finish_reason ?? ""),
     tin: u.tin,
     tout: u.tout,
+    // 03/09/2026: sem estes dois numeros a sintese curta era indiagnosticavel. O job das 18:33
+    // devolveu `finish: stop` com 2.106 tokens e 100 chars ao gestor, e nao havia como saber se
+    // o raciocinio tinha comido o orcamento ou se o modelo parou sozinho — `tokens_out` sozinho
+    // nao separa o que o modelo PENSOU do que ele ESCREVEU.
+    raciocinio: Number(r.parsed?.usage?.completion_tokens_details?.reasoning_tokens ?? 0),
+    teto: maxTok,
   };
 }
 
@@ -2272,6 +2365,7 @@ async function sintetizar(
   const perCallTimeout = opts?.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
   const hardDeadline = Date.now() + Math.min(SINT_FASE_HARD_MS, Math.max(prazo(), 8_000));
   let texto = "", partes = 0, tin = 0, tout = 0, finish = "";
+  let raciocinio = 0, tetoUltimo = 0;
   while (partes < SINT_MAX_PARTES) {
     const restanteMs = Math.min(prazo(), hardDeadline - Date.now());
     if (restanteMs <= 0) {
@@ -2281,12 +2375,13 @@ async function sintetizar(
     const maxTok = Math.max(1500, Math.min(SINT_MAX_TOKENS, Math.floor((restanteMs / 1000) * TOKENS_POR_SEGUNDO)));
     const callTimeout = Math.min(perCallTimeout, Math.max(5_000, restanteMs));
     const r = await chamarSinteseParte(messages, maxTok, callTimeout);
+    tetoUltimo = maxTok;
     if (r.erro) {
       if (!texto) texto = "";
       finish = `erro_llm:${r.erro}`;
       break;
     }
-    tin += r.tin; tout += r.tout;
+    tin += r.tin; tout += r.tout; raciocinio += r.raciocinio;
     const pedaco = String(r.pedaco ?? "");
     finish = String(r.finish ?? "");
     texto += pedaco;
@@ -2296,7 +2391,14 @@ async function sintetizar(
     messages.push({ role: "assistant", content: pedaco });
     messages.push({ role: "user", content: "Continue EXATAMENTE do ponto onde parou, na proxima palavra. Nao repita nada, nao reescreva titulos, nao cumprimente." });
   }
-  tel.sintese = { partes, tokens_in: tin, tokens_out: tout, finish_reason: finish };
+  tel.sintese = {
+    partes, tokens_in: tin, tokens_out: tout, finish_reason: finish,
+    // `visivel` e o que o gestor recebe; `raciocinio` e o que o modelo gastou pensando.
+    // Separados, denunciam de imediato se a sintese curta veio de teto apertado ou de
+    // parada espontanea do modelo. `teto` fecha a conta: sem ele nao da para dizer se
+    // colou no limite, porque o teto e derivado do tempo restante e muda a cada job.
+    raciocinio, visivel: Math.max(0, tout - raciocinio), teto: tetoUltimo, chars: texto.length,
+  };
   if (finish === "length" || finish.includes("sintese_timeout_parcial")) {
     texto += "\n\n*(resposta encerrada no limite de tamanho do processamento; peca a parte que faltou que eu completo)*";
   }
