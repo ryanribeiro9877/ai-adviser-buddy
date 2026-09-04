@@ -38,6 +38,22 @@
 // Por isso o instrumento passou a gravar `no_piso`: uma chamada no piso e uma chamada que a
 // aritmetica da reserva NAO autorizou e que foi emitida de qualquer jeito. Sem esse campo, um
 // timeout de relogio apertado e um timeout de provider lento ficam identicos na auditoria.
+//
+// 04/09/2026 — O PISO SAIU. `no_piso` VIROU `viavel`, E O CAMPO AGORA CONTA CHAMADA RECUSADA.
+//
+// O piso foi a resposta autorizada ao item (c) da proposta que morava junto de
+// `CUSTO_REINVOCACAO_MS`: chamada no piso tinha 0 de 4 sucessos medidos e ainda queimava parede
+// antes de abortar. Emitir uma chamada que a reserva nao autoriza nao e prudencia, e desperdicio
+// com nome de prudencia — o relogio some e a coleta ja paga vai embora junto.
+//
+// No lugar dele entra PARADA HONESTA: quando a reserva nao comporta chamada real, `tetoDaChamadaMs`
+// devolve `viavel: false` e a chamada NAO e emitida. Quem chama para a coleta e vai para a escrita
+// de salvamento (a que o commit abe7d15 destravou), que transforma coleta ja paga em relatorio.
+//
+// O campo continua sendo o que separa "relogio apertado" de "provider lento" na auditoria; o que
+// muda e o que ele conta. `no_piso` contava chamada emitida sem autorizacao; `viavel` conta
+// chamada que a reserva recusou — e `resumirTetos` passa a devolver `recusadas`, que e o numero
+// que diz quantas vezes a coleta preferiu parar a fingir que tinha orcamento.
 
 // ============================================================================
 // 1. MOTIVO DE SAIDA — separado do finish_reason do provider
@@ -53,7 +69,14 @@
 export type MotivoSaida =
   /** O modelo devolveu relatorio sem pedir ferramenta: ELE julgou que tinha terminado. */
   | "voluntario"
-  /** O laco parou para nao invadir a reserva da escrita (SINT_RESERVA + custo de reinvocacao). */
+  /**
+   * O laco parou porque a reserva da escrita nao autorizava chamada real.
+   *
+   * A reserva e `SINT_RESERVA` mais o custo de reinvocacao SO quando ainda ha reinvocacao possivel
+   * (item (b) de 04/09) — no ultimo segmento, ou em tier que nunca segmenta, os 45s nao entram.
+   * Desde o item (c), este rotulo tambem cobre a parada honesta: o laco para AQUI em vez de emitir
+   * a chamada de piso que a reserva recusava.
+   */
   | "reserva_sintese"
   /** Prazo do job zerado. */
   | "prazo_do_job"
@@ -84,54 +107,68 @@ export function ehSaidaPorRelogio(motivo: MotivoSaida | null | undefined): boole
 // ============================================================================
 
 export type TetoConcedido = {
-  /** Timeout que a chamada realmente recebeu. */
+  /** Timeout que a chamada recebeu. 0 quando a chamada nao foi emitida. */
   ms: number;
   /** O que a reserva de fato autorizava (pode ser negativo). */
   autorizado_ms: number;
-  /** true = a chamada saiu no piso, ou seja, com mais tempo do que a reserva autorizava. */
-  no_piso: boolean;
+  /** false = a reserva nao comportava chamada real; a chamada NAO foi emitida. */
+  viavel: boolean;
 };
 
 /**
- * Teto desta chamada do especialista.
+ * Teto desta chamada do especialista — ou a recusa de emiti-la.
  *
- * Mesma aritmetica que morava dentro de `rodarSubagente` — os numeros nao mudam. O que muda e que
- * agora ela e inspecionavel e declara `no_piso`.
+ * A aritmetica de reserva e a mesma de sempre (`prazo() - reserva`). O que mudou em 04/09/2026,
+ * item (c) autorizado, e o que ela faz quando a conta nao fecha:
  *
- * A leitura que o campo `no_piso` habilita: com `prazo()` limitado pelo teto POR INVOCACAO (270s)
- * e reserva de 195s (150s de sintese + 45s de reinvocacao), a coleta tem 65s de pista em que o
- * teto e real. Depois disso `autorizado_ms` fica negativo e toda chamada sai no piso de 20s — que
- * e menos do que uma chamada de raciocinio xhigh leva para voltar. O piso nao protege a coleta;
- * ele garante uma chamada que vai abortar e ainda gasta parede tentando.
+ *   ANTES  ms = max(piso, min(teto_provider, autorizado)) — com autorizado negativo, a chamada
+ *          saia com 20s de piso. Medido: 0 de 4 sucessos, e cada uma dessas queimava parede antes
+ *          de abortar em `openrouter_timeout_20000`. O piso nao era teto escolhido para aquela
+ *          chamada; era a aritmetica dizendo "nao cabe" e o codigo emitindo assim mesmo.
+ *   AGORA  autorizado < minimoMs => `viavel: false`, e quem chama NAO emite. A coleta para e vai
+ *          para a escrita de salvamento, preservando o que ja foi pago em vez de perde-lo.
+ *
+ * `minimoMs` e o menor timeout que vale emitir, e ele NAO e o piso antigo com outro nome: o piso
+ * era o que se concedia quando nada era autorizado, e este e o que a reserva precisa autorizar
+ * ANTES de a chamada sair. O valor vive no chamador (ver `CHAMADA_MINIMA_MS`), junto dos outros
+ * orcamentos de tempo, porque e la que ele pode ser corrigido pela proxima medicao.
+ *
+ * `autorizado_ms` continua sendo gravado mesmo na recusa — inclusive negativo. Ele e o que permite
+ * dizer DE QUANTO a coleta ficou devendo, em vez de so registrar que ela parou.
  */
 export function tetoDaChamadaMs(args: {
   prazoMs: number;
   tetoProviderMs: number;
   reservaMs: number;
-  pisoMs: number;
+  minimoMs: number;
 }): TetoConcedido {
   const autorizado = args.prazoMs - args.reservaMs;
-  const semPiso = Math.min(args.tetoProviderMs, autorizado);
-  const ms = Math.max(args.pisoMs, semPiso);
-  return { ms, autorizado_ms: autorizado, no_piso: ms > semPiso };
+  if (autorizado < args.minimoMs) return { ms: 0, autorizado_ms: autorizado, viavel: false };
+  return { ms: Math.min(args.tetoProviderMs, autorizado), autorizado_ms: autorizado, viavel: true };
 }
 
-/** Resumo dos tetos concedidos numa execucao de especialista. */
+/**
+ * Resumo dos tetos de uma execucao de especialista.
+ *
+ * `chamadas` conta so o que foi EMITIDO e `recusadas` so o que a reserva barrou — somar os dois
+ * num contador de "tentativas" apagaria justamente a diferenca que o item (c) criou. min/max
+ * olham apenas as emitidas: incluir o zero da recusa faria `min_ms` marcar 0 e sugerir chamada
+ * instantanea onde nao houve chamada nenhuma.
+ */
 export function resumirTetos(tetos: TetoConcedido[]): {
   chamadas: number;
-  no_piso: number;
+  recusadas: number;
   min_ms: number | null;
   max_ms: number | null;
 } {
-  if (!Array.isArray(tetos) || !tetos.length) {
-    return { chamadas: 0, no_piso: 0, min_ms: null, max_ms: null };
-  }
-  const ms = tetos.map((t) => t.ms);
+  const lista = Array.isArray(tetos) ? tetos : [];
+  const emitidas = lista.filter((t) => t.viavel);
+  const ms = emitidas.map((t) => t.ms);
   return {
-    chamadas: tetos.length,
-    no_piso: tetos.filter((t) => t.no_piso).length,
-    min_ms: Math.min(...ms),
-    max_ms: Math.max(...ms),
+    chamadas: emitidas.length,
+    recusadas: lista.length - emitidas.length,
+    min_ms: ms.length ? Math.min(...ms) : null,
+    max_ms: ms.length ? Math.max(...ms) : null,
   };
 }
 

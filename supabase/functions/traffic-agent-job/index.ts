@@ -2385,12 +2385,21 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     // Estourou iteracoes/prazo coletando, ou a ultima chamada falhou: forca o relatorio com o que ha.
     const tetoEscrita = tetoDaChamada(false);
     if (!tetoEscrita.viavel) {
-      escritaSalvamento = usadas.length
-        ? `sem_orcamento_com_${usadas.length}_consulta(s)_paga(s)`
-        : "sem_orcamento_sem_coleta";
-      // A coleta paga (se houve) se perde aqui, e isso fica DITO. O que nao acontece mais e gastar
-      // parede numa escrita que a medicao ja viu abortar, e chegar na sintese sem saber por que.
-      erroLlm = `orcamento_insuficiente_para_escrita (${escritaSalvamento}, autorizado ${Math.round(tetoEscrita.autorizado_ms / 1000)}s)`;
+      // Rotulo groupavel: quem consulta quer contar os dois casos, nao ler quantas ferramentas
+      // rodaram — esse numero ja esta em `tools`, e embuti-lo aqui daria um bucket por contagem.
+      escritaSalvamento = usadas.length ? "sem_orcamento_com_coleta_paga" : "sem_orcamento_sem_coleta";
+      /**
+       * A coleta paga (se houve) se perde aqui, e isso fica DITO. O que nao acontece mais e gastar
+       * parede numa escrita que a medicao ja viu abortar, e chegar na sintese sem saber por que.
+       *
+       * A CAUSA ANTERIOR E PRESERVADA, e nao e detalhe: entramos aqui por dois caminhos — a coleta
+       * parou honestamente (sem `erroLlm`) ou a ultima chamada morreu (com `erroLlm`). Sobrescrever
+       * apagaria justamente o `openrouter_timeout_<n>` que nomeia o relogio que matou a coleta, e a
+       * auditoria passaria a ler "faltou orcamento para escrever" onde faltou tempo para coletar.
+       * O marcador fica no INICIO porque e por ele que `rotuloRelatorio` reconhece este estado.
+       */
+      const causaDaColeta = erroLlm ? `; coleta morreu em ${erroLlm}` : "";
+      erroLlm = `orcamento_insuficiente_para_escrita (${escritaSalvamento}, autorizado ${Math.round(tetoEscrita.autorizado_ms / 1000)}s${causaDaColeta})`;
     } else {
       if (erroLlm) relatorio = "";
       messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
@@ -2470,9 +2479,21 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
  * significam que o dado nao existe". Isso e verdade para relatorio truncado e MENTIRA para
  * especialista que morreu no timeout: nesse caso a ausencia significa exatamente que ninguem leu.
  * Com um rotulo so, a sintese tratava falha de coleta como relatorio enxuto e escrevia por cima
- * do vazio. Sao tres estados diferentes e agora eles se distinguem.
+ * do vazio. Sao quatro estados diferentes e agora eles se distinguem.
+ *
+ * O quarto entrou com o item (c), em 04/09/2026, e ele NAO e uma falha: a coleta parou honestamente
+ * porque a reserva nao autorizava mais chamada, e o orcamento nao comportou nem a escrita de
+ * salvamento. As ferramentas podem ter rodado — o dado foi LIDO e nao foi ESCRITO. Chamar isso de
+ * "FALHOU ... NAO leu nada" seria mentir na direcao oposta, e mandar a sintese analisar um dominio
+ * que ninguem relatou; chamar de "INCOMPLETO - cortado por limite de tamanho" seria pior, porque e
+ * a frase que autoriza a sintese a tratar ausencia como dado inexistente. Os dois erros produzem a
+ * mesma coisa no fim: cobertura fingida.
  */
 function rotuloRelatorio(r: { completo: boolean; erro?: string | null }): string {
+  const erro = String(r.erro ?? "");
+  if (erro.startsWith("orcamento_insuficiente_para_escrita")) {
+    return `SEM RELATORIO (${erro}) - a coleta parou por falta de orcamento e o relatorio dele NAO foi escrito. Nada do dominio dele chegou aqui: declare a lacuna e NAO afirme que o dado nao existe nem que e zero`;
+  }
   if (r.erro) {
     return `FALHOU (${r.erro}) - este especialista NAO leu nada. NAO escreva analise sobre o dominio dele: declare a falha como lacuna`;
   }
@@ -2777,10 +2798,33 @@ async function sintetizarComResgate(args: {
 }): Promise<string | null> {
   await cooldownAntesDaSintese(args.jobId, args.tel, args.prazo);
   await pushProgresso(args.jobId, "sintese", "escrevendo a resposta final");
+  /**
+   * QUANTO A ESCRITA LEVOU — o numero que `SINT_RESERVA_MS` dimensiona e que nao era medido.
+   *
+   * A reserva de 150s foi arbitrada a partir de uma unica chamada cronometrada (121,9s) e depois
+   * revisitada por ARQUEOLOGIA: subtraindo o carimbo do progresso "escrevendo a resposta final" do
+   * `finished_at` do job. Funciona, mas depende de string de mensagem de tela — o mesmo defeito
+   * que `tel.coleta` consertou do outro lado do pipeline. Sem campo proprio, a cauda da sintese
+   * (item (d)) so pode ser reconstruida, nunca consultada.
+   *
+   * Fica FORA da conta, de proposito, o cooldown de rate-limit acima: ele nao e escrita, e limitado
+   * por `SINT_COOLDOWN_POS_429_MS` e apareceria como sintese lenta sem nenhuma chamada lenta.
+   *
+   * Cobre os dois caminhos de escrita (direto e segmentado) porque `sintetizar` e quem delega para
+   * `sintetizarSegmentada` — medir aqui evita repetir o cronometro nos cinco pontos em que a
+   * versao segmentada fecha `tel.sintese`, onde um deles ficaria de fora na primeira manutencao.
+   */
+  const tSintese = Date.now();
   const texto = await sintetizar(
     args.companyName, args.pergunta, args.relatorios, args.estilo, args.memoria,
     args.prazo, args.tel, { timeoutMs: args.timeoutMs, escopo: args.escopo, companyId: args.companyId },
   );
+  if (args.tel.sintese) {
+    args.tel.sintese.ms = Date.now() - tSintese;
+    // A reserva no momento em que a escrita comecou. Sem ela, `ms` diz quanto a sintese levou mas
+    // nao se ela CABIA — e a pergunta de (d) e exatamente a segunda.
+    args.tel.sintese.reserva_ms = SINT_RESERVA_MS;
+  }
   if (String(texto ?? "").trim()) return texto;
 
   const finish = String(args.tel.sintese?.finish_reason ?? "sem_finish");
@@ -3520,6 +3564,26 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   const cap = classificarCapacidade(pergunta);
   JOB_FAIXA_SINTESE = cap.tier === "deep" ? "premium" : "economia";
   JOB_TIER = cap.tier;
+  /**
+   * ITEM (b), AUTORIZADO EM 04/09/2026: A COLETA SO PAGA PEDAGIO QUE AINDA PODE SER COBRADO.
+   *
+   * A reserva da coleta existe para garantir a ESCRITA da resposta. Ela sempre incluiu os 45s de
+   * `CUSTO_REINVOCACAO_MS` porque, quando o job segmenta, a sintese roda no segmento seguinte e
+   * paga esse pedagio. O erro estava em cobra-lo tambem de quem NAO pode segmentar:
+   *
+   *   - `segmento === MAX_SEGMENTOS`: nao existe segmento 3 para onde ir;
+   *   - `!cap.permitirCheckpoint`: lite nunca grava checkpoint, entao nunca reinvoca.
+   *
+   * Nos dois casos os 45s eram descontados de uma reinvocacao que nao vai acontecer — 45s de pista
+   * jogados fora por aritmetica. A conta importa porque `prazo()` fica preso ao teto POR INVOCACAO
+   * (260s uteis): com reserva de 195s a coleta tinha 65s de pista, com 150s ela tem 110s.
+   *
+   * O que NAO mudou, de proposito: no segmento 1 de um tier que segmenta, os 45s continuam sendo
+   * cobrados. Ali a reinvocacao e possivel de verdade, e adivinhar que ela nao vai ocorrer seria
+   * trocar aritmetica por palpite — exatamente o que custou tres jobs falhados antes.
+   */
+  const podeReinvocar = cap.permitirCheckpoint && segmento < MAX_SEGMENTOS;
+  const reservaColetaMs = SINT_RESERVA_MS + (podeReinvocar ? CUSTO_REINVOCACAO_MS : 0);
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
   /**
@@ -3532,8 +3596,14 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * pequena mentiu duas vezes esta aqui, e nao no tamanho da amostra.
    *
    * v4.19 = telemetria de coleta (motivo_saida, tetos_chamada, tel.coleta, tel.fidelidade).
+   * v4.20 = itens (b) e (c) do orcamento de coleta. A versao TEM de andar aqui porque dois campos
+   *   TROCARAM DE SIGNIFICADO, e nao apenas ganharam valor novo: `tetos_chamada.no_piso` (chamada
+   *   emitida sem autorizacao) virou `tetos_chamada.recusadas` (chamada que a reserva barrou, e
+   *   que portanto nao existe no banco antigo), e `erro` do especialista passou a poder dizer
+   *   `orcamento_insuficiente_para_escrita` — que e ausencia de relatorio, nao falha de provider.
+   *   Sem o corte de versao, uma consulta de taxa de falha somaria as duas coisas.
    */
-  tel.versao = "job-v4.19";
+  tel.versao = "job-v4.20";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -3579,7 +3649,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           retomada.devolver.map((d: any) => ({ nome: String(d.nome),
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${String(d.motivo)}\nCorrija exatamente isso.` })),
-          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel,
+          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel, reservaColetaMs,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -3600,7 +3670,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver2.map((d) => d.nome).join(", ")}`);
           const refeitos2 = await executarLote(
             devolver2.map((d) => ({ nome: d.nome, foco: `DEVOLUCAO DA COORDENACAO (rodada ${rodada}): ${d.motivo}. Corrija exatamente isso.` })),
-            pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel,
+            pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel, reservaColetaMs,
           );
           for (const novo of refeitos2) {
             const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -3667,7 +3737,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
     // FASE 2 - subagentes em paralelo
     await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
-    let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel);
+    let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel, reservaColetaMs);
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
     /**
      * PAREDE NO FIM DA COLETA — o numero que faltava para responder "qual recurso apertou".
@@ -3685,7 +3755,12 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       parede_livre_ms: prazoDeParede(),
       prazo_ms: prazo(),
       quem_aperta: prazo() < prazoDeParede() ? "por_invocacao" : "parede_global",
-      reserva_ms: SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS,
+      // A reserva REAL desta coleta, nao a soma das constantes: desde o item (b) ela depende de
+      // haver reinvocacao possivel. Gravar a soma fixa aqui faria a auditoria ler 195s onde a
+      // coleta trabalhou com 150s, e a pista medida sairia errada por 45s.
+      reserva_ms: reservaColetaMs,
+      pode_reinvocar: podeReinvocar,
+      chamada_minima_ms: CHAMADA_MINIMA_MS,
       ms_desde_created: Date.now() - createdMs,
     };
 
@@ -3711,7 +3786,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           devolver.map((d) => ({ nome: d.nome,
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${d.motivo}\nCorrija exatamente isso; o que ja estava certo nao precisa ser repetido do zero.` })),
-          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel,
+          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel, reservaColetaMs,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);

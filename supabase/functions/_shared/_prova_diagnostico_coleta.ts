@@ -6,9 +6,13 @@
 // medido como ruido do modelo). Entao o que tem de ficar vermelho aqui e:
 //
 //   1. motivo de saida voltar a se confundir com finish_reason do provider;
-//   2. o piso do teto por chamada deixar de ser declarado como piso;
+//   2. o piso VOLTAR — isto e, uma chamada sair com mais tempo do que a reserva autorizou;
 //   3. a fidelidade passar a premiar comprimento em vez de conteudo conferivel;
 //   4. relatorio que FALHOU voltar a entrar no denominador do aproveitamento.
+//
+// O item 2 mudou de sentido em 04/09/2026 com os itens (b) e (c). Antes ele defendia que o piso
+// fosse DECLARADO como piso; agora defende que ele nao exista, porque chamada no piso teve 0 de 4
+// sucessos medidos e queimava parede antes de abortar. O que substitui e a parada honesta.
 
 import {
   ancorasVerificaveis,
@@ -25,48 +29,89 @@ function assert(cond: boolean, msg: string) {
   if (!cond) { console.error(`FALHOU: ${msg}`); falhas++; }
 }
 
-// --- 1) TETO POR CHAMADA: a aritmetica medida em 04/09 tem de continuar reproduzivel ---------
+// --- 1) TETO POR CHAMADA: parada honesta no lugar do piso ------------------------------------
 //
-// Parametros reais do deep: teto de provider 150s, reserva 195s (150s sintese + 45s reinvocacao),
-// piso 20s. `prazo()` comeca em ~260s (270s por invocacao - 10s de reserva final).
-const P = { tetoProviderMs: 150_000, reservaMs: 195_000, pisoMs: 20_000 };
+// Parametros reais do deep no segmento 1: teto de provider 150s, reserva 195s (150s de sintese +
+// 45s de reinvocacao, que ali ainda pode ocorrer) e minimo de 45s. `prazo()` comeca em ~260s
+// (270s por invocacao - 10s de reserva final).
+const P = { tetoProviderMs: 150_000, reservaMs: 195_000, minimoMs: 45_000 };
 
 const inicio = tetoDaChamadaMs({ prazoMs: 260_000, ...P });
 assert(inicio.ms === 65_000, `no inicio da coleta o teto deveria ser 65s, veio ${inicio.ms}`);
-assert(!inicio.no_piso, "teto de 65s nao e piso");
+assert(inicio.viavel, "65s autorizados sao chamada viavel");
 
-const meio = tetoDaChamadaMs({ prazoMs: 230_000, ...P });
-assert(meio.ms === 35_000, `aos 30s de coleta o teto deveria ser 35s, veio ${meio.ms}`);
-assert(!meio.no_piso, "teto de 35s nao e piso");
+// ITEM (b): a MESMA coleta, no ultimo segmento ou em tier que nunca reinvoca, nao paga o pedagio
+// de reinvocacao. E o mesmo instante do relogio; muda so a reserva — e a pista salta de 65s para
+// 110s. Se esta linha ficar vermelha, os 45s voltaram a ser cobrados de quem nao vai reinvocar.
+const semReinvocacao = tetoDaChamadaMs({ prazoMs: 260_000, ...P, reservaMs: 150_000 });
+assert(semReinvocacao.ms === 110_000, `sem reinvocacao possivel o teto e 110s, veio ${semReinvocacao.ms}`);
+assert(
+  semReinvocacao.ms - inicio.ms === 45_000,
+  "o item (b) tem de devolver exatamente os 45s do pedagio que nao vai ser cobrado",
+);
 
-// FRONTEIRA EXATA: com 215s de prazo a reserva autoriza exatamente 20s. Ainda NAO e piso — e o
-// ultimo instante em que o teto concedido e um teto de verdade. Isso acontece aos 45s de coleta.
-const fronteira = tetoDaChamadaMs({ prazoMs: 215_000, ...P });
-assert(fronteira.ms === 20_000, `na fronteira o teto e 20s, veio ${fronteira.ms}`);
-assert(fronteira.autorizado_ms === 20_000, "na fronteira a reserva autoriza exatamente 20s");
-assert(!fronteira.no_piso, "20s autorizados nao sao piso: a reserva concedeu esse tempo");
+// FRONTEIRA EXATA: a reserva autoriza exatamente o minimo. Ainda emite — o minimo e o que precisa
+// ser autorizado, nao o que precisa ser excedido.
+const fronteira = tetoDaChamadaMs({ prazoMs: 240_000, ...P });
+assert(fronteira.autorizado_ms === 45_000, "na fronteira a reserva autoriza exatamente 45s");
+assert(fronteira.viavel && fronteira.ms === 45_000, "minimo autorizado no limite ainda e chamada real");
 
-// AQUI ESTA O ACHADO: passada a fronteira, o teto NAO cai abaixo de 20s nem sobe nunca mais —
-// toda chamada seguinte sai no piso, com mais tempo do que a reserva autoriza. Foram essas as
-// chamadas que a medicao de 04/09 viu abortar em `openrouter_timeout_20000`.
-const colapso = tetoDaChamadaMs({ prazoMs: 210_000, ...P });
-assert(colapso.ms === 20_000, `depois da fronteira o teto fica travado em 20s, veio ${colapso.ms}`);
-assert(colapso.autorizado_ms === 15_000, `a reserva autorizava 15s, veio ${colapso.autorizado_ms}`);
-assert(colapso.no_piso, "teto de 20s com 15s autorizados TEM de ser declarado como piso");
+// AQUI ESTAVA O DEFEITO. Um milissegundo abaixo do minimo, o codigo antigo emitia a chamada com o
+// piso de 20s; agora ela nao sai. Nao ha "chamada pequena": ha chamada ou parada.
+const abaixo = tetoDaChamadaMs({ prazoMs: 239_999, ...P });
+assert(!abaixo.viavel, "abaixo do minimo a chamada NAO pode ser emitida");
+assert(abaixo.ms === 0, `chamada recusada nao recebe timeout, veio ${abaixo.ms}`);
+assert(abaixo.autorizado_ms === 44_999, "a recusa continua dizendo de quanto a coleta ficou devendo");
+
+// O caso literal que a medicao de 04/09 viu abortar em `openrouter_timeout_20000`: 15s autorizados
+// saindo como 20s de chamada. Hoje ele para, e o relogio que sobra fica para a escrita.
+const exPiso = tetoDaChamadaMs({ prazoMs: 210_000, ...P });
+assert(exPiso.autorizado_ms === 15_000, `a reserva autorizava 15s, veio ${exPiso.autorizado_ms}`);
+assert(!exPiso.viavel && exPiso.ms === 0, "15s autorizados nao viram mais uma chamada de 20s");
 
 const negativo = tetoDaChamadaMs({ prazoMs: 150_000, ...P });
 assert(negativo.autorizado_ms === -45_000, `reserva deveria autorizar -45s, veio ${negativo.autorizado_ms}`);
-assert(negativo.ms === 20_000 && negativo.no_piso, "orcamento negativo tem de sair no piso E declarar");
+assert(!negativo.viavel && negativo.ms === 0, "orcamento negativo nao emite chamada nenhuma");
 
-// A parede global (480s) NAO e quem produz o piso — e o teto por invocacao. Com 470s de prazo o
-// teto e o do provider, cheio. Se algum dia esta linha ficar vermelha, alguem mexeu na reserva.
+/**
+ * ITEM (c), O QUE ELE DE FATO COMPRA: a coleta para ENQUANTO a escrita ainda cabe.
+ *
+ * Parar por parar nao preservaria nada. O laco de coleta soma `CHAMADA_MINIMA_MS` a reserva depois
+ * da primeira ferramenta (`guardarEscrita`), justamente para que, quando ele parar, a escrita de
+ * salvamento — que reserva so o basico — ainda tenha orcamento. E este par que transforma coleta
+ * paga em relatorio em vez de perde-la.
+ */
+const coletaComEscritaGuardada = tetoDaChamadaMs({ prazoMs: 260_000, ...P, reservaMs: 195_000 + 45_000 });
+assert(!coletaComEscritaGuardada.viavel, "com escrita guardada, esta chamada de coleta nao sai");
+const escritaDepoisDaParada = tetoDaChamadaMs({ prazoMs: 260_000, ...P });
+assert(
+  escritaDepoisDaParada.viavel && escritaDepoisDaParada.ms === 65_000,
+  "DEFEITO CENTRAL DO ITEM (c): a coleta parou e a escrita de salvamento ficou sem orcamento",
+);
+
+// A parede global (480s) NAO era quem produzia o piso — era o teto por invocacao. Com 470s de
+// prazo o teto e o do provider, cheio. Se esta linha ficar vermelha, alguem mexeu na reserva.
 const paredeCheia = tetoDaChamadaMs({ prazoMs: 470_000, ...P });
-assert(paredeCheia.ms === 150_000 && !paredeCheia.no_piso, "com parede cheia o teto e o do provider");
+assert(paredeCheia.ms === 150_000 && paredeCheia.viavel, "com parede cheia o teto e o do provider");
 
-const resumo = resumirTetos([inicio, meio, fronteira, colapso, negativo]);
-assert(resumo.chamadas === 5, "resumo deveria contar 5 chamadas");
-assert(resumo.no_piso === 2, `resumo deveria achar 2 chamadas no piso, achou ${resumo.no_piso}`);
-assert(resumo.min_ms === 20_000 && resumo.max_ms === 65_000, "resumo deveria dar min 20s e max 65s");
+// INVARIANTE QUE O PISO VIOLAVA, e a unica linha que precisa ficar de pe se todo o resto mudar:
+// nenhuma chamada emitida recebe mais tempo do que a reserva autorizou.
+for (const t of [inicio, semReinvocacao, fronteira, paredeCheia, escritaDepoisDaParada]) {
+  assert(t.ms <= t.autorizado_ms, `chamada de ${t.ms}ms com ${t.autorizado_ms}ms autorizados: o piso voltou`);
+}
+
+const resumo = resumirTetos([inicio, fronteira, exPiso, negativo, paredeCheia]);
+assert(resumo.chamadas === 3, `resumo deveria contar 3 chamadas emitidas, contou ${resumo.chamadas}`);
+assert(resumo.recusadas === 2, `resumo deveria contar 2 chamadas recusadas, contou ${resumo.recusadas}`);
+// min/max olham so as emitidas: incluir o zero da recusa faria `min_ms` marcar 0 e sugerir chamada
+// instantanea onde nao houve chamada.
+assert(resumo.min_ms === 45_000, `min das emitidas deveria ser 45s, veio ${resumo.min_ms}`);
+assert(resumo.max_ms === 150_000, `max das emitidas deveria ser 150s, veio ${resumo.max_ms}`);
+const soRecusadas = resumirTetos([exPiso, negativo]);
+assert(
+  soRecusadas.chamadas === 0 && soRecusadas.min_ms === null,
+  "execucao que nao emitiu chamada nenhuma nao pode reportar teto minimo",
+);
 const vazio = resumirTetos([]);
 assert(vazio.chamadas === 0 && vazio.min_ms === null, "resumo de lista vazia nao deve inventar numero");
 
@@ -165,4 +210,4 @@ assert(janelaLivre(21_205, 500_000).ocupacao < 0.05, "a entrada antiga tambem oc
 assert(janelaLivre(600_000, 500_000).livre_tokens === 0, "entrada acima do contexto nao gera janela negativa");
 
 if (falhas) { console.error(`\n${falhas} falha(s)`); Deno.exit(1); }
-console.log("ok - diagnostico da coleta (piso do teto declarado, motivo de saida limpo, fidelidade por conteudo)");
+console.log("ok - diagnostico da coleta (parada honesta sem piso, motivo de saida limpo, fidelidade por conteudo)");
