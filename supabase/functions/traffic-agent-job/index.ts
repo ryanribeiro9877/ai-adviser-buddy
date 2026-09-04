@@ -2137,6 +2137,9 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
   let tin = 0, tout = 0, reas = 0, relatorio = "", finish = "";
+  // Guarda a falha em vez de deixa-la virar "relatorio". Ver relatorioCompleto no fim da funcao:
+  // sem isto, um especialista que morreu no timeout era contabilizado como coleta bem-sucedida.
+  let erroLlm: string | null = null;
   /**
    * Teto DESTA chamada, preso ao que sobra depois de reservar a sintese e a reinvocacao.
    *
@@ -2155,7 +2158,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     if (prazo() < SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS) { finish = finish || "reserva_sintese"; break; }
     if (prazo() <= 0) { finish = "prazo_do_job"; break; }
     const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
-    if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; break; }
+    if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; erroLlm = String(r.erro); break; }
     const u = usoDe(r.parsed); tin += u.tin; tout += u.tout; reas += u.reas;
     finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
     const msg = r.parsed?.choices?.[0]?.message;
@@ -2189,7 +2192,9 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     // Estourou iteracoes/prazo coletando: forca o relatorio com o que ha.
     messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
     const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
+    if (rf.erro) erroLlm = String(rf.erro);
     if (!rf.erro) {
+      erroLlm = null; // a escrita forcada salvou o relatorio: nao houve perda de coleta
       const u = usoDe(rf.parsed); tin += u.tin; tout += u.tout;
       relatorio = String(rf.parsed?.choices?.[0]?.message?.content ?? "");
       finish = String(rf.parsed?.choices?.[0]?.finish_reason ?? finish) + "+forcado";
@@ -2212,14 +2217,45 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     finish = String(rc.parsed?.choices?.[0]?.finish_reason ?? "length");
     partes++;
   }
-  const relatorioCompleto = !!relatorio && !finish.startsWith("length");
+  /**
+   * DEFEITO CORRIGIDO EM 04/09/2026: falha nao e relatorio completo.
+   *
+   * Quando `chamarLLM` erra, a linha la em cima poe "(subagente X falhou: ...)" dentro de
+   * `relatorio`. Como o teste antigo era so `!!relatorio && !finish.startsWith("length")`, essa
+   * string de falha passava por relatorio VALIDO: a telemetria gravava `relatorio_completo: true`
+   * e a sintese recebia a frase de erro como se fosse coleta. Foi assim que 11 de 16 execucoes de
+   * especialista apareceram como coleta bem-sucedida sem ter trazido um unico numero — e foi essa
+   * leitura errada que me fez reportar "coleta completa" ao gestor em duas rodadas seguidas.
+   * `partes` idem: contava a frase de erro como uma parte de relatorio.
+   */
+  const houveRelatorioReal = !!relatorio && !erroLlm;
+  const relatorioCompleto = houveRelatorioReal && !finish.startsWith("length");
+  if (!houveRelatorioReal) partes = 0;
   if (!relatorio) relatorio = `(subagente ${nome}: sem relatorio - registre como lacuna do job)`;
-  return { nome, relatorio, completo: relatorioCompleto, partes, tools: usadas, tokens_in: tin, tokens_out: tout, reasoning_tokens: reas, finish };
+  return { nome, relatorio, completo: relatorioCompleto, partes, tools: usadas, tokens_in: tin, tokens_out: tout, reasoning_tokens: reas, finish, erro: erroLlm };
 }
 
 // ============================================================================
 // FASE 3 - SINTESE com continuacao INTERNA (contexto preservado, zero re-coleta)
 // ============================================================================
+
+/**
+ * Rotulo honesto do relatorio para a sintese.
+ *
+ * Havia so dois rotulos, e o negativo dizia "cortado por limite de tamanho; ausencias aqui NAO
+ * significam que o dado nao existe". Isso e verdade para relatorio truncado e MENTIRA para
+ * especialista que morreu no timeout: nesse caso a ausencia significa exatamente que ninguem leu.
+ * Com um rotulo so, a sintese tratava falha de coleta como relatorio enxuto e escrevia por cima
+ * do vazio. Sao tres estados diferentes e agora eles se distinguem.
+ */
+function rotuloRelatorio(r: { completo: boolean; erro?: string | null }): string {
+  if (r.erro) {
+    return `FALHOU (${r.erro}) - este especialista NAO leu nada. NAO escreva analise sobre o dominio dele: declare a falha como lacuna`;
+  }
+  return r.completo
+    ? "COMPLETO"
+    : "INCOMPLETO - cortado por limite de tamanho; ausencias aqui NAO significam que o dado nao existe";
+}
 /**
  * Memoria da sintese: por relevancia, nao por atacado.
  *
@@ -2324,7 +2360,7 @@ async function chamarSinteseParte(
 async function sintetizarSegmentada(
   companyName: string,
   pergunta: string,
-  relatorios: { nome: string; relatorio: string; completo: boolean }[],
+  relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[],
   estilo: string,
   memoria: string,
   prazo: () => number,
@@ -2344,7 +2380,7 @@ async function sintetizarSegmentada(
     const restanteMs = Math.min(prazo(), hardDeadline - Date.now());
     if (restanteMs <= 8_000) break;
     const blocos = grupo.map((r) =>
-      `=== RELATORIO ${r.nome} [${r.completo ? "COMPLETO" : "INCOMPLETO"}] ===\n${r.relatorio}`).join("\n\n");
+      `=== RELATORIO ${r.nome} [${rotuloRelatorio(r)}] ===\n${r.relatorio}`).join("\n\n");
     const messages: any[] = [
       { role: "system", content: sys },
       { role: "user", content: `PERGUNTA DO GESTOR (responda o que estes relatorios cobrem; declare lacunas do que falta):\n${pergunta}\n\n=== RELATORIOS (bloco ${g + 1}/${grupos.length}) ===\n${blocos}` },
@@ -2396,7 +2432,7 @@ async function sintetizarSegmentada(
 async function sintetizar(
   companyName: string,
   pergunta: string,
-  relatorios: { nome: string; relatorio: string; completo: boolean }[],
+  relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[],
   estilo: string,
   memoria: string,
   prazo: () => number,
@@ -2404,7 +2440,7 @@ async function sintetizar(
   opts?: { timeoutMs?: number; escopo?: EscopoPedido; companyId?: string },
 ) {
   const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo, opts?.companyId);
-  const blocos = relatorios.map((r) => `=== RELATORIO ${r.nome} [${r.completo ? "COMPLETO" : "INCOMPLETO - cortado por limite de tamanho; ausencias aqui NAO significam que o dado nao existe"}] ===\n${r.relatorio}`).join("\n\n");
+  const blocos = relatorios.map((r) => `=== RELATORIO ${r.nome} [${rotuloRelatorio(r)}] ===\n${r.relatorio}`).join("\n\n");
   // v3.8: pacote enorme → sintese segmentada (menos 429 numa unica chamada monstro).
   if (relatorios.length >= 4 && blocos.length >= SINT_CHARS_SEGMENTAR && prazo() > 60_000) {
     return await sintetizarSegmentada(companyName, pergunta, relatorios, estilo, memoria, prazo, tel, opts);
@@ -2507,7 +2543,7 @@ async function sintetizarComResgate(args: {
   jobId: string; convId: string; companyId: string; mcpKey: string;
   companyName: string; pergunta: string;
   plano: { nome: string; foco: string }[];
-  relatorios: { nome: string; relatorio: string; completo: boolean }[];
+  relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[];
   estilo: string; memoria: string;
   prazo: () => number; tel: any;
   segmento: number; rodada: number;
@@ -3061,7 +3097,7 @@ function motivosDevolucaoDetalhe(
 async function validarRelatorios(
   pergunta: string,
   plano: { nome: string; foco: string }[],
-  relatorios: { nome: string; relatorio: string; completo: boolean }[],
+  relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[],
   tel: any,
 ): Promise<{ nome: string; motivo: string }[]> {
   const det = [
@@ -3122,26 +3158,29 @@ async function pushProgresso(jobId: string, fase: string, detalhe: string) {
 async function executarLote(
   lote: { nome: string; foco: string }[], pergunta: string,
   ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number, tel: any,
-): Promise<{ nome: string; relatorio: string; completo: boolean }[]> {
+): Promise<{ nome: string; relatorio: string; completo: boolean; erro?: string | null }[]> {
   const resultados = await Promise.allSettled(lote.map((p) =>
     p.nome === "analise_visual_drive"
       ? rodarAnaliseVisual(p.foco, ctx, prazo, tel)
       : rodarSubagente(p.nome, p.foco, pergunta, ctx, prazo)));
-  const saida: { nome: string; relatorio: string; completo: boolean }[] = [];
+  const saida: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
   for (let i = 0; i < resultados.length; i++) {
     const res = resultados[i];
     if (res.status === "fulfilled") {
-      saida.push({ nome: res.value.nome, relatorio: res.value.relatorio, completo: res.value.completo });
+      saida.push({ nome: res.value.nome, relatorio: res.value.relatorio, completo: res.value.completo, erro: (res.value as { erro?: string | null }).erro ?? null });
       // rodarAnaliseVisual devolve so { nome, relatorio, completo }; rodarSubagente
       // devolve tambem tools/tokens/finish/partes. Acessar os campos de token no
       // primeiro caso gravava undefined em silencio na telemetria - agora a ausencia
       // e declarada no tipo e o campo simplesmente nao entra no registro.
       const t = res.value as Partial<{
         tools: unknown; tokens_in: number; tokens_out: number;
-        reasoning_tokens: number; finish: string; partes: number;
+        reasoning_tokens: number; finish: string; partes: number; erro: string | null;
       }>;
       tel.subagentes.push({
         nome: res.value.nome, relatorio_completo: res.value.completo,
+        // O erro do especialista precisa aparecer na telemetria: sem ele, uma coleta que morreu
+        // no timeout e uma que fechou sozinha ficam indistinguiveis na auditoria.
+        ...(t.erro ? { erro: t.erro } : {}),
         ...(t.tools !== undefined ? { tools: t.tools } : {}),
         ...(t.tokens_in !== undefined ? { tokens_in: t.tokens_in } : {}),
         ...(t.tokens_out !== undefined ? { tokens_out: t.tokens_out } : {}),
@@ -3274,7 +3313,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       const { data: styleRows0 } = await supa.from("agent_style").select("secao,regra").eq("vigente", true).order("ordem");
       const estilo0 = (styleRows0 ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n") || "(sem regras cadastradas)";
       const mem0 = await carregarMemoriaInstitucional(supa, companyId);
-      let relatorios: { nome: string; relatorio: string; completo: boolean }[] = retomada.relatorios ?? [];
+      let relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = retomada.relatorios ?? [];
       const plano: { nome: string; foco: string }[] = retomada.plano ?? [];
       let rodada: number = Number(retomada.rodada ?? 0);
       const devolucoesCap = cap.devolucoesMax;
