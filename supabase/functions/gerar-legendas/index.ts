@@ -94,10 +94,18 @@ function complianceAptoParaCard(compl: any, httpOk: boolean): boolean {
   const viol = Array.isArray(compl?.violacoes) ? compl.violacoes : [];
   if (viol.some((v: any) => String(v?.severidade ?? "").toLowerCase() === "bloqueia")) return false;
   // aprovado e atencao (ex. LGL-04 sem CNPJ no body) sao aptos para emitir card.
+  //
+  // A CHAVE FANTASMA, removida em 04/09/2026. As duas linhas seguintes liam `compl.aprovado`,
+  // chave que `compliance-check` NUNCA devolve - ela so produz `veredito: "aprovado"`. A
+  // primeira leitura era `!== false`, a forma perigosa: chave ausente da `undefined !== false`,
+  // que e VERDADEIRO, entao a ausencia de sinal virava aprovacao. A segunda era `=== true`,
+  // inofensiva mas morta. Aqui o dano estava contido porque so se chegava nelas com veredito
+  // ja positivo; o motivo de tirar e que o idioma e o mesmo que em 03/09/2026 leu
+  // `->>'aprovado'` do portao de promessas e quase enterrou um achado de compliance.
+  // Quem decide agora e o veredito, que existe. Ver _prova_portao_fail_closed.ts.
   if (verd === "aprovado" || verd === "atencao" || verd.includes("aprov") || verd.includes("atenc")) {
-    return compl?.aprovado !== false;
+    return true;
   }
-  if (compl?.aprovado === true) return true;
   return false;
 }
 
@@ -382,13 +390,32 @@ ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.sl
         p_legenda: texto,
         p_drive_file_id: driveFileId,
       });
+      // FAIL-CLOSED, e o motivo esta em producao. A versao anterior tratava erro da RPC, mas
+      // nao tratava RESPOSTA VAZIA sem erro: `parData` nulo fazia `verdPar` virar "", ""
+      // nao contem "reprov", e a variante passava como apta. Ou seja, verificador que nao
+      // respondeu liberava a publicacao. E o mesmo defeito que em 03/09/2026 fez uma
+      // comparacao de risco ler a chave inexistente `aprovado` e tratar NULL como aprovacao.
+      // Agora so passa quem foi avaliado e cujo veredito esta na lista de liberados; qualquer
+      // outra coisa - nulo, vazio, vocabulario novo - e recusa. Ausencia de veredito nao e
+      // veredito de ausencia de risco.
+      const LIBERADOS = ["sem_violacao_detectada", "atencao", "nada_a_avaliar"];
       if (parErr) {
         par = { fail_closed: true, erro: parErr.message };
         parOk = false;
+      } else if (!parData || typeof parData !== "object") {
+        par = { fail_closed: true, erro: "checar_par_texto_e_peca devolveu resposta vazia" };
+        parOk = false;
       } else {
         par = parData;
-        const verdPar = String((parData as any)?.veredito ?? "").toLowerCase();
-        if (verdPar.includes("reprov")) parOk = false;
+        const verdPar = String((parData as any)?.veredito ?? "").toLowerCase().trim();
+        if (!LIBERADOS.includes(verdPar)) {
+          parOk = false;
+          par = {
+            ...(parData as Record<string, unknown>),
+            fail_closed: true,
+            erro: `veredito do par nao esta na lista de liberados: ${verdPar || "(ausente)"}`,
+          };
+        }
       }
     }
 

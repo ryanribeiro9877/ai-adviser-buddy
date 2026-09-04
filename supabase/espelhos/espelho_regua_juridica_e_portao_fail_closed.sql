@@ -1,0 +1,193 @@
+-- ESPELHO PARA GIT — NÃO RE-EXECUTAR (os objetos já existem em produção).
+--
+-- Consolida a rodada de 04/09/2026, continuação direta do commit `80a0fc1` (escoamento das
+-- transcrições). O SQL exato está em `../migrations/`:
+--   20260904100000_portao_de_compliance_incapaz_de_aprovar_por_omissao.sql
+--   20260904110000_regua_de_publicidade_juridica_em_modo_aviso.sql
+--   20260904120000_usage_faturado_da_transcricao.sql
+-- Este arquivo guarda a DECISÃO e a MEDIÇÃO, que não cabem no DDL.
+--
+-- =========================================================================================
+-- 1. O TAMANHO DA EXPOSIÇÃO, MEDIDO ANTES DE QUALQUER PROPOSTA
+-- =========================================================================================
+-- Pergunta do gestor: das peças do Jurídico da COHAPM cujo áudio revelou risco, quantas estão
+-- NO AR como anúncio agora? Não quantas já viraram anúncio algum dia.
+--
+-- SINAL CANÔNICO ESCOLHIDO: `ads.status = 'ACTIVE'`. A coluna carrega a semântica de
+-- `effective_status` da Meta, e não o status próprio do anúncio — os valores presentes incluem
+-- `ADSET_PAUSED` e `CAMPAIGN_PAUSED`, ou seja, pausa de pai já vem embutida. Conferido: os 97
+-- anúncios ACTIVE têm 100% de conjunto ACTIVE e campanha active, sem exceção. Logo `ACTIVE`
+-- aqui significa "entregando", e não "ligado mas com pai desligado".
+--
+-- PONTE PEÇA→ANÚNCIO, e a prova de que ela liga. Não existe FK entre peça do Drive e anúncio.
+-- Duas vias foram testadas e uma foi descartada com número:
+--   * nome do anúncio casando nome do arquivo: 0 de 42 casaram. Descartada.
+--   * `approval_requests.payload->>'drive_file_id'` → `execution_result->>'id_criado'` →
+--     `ads.external_id`: 123 aprovações com id, 123 encontram o anúncio no espelho (100%),
+--     89 peças distintas, 31 anúncios ACTIVE criados por essa via.
+-- A prova da ponte foi feita DE PROPÓSITO antes de reportar o negativo: um "nenhuma no ar"
+-- vindo de junção quebrada é exatamente o defeito da seção 3 deste espelho, e teria a mesma
+-- aparência de uma boa notícia.
+--
+-- RESULTADO (42 peças do Jurídico com áudio transcrito):
+--
+--   categoria de teor                     peças   já viraram anúncio   NO AR AGORA
+--   ------------------------------------  -----   ------------------   -----------
+--   afirma direito incondicional            6*             0                0
+--   acusa prática abusiva                  19              7                5
+--   oferta análise gratuita                42             10                6
+--   ------------------------------------  -----   ------------------   -----------
+--   total do Jurídico                      42             10                6
+--
+--   * o subconjunto "teor forte" foi levantado em 8 na apuração de 03/09 por regex mais
+--     larga; a contagem de 6 é a da regra que ficou (LGL-JUR-01), que exclui hedge. As 8
+--     incluíam 2 peças que dizem "PODE ter direito", que informam em vez de prometer.
+--
+-- A RESPOSTA QUE MUDA A URGÊNCIA: ZERO das peças de teor forte está no ar, e nenhuma delas
+-- chegou a virar anúncio um único dia. As 6 peças do Jurídico que entregam agora vivem todas
+-- na campanha `COHAPM_JURIDICO_CONV_WA_2026-08`, conjuntos `JUR_WA_CONJ.03_9305-8759` e
+-- `JUR_WA_CONJ.04_9331-6245`, com entrega desde 02–03/09/2026 (2 dias), 1.570 impressões e
+-- R$ 76,25 gastos — e 74 desses reais estão em duas peças só.
+--
+-- LEITURA QUE O NÚMERO SOZINHO NÃO DÁ, e que importa para a decisão: 4 das 6 no ar usam
+-- condicional ("os juros PODEM ser abusivos", "isso PODE ser uma prática abusiva", "PODE ser
+-- revertida judicialmente"). Duas afirmam: "isso não é crédito, é uma armadilha" (4
+-- impressões) e "muitos bancos cobram o dobro do que deveria" (36 impressões). O teor mais
+-- forte do acervo ficou fora do ar por acaso operacional, não por controle — nada no sistema
+-- impediria essas 6 de terem sido as 8.
+--
+-- NADA FOI PAUSADO NEM ALTERADO. Levantamento, por instrução expressa.
+--
+-- =========================================================================================
+-- 2. A RÉGUA JURÍDICA — 5 REGRAS, TODAS EM AVISO, NENHUMA BLOQUEIA
+-- =========================================================================================
+-- Norma conferida em 04/09/2026, não citada de memória: Provimento CFOAB 205/2021 segue
+-- VIGENTE (revogou o 94/2000 pelo art. 12; a revisão está em "fase final" desde dez/2025 mas
+-- nenhuma norma substitutiva foi publicada). Mais CED OAB (Res. 02/2015) art. 39, Estatuto
+-- (Lei 8.906/1994) art. 34, IV, e CDC arts. 31, 36 §único, 37 §1º/§2º/§3º.
+--
+--   regra        o que pega                              severidade   pega   no ar
+--   -----------  --------------------------------------  ----------   ----   -----
+--   LGL-JUR-01   direito incondicional a benefício         atencao      6       0
+--                que a lei condiciona
+--   LGL-JUR-02   menção a decisão judicial / resultado     atencao      5       3
+--   LGL-JUR-03   gratuidade como chamariz                  atencao     42       6
+--   LGL-JUR-04   exploração do medo / sensacionalismo      atencao      8       2
+--   LGL-JUR-05   afirmação factual sobre terceiros         atencao      1       1
+--
+-- MEDIDO, não estimado: zero falso positivo fora do Jurídico nas cinco (universo de 145
+-- vídeos com transcrição). 42 peças passaram a receber aviso, 0 passaram a ser bloqueadas.
+--
+-- ESCOPO, e por que foi obrigatório. `promessas_proibidas` não tem coluna de escopo — as 10
+-- regras existentes são todas de crédito e valem globalmente. As versões ingênuas produziram
+-- falsos positivos MEDIDOS no acervo da Legal é Viver: a de gratuidade pegava "o Registrato do
+-- Banco Central é um serviço gratuito" (2 peças) e a de medo pegava "cuidado com boleto falso"
+-- (4 peças) — educação financeira, não publicidade advocatícia. Dois remédios diferentes, e a
+-- distinção importa para quem for reescrever:
+--   * 4 das 5 (01, 02, 04, 05) ancoram em `(?=.*(juridic|advogad|judicial))`, lookahead que a
+--     regex do Postgres suporta. Sem isso a regra sai do assunto.
+--   * a LGL-JUR-03 NÃO usa lookahead: o que a salva é PROXIMIDADE — exige "análise/consulta/
+--     atendimento" a no máximo 25 caracteres de "gratuit", `[^.!?]{0,25}`, sem cruzar
+--     pontuação. É por isso que "serviço gratuito" do Registrato não casa, e ancorá-la em
+--     contexto jurídico seria redundante: quem oferta "análise gratuita" já está no assunto.
+-- Fica registrado que a solução ESTRUTURAL seria uma coluna `escopo`; não foi criada porque
+-- mudaria uma tabela com seis consumidores vivos e os dois remédios acima resolvem com risco
+-- menor.
+--
+-- POR QUE TUDO FICOU EM AVISO. `checar_par_texto_e_peca` só faz a emissão RECUSAR quando o
+-- veredito é 'reprova' (severidade 'bloqueia'); 'atencao' apenas anota. Verificado de ponta a
+-- ponta com uma peça real: veredito 'atencao', emissão não barrada, regras nomeadas no
+-- retorno. Regra larga ativada como bloqueio sem revisão de advogado travaria a operação na
+-- manhã seguinte, e o custo de travar 42 peças legítimas recai sobre quem opera.
+--
+-- LIMITE DE QUEM ESCREVEU, declarado: nem eu nem o gestor somos advogados. A dúvida grande é
+-- a LGL-JUR-03 — pega 42 de 42, e o art. 3º, I do Provimento veda gratuidade "COMO FORMA DE
+-- CAPTAÇÃO", condicionando a vedação a uma finalidade que não está na frase. Pior: o art. 2º,
+-- VIII define captação como mecanismo que "de forma ativa" angaria clientes, e há entendimento
+-- de que tráfego pago ofertando serviço advocatício já é publicidade ativa. Se esse
+-- entendimento procede, o problema não é a palavra "gratuita" — é o modelo do anúncio. Essa
+-- pergunta está REGISTRADA, não decidida.
+--
+-- ASSIMETRIA QUE FICA ABERTA: a edge `compliance-check` só consulta `promessas_proibidas`
+-- quando a empresa é de crédito ("COHAPM não herda substitutos CLT"). Estas regras NÃO
+-- aparecem por aquele caminho para a COHAPM — aparecem pelo que de fato roda na emissão,
+-- `checar_par_texto_e_peca`, que consulta o portão para qualquer empresa. Abrir a edge para a
+-- COHAPM também exporia as 10 regras de crédito a um negócio que não é de crédito, que foi a
+-- razão original do recorte. Decisão do gestor.
+--
+-- =========================================================================================
+-- 3. O PORTÃO FICA INCAPAZ DE APROVAR POR OMISSÃO
+-- =========================================================================================
+-- O defeito: a apuração de 03/09 leu `resultado->>'aprovado'`, chave que
+-- `checar_promessas_proibidas` não devolve. NULL virou "sem risco" e a conclusão "o áudio não
+-- carrega risco além da tela" quase foi reportada com base em nada. Quem desmentiu foi um
+-- controle positivo — um texto que TINHA de ser barrado e não foi.
+--
+-- Terceiro episódio do mesmo padrão neste projeto (antes: `get_notificacoes_pendentes` com
+-- comparação de `status::text` que zerava aprovações; auditoria de 13/08 onde 10 de 12 funções
+-- devolviam `PGRST202` lido como permissão). A lição repetida: STATUS AUSENTE NÃO É STATUS
+-- SEGURO.
+--
+-- QUATRO CONSERTOS:
+--
+-- (a) SQL — `checar_promessas_proibidas` levanta exceção quando não há nenhuma regra ativa.
+--     Antes, desativar as 10 regras produzia um portão que aprovava tudo com aparência de
+--     normalidade. Martelo deliberado: preferimos operação travada a operação sem portão.
+--     Ganhou também `bloqueia` (booleano) e `regras_consideradas` (contagem), para que exista
+--     UMA chave que é a resposta e o chamador possa conferir que o portão rodou.
+--
+-- (b) SQL — `provar_portao_de_compliance()` roda controle POSITIVO (texto que tem de ser
+--     barrado, casando 3 famílias de regra de propósito, para não morrer junto com uma) e
+--     NEGATIVO (texto inocente que não pode ser barrado — portão histérico é a outra forma de
+--     ficar inútil, porque acaba desligado por quem tem pressa). Levanta exceção em qualquer
+--     desvio. `vigiar_portao_de_compliance()` traduz a falha em alerta crítico por empresa
+--     (`alerts.company_id` é NOT NULL, então defeito global vira um alerta por dono), e o cron
+--     `vigia-portao-compliance-0955` roda diário via `rodar_tarefa_sql`.
+--     Estado conferido: portão vivo, 15 regras ativas, 3 bloqueios no controle positivo, 0 no
+--     negativo.
+--
+-- (c) Edges — `gerar-legendas` tratava erro da RPC mas NÃO resposta vazia sem erro: `parData`
+--     nulo fazia o veredito virar "", "" não contém "reprov", e a variante saía apta. Ou seja,
+--     verificador mudo liberava publicação. Agora só passa veredito que está na lista de
+--     liberados. `meta-actions` bloqueava por igualdade exata com "reprova", então vocabulário
+--     novo passaria calado — virou lista de liberados também, com mensagem própria para
+--     "veredito desconhecido" (explicar CET a quem recebeu outro defeito manda o gestor
+--     procurar no lugar errado). Removida ainda a leitura `compl?.aprovado !== false` de
+--     `gerar-legendas`: `compliance-check` nunca devolve essa chave (só `veredito:
+--     "aprovado"`), e na forma `!== false` a ausência valia VERDADEIRO.
+--
+-- (d) Prova permanente — `_shared/_prova_portao_fail_closed.ts`, que a suíte descobre por
+--     glob. Checa quatro coisas por leitura de fonte: recusa de resposta vazia, decisão por
+--     lista de liberados, ausência de idioma "ausência vira aprovação", e existência da
+--     migration do controle positivo. A distinção que essa prova faz e que evita alarme falso:
+--     `x.aprovado === true` sobre chave inexistente é código morto inofensivo (ausente dá
+--     falso, não libera) e NÃO é acusado; `x.aprovado !== false` e `->>'aprovado' is false`
+--     liberam e SÃO acusados. Auditados todos os consumidores; os de `traffic-chat` e
+--     `waba-template-create/replicate` usam a forma segura e ficaram como estão.
+--
+-- CI conferido depois de tudo: 31 edges no `deno check`, 35 provas do `_shared`, zero falhas.
+--
+-- =========================================================================================
+-- 4. ITEM MENOR — O USAGE FATURADO DEIXA DE SER JOGADO FORA
+-- =========================================================================================
+-- A apuração de custo de 03/09 (US$ 0,15 em 145 vídeos) foi DERIVADA: calibrei
+-- caracteres-por-segundo contra as durações do mp4box e multipliquei pelo preço publicado.
+-- O número exato sempre esteve na resposta da OpenAI e era descartado — `transcribe-audio`
+-- devolvia `tokens_in: null, tokens_out: null` cravado no caminho da OpenAI, embora
+-- `/v1/audio/transcriptions` com `response_format: json` (o único formato que
+-- gpt-4o-mini-transcribe aceita) devolva `usage` com `input_tokens`, `output_tokens`,
+-- `total_tokens` e `input_token_details.audio_tokens`.
+--
+-- Agora o objeto cru é capturado e gravado em `drive_midia_analises.transcricao_usage`
+-- (jsonb). Jsonb e não duas colunas de inteiro por dois motivos: o `usage` tem duas variantes
+-- de contrato (`type:"tokens"` e `type:"duration"`, esta para modelos cobrados por duração), e
+-- `input_token_details.audio_tokens` — o número que confere a fatura — é aninhado; achatar
+-- perderia a distinção entre token de áudio (o arquivo) e token de texto (o glossário que NÓS
+-- escrevemos e podemos encurtar).
+--
+-- SEM BACKFILL, e por quê: o `usage` das 145 transcrições já feitas foi descartado na resposta
+-- e só voltaria transcrevendo de novo. Não vale US$ 0,15 para reaver um número já estimado com
+-- margem conhecida. A coluna começa nula e vale da próxima em diante — ausência ali significa
+-- "não capturado", nunca "custou zero". `output_tokens` costuma vir 0 nos modelos de
+-- transcrição porque a OpenAI trata transcrição como transformação de ENTRADA: zero ali é o
+-- valor correto, não dado faltando.

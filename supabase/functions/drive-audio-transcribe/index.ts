@@ -217,6 +217,8 @@ type ResultadoPeca = {
   tamanho_audio?: number;
   duracao_seg?: number;
   transcricao_fonte?: string;
+  /** `usage` cru do transcritor, para conferencia de fatura. Ver a gravacao em processarPeca. */
+  usage?: unknown;
   erro?: string;
 };
 
@@ -296,13 +298,24 @@ async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPec
 
   const fonte = `transcribe-audio / ${t.parsed?.provider ?? "desconhecido"} / ${t.parsed?.model ?? "modelo nao informado"} (via ${metodo})`;
   const now = new Date().toISOString();
+  // v4 (04/09/2026) - GUARDA O USAGE FATURADO. A apuracao de 03/09 teve de DERIVAR o custo
+  // (calibrando caracteres por segundo contra as duracoes do mp4box) porque este numero era
+  // descartado. Agora o objeto cru da OpenAI fica ao lado da transcricao que ele pagou, e a
+  // proxima apuracao mede em vez de estimar. Nulo quando o provedor nao informa - ausencia
+  // aqui significa "nao capturado", nunca "custou zero".
+  const usage = t.parsed?.usage ?? null;
   const { error: writeError } = await supa
     .from("drive_midia_analises")
-    .update({ transcricao_audio: text, transcricao_em: now, transcricao_fonte: fonte })
+    .update({
+      transcricao_audio: text,
+      transcricao_em: now,
+      transcricao_fonte: fonte,
+      transcricao_usage: usage,
+    })
     .eq("id", row.id);
   if (writeError) return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: `gravacao: ${writeError.message}` }, transitorio: true };
 
-  return { res: { peca: row.nome, drive_file_id: fileId, transcrito: true, metodo, caracteres: text.length, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, transcricao_fonte: fonte }, transitorio: false };
+  return { res: { peca: row.nome, drive_file_id: fileId, transcrito: true, metodo, caracteres: text.length, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, transcricao_fonte: fonte, usage }, transitorio: false };
 }
 
 Deno.serve(async (req) => {

@@ -4178,10 +4178,25 @@ Deno.serve(async (req) => {
           resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
           continue;
         }
-        if (doisLados && (par as any).veredito === "reprova") {
-          const motivo = "par_texto_e_peca_reprova";
-          const detalhe =
-            "O PAR legenda+peca reprovou no compliance de texto: a peca MOSTRA valor/taxa/prazo na tela e a legenda da publicacao nao traz o CET nem referencia de consulta. O card NAO foi executado. Aceito: 'consulte o CET na sua simulacao' (ou CET numerico oficial). Percentual de CET NAO e obrigatorio.";
+        // v5.6 (04/09/2026) - LISTA DE LIBERADOS, e nao mais igualdade com "reprova". A versao
+        // anterior so bloqueava no literal exato, entao vocabulario novo no veredito (ou
+        // grafia diferente) passaria calado - `undefined === "reprova"` e falso, e falso aqui
+        // significa publicar. Inverter a leitura custa nada e fecha a classe inteira: o que
+        // nao esta explicitamente liberado bloqueia. Se a RPC ganhar um veredito novo, o pior
+        // caso passa a ser card bloqueado a toa (visivel, reclamavel) em vez de anuncio
+        // publicado sem avaliacao (invisivel).
+        const VER_LIBERADOS = ["sem_violacao_detectada", "atencao", "nada_a_avaliar"];
+        const verdPar = String((par as any)?.veredito ?? "").toLowerCase().trim();
+        if (doisLados && !VER_LIBERADOS.includes(verdPar)) {
+          const motivo = verdPar === "reprova"
+            ? "par_texto_e_peca_reprova"
+            : "par_texto_e_peca_veredito_desconhecido";
+          // Duas mensagens porque as duas causas pedem conserto diferente. Explicar CET para
+          // quem recebeu veredito desconhecido mandaria o gestor procurar defeito no lugar
+          // errado - e mensagem que aponta para o lugar errado custa mais que mensagem curta.
+          const detalhe = verdPar === "reprova"
+            ? "O PAR legenda+peca reprovou no compliance de texto: a peca MOSTRA valor/taxa/prazo na tela e a legenda da publicacao nao traz o CET nem referencia de consulta. O card NAO foi executado. Aceito: 'consulte o CET na sua simulacao' (ou CET numerico oficial). Percentual de CET NAO e obrigatorio."
+            : `O PAR legenda+peca devolveu um veredito que esta fora do vocabulario conhecido (${verdPar || "ausente"}), entao o card NAO foi executado. Isto NAO e reprova de conteudo: e o verificador respondendo algo que este executor nao sabe interpretar, e publicar sem entender o veredito seria aprovar por omissao. Conserto: alinhar o vocabulario de checar_par_texto_e_peca com a lista de liberados deste executor.`;
           await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
             motivo,
             detalhe,

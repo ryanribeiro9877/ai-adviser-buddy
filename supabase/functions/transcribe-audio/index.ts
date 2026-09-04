@@ -113,7 +113,25 @@ async function transcreverOpenAI(key: string, bytes: Uint8Array, mime: string) {
   if (!resp.ok) return { erro: `openai_http_${resp.status}`, detalhe: raw.slice(0, 400) };
   try {
     const p = JSON.parse(raw);
-    return { texto: String(p?.text ?? "").trim() };
+    // v5 (04/09/2026) - O USAGE ERA DESCARTADO. A resposta sempre trouxe `usage` (o
+    // `response_format: json` acima e o unico formato que gpt-4o-mini-transcribe aceita, e e
+    // justamente o que devolve usage), mas o retorno cravava tokens nulos. Resultado: a
+    // apuracao de custo de 03/09 teve de DERIVAR o gasto calibrando caracteres por segundo
+    // contra as duracoes do mp4box, quando o numero faturado estava na mao.
+    //
+    // Duas variantes de contrato, e por isso o objeto cru vai adiante inteiro:
+    //   {type:"tokens",   input_tokens, output_tokens, total_tokens, input_token_details:{...}}
+    //   {type:"duration", seconds}   <- modelos cobrados por duracao de audio
+    // `output_tokens` costuma vir 0 nos modelos de transcricao, porque a OpenAI trata a
+    // transcricao como transformacao de ENTRADA e nao como geracao. Zero aqui e o valor
+    // correto, nao dado faltando.
+    const usage = (p && typeof p.usage === "object") ? p.usage : null;
+    return {
+      texto: String(p?.text ?? "").trim(),
+      usage,
+      tokens_in: usage?.input_tokens ?? null,
+      tokens_out: usage?.output_tokens ?? null,
+    };
   } catch {
     return { erro: "openai_non_json", detalhe: raw.slice(0, 300) };
   }
@@ -209,7 +227,10 @@ Deno.serve(async (req) => {
     const r = await transcreverOpenAI(openaiKey, bytes, mime);
     if (!r.erro) {
       return json({ ok: true, text: r.texto, model: OPENAI_AUDIO_MODEL, provider: "openai",
-        tokens_in: null, tokens_out: null });
+        // `usage` cru vai adiante para quem quiser conferir a fatura; tokens_in/out sao a
+        // leitura conveniente da variante por token. Ver transcreverOpenAI.
+        usage: r.usage ?? null,
+        tokens_in: r.tokens_in ?? null, tokens_out: r.tokens_out ?? null });
     }
     const f = await transcreverFallback(bytes, mime);
     if (!f.erro) {
