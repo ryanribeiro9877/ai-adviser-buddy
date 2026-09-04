@@ -255,7 +255,8 @@ import {
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
 import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto, statusObjetoOperacional } from "../_shared/memoria_conjunto.ts";
-import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
+import { carregarMemoriaInstitucional, type FatoMemoria } from "../_shared/agent_memory.ts";
+import { selecionarMemoria } from "../_shared/memoria_relevante.ts";
 import {
   agenteDoSubagente,
   carregarCatalogoAgentes,
@@ -2219,6 +2220,60 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
 // ============================================================================
 // FASE 3 - SINTESE com continuacao INTERNA (contexto preservado, zero re-coleta)
 // ============================================================================
+/**
+ * Memoria da sintese: por relevancia, nao por atacado.
+ *
+ * O gatilho e a pergunta MAIS o contrato do pedido, porque o contrato carrega o universo e as
+ * perguntas obrigatorias — um pedido que fala "conversas" pelo contrato traz a doutrina de
+ * WhatsApp de volta mesmo que a frase do gestor nao use a palavra.
+ *
+ * `selecionarMemoria` devolvendo `null` significa "nao estreitar": neste caso a memoria INTEIRA
+ * entra, e a telemetria registra `fail_open: true` para o caso aparecer em auditoria em vez de
+ * virar economia silenciosa.
+ */
+function memoriaDaSintese(
+  mem: { rows: FatoMemoria[]; texto: string },
+  pergunta: string,
+  escopo: EscopoPedido | undefined,
+  tel: any,
+  plano?: { nome: string; foco: string }[],
+): string {
+  const gatilho = [
+    pergunta,
+    escopo?.resumo ?? "",
+    ...(escopo?.perguntas_obrigatorias ?? []),
+    // O PLANO tambem e gatilho, e isto conserta uma aresta real: numa conta com campanhas de
+    // WhatsApp, "compare o custo por resultado" nao diz a palavra "conversa", mas o roteador
+    // escala o especialista `whatsapp_waba` e a sintese vai receber numeros de conversa. Sem o
+    // plano no gatilho, a doutrina do canal ficaria de fora justamente quando ela e usada.
+    ...(plano ?? []).map((p) => `${p.nome} ${p.foco}`),
+  ].join("\n");
+  const sel = selecionarMemoria(mem.rows, gatilho);
+  if (!sel) {
+    tel.memoria = { fail_open: true, fatos_injetados: mem.rows.length, chars: mem.texto.length };
+    return mem.texto;
+  }
+  tel.memoria = {
+    fail_open: false,
+    fatos_total: mem.rows.length,
+    fatos_injetados: sel.injetados.length,
+    fatos_dispensados: sel.dispensados.length,
+    chars_antes: sel.chars_antes,
+    chars_depois: sel.chars_depois,
+    topicos_ativados: sel.topicos_ativados,
+    dispensados_por_topico: sel.dispensados.reduce((a: Record<string, number>, d) => {
+      a[d.topico ?? "?"] = (a[d.topico ?? "?"] ?? 0) + 1;
+      return a;
+    }, {}),
+    // A LISTA e o produto que permite revisao. Sem ela isto seria remocao silenciosa disfarcada de
+    // otimizacao: ninguem consegue auditar "sumiu um guardrail" olhando so um contador.
+    dispensados_lista: sel.dispensados.map((d) =>
+      `[${d.fato.categoria}|${d.topico}] ${String(d.fato.fato).replace(/\s+/g, " ").trim().slice(0, 90)}`
+    ),
+  };
+  return sel.texto;
+}
+
 function montarSysSintese(companyName: string, estilo: string, memoria: string, escopo?: EscopoPedido, companyId?: string): string {
   const isLegal = empresaEhCredito(companyId) || norm(companyName).includes("legal");
   const perfil = isLegal
@@ -3219,7 +3274,6 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       const { data: styleRows0 } = await supa.from("agent_style").select("secao,regra").eq("vigente", true).order("ordem");
       const estilo0 = (styleRows0 ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n") || "(sem regras cadastradas)";
       const mem0 = await carregarMemoriaInstitucional(supa, companyId);
-      const memoria0 = mem0.texto;
       let relatorios: { nome: string; relatorio: string; completo: boolean }[] = retomada.relatorios ?? [];
       const plano: { nome: string; foco: string }[] = retomada.plano ?? [];
       let rodada: number = Number(retomada.rodada ?? 0);
@@ -3282,7 +3336,9 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       }
       const texto0 = await sintetizarComResgate({
         jobId, convId, companyId, mcpKey, companyName, pergunta, plano, relatorios,
-        estilo: estilo0, memoria: memoria0, prazo, tel, segmento, rodada,
+        // Na retomada o plano vem do checkpoint, entao o gatilho de relevancia e o mesmo.
+        estilo: estilo0, memoria: memoriaDaSintese(mem0, pergunta, escopo, tel, plano),
+        prazo, tel, segmento, rodada,
         timeoutMs: cap.openRouterTimeoutMs,
         jaRetentouSintese: !!retomada.sintese_retry,
         escopo,
@@ -3304,7 +3360,6 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     // Contexto institucional (mesmas fontes do chat) — isolado por company_id
     const memCarregada = await carregarMemoriaInstitucional(supa, companyId);
     const ctxRows = memCarregada.rows;
-    const memoria = memCarregada.texto;
     const { data: styleRows } = await supa.from("agent_style").select("secao,regra").eq("vigente", true).order("ordem");
     const estilo = (styleRows ?? []).length
       ? (styleRows ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n")
@@ -3390,6 +3445,9 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         segmento: segmento + 1, direto_para_sintese: true, escopo });
       return;
     }
+
+    // Memoria escolhida so AQUI: o plano ja existe e entra no gatilho de relevancia.
+    const memoria = memoriaDaSintese(memCarregada, pergunta, escopo, tel, plano);
 
     // FASE 3 - sintese (com resgate 429)
     const texto = await sintetizarComResgate({
