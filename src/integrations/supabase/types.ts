@@ -23,7 +23,6 @@ export type Database = {
           impressions: number | null;
           landing_page_views: number | null;
           last_synced_at: string | null;
-          leads: number | null;
           lifetime_budget: number | null;
           link_clicks: number | null;
           messaging_started: number | null;
@@ -50,7 +49,6 @@ export type Database = {
           impressions?: number | null;
           landing_page_views?: number | null;
           last_synced_at?: string | null;
-          leads?: number | null;
           lifetime_budget?: number | null;
           link_clicks?: number | null;
           messaging_started?: number | null;
@@ -77,7 +75,6 @@ export type Database = {
           impressions?: number | null;
           landing_page_views?: number | null;
           last_synced_at?: string | null;
-          leads?: number | null;
           lifetime_budget?: number | null;
           link_clicks?: number | null;
           messaging_started?: number | null;
@@ -110,7 +107,6 @@ export type Database = {
           impressions: number | null;
           landing_page_views: number | null;
           last_synced_at: string | null;
-          leads: number | null;
           link_clicks: number | null;
           messaging_started: number | null;
           name: string | null;
@@ -143,7 +139,6 @@ export type Database = {
           impressions?: number | null;
           landing_page_views?: number | null;
           last_synced_at?: string | null;
-          leads?: number | null;
           link_clicks?: number | null;
           messaging_started?: number | null;
           name?: string | null;
@@ -176,7 +171,6 @@ export type Database = {
           impressions?: number | null;
           landing_page_views?: number | null;
           last_synced_at?: string | null;
-          leads?: number | null;
           link_clicks?: number | null;
           messaging_started?: number | null;
           name?: string | null;

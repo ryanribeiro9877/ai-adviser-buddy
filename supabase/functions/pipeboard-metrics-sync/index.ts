@@ -158,7 +158,9 @@ function mapRow(row: any, companyId: string, accountFallback: string) {
     //
     // A coluna e a mistura sem base declarada que ja saiu de `campaigns` em 03/09. Quem tem base
     // explicita e vive do rollup e `form_leads`, `messaging_started` e `link_clicks` — os tres
-    // ficam. Omitir aqui e seguro: a coluna e default 0 em todas as tabelas onde existe.
+    // ficam. Em 04/09/2026 a coluna foi REMOVIDA das seis tabelas onde ainda existia, entao
+    // omitir aqui deixou de ser escolha e passou a ser obrigacao: mandar a chave `leads` neste
+    // upsert derruba a corrida inteira com "column leads does not exist".
     frequency: number(source?.frequency),
     quality_ranking: rank(source?.quality_ranking),
     engagement_rate_ranking: rank(source?.engagement_rate_ranking),

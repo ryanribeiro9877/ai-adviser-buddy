@@ -1,5 +1,13 @@
 // supabase/functions/windsor-sync/index.ts (v18)
 //
+// NAO RESSUSCITAR SEM REESCREVER (nota de 04/09/2026): a RPC `sync_ingest_windsor` chamada
+//   abaixo NAO EXISTE MAIS — foi removida em 20260904170000, junto com a coluna `leads` das
+//   seis tabelas. Ela gravava `leads = conversas + formulario`, a mistura sem base declarada
+//   que essa frente eliminou. As outras quatro RPCs que esta edge chama (sync_ingest_ads,
+//   sync_ingest_adsets, sync_ingest_ad_snapshots, sync_ingest_breakdown) continuam existindo e
+//   funcionando, mas tambem pararam de gravar `leads`. Quem trouxer o Windsor de volta precisa
+//   escrever `form_leads` e `messaging_started` separados, cada um com a base no nome.
+//
 // v18 (05/08/2026) — `wide_only`: corrida dedicada a UM nivel da janela ampla.
 //   O PROBLEMA MEDIDO: na corrida semanal de 02/08 o passo de CONJUNTO gravou as 08:02:34, isto e,
 //   154s depois do inicio — o pg_net (timeout_milliseconds:=150000) ja tinha desistido 4s antes. O
