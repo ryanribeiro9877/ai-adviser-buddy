@@ -3113,6 +3113,35 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    */
   const valeSegmentar = () =>
     prazo() < CHECKPOINT_MIN_MS && prazoDeParede() >= CHECKPOINT_MIN_MS + CUSTO_REINVOCACAO_MS;
+  /**
+   * ALAVANCA TESTADA E DESCARTADA (04/09/2026): DAR A SINTESE UM SEGMENTO SO DELA.
+   *
+   * A ideia era boa e a maquina ja suportava. Como os ~400s do worker sao POR INVOCACAO, o
+   * segmento 2 nasce com relogio de plataforma zerado; `gravarCheckpointEReinvocar` ja persiste os
+   * relatorios VALIDADOS e os tres pontos de checkpoint ja marcam `direto_para_sintese`, entao a
+   * retomada nunca reabre coleta. Bastava trocar o freio de emergencia (`valeSegmentar`) por
+   * segmentacao DE PLANO no deep, e soltar a coleta da reserva por invocacao (reservando parede,
+   * nao espaco na invocacao atual).
+   *
+   * Implementado e medido. A parte estrutural FUNCIONOU: a coleta ficou completa (os dois
+   * especialistas fecharam relatorio inteiro, um deles em `finish: stop` com 7.321 tokens) e a
+   * sintese passou a rodar sozinha num worker novo, com `sintese_em_segmento_proprio: true`.
+   *
+   * O que derrubou foi outra coisa, e e o achado que importa: COLETA COMPLETA FAZ A SINTESE
+   * ESTOURAR QUALQUER TETO QUE ESTA PAREDE COMPORTE. Com ~100k tokens de coleta na entrada (contra
+   * os ~12k de quando 121,9s foram medidos), a chamada de sintese nao fechou em 150s
+   * (`openrouter_timeout_150000`, job aos 367s) nem em 200s (`openrouter_timeout_200000`, job aos
+   * 395s). Nos dois casos a coleta boa ja estava paga e foi perdida junto.
+   *
+   * A aritmetica que sobra: coleta ~215s + reinvocacao 45s + sintese >200s passa de 460s, e a
+   * parede de 480s nao cobre isso com margem. Nao da para consertar dimensionando teto — o teto
+   * ja foi dimensionado duas vezes. As alavancas restantes mexem em profundidade ou em parede, e
+   * essas sao decisao do gestor, nao minha.
+   *
+   * Por isso o codigo voltou ao arranjo que CONCLUI: coleta e sintese na mesma invocacao, com a
+   * coleta cedendo espaco para a escrita. A resposta sai menor e declara o que nao coletou, mas
+   * sai.
+   */
   const segmento: number = Number(retomada?.segmento ?? 1);
   JOB_SESSION_ID = convId || null;
   JOB_MODELO_ROTEADO = MODEL;

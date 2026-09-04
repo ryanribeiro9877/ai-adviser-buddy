@@ -142,9 +142,23 @@ function mapRow(row: any, companyId: string, accountFallback: string) {
       integer(source?.form_leads) ||
       integer(source?.actions_lead) ||
       integer(actionValue(source, ["lead", "onsite_conversion.lead_grouped"])),
-    leads:
-      integer(source?.leads) ||
-      integer(actionValue(source, ["lead", "onsite_conversion.lead_grouped"])),
+    // `leads` NAO e mais gravado (04/09/2026). Este coletor nao era um escritor legitimo da
+    // coluna; era um escritor QUEBRADO, e a medicao mostra as duas coisas.
+    //
+    // O que a coluna deveria ser: a base combinada — `sync_ingest_windsor` ainda documenta
+    // "leads = conversas + formulário". O que este mapeamento fazia: `source.leads` ou, na falta
+    // dele, a acao `lead`. Nenhum dos dois olha `messaging_started`. Ou seja, ele so acertava a
+    // definicao quando a campanha nao tinha conversa nenhuma.
+    //
+    // O estrago esta medido: das 95 linhas com `messaging_started > 0`, 23 (todas de 04/08 em
+    // diante) gravaram `leads = 0` tendo resultado real — a fonte parou de devolver `source.leads`
+    // e o fallback assumiu, calado. Ex.: 03/09, campanha bd9b6122, 44 conversas iniciadas,
+    // `leads = 0`. Um numero de resultado que some quando a base muda e pior que numero ausente,
+    // porque ninguem desconfia de um zero.
+    //
+    // A coluna e a mistura sem base declarada que ja saiu de `campaigns` em 03/09. Quem tem base
+    // explicita e vive do rollup e `form_leads`, `messaging_started` e `link_clicks` — os tres
+    // ficam. Omitir aqui e seguro: a coluna e default 0 em todas as tabelas onde existe.
     frequency: number(source?.frequency),
     quality_ranking: rank(source?.quality_ranking),
     engagement_rate_ranking: rank(source?.engagement_rate_ranking),
