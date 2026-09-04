@@ -793,7 +793,8 @@ import {
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
 import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
-import { tDetalheAnuncios, casarCampanhas, escolherCampanhaUnica, janelaDetalhe } from "../_shared/leitura_desempenho.ts";
+import { tDetalheAnuncios, casarCampanhas, escolherCampanhaUnica, janelaDetalhe, somarSnaps, totaisDe, custosDaContaPorBase, NOTA_OVERVIEW } from "../_shared/leitura_desempenho.ts";
+import { baseDoObjetivo } from "../_shared/metrica_canonica.ts";
 import { tOrigemDriveDosAnuncios, tCasarCriativoPerformance } from "../_shared/origem_drive_anuncios.ts";
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
 import {
@@ -1246,22 +1247,23 @@ async function t_overview(companyId: string) {
   const ativos = vivos.filter((c) => c.status === "active");
   const from = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
   const { data: snaps } = await supa.from("metric_snapshots")
-    .select("spend,impressions,link_clicks,form_leads,messaging_started,leads,snapshot_date")
+    // `campaign_id` entrou em 04/09/2026 para escopar o gasto por base; `leads` saiu (coluna
+    // aposentada, era somada e nunca usada).
+    .select("campaign_id,spend,impressions,link_clicks,form_leads,messaging_started,snapshot_date")
     .eq("company_id", companyId).gte("snapshot_date", from);
   const s = (snaps ?? []).reduce((a, r) => ({
     spend: a.spend + Number(r.spend || 0), imp: a.imp + Number(r.impressions || 0),
     link: a.link + Number(r.link_clicks || 0), forms: a.forms + Number(r.form_leads || 0),
-    msg: a.msg + Number(r.messaging_started || 0), leads: a.leads + Number(r.leads || 0),
-  }), { spend: 0, imp: 0, link: 0, forms: 0, msg: 0, leads: 0 });
+    msg: a.msg + Number(r.messaging_started || 0),
+  }), { spend: 0, imp: 0, link: 0, forms: 0, msg: 0 });
   const dias = new Set((snaps ?? []).map((r) => r.snapshot_date)).size;
+  const custos = custosDaContaPorBase(snaps ?? [], s);
   return {
     campanhas_ativas: ativos.length, campanhas_total: vivos.length,
     ultimos_7_dias: { gasto: brl(s.spend), dias_com_dado: dias, impressoes: s.imp, cliques_link: s.link,
-      formularios: s.forms, conversas_whatsapp: s.msg,
-      custo_por_formulario: s.forms ? brl(s.spend / s.forms) : null,
-      custo_por_lead_lp: s.link ? brl(s.spend / s.link) : null },
+      formularios: s.forms, conversas_whatsapp: s.msg, ...custos },
     campanhas_ativas_lista: ativos.map((c) => ({ nome: c.name, categoria: c.category, conta: c.external_account_id, gasto_acumulado: brl(Number(c.spend || 0)) })),
-    nota: "status vem do effective_status real da Meta (cron 09:10). dias_com_dado<7 indica cobertura incompleta: nao conclua queda sem checar isso.",
+    nota: NOTA_OVERVIEW,
   };
 }
 async function t_alerts(companyId: string) {
@@ -1601,11 +1603,11 @@ async function t_campaign_detail(companyId: string, name_like: string, date_from
       ...(String(s.snapshot_date) === hoje ? { dia_parcial_em_coleta: true } : {}),
     };
   };
-  const tot = rows.reduce((a, s: Record<string, unknown>) => ({
-    spend: a.spend + num(s.spend), imp: a.imp + num(s.impressions), reach: a.reach + num(s.reach),
-    clkTodos: a.clkTodos + num(s.clicks), link: a.link + num(s.link_clicks), lpv: a.lpv + num(s.landing_page_views),
-    forms: a.forms + num(s.form_leads), msg: a.msg + num(s.messaging_started),
-  }), { spend: 0, imp: 0, reach: 0, clkTodos: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
+  // 04/09/2026: esta soma e o bloco de totais abaixo eram copia literal de `leitura_desempenho.ts`.
+  // A triplicacao (aqui, no job e no _shared) foi o que deixou os tres divergirem: o denominador
+  // fixo em formularios foi consertado num lugar so e sobreviveu nos outros dois. Agora ha uma
+  // implementacao, e consertar de novo exige mexer em um arquivo.
+  const tot = somarSnaps(rows as Record<string, unknown>[]);
   const fechados = rows.filter((s: Record<string, unknown>) => String(s.snapshot_date) < hoje);
   const gastoFechado = fechados.reduce((a, s: Record<string, unknown>) => a + num(s.spend), 0);
   const cats = Array.isArray((c as any).special_ad_categories)
@@ -1632,15 +1634,8 @@ async function t_campaign_detail(companyId: string, name_like: string, date_from
     totais_periodo: {
       dias_com_dado: rows.length, dias_fechados: fechados.length,
       inclui_dia_parcial: rows.some((s: Record<string, unknown>) => String(s.snapshot_date) === hoje),
-      gasto: brl(tot.spend),
       gasto_medio_por_dia_fechado: fechados.length ? brl(gastoFechado / fechados.length) : null,
-      impressoes: tot.imp, alcance_soma_diaria_nao_deduplicada: tot.reach,
-      cliques_todos: tot.clkTodos, cliques_no_link: tot.link, visualizacoes_lp: tot.lpv,
-      formularios: tot.forms, conversas: tot.msg,
-      ctr_todos: pct(tot.clkTodos, tot.imp), ctr_link: pct(tot.link, tot.imp),
-      cpc_todos: tot.clkTodos ? brl(tot.spend / tot.clkTodos) : null, cpc_link: tot.link ? brl(tot.spend / tot.link) : null,
-      cpm: tot.imp ? brl(1000 * tot.spend / tot.imp) : null,
-      custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
+      ...totaisDe(tot, baseDoObjetivo(c.category, null, (c as any).objective)),
     },
     outras_encontradas: hits.filter((x) => x.id !== c.id).slice(0, 5).map((x) => x.name),
     nota: "serie diaria e totais vem de metric_snapshots (D-1, coletor oficial pipeboard:meta). special_ad_categories e campo da CAMPANHA (Meta nao grava isso no anuncio): se a campanha tem FINANCIAL_PRODUCTS_SERVICES, TODOS os anuncios dela estao sob a categoria especial. Para confirmar ao vivo, ler_pipeboard get_campaign_details. DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques; cliques_no_link = SO cliques de destino. ALCANCE: alcance_soma_diaria_nao_deduplicada e SOMA diaria (nao pessoas unicas).",

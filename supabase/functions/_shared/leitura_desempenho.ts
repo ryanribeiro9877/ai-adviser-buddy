@@ -3,6 +3,7 @@
 // sem o gestor repetir a pergunta. Não grava fato de conta.
 
 import { statusObjetoOperacional } from "./memoria_conjunto.ts";
+import { type BaseDeResultado, baseDoObjetivo, custoPorResultado, rotuloDaBase } from "./metrica_canonica.ts";
 
 export type CampanhaRef = {
   id?: string;
@@ -137,7 +138,7 @@ type TotaisSnap = {
   link: number; lpv: number; forms: number; msg: number;
 };
 
-function somarSnaps(rows: Record<string, unknown>[]): TotaisSnap {
+export function somarSnaps(rows: Record<string, unknown>[]): TotaisSnap {
   return rows.reduce<TotaisSnap>((a, s) => ({
     spend: a.spend + num(s.spend),
     imp: a.imp + num(s.impressions),
@@ -150,7 +151,28 @@ function somarSnaps(rows: Record<string, unknown>[]): TotaisSnap {
   }), { spend: 0, imp: 0, reach: 0, clkTodos: 0, link: 0, lpv: 0, forms: 0, msg: 0 });
 }
 
-function totaisDe(tot: TotaisSnap) {
+/**
+ * Totais da janela COM A BASE DE RESULTADO DECLARADA.
+ *
+ * 04/09/2026: antes daqui saia so `custo_por_formulario`, com denominador fixo em formularios
+ * qualquer que fosse a base da campanha. Numa campanha de WhatsApp — que nao coleta formulario —
+ * isso devolvia `null` e o leitor concluia "sem resultado", quando havia conversa; numa campanha
+ * de trafego, dividia o gasto por formularios que nunca existiriam. O rotulo dizia "formulario"
+ * e o consumidor lia "resultado", que sao coisas diferentes quando a base muda.
+ *
+ * `base` e OBRIGATORIA de proposito. Ela vem de `baseDoObjetivo` (categoria, optimization_goal,
+ * objective) — configuracao declarada, nunca contador — porque base decidida por "teve conversa
+ * > 0" troca de identidade conforme a janela do relatorio.
+ *
+ * `custo_por_formulario` continua saindo, mas agora ao lado de `custo_por_resultado` e do rotulo
+ * da base: ele nunca foi errado como "custo por formulario", foi errado como "custo por
+ * resultado". Manter os dois nomeados separadamente e o que impede a proxima confusao.
+ */
+export function totaisDe(tot: TotaisSnap, base: BaseDeResultado) {
+  const cpr = custoPorResultado(
+    { gasto: tot.spend, formularios: tot.forms, conversas: tot.msg, cliques_no_link: tot.link },
+    base,
+  );
   return {
     gasto: brl(tot.spend),
     impressoes: tot.imp,
@@ -165,7 +187,79 @@ function totaisDe(tot: TotaisSnap) {
     cpc_todos: tot.clkTodos ? brl(tot.spend / tot.clkTodos) : null,
     cpc_link: tot.link ? brl(tot.spend / tot.link) : null,
     cpm: tot.imp ? brl(1000 * tot.spend / tot.imp) : null,
+    base_de_resultado: base,
+    base_de_resultado_rotulo: rotuloDaBase(base),
+    resultados_na_base: cpr.resultados,
+    custo_por_resultado: cpr.valor === null ? null : brl(cpr.valor),
+    custo_por_resultado_indefinido_porque: cpr.indefinido_porque,
     custo_por_formulario: tot.forms ? brl(tot.spend / tot.forms) : null,
+  };
+}
+
+/**
+ * Nota do overview da conta. Fica junto do calculo de proposito: nota e formula que moram em
+ * arquivos diferentes divergem, e foi assim que a proibicao de recalcular sumiu do overview
+ * enquanto continuava escrita no funil.
+ */
+export const NOTA_OVERVIEW =
+  "status vem do effective_status real da Meta (cron 09:10). dias_com_dado<7 indica cobertura " +
+  "incompleta: nao conclua queda sem checar isso. CUSTO POR RESULTADO: a conta mistura TRES bases " +
+  "(formulario, conversa e clique no link) e cada custo abaixo usa SO o gasto das campanhas que " +
+  "registraram AQUELE evento (veja os campos gasto_base_*). E PROIBIDO recalcular dividindo o " +
+  "`gasto` total por um evento — o gasto total inclui campanhas de outra base, e a divisao infla o " +
+  "custo. custo_por_clique_no_link NAO e custo por lead: clique no link e midia, nao resultado.";
+
+type LinhaSnapConta = {
+  campaign_id?: unknown; spend?: unknown;
+  form_leads?: unknown; messaging_started?: unknown; link_clicks?: unknown;
+};
+
+/**
+ * Custo por resultado da CONTA INTEIRA, com o gasto escopado por base.
+ *
+ * 04/09/2026: o overview dividia o gasto das TRES bases pelo denominador de UMA. Numa conta que
+ * roda formulario, WhatsApp e trafego ao mesmo tempo, o gasto do WhatsApp e do trafego entrava no
+ * numerador do custo por formulario — o mesmo defeito de numerador que ja tinha inflado o custo de
+ * uma marca em 5,4x no detalhamento, aqui em versao agregada e portanto mais dificil de notar.
+ *
+ * O padrao replicado e o de `get_funnel`, que ja fazia certo desde 14/08: soma so o gasto das
+ * campanhas que registraram o evento, e devolve esse gasto ao lado do custo para que o numero
+ * possa ser conferido sem refazer a conta.
+ */
+export function custosDaContaPorBase(linhas: LinhaSnapConta[], tot: { spend: number; forms: number; msg: number; link: number }) {
+  const porCampanha = new Map<string, { spend: number; forms: number; msg: number; link: number }>();
+  for (const r of linhas) {
+    const k = String(r.campaign_id ?? "sem_campanha");
+    const cur = porCampanha.get(k) ?? { spend: 0, forms: 0, msg: 0, link: 0 };
+    cur.spend += num(r.spend);
+    cur.forms += num(r.form_leads);
+    cur.msg += num(r.messaging_started);
+    cur.link += num(r.link_clicks);
+    porCampanha.set(k, cur);
+  }
+  const gastoOnde = (tem: (v: { forms: number; msg: number; link: number }) => boolean) =>
+    [...porCampanha.values()].filter(tem).reduce((a, v) => a + v.spend, 0);
+  const gastoForm = gastoOnde((v) => v.forms > 0);
+  const gastoMsg = gastoOnde((v) => v.msg > 0);
+  const gastoLink = gastoOnde((v) => v.link > 0);
+  const cpr = (base: BaseDeResultado, gastoDosObjetosComResultado: number) =>
+    custoPorResultado(
+      { gasto: tot.spend, formularios: tot.forms, conversas: tot.msg, cliques_no_link: tot.link },
+      base,
+      { gastoDosObjetosComResultado },
+    ).valor;
+  const cForm = cpr("formularios", gastoForm);
+  const cMsg = cpr("conversas", gastoMsg);
+  const cLink = cpr("cliques_no_link", gastoLink);
+  return {
+    custo_por_formulario: cForm === null ? null : brl(cForm),
+    custo_por_conversa: cMsg === null ? null : brl(cMsg),
+    // Renomeado de `custo_por_lead_lp` em 04/09/2026: chamava de "lead" um clique no link, e o
+    // rotulo levava o modelo a compara-lo com custo por formulario como se fossem a mesma coisa.
+    custo_por_clique_no_link: cLink === null ? null : brl(cLink),
+    gasto_base_do_por_formulario: tot.forms ? brl(gastoForm) : null,
+    gasto_base_do_por_conversa: tot.msg ? brl(gastoMsg) : null,
+    gasto_base_do_por_clique_no_link: tot.link ? brl(gastoLink) : null,
   };
 }
 
@@ -220,7 +314,10 @@ export async function tDetalheAnuncios(
     return { erro: "informe campaign_id (ID Meta) ou name_like (trecho do nome)" };
   }
   const { data: all, error: eCamp } = await supa.from("campaigns")
-    .select("id,name,status,objective,external_id,special_ad_categories")
+    // `category` entrou em 04/09/2026: e a PRIMEIRA entrada de `baseDoObjetivo` (decisao humana
+    // vem antes de configuracao da Meta). Sem ela, toda campanha caia no ramo de `objective` e as
+    // de categoria "mensagem" eram medidas por formulario.
+    .select("id,name,status,objective,external_id,special_ad_categories,category")
     .eq("company_id", companyId);
   if (eCamp) return { erro: `falha ao ler campanhas: ${eCamp.message}` };
   const campsOperacionais = ((all ?? []) as Array<CampanhaRef & { status?: unknown }>)
@@ -240,8 +337,11 @@ export async function tDetalheAnuncios(
     return { erro: `nenhuma campanha com nome ou ID contendo '${needle}'` };
   }
   const camp = escolha.unica as CampanhaRef & {
-    status?: string; objective?: string; special_ad_categories?: unknown;
+    status?: string; objective?: string; special_ad_categories?: unknown; category?: string | null;
   };
+  // Base da CAMPANHA. Os conjuntos podem refinar com o proprio optimization_goal (abaixo), mas
+  // ninguem aqui decide base por contador — so por configuracao declarada.
+  const baseCamp = baseDoObjetivo(camp.category, null, camp.objective);
   const { from, to } = janelaDetalhe(args.date_from, args.date_to, 14);
   const pagina = Math.max(1, Number(args.pagina ?? 1) || 1);
   const comSerie = args.incluir_serie_diaria !== false;
@@ -320,7 +420,9 @@ export async function tDetalheAnuncios(
       legenda: typeof a.body === "string" && a.body.trim() ? String(a.body).slice(0, 500) : null,
       formato: a.object_type ?? null,
       destino: dest,
-      totais_janela: totaisDe(tot),
+      // O anuncio herda a base do conjunto que o entrega; o conjunto refina a da campanha pelo
+      // proprio optimization_goal, que e onde a Meta declara o que aquele conjunto otimiza.
+      totais_janela: totaisDe(tot, baseDoObjetivo(camp.category, set?.optimization_goal as string | null, camp.objective)),
       ...(comSerie
         ? { serie_diaria: dias.map((d) => {
           const { gasto_num: _g, ...linha } = linhaMetrica(d, hoje);
@@ -396,7 +498,7 @@ export async function tDetalheAnuncios(
       optimization_goal: set?.optimization_goal ?? null,
       destination_type: set?.destination_type ?? null,
       publico: resumoTargeting(set?.targeting),
-      totais_janela: totaisDe(c.tot),
+      totais_janela: totaisDe(c.tot, baseDoObjetivo(camp.category, set?.optimization_goal as string | null, camp.objective)),
       serie_diaria: serie,
     };
   });
@@ -416,7 +518,7 @@ export async function tDetalheAnuncios(
     total_anuncios: totalAnuncios,
     exibidos: fatia.length,
     restantes,
-    totais_campanha_janela: totaisDe(totCamp),
+    totais_campanha_janela: totaisDe(totCamp, baseCamp),
     conjuntos,
     anuncios,
     nota:
