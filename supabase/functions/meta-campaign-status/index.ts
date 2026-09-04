@@ -189,8 +189,14 @@ type ConfigCampanha = {
   buying_type: string | null;
 };
 
+// Rotulo de diagnostico da sonda: diz em que nivel da hierarquia o campo foi lido, e sai no
+// `sonda` da resposta. Uma fonte so de proposito — quando a v8 acrescentou "conjunto" ela
+// mexeu nos dois lugares (tipo e assinaturas); quando a coleta de recommendations acrescentou
+// "campanha" so nas assinaturas, os dois lados divergiram e o `deno check` das 5 edges caiu.
+type NivelLeitura = "anuncio" | "criativo" | "conta" | "conjunto" | "campanha";
+
 type LeituraCampo = {
-  nivel: "anuncio" | "criativo" | "conta" | "conjunto";
+  nivel: NivelLeitura;
   campo: string;
   solicitados: number;
   respostas: number;
@@ -264,7 +270,7 @@ function exemploSeguro(v: unknown): unknown {
 // (ate 20) preservam o throughput da corrida diaria sem reintroduzir o query param deprecado.
 async function lerCampoPorIds(
   ids: string[],
-  nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
+  nivel: NivelLeitura,
   campo: string,
   tokenOverride?: string,
 ): Promise<ResultadoCampo> {
@@ -368,7 +374,7 @@ function mergeResultadoCampo(parts: ResultadoCampo[]): ResultadoCampo {
 async function lerCampoPorIdsMultiToken(
   ids: string[],
   tokenDe: (id: string) => string | null,
-  nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
+  nivel: NivelLeitura,
   campo: string,
 ): Promise<ResultadoCampo> {
   const grupos = new Map<string, string[]>();
@@ -413,7 +419,7 @@ async function lerCampoPorIdsMultiToken(
 }
 
 function resultadoVazio(
-  nivel: LeituraCampo["nivel"],
+  nivel: NivelLeitura,
   campo: string,
   solicitados: number,
 ): ResultadoCampo {
@@ -435,7 +441,7 @@ function resultadoVazio(
 /** Um GET por objeto com varios campos. Corta ~5-10x vs 1 campo por request. */
 async function lerCamposPorIds(
   ids: string[],
-  nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
+  nivel: NivelLeitura,
   campos: string[],
   tokenOverride?: string,
 ): Promise<Map<string, ResultadoCampo>> {
@@ -515,7 +521,7 @@ async function lerCamposPorIds(
 async function lerCamposPorIdsMultiToken(
   ids: string[],
   tokenDe: (id: string) => string | null,
-  nivel: "anuncio" | "criativo" | "conta" | "conjunto" | "campanha",
+  nivel: NivelLeitura,
   campos: string[],
 ): Promise<Map<string, ResultadoCampo>> {
   const grupos = new Map<string, string[]>();

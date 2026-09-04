@@ -46,6 +46,12 @@ export type AdParaOrigem = {
   criado_por_approval_id: string | null;
 };
 
+// Espelham as colunas dos dois `select()` de ad_sets e campaigns logo abaixo: ao mexer no
+// select, mexer aqui. Campos como `unknown` de proposito — vem crus do banco e cada leitura
+// tem de coagir (`String(...)`), que e o que o codigo abaixo ja fazia sem o tipo garantir.
+type LinhaConjunto = { external_id?: unknown; name?: unknown; campaign_id?: unknown; status?: unknown };
+type LinhaCampanha = { id?: unknown; name?: unknown; external_id?: unknown; status?: unknown };
+
 export function pistasCampanhaDoPedido(pedido: string): string[] {
   const raw = String(pedido ?? "");
   const out: string[] = [];
@@ -250,8 +256,15 @@ export async function tOrigemDriveDosAnuncios(
     .select("id,name,external_id,status")
     .eq("company_id", companyId);
 
-  const setMap = new Map((setsRaw ?? []).map((s: any) => [String(s.external_id), s]));
-  const campMap = new Map((campsRaw ?? []).map((c: any) => [String(c.id), c]));
+  // A anotacao de tupla no retorno do map e obrigatoria: sem ela o literal vira
+  // `(string | Linha…)[]`, o `new Map` nao consegue inferir chave/valor e cai em
+  // `Map<unknown, unknown>` — era dai que saiam os TS2339 de `set?.name`/`camp?.external_id`.
+  const setMap = new Map(
+    ((setsRaw ?? []) as LinhaConjunto[]).map((s): [string, LinhaConjunto] => [String(s.external_id), s]),
+  );
+  const campMap = new Map(
+    ((campsRaw ?? []) as LinhaCampanha[]).map((c): [string, LinhaCampanha] => [String(c.id), c]),
+  );
   const incluirApagados = args.incluir_apagados === true;
 
   const ads: AdParaOrigem[] = ((adsRaw ?? []) as any[])

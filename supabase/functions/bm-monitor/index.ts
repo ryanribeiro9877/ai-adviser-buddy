@@ -277,11 +277,14 @@ Deno.serve(async (req) => {
     return json({ ok: true, modo: "TESTE", company_id: companyId, alerta: r, versao: VERSAO });
   }
 
+  // `null` cru, sem `as string | null`: token e ref vem sempre juntos de
+  // tokenAdsPorCompanyId, e com os ramos assim os dois formam uma uniao discriminada —
+  // o `if (!emp.token) continue` abaixo estreita `ref` para string junto com `token`.
+  // Com o cast, `ref` continuava `string | null` depois da guarda e nao entrava em
+  // coletarEmpresa, que exige string.
   const empresas = EMPRESAS_META.map((e) => {
     const tok = tokenAdsPorCompanyId(e.company_id);
-    return tok
-      ? { ...e, token: tok.token, ref: tok.ref }
-      : { ...e, token: null as string | null, ref: null as string | null };
+    return tok ? { ...e, token: tok.token, ref: tok.ref } : { ...e, token: null, ref: null };
   });
 
   const resultados: any[] = [];

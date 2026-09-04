@@ -111,7 +111,62 @@ async function inspecionarToken(papel: "ads" | "waba", token: string, tokenRef: 
   };
 }
 
-async function lerConta(token: string, act: string) {
+/**
+ * Uma leitura de conta de anuncios pela Graph. O tipo e explicito porque os tres pontos de
+ * chamada tem um ramo "token ausente" que NAO chama a Graph: enquanto esse ramo era um objeto
+ * literal com 4 das 13 chaves, a uniao dos dois ramos nao tinha `acesso_campanhas`,
+ * `acesso_recommendations` nem `http_conta`, e o veredito que le esses campos nao compilava.
+ *
+ * http_* nulo significa "nao houve request", nao "request com status 0".
+ */
+type LeituraConta = {
+  act: string;
+  acesso_conta: boolean;
+  http_conta: number | null;
+  erro_conta: string | null;
+  conta: {
+    id: string | null;
+    name: string | null;
+    account_status: unknown;
+    currency: string | null;
+    business: unknown;
+  } | null;
+  acesso_campanhas: boolean;
+  http_campanhas: number | null;
+  erro_campanhas: string | null;
+  campanhas_graph: Array<{
+    id: string;
+    name: string | null;
+    status: string | null;
+    effective_status: string | null;
+    objective: string | null;
+  }>;
+  acesso_recommendations: boolean;
+  http_recommendations: number | null;
+  erro_recommendations: string | null;
+  recommendations_count: number;
+};
+
+/** Conta que nem chegou a ser consultada — sem token nao se pergunta nada a Graph. */
+function contaNaoLida(act: string, motivo: string): LeituraConta {
+  return {
+    act,
+    acesso_conta: false,
+    http_conta: null,
+    erro_conta: motivo,
+    conta: null,
+    acesso_campanhas: false,
+    http_campanhas: null,
+    erro_campanhas: motivo,
+    campanhas_graph: [],
+    acesso_recommendations: false,
+    http_recommendations: null,
+    erro_recommendations: motivo,
+    recommendations_count: 0,
+  };
+}
+
+async function lerConta(token: string, act: string): Promise<LeituraConta> {
   const conta = await g(
     `/${act}?fields=id,name,account_id,account_status,currency,amount_spent,balance,business{id,name},disable_reason`,
     token,
@@ -328,20 +383,15 @@ Deno.serve(async (req) => {
 
   const graphCohapm = T_ADS_EMP
     ? await lerConta(T_ADS_EMP, ACT_COHAPM)
-    : {
-        act: ACT_COHAPM,
-        acesso_conta: false,
-        erro_conta: `${adsRef} ausente`,
-        campanhas_graph: [] as any[],
-      };
+    : contaNaoLida(ACT_COHAPM, `${adsRef} ausente`);
   // Controle: o token DA EMPRESA enxerga a Legal? (esperado: nao, se for token isolado COHAPM)
   const graphLegalComTokenEmp = T_ADS_EMP
     ? await lerConta(T_ADS_EMP, ACT_LEGAL)
-    : { act: ACT_LEGAL, acesso_conta: false, erro_conta: "ausente", campanhas_graph: [] as any[] };
+    : contaNaoLida(ACT_LEGAL, "ausente");
   // Controle: o token GLOBAL ainda enxerga a Legal?
   const graphLegalGlobal = T_ADS_GLOBAL
     ? await lerConta(T_ADS_GLOBAL, ACT_LEGAL)
-    : { act: ACT_LEGAL, acesso_conta: false, erro_conta: "META_ADS_TOKEN ausente", campanhas_graph: [] as any[] };
+    : contaNaoLida(ACT_LEGAL, "META_ADS_TOKEN ausente");
 
   const { data: dbCamps } = await supa
     .from("campaigns")
