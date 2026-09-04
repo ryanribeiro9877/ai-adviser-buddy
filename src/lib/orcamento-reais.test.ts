@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { ehFlagSemMolde } from "./memoria-conjunto";
 import {
   conferirOrcamentoReais,
   ehFlagOrcamentoConfirmadoReais,
@@ -91,6 +92,13 @@ describe("ehFlagOrcamentoConfirmadoReais", () => {
     expect(ehFlagOrcamentoConfirmadoReais(null)).toBe(false);
     expect(ehFlagOrcamentoConfirmadoReais(undefined)).toBe(false);
     expect(ehFlagOrcamentoConfirmadoReais("sim")).toBe(false);
+  });
+
+  // A borda que parece descuido e nao e: ehFlagSemMolde aceita "1", esta recusa. Fixada aqui
+  // para que "padronizar as duas flags" nao afrouxe a guarda de dinheiro sem ninguem notar.
+  it('recusa a string "1" — ao contrario de ehFlagSemMolde, e de proposito', () => {
+    expect(ehFlagOrcamentoConfirmadoReais("1")).toBe(false);
+    expect(ehFlagSemMolde("1")).toBe(true);
   });
 });
 

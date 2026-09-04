@@ -59,6 +59,16 @@ export function extrairOrcamentoDiarioDaFala(texto: string): number | null {
   return hits[hits.length - 1].val;
 }
 
+/**
+ * Confirmacao de que o valor foi dito em REAIS, e nao centavos copiados da Meta.
+ *
+ * Mais restrita que `ehFlagSemMolde` (memoria_conjunto), que tambem aceita a string `"1"`, e a
+ * assimetria e de proposito — nao harmonizar as duas. `sem_molde` e dica de estrutura: ser
+ * liberal ali nao quebra nada. Aqui a lista curta E a guarda: esta flag e a unica coisa entre
+ * "3000 foi engano de centavos" e "3000 foi proposito", e um truthy acidental faria
+ * `conferirOrcamentoReais` aceitar R$ 3000/dia onde o gestor quis R$ 30 — 100x. Recusar custa
+ * uma repergunta; aceitar por acidente custa o orcamento do dia.
+ */
 export function ehFlagOrcamentoConfirmadoReais(v: unknown): boolean {
   return v === true || v === 1 || String(v ?? "").trim().toLowerCase() === "true";
 }
