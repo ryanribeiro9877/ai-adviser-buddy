@@ -41,7 +41,17 @@ const semPapelCamp = montarNomeMeta({
   objetivo_tag: "LEADS",
   periodo: "AGO26",
 }, { exigirPapel: true });
-assert(!semPapelCamp.ok && semPapelCamp.faltando?.includes("papel"), "papel so na sugestao composta");
+// `?? false` e nao `!` nem cast: `faltando` e opcional no tipo porque `resolverNomeFinal`
+// repassa o do montado, que pode vir ausente. Aqui a ausencia tem de REPROVAR — recusa que
+// nao diz qual campo falta obriga o chamador a adivinhar, e era o que o optional chaining
+// deixava passar como sucesso silencioso (undefined e falsy, mas `assert` recebia
+// `boolean | undefined` e o compilador estava certo em reclamar).
+assert(
+  !semPapelCamp.ok && (semPapelCamp.faltando?.includes("papel") ?? false),
+  `papel so na sugestao composta, e a recusa tem de nomear o campo faltante; faltando=${
+    JSON.stringify(semPapelCamp.ok ? null : semPapelCamp.faltando)
+  }`,
+);
 
 const livre = resolverNomeFinal({ nomeLivre: "Campanha Verao RR" });
 assert(livre.ok && livre.origem === "livre" && livre.nome === "Campanha Verao RR", "nome livre");

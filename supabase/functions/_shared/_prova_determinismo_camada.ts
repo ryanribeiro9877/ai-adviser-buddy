@@ -80,6 +80,15 @@ const MOLDE_NUM: MoldeRegistro = {
     { nome: "qtd", tipo: "inteiro", origem: "avaliar_orcamento_diario.qtd_conjuntos", obrigatorio: true },
   ],
   fronteira: "Nao usar quando a leitura de orcamento falhou: sem soma nao ha molde.",
+  // Copiado do registro real, nao escolhido: `moldes_de_resposta` traz
+  // NUM_EXPOSICAO_ORCAMENTO como `segmento_componivel`. Esta fixture existe para reproduzir o
+  // molde de producao byte a byte — divergir dele aqui faria a prova de determinismo atestar
+  // o determinismo de um molde que nao existe.
+  //
+  // Coerente com o resto: dos 6 molde_calculado do registro, 5 sao componiveis e so o
+  // EST_ROTULO_RASTREIO nao e (rotulo de rastreio e literal a copiar, e texto em volta
+  // convida a colar o comentario junto com o UTM).
+  composicao: "segmento_componivel",
   verificado_em: HOJE,
   revalidar_ate: "2027-03-03",
   versao: 1,

@@ -1,0 +1,259 @@
+-- =========================================================================================
+-- ESPELHO — ESCOPO DAS REGRAS POR RAMO DO NEGOCIO, E LGL-JUR-01 EM BLOQUEIO
+-- =========================================================================================
+-- Migrations: 20260904140000, 20260904150000, 20260904160000 (SQL em ../migrations/).
+-- Edges: _shared/empresa_credito.ts (compliance-check).
+-- Continuacao de espelho_regua_juridica_e_portao_fail_closed.sql (commit 8d98021).
+--
+-- Este documento registra decisao e evidencia. O SQL executavel esta nas migrations.
+--
+--
+-- =========================================================================================
+-- 1. LGL-JUR-01 PASSOU A BARRAR PUBLICACAO
+-- =========================================================================================
+-- Reconferido no INSTANTE da promocao (04/09/2026 14:34 UTC), nao no levantamento da vespera,
+-- porque bloqueio mexe em veiculacao e levantamento de horas atras nao serve para decidir:
+--
+--   pecas que a regra pega ......... 6
+--   viraram anuncio algum dia ...... 0
+--   ativas neste momento ........... 0
+--   sequer enviadas para a Meta .... 0
+--   das 23 pecas hoje NO AR (todas as empresas), quantas ela barraria .... 0
+--
+-- DUAS VIAS, porque a via provada tem ponto cego. A ponte
+-- `approval_requests.payload->>'drive_file_id'` -> `execution_result->>'id_criado'` ->
+-- `ads.external_id` so ve anuncio nascido do fluxo de aprovacao; anuncio montado a mao no
+-- Gerenciador nao apareceria nela, e o negativo pareceria igual. A segunda via fecha por
+-- baixo: `media_uploads.drive_file_id` -> `meta_video_id` mostra que nenhuma das 6 foi sequer
+-- SUBIDA para a Meta, e video que nao existe na conta nao pode estar em anuncio por caminho
+-- nenhum. Negativo por duas vias que falham de formas diferentes vale mais que por uma.
+--
+-- Por que so esta das cinco: o defeito e verificavel na propria frase. BPC/LOAS, aposentadoria
+-- rural e isencao de IR sao condicionais na lei; a peca as apresenta como certas. Nao ha juizo
+-- de tom a fazer. O hedge segue sendo a fronteira: "pode ter direito" passa, "tem direito"
+-- barra.
+--
+-- ORDEM DELIBERADA: a promocao (20260904150000) vem DEPOIS do escopo (20260904140000). Ligar
+-- bloqueio antes do escopo o faria valer global por alguns minutos, inclusive para a Legal e
+-- Viver, que nao vende servico advocaticio. O risco pratico era baixo — a regra tem lookahead
+-- de contexto juridico — mas ligar bloqueio global "porque provavelmente nao pega ninguem" e o
+-- tipo de aposta que este projeto ja pagou caro.
+--
+-- FALHA CONHECIDA E ACEITA: "Cuidar da saude e aposentadoria" diz "Varias pessoas tem esse
+-- direito e nao sabem", afirmativo, e escapa porque a frase anterior traz "podem permitir" e o
+-- hedge e avaliado no texto inteiro. Falso negativo preferido a falso positivo, agora que a
+-- regra barra publicacao.
+--
+-- As outras quatro seguem em `atencao`. A LGL-JUR-03 fica em aviso ate um advogado responder
+-- se trafego pago ofertando servico advocaticio ja e captacao ativa vedada pelo art. 2º, VIII
+-- do Provimento 205/2021 — se for, o problema e o canal e nao a palavra, e a regra fica
+-- irrelevante em vez de estreita.
+--
+--
+-- =========================================================================================
+-- 2. O ESCOPO POR RAMO NAO ERA ARRUMACAO: HAVIA FALSO POSITIVO DE BLOQUEIO NO AR
+-- =========================================================================================
+-- Pedi a medicao espelhada da que eu havia feito (zero falso positivo das regras juridicas
+-- fora do Juridico) e o resultado inverteu a leitura da entrega anterior.
+--
+-- MEDIDO: as 9 regras de credito pegam 2 pecas do Sistema Ocular (VISTTA) — "Combo Casal,
+-- oculos novos todos os anos por parcelas de R$79,00/mes". A regra e FIN-04 (taxa citada sem
+-- CET), severidade `bloqueia`. Rodado o portao de verdade sobre "Criativo 01.jpeg":
+-- `veredito = 'reprova'`. CET e informacao bancaria; exigi-la de anuncio de OCULOS e falso
+-- positivo de regra de BLOQUEIO, em producao, hoje.
+--
+-- ISTO CORRIGE UMA AFIRMACAO MINHA. Na entrega anterior escrevi que abrir a edge
+-- `compliance-check` para a COHAPM "exporia as 10 regras de credito a um negocio que nao e de
+-- credito", e apresentei a escolha como binaria. A exposicao JA EXISTIA, por um caminho pior:
+-- a edge e opcional, mas `checar_par_texto_e_peca` e o que roda na emissao. O recorte da edge
+-- nunca foi a protecao que eu supus. Tambem recusei criar a coluna `escopo` por mexer em
+-- tabela com 6 consumidores — com o falso positivo medido, o custo de NAO ter a coluna virou
+-- bloqueio indevido de peca legitima, e a conta inverteu.
+--
+-- QUANTAS REGRAS CADA EMPRESA PASSA A VER (era 15 para todas):
+--
+--   COHAPM ................ ramos [juridico]           6 regras, 0 bloqueiam   (era 15, 8)
+--   Legal e Viver ......... ramos [credito]           10 regras, 8 bloqueiam   (era 15, 8)
+--   Cooperativa_ Cohapm ... ramo NAO derivado         15 regras, 8 bloqueiam   (inalterado)
+--
+-- A COHAPM cai de 15 para 6 e perde as 8 de bloqueio — todas de credito, e e exatamente a
+-- perda desejada: nenhuma delas pegava peca do Juridico, e uma pegava peca de oculos.
+-- Conferido depois: o portao global ainda barra a peca de oculos, o escopado nao.
+--
+--
+-- =========================================================================================
+-- 3. EMPRESA SEM RAMO VE O CONJUNTO MAIS AMPLO — 15 REGRAS, NAO ZERO
+-- =========================================================================================
+-- Resposta direta a pergunta do gestor: "Cooperativa_ Cohapm" (industry='Digital', sem marca
+-- cadastrada, 0 campanhas) passa a ver TODAS as 15 regras, incluindo as 8 de bloqueio.
+--
+-- `ramos_da_empresa` tem tres desfechos, e nenhum deles e conjunto vazio:
+--   ramo derivado ........... as regras do ramo + as de ramo 'qualquer'
+--   ramo NAO derivavel ...... TODAS as regras, e `resolvido:false` no retorno
+--   empresa inexistente ..... EXCECAO (defeito de chamador, nao ausencia de ramo)
+--
+-- Custo aceito: aviso fora de contexto para essa empresa. Mitigado sem esconder — o retorno
+-- carrega `escopo_resolvido:false` e `checar_par_texto_e_peca` emite lacuna dizendo que aviso
+-- estranho ali indica cadastro incompleto, e nao regra errada. Sem isso, o primeiro aviso
+-- absurdo levaria alguem a culpar a regra e afrouxa-la, que e como regra boa morre.
+--
+-- A UNICA das 15 sem `regra_code` ("maior limite / comparativo sem prova") ficou em
+-- 'qualquer', e nao por descuido: pega "o melhor do mercado" e "imbativel", superlativo sem
+-- prova vedado pelo CDC art. 37 §1º para qualquer ramo. Efeito colateral desejado — toda
+-- empresa conhecida tem no minimo 1 regra ativa, entao o escopo nunca produz portao vazio
+-- por construcao, e nao so por sorte de cadastro.
+--
+--
+-- =========================================================================================
+-- 4. DE ONDE VEM O RAMO — E A DERIVACAO INGENUA QUE ERRARIA
+-- =========================================================================================
+-- Nao criei campo. A informacao ja existia espalhada: `companies.industry`,
+-- `brand_identity.marca_nome` e `brand_identity.linhas_produto`.
+--
+-- POR QUE NAO SO `companies.industry`: e grosso demais e para a COHAPM esta INCOMPLETO. Diz
+-- "Cooperativa habitacional", que descreve La Felicità e nao descreve nem o Juridico nem o
+-- Sistema Ocular — as tres marcas dividem um company_id, contaminacao ja registrada no
+-- espelho dos crons. Derivar so pelo `industry` deixaria o Juridico sem as regras juridicas.
+--
+-- A ARMADILHA, MEDIDA ANTES DE ESCREVER A FUNCAO: o padrao ingenuo
+-- `(consignado|credito|emprestimo)` classifica a COHAPM como CREDITO, porque `linhas_produto`
+-- dela tem "emprestimo_abusivo" e "cobranca_indevida". Esses sao temas de LITIGIO sobre
+-- emprestimo, nao oferta de emprestimo — quem processa banco por juros abusivos nao esta
+-- vendendo credito. Com o padrao ingenuo a COHAPM continuaria recebendo FIN-04 e o falso
+-- positivo do Sistema Ocular sobreviveria a migration inteira. Por isso o padrao exige sinal
+-- de OFERTA (`consignado`, `credito clt`, `correspondente banc`, `financiament`) e nao a
+-- palavra "emprestimo" solta. Conferido nas 3 empresas: o ingenuo erra a COHAPM, o de oferta
+-- acerta as 3. Mesmo padrao do projeto na derivacao de categoria de campanha: deriva quando
+-- inequivoco, e o inequivoco foi testado, nao presumido.
+--
+--
+-- =========================================================================================
+-- 5. O CONTROLE PERMANENTE APRENDEU A COBRAR O ESCOPO
+-- =========================================================================================
+-- Escopo por ramo cria uma forma NOVA de o portao morrer em silencio: basta a derivacao passar
+-- a devolver vazio e tudo passa, sem nada acusar. `provar_portao_de_compliance()` foi de 2
+-- para 5 controles, cada um cobrindo uma forma diferente de apodrecer:
+--
+--   1. positivo global ....... texto de credito TEM de ser barrado          (portao morto)
+--   2. negativo global ....... texto inocente NAO pode ser barrado          (portao histerico)
+--   3. escopo discrimina ..... empresa de credito barra texto de credito, empresa juridica NAO
+--                              e a juridica ACUSA o texto juridico          (escopo inerte/cego)
+--   4. sem ramo e amplo ...... empresa sem ramo barra o controle positivo   (fail-open novo)
+--   5. empresa fantasma ...... uuid fora de `companies` tem de ESTOURAR     (aprovacao a nada)
+--
+-- O controle 3 tem tres asserçoes de proposito: escopo pode falhar por filtrar demais (esconde
+-- regra de quem deveria receber) ou de menos (nao filtra nada). As duas dao "passou" numa
+-- verificacao ingenua. Rodado com as 3 empresas reais: passa.
+--
+-- DEFEITO ACHADO POR EXECUTAR, e nao por reler: `v_ramos := v_ramos || 'credito'` estoura com
+-- "malformed array literal" — com array vazio o `||` resolve para `anyarray || anyarray` e o
+-- Postgres le a string como literal de array. Trocado por `array_append`. A funcao foi
+-- APLICADA com o defeito e so a primeira execucao o acusou; nao houve dano porque
+-- `checar_par_texto_e_peca` ainda nao tinha sido religada — a ordem das migrations, escolhida
+-- por outro motivo, absorveu o erro.
+--
+-- FAIL-OPEN FECHADO NO LADO TYPESCRIPT (o quinto deste projeto, e ja existia):
+-- `filtrarRegrasPorEmpresa` chamava `empresaEhCredito`, que colapsa TRES estados de mundo em
+-- dois — Legal (credito), COHAPM (nao-credito) e QUALQUER OUTRA (nao sabemos) caindo em
+-- `false`. Para escolher texto de prompt o colapso e inofensivo e foi para isso que a funcao
+-- nasceu; para FILTRAR REGRA nao e: company_id novo saia de la SEM as 10 regras de credito, e
+-- a resposta diria "regras_aplicadas: N" com aparencia de normalidade. Empresa nova estrearia
+-- com verificador mais frouxo que as duas cadastradas. Criado `empresaComRamoConhecido` e o
+-- filtro agora devolve TODAS as regras para empresa desconhecida. `empresaEhCredito` NAO foi
+-- alterada: ela e importada por traffic-chat e traffic-agent-job, que pertencem a outro
+-- trabalho nesta rodada, e mudar a semantica dela de fora seria mexer neles pela porta lateral.
+--
+--
+-- =========================================================================================
+-- 6. O CI VERMELHO: TRES ERROS, NAO DOIS, E DOIS DEFEITOS DIFERENTES
+-- =========================================================================================
+-- Reportei que `_prova_nomenclatura.ts` e `_prova_resposta_canonica.ts` falhavam pelo campo
+-- obrigatorio `composicao`. Errado pela metade: sao dois defeitos distintos, e havia um
+-- terceiro arquivo que meu `deno check` sobre dois arquivos nao alcancava.
+--
+--   _prova_nomenclatura.ts:44 — TS2345, NAO tem relacao com `composicao`.
+--     `semPapelCamp.faltando?.includes("papel")` devolve `boolean | undefined` e `assert` pede
+--     `boolean`. Consertado com `?? false`, nao com `!` nem cast: `faltando` e opcional no tipo
+--     porque `resolverNomeFinal` repassa o do montado, e a AUSENCIA tem de reprovar — recusa
+--     que nao nomeia o campo faltante obriga o chamador a adivinhar. O compilador estava certo.
+--
+--   _prova_resposta_canonica.ts:58 e _prova_determinismo_camada.ts:66 — TS2741, `composicao`.
+--
+-- O QUE O CAMPO SIGNIFICA: se o texto do molde admite analise do modelo em volta.
+-- `turno_inteiro` responde tudo; `segmento_componivel` trava um pedaco e a analise entra em
+-- volta; `nao_componivel` e o default restritivo, para quando texto livre FALSIFICA ou dilui o
+-- canonico. Preenchi os dois com `segmento_componivel`, e nenhum dos dois por conveniencia:
+--
+--   MOLDE_NUM (determinismo) e `NUM_EXPOSICAO_ORCAMENTO`, codigo REAL. Copiei o valor de
+--   `moldes_de_resposta`, que o traz como `segmento_componivel`. A fixture existe para
+--   reproduzir producao; divergir dela atestaria o determinismo de um molde que nao existe.
+--
+--   moldeTeste (resposta_canonica) e sintetico, mas e `molde_calculado` e o gabarito relata
+--   numero medido. Analise em volta de numero medido nao o torna falso nem o repete — comentar
+--   o que o numero significa e o que se espera depois dele. Dos 6 molde_calculado reais, 5 sao
+--   componiveis; so EST_ROTULO_RASTREIO nao e (rotulo e literal a copiar).
+--
+-- A LACUNA QUE O CAMPO OBRIGATORIO ESTAVA APONTANDO: `segmento_componivel` nao tinha NENHUMA
+-- assercao em `_prova_resposta_canonica.ts`. O registro de fallback so tem as 5 recusas
+-- (nao_componivel) e a sonda (turno_inteiro), entao o terceiro estado passava sem prova — e e
+-- o unico cuja emissao depende de o chamador NAO curto-circuitar. Preencher a fixture com o
+-- default restritivo teria calado o compilador e deixado o buraco; acrescentada a assercao.
+-- Tornar o campo opcional, como o gestor advertiu, teria desfeito exatamente isto.
+--
+-- Estado do CI ao fechar: `deno check` limpo nos 33 _shared e nas 31 edges, 35 de 35 provas
+-- passando.
+--
+--
+-- =========================================================================================
+-- 7. CRONS SEM ARQUIVO: NOVE, EM DUAS FAMILIAS
+-- =========================================================================================
+-- Detalhe em 20260904160000. Resumo, e a medicao errada que veio primeiro:
+--
+-- A primeira passagem procurou o NOME do job em qualquer lugar das migrations e devolveu 31 de
+-- 31 versionados — limpo e falso. `alerts-eval-daily` aparece em 10 migrations, todas em
+-- consultas de MONITORAMENTO (`where j.jobname in (...)`); nenhuma o agenda. Presenca do nome
+-- nao e declaracao do agendamento, e a checagem barata deu a resposta que eu queria ouvir.
+-- Procurando `cron.schedule('<nome>'`, a resposta virou 9.
+--
+--   FAMILIA A (6 sem nenhuma declaracao): meta-campaign-status-0910, alerts-eval-daily,
+--   campaign-config-snapshot-0925, waba-sync-daily, daily-report-0830, drive-watch-0845.
+--   Em banco reconstruido pelas migrations, a operacao subiria sem espelho da Meta, sem
+--   relatorio diario, sem sincronia de WhatsApp e sem varredura do Drive da Legal — sem nada
+--   acusando, porque `tarefas_agendadas` continuaria listando as tarefas como ativas.
+--   `drive-watch-0845` e o caso extremo: a UNICA mencao dele no repo e um `cron.unschedule`
+--   de 20260806120620, entao o repositorio afirma hoje o OPOSTO do que roda.
+--
+--   FAMILIA B (3 declarados com horario errado): o trio de estrutura do Pipeboard esta em
+--   20260814130000 as 09:12/09:17/09:22 e roda as 08:40/08:45/08:50.
+--
+-- DIRECAO DA CORRECAO, que foi decisao e nao copia: PRODUCAO esta certa e o ARQUIVO velho. A
+-- evidencia e ordem de dependencia — `pipeboard-metrics-daily` roda as 09:00 e le a estrutura
+-- que o trio coleta; no horario do arquivo a estrutura chegaria DEPOIS das metricas, que
+-- casariam com a estrutura do dia anterior. Alguem antecipou o trio para corrigir isso e nao
+-- versionou. Escrever `12 9` de volta "para bater com o repositorio" quebraria a coleta em
+-- nome da consistencia.
+--
+-- PARECE DERIVA E NAO E: `daily-report-0830` roda `30 11 * * *`. Cron do Postgres esta em UTC
+-- e 11:30 UTC = 08:30 em Brasilia — o nome fala horario local. Outros jobs nomeiam pelo UTC
+-- (`bm-monitor-0920` roda 09:20 UTC), entao a convencao de nome e inconsistente no projeto,
+-- mas isso e nomenclatura e nao agendamento; renomear job em producao por estetica troca risco
+-- por aparencia.
+--
+-- LIXO ESQUECIDO: NENHUM, conferido pelos dois lados. As 32 linhas de `tarefas_agendadas` tem
+-- cron vivo, e os 31 crons apontam para tarefa registrada e ativa (`alerts-eval-daily` cobre
+-- duas). Nao ha job orfao nem tarefa ativa sem quem a dispare — a deriva era so entre producao
+-- e repositorio, nunca dentro de producao. Os quatro `windsor-*` seguem declarados e
+-- desagendados, o que esta certo: o Windsor foi aposentado em 20260814123000 e a ausencia
+-- deles em producao e o desfecho desejado.
+--
+-- A migration NAO altera producao: horario e comando foram copiados de `cron.job` como estao
+-- rodando. Conferido depois de aplicar — 31 jobs, nenhum duplicado, nenhum horario alterado.
+--
+--
+-- =========================================================================================
+-- 8. `usage` DA OPENAI: SEGUE PUBLICADO E NAO EXERCITADO
+-- =========================================================================================
+-- `contar_videos_com_audio_pendente()` = 0, ultima analise em 31/08, `transcricao_usage`
+-- preenchido em 0 de 145. Nao houve transcricao nova nesta rodada e nao forcei caso artificial
+-- para poder dizer que provei. O caminho de escrita esta publicado e conferido por leitura de
+-- codigo; a prova de ponta a ponta fica pendente da proxima peca de video que entrar no Drive.

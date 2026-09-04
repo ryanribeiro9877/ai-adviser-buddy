@@ -1,0 +1,52 @@
+-- LGL-JUR-01 PASSA DE AVISO A BLOQUEIO
+--
+-- Decisao do gestor, sobre recomendacao minha. Das cinco regras juridicas propostas em
+-- 20260904110000, esta e a unica que eu recomendei promover, e o motivo e o que a torna
+-- promovivel: o defeito e verificavel na propria frase, sem juizo de tom. BPC/LOAS,
+-- aposentadoria rural e isencao de IR por doenca grave sao beneficios que a lei concede SOB
+-- CONDICAO (renda per capita, comprovacao de atividade rural, laudo e enquadramento). Uma
+-- peca que diz "essa pessoa TEM direito" a quem nunca teve o caso analisado omite a condicao,
+-- que e a hipotese do art. 37 §3º do CDC. Nao e questao de tom: ou o beneficio e condicional
+-- na lei e a frase o apresenta como certo, ou nao e.
+--
+-- O hedge continua sendo o que separa o licito do ilicito, e por isso `exige_presenca_de`
+-- fica intocado: "pode ter direito" informa e passa; "tem direito" promete e barra.
+--
+-- =========================================================================================
+-- POR QUE PROMOVER AGORA CUSTA ZERO, CONFERIDO NO INSTANTE DA PROMOCAO
+-- =========================================================================================
+-- Reconferido em 04/09/2026 14:34 UTC, por DUAS vias independentes, porque levantamento de
+-- veiculacao com algumas horas nao serve para decidir bloqueio:
+--
+--   pecas que a regra pega ............ 6
+--   ja viraram anuncio algum dia ...... 0
+--   ativas neste momento .............. 0
+--   sequer enviadas para a Meta ....... 0
+--
+-- A segunda via existe porque a primeira tem um ponto cego. A ponte
+-- `approval_requests.payload->>'drive_file_id'` -> `execution_result->>'id_criado'` ->
+-- `ads.external_id` so ve anuncio criado pelo fluxo de aprovacao; anuncio montado a mao no
+-- Gerenciador nao apareceria nela. `media_uploads.drive_file_id` -> `meta_video_id` fecha
+-- esse furo por baixo: nenhuma das 6 foi sequer SUBIDA para a Meta, e video que nao existe na
+-- conta nao pode estar em anuncio nenhum, por qualquer caminho. O negativo por duas vias que
+-- falham de formas diferentes vale mais que o negativo por uma.
+--
+-- Medido tambem o efeito da promocao sobre a operacao viva, que e a pergunta que importa
+-- quando se liga um bloqueio: das 23 pecas hoje vinculadas a anuncio ATIVO em todas as
+-- empresas, ZERO seria barrada por esta regra. Bloqueio que nao interrompe entrega de nada
+-- hoje, e que a partir de agora impede a proxima peca de teor forte de subir.
+--
+-- ORDEM DELIBERADA: esta migration vem DEPOIS de 20260904140000 (escopo por ramo). Ligar
+-- bloqueio antes do escopo faria a regra valer globalmente por alguns minutos, inclusive para
+-- a Legal e Viver, que nao vende servico advocaticio. O risco pratico era baixo (a regra tem
+-- lookahead de contexto juridico), mas ligar bloqueio global "porque provavelmente nao pega
+-- ninguem" e o tipo de aposta que este projeto ja pagou caro.
+--
+-- AS OUTRAS QUATRO CONTINUAM EM AVISO, e uma delas por decisao expressa: a LGL-JUR-03
+-- (gratuidade como chamariz) fica em aviso ate um advogado responder se trafego pago ofertando
+-- servico advocaticio ja e captacao ativa vedada pelo art. 2º, VIII do Provimento 205/2021. Se
+-- for, o problema e o canal e nao a palavra, e a regra fica irrelevante em vez de estreita.
+update public.promessas_proibidas
+   set severidade = 'bloqueia',
+       observacao = 'PROMOVIDA A BLOQUEIO em 04/09/2026 por decisao do gestor. Reconferido no instante da promocao por duas vias independentes (approval_requests->ads e media_uploads->meta_video_id): pega 6 pecas, 0 viraram anuncio algum dia, 0 ativas, 0 sequer enviadas a Meta - e 0 das 23 pecas hoje no ar em qualquer empresa seria barrada. E a unica das cinco cujo defeito e verificavel na frase e nao juizo de tom: o beneficio e condicional na lei e a frase o apresenta como certo. O hedge continua sendo a fronteira - "pode ter direito" passa, "tem direito" barra. FALHA CONHECIDA E ACEITA: "Cuidar da saude e aposentadoria" diz "Varias pessoas tem esse direito e nao sabem", afirmativo, mas escapa porque a frase anterior traz "podem permitir" e o hedge e avaliado no texto inteiro. Falso negativo preferido a falso positivo, agora que a regra barra publicacao.'
+ where regra_code = 'LGL-JUR-01';

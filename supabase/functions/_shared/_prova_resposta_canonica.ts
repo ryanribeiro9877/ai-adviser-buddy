@@ -66,6 +66,18 @@ const moldeTeste: MoldeRegistro = {
     { nome: "n", tipo: "inteiro", origem: "avaliar_orcamento_diario.qtd", obrigatorio: true },
   ],
   fronteira: null,
+  // `segmento_componivel` e nao o default restritivo, e a escolha e do CONTEUDO do gabarito,
+  // nao de conveniencia: o texto e um relato de numero medido ("Exposicao de hoje: X. Pior
+  // dia: Y."). Analise em volta de numero medido nao o torna falso nem o repete — comentar o
+  // que o numero significa e exatamente o que se espera depois dele. E o mesmo grupo dos
+  // moldes_calculado reais, entao a fixture representa a propria classe em vez de simular
+  // outra.
+  //
+  // Efeito colateral que era a lacuna real: `segmento_componivel` nao tinha NENHUMA assercao
+  // neste arquivo. O registro de fallback so tem as cinco recusas (nao_componivel) e a sonda
+  // (turno_inteiro), entao o terceiro estado do grupo passava sem prova aqui. Preencher esta
+  // fixture com o restritivo teria calado o compilador e deixado o buraco.
+  composicao: "segmento_componivel",
   verificado_em: HOJE,
   revalidar_ate: "2027-01-01",
   versao: 1,
@@ -232,6 +244,29 @@ const reg = registroFallback();
   if (r.caminho === "canonico") {
     assert(r.classe === "texto_canonico", "classe esperada");
     assert(r.composicao === "turno_inteiro", `grupo deveria ser turno_inteiro, veio ${r.composicao}`);
+  }
+}
+{
+  // O TERCEIRO estado. Sem esta assercao, `segmento_componivel` nunca era exercitado neste
+  // arquivo, e ele e o unico dos tres cuja emissao depende de o chamador NAO curto-circuitar:
+  // `turno_inteiro` e `nao_componivel` emitem sozinhos, o componivel entra em volta da analise
+  // do modelo. Um bug que devolvesse o grupo restritivo no lugar do componivel nao quebraria
+  // nenhuma prova antiga — so travaria a analise em silencio, que e a falha barata de aceitar
+  // e caríssima de perceber.
+  const vivo = { moldes: [...reg.moldes, moldeTeste], degradado: false };
+  const r = resolverRespostaCanonica({
+    molde: { codigo: "TESTE_MOLDE", classe: "molde_calculado", confianca: "exata", parametros: {} },
+    registro: vivo,
+    valores: { exposicao: 1209.6, pior: 1512, n: 7 },
+    ctx,
+  });
+  assert(r.caminho === "canonico", "molde calculado completo deveria emitir canonico");
+  if (r.caminho === "canonico") {
+    assert(r.classe === "molde_calculado", "classe esperada");
+    assert(
+      r.composicao === "segmento_componivel",
+      `grupo deveria ser segmento_componivel, veio ${r.composicao}`,
+    );
   }
 }
 
