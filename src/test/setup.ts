@@ -1,6 +1,21 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, vi } from "vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
+
+// O default de `findBy*`/`waitFor` e 1000 ms, e esse numero embute a premissa de
+// maquina ociosa. MEDIDO em 04/09 nesta maquina de 8 GB, com outro trabalho em
+// paralelo: 558 MB de RAM livre ANTES de subir a suite, e 18,9 GB de commit
+// charge — ou seja, paginacao. Nessas condicoes um processo fica sem CPU por
+// mais de 1 s com facilidade, e tres testes de operacao-chat que passam
+// isolados reprovaram na suite cheia esperando uma consulta que resolve em ~10 ms.
+//
+// Subir esta janela NAO esconde defeito, e e por isso que a correcao e aqui e nao
+// em cada teste: `waitFor` retorna no instante em que a asserção passa, entao o
+// teto so governa quanto tempo se espera antes de declarar FALHA. Ampliar nao
+// deixa nada verde que devesse ficar vermelho; so evita vermelho por inanicao.
+// Mesma doutrina do testTimeout de 20 s em vitest.config.ts, e o CI (runner de
+// 2 nucleos) e ainda mais apertado que esta maquina.
+configure({ asyncUtilTimeout: 5_000 });
 
 // Timezone FIXO. Sem isto a suite passa na maquina do dev (UTC-3) e falha no CI
 // (UTC): pegamos exatamente isso na primeira execucao do workflow, num teste que
@@ -29,6 +44,15 @@ if (!globalThis.ResizeObserver) {
     unobserve() {}
     disconnect() {}
   } as unknown as typeof ResizeObserver;
+}
+
+// jsdom não implementa scrollTo em Element (só o de window, e mesmo esse é um
+// no-op que avisa). O chat rola o fio para o fim a cada mensagem nova, num
+// useEffect — sem o stub, montar OperacaoChat estoura em `scrollTo is not a
+// function` no primeiro render, que não tem nada a ver com o defeito sob teste.
+// Mesmo critério do ResizeObserver acima: é lacuna do ambiente, não de um teste.
+if (!Element.prototype.scrollTo) {
+  Element.prototype.scrollTo = function scrollTo() {};
 }
 
 // jsdom não implementa matchMedia, e use-mobile.tsx chama no primeiro render.
