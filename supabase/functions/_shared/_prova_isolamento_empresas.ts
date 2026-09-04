@@ -87,19 +87,60 @@ assert(
     !chat.includes("norm(nomeAlvo) === '_sem_molde'"),
   "traffic-chat nao pode comparar sem_molde via norm() (ela remove o underscore)",
 );
-assert(
-  chat.includes("pedidoLoteCriativo") &&
-    chat.includes("pareceNomeDePecaNaoMolde") &&
-    chat.includes("ehSentinelaSemMolde") &&
-    chat.includes("LINKS DE CONJUNTO DEFINIDOS NESTA CONVERSA") &&
-    chat.includes("replyLoteComLegendas") &&
-    chat.includes("LOTE DE 6 CRIATIVOS") &&
-    chat.includes("LOTE + EMISSAO") &&
-    chat.includes("precisaProposeAto") &&
-    chat.includes("cortarClaimEmitidoSemCard") &&
-    chat.includes("ato_sem_propose_sem_sintese_cega"),
-  "traffic-chat deve lembrar conjunto N + link da conversa e auto-continuar lote",
-);
+// Um assert por marcador: um AND de dez com uma mensagem so dizia que "algo" caiu, e ainda
+// obrigava a bisseccao manual para descobrir qual dos dez.
+for (
+  const marcador of [
+    "pedidoLoteCriativo",
+    "pareceNomeDePecaNaoMolde",
+    "ehSentinelaSemMolde",
+    "LINKS DE CONJUNTO DEFINIDOS NESTA CONVERSA",
+    "replyLoteComLegendas",
+    "LOTE + EMISSAO",
+    "precisaProposeAto",
+    "cortarClaimEmitidoSemCard",
+    "ato_sem_propose_sem_sintese_cega",
+  ]
+) {
+  assert(
+    chat.includes(marcador),
+    `traffic-chat perdeu o marcador "${marcador}" (conjunto N + link da conversa + auto-continuar lote)`,
+  );
+}
+
+// A regra do lote nasceu de um 502 real: 22/08/2026, v28.59 — seis pecas mais gerar_legendas
+// estouravam o gateway (~150s) e a prosa "legendas pendentes" era tratada como turno FECHADO.
+//
+// A compactacao de prompt de 03/09 (0ed7a9f) NAO a perdeu: ela renomeou "LOTE DE 6 CRIATIVOS"
+// para "LOTE DE N CRIATIVOS" e generalizou "6 pecas = 6 EIXOS" para "N pecas = N EIXOS". O 6
+// fixo era, ele mesmo, o defeito seguinte — v28.96 (02/09) registra "o lote so reconhecia 6/8",
+// teto de coleta preso em 55s e approval_id inventado na sintese cega.
+//
+// Por isso esta guarda deixou de olhar o TITULO e passou a olhar o CONTEUDO que veio do
+// incidente, ancorada na etiqueta da versao (unica numa linha de regra do prompt; a outra
+// ocorrencia de v28.59 e comentario `//`). Renomear a regra e livre; perde-la, nao.
+{
+  const regraLote = chat
+    .split("\n")
+    .find((l) => l.trimStart().startsWith("- ") && l.includes("v28.59"));
+  assert(
+    !!regraLote,
+    "a regra do lote (v28.59) saiu dos LIMITES DUROS do prompt — nasceu de 502 real em 22/08/2026 " +
+      "e regra de incidente nao sai sem substituto declarado",
+  );
+  const exigencias: ReadonlyArray<readonly [string, string]> = [
+    ["EXCLUA", "excluir as pecas que ja estao no conjunto ativo (anti-repeticao de arquivo)"],
+    ["EIXOS", "N pecas = N eixos de mensagem (anti-repeticao de mensagem)"],
+    ["gerar_legendas", "uma chamada por peca, com teto por janela HTTP (anti-timeout)"],
+    ["legendas pendentes", "proibicao de encerrar o turno como se o pedido tivesse acabado"],
+  ];
+  for (const [marcador, porque] of exigencias) {
+    assert(
+      regraLote!.includes(marcador),
+      `a regra do lote perdeu "${marcador}" — ${porque}. Veio do 502 de 22/08/2026 (v28.59).`,
+    );
+  }
+}
 {
   const loteEdge = await Deno.readTextFile(
     new URL("./lote_criativo.ts", import.meta.url),
