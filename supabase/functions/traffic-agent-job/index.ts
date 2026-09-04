@@ -440,10 +440,38 @@ const DEVOLUCAO_MIN_MS = 90_000;
 // no job 1403d076 a parede caiu de 79s para 32s entre o checkpoint e a chamada de sintese.
 const CUSTO_REINVOCACAO_MS = 45_000;
 /**
+ * MENOR TIMEOUT QUE VALE EMITIR. Substitui o piso de 20s (item (c), autorizado em 04/09/2026).
+ *
+ * O piso era a aritmetica da reserva dizendo "nao cabe" e o codigo emitindo a chamada assim mesmo.
+ * O resultado esta medido dos dois lados do caminho:
+ *
+ *   - COLETA: chamada no piso teve 0 de 4 sucessos, sempre em `openrouter_timeout_20000`. 20s e
+ *     menos do que uma chamada de raciocinio leva so para comecar a devolver: o proprio arquivo
+ *     mede o modelo gastando 3.971 e 6.575 tokens de raciocinio ANTES do primeiro token visivel.
+ *   - ESCRITA DE SALVAMENTO: o commit abe7d15 destravou a escrita e ela tambem morreu no piso.
+ *     Ou seja, 20s nao bastam nem para escrever sem ferramenta e sem raciocinio.
+ *
+ * Por que 45s e nao um numero maior: o teto que a coleta recebe na PRIMEIRA chamada do deep hoje e
+ * de 65s (ver o bloco abaixo), e sao essas chamadas que produzem os 13% de encerramento voluntario
+ * medidos. Exigir mais do que 65s apagaria a unica coleta que hoje da certo — trocar 0 de 4 por
+ * 0 de 62 nao e conserto. Por que nao um numero menor: 20s esta medido como morte nos dois casos.
+ *
+ * Por que 45s exatamente, dentro dessa faixa: e o mesmo valor que `VISAO_MIN_PRAZO_MS` ja usa para
+ * a MESMA decisao no pipeline de visao ("abaixo disto, para o lote e declara parcial"). Duas
+ * frentes com a mesma regra e um numero so.
+ *
+ * O QUE AINDA NAO ESTA MEDIDO, e por isso este numero e o unico lugar a corrigir: qual o menor
+ * timeout em que uma chamada de coleta AINDA volta. A faixa util e (20s, 65s] e 45s esta dentro
+ * dela, mas nao ha medicao apontando 45 em vez de 35 ou 55. `tetos_chamada` agora grava
+ * `min_ms`/`max_ms` das chamadas EMITIDAS junto de `motivo_saida`, que e exatamente o par que
+ * responde isso na proxima amostra grande.
+ */
+const CHAMADA_MINIMA_MS = 45_000;
+/**
  * O QUE DE FATO LIMITA A COLETA DO DEEP — MEDIDO EM 04/09/2026 (n=39 jobs, 62 especialistas).
  *
- * Nao mexa em `SINT_RESERVA_MS`, `CUSTO_REINVOCACAO_MS` ou `JOB_LIMIT_MS` sem ler isto: os tres
- * se compoem num quarto numero que ninguem escolheu, e e esse que aperta.
+ * Nao mexa em `SINT_RESERVA_MS`, `CUSTO_REINVOCACAO_MS`, `CHAMADA_MINIMA_MS` ou `JOB_LIMIT_MS` sem
+ * ler isto: eles se compoem num numero que ninguem escolheu, e e esse que aperta.
  *
  * A investigacao tinha tres suspeitos. A telemetria derrubou os TRES:
  *
@@ -457,33 +485,38 @@ const CUSTO_REINVOCACAO_MS = 45_000;
  *   ENCERRAMENTO VOLUNTARIO — nao. `finish: stop`, o unico estado em que o especialista decidiu
  *     que terminou, sao 8 de 62 (13%). Os outros 81% terminaram em chamada abortada por relogio.
  *
- * O QUE APERTA e um numero derivado: `tetoDaChamada` = max(20s, min(150s, prazo() - 195s)), com
+ * O QUE APERTAVA era um numero derivado: `tetoDaChamada` = max(20s, min(150s, prazo() - 195s)), com
  * `prazo()` limitado pelos 270s por invocacao e a reserva sendo 150s de sintese + 45s de
  * reinvocacao. Isso da a coleta 65s de pista em que o teto por chamada e real. Passados os 65s,
- * `autorizado_ms` fica negativo e TODA chamada sai no piso de 20s — que e menos do que uma
+ * `autorizado_ms` ficava negativo e TODA chamada saia no piso de 20s — que e menos do que uma
  * chamada de raciocinio xhigh leva para voltar. A assinatura no banco e literal:
- * `openrouter_timeout_20000`, onde 20000 nao e teto escolhido, e o piso.
+ * `openrouter_timeout_20000`, onde 20000 nao era teto escolhido, era o piso.
  *
  * Bate com o observado: a coleta morre entre 71s e 104s de parede em todos os jobs concluidos.
  *
- * O QUE DESTRAVARIA — PROPOSTO, NAO IMPLEMENTADO (mexe em relogio, e decisao do gestor):
+ * O QUE FOI FEITO E O QUE NAO FOI (autorizacao do gestor, 04/09/2026):
  *
- *   (a) DESCONTAR A RESERVA DA PAREDE, NAO DA INVOCACAO. A reserva existe para garantir a
- *       escrita, e a escrita pode rodar no segmento seguinte, onde o relogio de invocacao nasce
- *       zerado. Reservar contra `prazoDeParede()` em vez de `prazo()` daria a coleta ~245s de
- *       pista sem tocar nos 480s nem no teto de 270s.
- *   (b) NAO COBRAR `CUSTO_REINVOCACAO_MS` QUANDO NAO HA REINVOCACAO POSSIVEL. Em
- *       `segmento === MAX_SEGMENTOS` os 45s sao cobrados de uma reinvocacao que nao vai
- *       acontecer: 45s de pista jogados fora por aritmetica.
- *   (c) TROCAR O PISO POR PARADA HONESTA. Chamada no piso tem 0 de 4 sucessos medidos e ainda
- *       queima parede antes de abortar. Parar a coleta e ir para a escrita de salvamento (que o
- *       commit abe7d15 acabou de liberar) preserva coleta ja paga em vez de perde-la.
- *   (d) A reserva de 150s esta bem dimensionada para a mediana e curta na cauda: a sintese leva
- *       106s de mediana, mas 201,5s no p90 e 239,9s no maximo. Alargar coleta sem olhar esta
- *       cauda troca "resposta curta" por "erro" — foi o que aconteceu com 370s por invocacao.
- *
- * Ordem sugerida: (b) e (c) sao baratos e conservadores; (a) e o ganho grande e precisa de (d)
- * medido junto, com amostra grande — n=5 ja mentiu duas vezes neste problema.
+ *   (a) DESCONTAR A RESERVA DA PAREDE, NAO DA INVOCACAO — NAO IMPLEMENTADA, CONDICIONADA A (d).
+ *       A ideia: a reserva existe para garantir a escrita, a escrita pode rodar no segmento
+ *       seguinte com relogio de invocacao zerado, e reservar contra `prazoDeParede()` em vez de
+ *       `prazo()` daria ~245s de pista sem tocar nos 480s nem no teto de 270s. So que a pista que
+ *       (a) abre e paga com o que a sintese ainda vai precisar, e quanto ela precisa na CAUDA e a
+ *       pergunta de (d). O veredito fica registrado junto de `SINT_RESERVA_MS`.
+ *   (b) NAO COBRAR `CUSTO_REINVOCACAO_MS` QUANDO NAO HA REINVOCACAO POSSIVEL — IMPLEMENTADA.
+ *       Ver `reservaColetaMs` em `processarJob`: os 45s so entram quando a reinvocacao pode de
+ *       fato ocorrer (`cap.permitirCheckpoint && segmento < MAX_SEGMENTOS`). Cobrar de quem nao
+ *       vai reinvocar era jogar 45s de pista fora por aritmetica — no ultimo segmento e em lite,
+ *       que nunca grava checkpoint.
+ *   (c) TROCAR O PISO POR PARADA HONESTA — IMPLEMENTADA. Ver `CHAMADA_MINIMA_MS` e
+ *       `tetoDaChamadaMs`: quando a reserva nao autoriza chamada real, a chamada nao sai. A coleta
+ *       para e vai para a escrita de salvamento (destravada por abe7d15), que tem orcamento
+ *       proprio guardado justamente para isso, e o que ja foi pago vira relatorio em vez de ir
+ *       fora. Sem relatorio, o especialista entra na sintese como lacuna DECLARADA — nunca como
+ *       relatorio enxuto, que era o rotulo que fingia cobertura.
+ *   (d) A CAUDA DA SINTESE — a medir com amostra grande. A reserva de 150s esta bem dimensionada
+ *       para a mediana (106s) e curta na cauda (201,5s no p90, 239,9s no maximo) na amostra de
+ *       n=39. Alargar coleta sem olhar esta cauda troca "resposta curta" por "erro" — foi o que
+ *       aconteceu com 370s por invocacao. O veredito fica junto de `SINT_RESERVA_MS`.
  */
 // v3.5/v4.0: caps por tier de capacidade (roteador deterministico).
 const LITE_MAX_ESPECIALISTAS = 1;
@@ -2176,7 +2209,19 @@ Use o codigo (AG-02) ou o nome (Analista). Para overview amplo, 3 agentes bastam
 // ============================================================================
 // FASE 2 - SUBAGENTE (loop restrito, relatorio final)
 // ============================================================================
-async function rodarSubagente(nome: string, foco: string, pergunta: string, ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number) {
+async function rodarSubagente(
+  nome: string, foco: string, pergunta: string,
+  ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string },
+  prazo: () => number,
+  /**
+   * Quanto tem de ficar de pe para a resposta ser escrita, ja com o item (b) aplicado pelo
+   * chamador: `SINT_RESERVA_MS` mais o pedagio de reinvocacao SO quando ha reinvocacao possivel.
+   *
+   * Chega por parametro, e nao como constante lida aqui, porque a resposta depende de em que
+   * segmento o job esta e de o tier gravar checkpoint — dois fatos que so `processarJob` conhece.
+   */
+  reservaColetaMs: number,
+) {
   const cfg = SUBAGENTES[nome];
   // cfg.tools serve como recorte E como ordem: array de ferramenta estavel entre rodadas e o
   // que permite ao provider reaproveitar o prefixo da requisicao.
@@ -2210,6 +2255,16 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   // sem isto, um especialista que morreu no timeout era contabilizado como coleta bem-sucedida.
   let erroLlm: string | null = null;
   /**
+   * Destino da escrita de salvamento: `null` = nao foi preciso (o especialista fechou o relatorio
+   * dentro do laco).
+   *
+   * Existe porque o item (c) criou um desfecho novo — coleta paga que NAO virou relatorio por
+   * falta de orcamento — e sem um campo proprio ele chegaria na auditoria como qualquer outra
+   * falha de LLM. A pergunta que este campo responde, e que decide se `CHAMADA_MINIMA_MS` esta
+   * bem calibrada: quando a coleta para honestamente, a escrita consegue salva-la ou nao?
+   */
+  let escritaSalvamento: string | null = null;
+  /**
    * MOTIVO DE SAIDA — separado do `finish_reason` do provider, e o campo que faltava.
    *
    * O codigo antigo empilhava as duas coisas em `finish`, e a linha da reserva era
@@ -2223,40 +2278,50 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   let iteracoes = 0;
   const tetos: TetoConcedido[] = [];
   /**
-   * Teto DESTA chamada, preso ao que sobra depois de reservar a sintese e a reinvocacao.
+   * Teto DESTA chamada — ou a recusa de emiti-la (item (c), autorizado em 04/09/2026).
    *
-   * O guard abaixo so olha o relogio ENTRE chamadas. Sem este teto, uma chamada que comeca com
-   * orcamento suficiente pode correr os 150s inteiros e atravessar a reserva da sintese — foi
-   * assim que tres jobs seguidos coletaram bem e depois estouraram na hora de escrever. Piso de
-   * 20s porque chamada com menos que isso nao volta nada util, so queima parede.
+   * Sem um teto por chamada, uma chamada que comeca com orcamento suficiente pode correr os 150s
+   * inteiros e atravessar a reserva da escrita — foi assim que tres jobs seguidos coletaram bem e
+   * depois estouraram na hora de escrever. Isso nao mudou.
    *
-   * A aritmetica mudou de lugar (para `_shared/diagnostico_coleta.ts`) e NAO mudou de valor: o
-   * que se ganha e `no_piso`, que separa "teto que o relogio concedeu" de "piso emitido apesar de
-   * a reserva nao autorizar". Toda chamada no piso e uma chamada que a medicao de 04/09 viu
-   * abortar em `openrouter_timeout_20000`.
+   * O QUE MUDOU: quando a reserva nao autorizava nada, a chamada saia com 20s de piso. Isso esta
+   * medido como perda dupla — 0 de 4 sucessos E parede queimada antes de abortar, com assinatura
+   * `openrouter_timeout_20000`. Agora a chamada nao sai: `tetoDaChamadaMs` devolve `viavel: false`
+   * e o laco vai para a escrita de salvamento com a coleta ja paga no contexto.
+   *
+   * `guardarEscrita` e o que faz a parada ser HONESTA em vez de so ser tardia. Depois da primeira
+   * ferramenta existe coleta paga, e ela so vira relatorio se sobrar relogio para escrever —
+   * entao, enquanto ha coleta a salvar, a chamada de COLETA precisa deixar de pe o orcamento da
+   * ESCRITA. E a mesma `CHAMADA_MINIMA_MS`, porque escrever tambem e chamada. ANTES da primeira
+   * ferramenta nao ha nada a salvar, e reservar ali seria abrir mao da unica chamada de coleta que
+   * o deep consegue pagar hoje — a reserva protegeria uma escrita sem assunto.
+   *
+   * `reservaColetaMs` chega de fora ja com o item (b) aplicado: o pedagio de reinvocacao entra so
+   * quando ainda existe reinvocacao possivel.
    */
-  const tetoDaChamada = () => {
+  const tetoDaChamada = (guardarEscrita: boolean) => {
     const t = tetoDaChamadaMs({
       prazoMs: prazo(),
       tetoProviderMs: OPENROUTER_TIMEOUT_MS,
-      reservaMs: SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS,
-      pisoMs: 20_000,
+      reservaMs: reservaColetaMs + (guardarEscrita ? CHAMADA_MINIMA_MS : 0),
+      minimoMs: CHAMADA_MINIMA_MS,
     });
     tetos.push(t);
-    return t.ms;
+    return t;
   };
   for (let iter = 0; iter < SUB_MAX_ITER; iter++) {
     iteracoes = iter + 1;
-    // Reserva da sintese: para de coletar e escreve com o que tem. Inclui o custo de reinvocar
-    // porque, quando o job segmenta, a sintese roda no segmento seguinte e paga esse pedagio.
-    if (prazo() < SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS) {
+    if (prazo() <= 0) { iteracoes = iter; finish = "prazo_do_job"; motivoSaida = "prazo_do_job"; break; }
+    // Reserva da escrita: quando ela nao autoriza chamada real, para de coletar e vai escrever com
+    // o que tem. Este e o guard que antes deixava passar a chamada de piso.
+    const teto = tetoDaChamada(usadas.length > 0);
+    if (!teto.viavel) {
       iteracoes = iter;
       finish = finish || "reserva_sintese";
       motivoSaida = "reserva_sintese";
       break;
     }
-    if (prazo() <= 0) { iteracoes = iter; finish = "prazo_do_job"; motivoSaida = "prazo_do_job"; break; }
-    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
+    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome, timeoutMs: teto.ms });
     if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; motivoSaida = "erro_llm"; erroLlm = String(r.erro); break; }
     const u = usoDe(r.parsed); tin += u.tin; tout += u.tout; reas += u.reas;
     finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
@@ -2301,18 +2366,43 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
    * as ferramentas ja chamadas e os dados no contexto, e nada disso era aproveitado: ia tudo fora
    * e a sintese recebia a frase de erro. Agora o erro tambem dispara o salvamento, sem tools e sem
    * raciocinio, que e a chance de transformar coleta ja paga em relatorio.
+   *
+   * 04/09/2026, ITEM (c): O SALVAMENTO PASSOU A TER ORCAMENTO, E A NEGATIVA PASSOU A TER NOME.
+   *
+   * O conserto acima destravou a escrita e a medicao seguinte mostrou que ela morria de qualquer
+   * jeito, em `openrouter_timeout_20000` — porque ela herdava o mesmo piso da coleta. Duas coisas
+   * mudaram: o laco de coleta agora para enquanto o orcamento da escrita esta de pe
+   * (`guardarEscrita`), e a escrita nao e emitida quando nem esse orcamento existe.
+   *
+   * Quando nao ha orcamento, `erroLlm` recebe `orcamento_insuficiente_para_escrita`. Isso NAO e
+   * detalhe de telemetria: e o que faz o especialista entrar na sintese como lacuna declarada, via
+   * `rotuloRelatorio`. Sem esse rotulo, um especialista sem relatorio chegaria a sintese como
+   * "INCOMPLETO - cortado por limite de tamanho", que e a frase que autoriza a sintese a tratar
+   * ausencia como dado inexistente. Preferir "nao li" a "nao existe" e o unico jeito de a resposta
+   * curta continuar sendo honesta.
    */
   if (!relatorio || erroLlm) {
     // Estourou iteracoes/prazo coletando, ou a ultima chamada falhou: forca o relatorio com o que ha.
-    if (erroLlm) relatorio = "";
-    messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
-    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
-    if (rf.erro) erroLlm = String(rf.erro);
-    if (!rf.erro) {
-      erroLlm = null; // a escrita forcada salvou o relatorio: nao houve perda de coleta
-      const u = usoDe(rf.parsed); tin += u.tin; tout += u.tout;
-      relatorio = String(rf.parsed?.choices?.[0]?.message?.content ?? "");
-      finish = String(rf.parsed?.choices?.[0]?.finish_reason ?? finish) + "+forcado";
+    const tetoEscrita = tetoDaChamada(false);
+    if (!tetoEscrita.viavel) {
+      escritaSalvamento = usadas.length
+        ? `sem_orcamento_com_${usadas.length}_consulta(s)_paga(s)`
+        : "sem_orcamento_sem_coleta";
+      // A coleta paga (se houve) se perde aqui, e isso fica DITO. O que nao acontece mais e gastar
+      // parede numa escrita que a medicao ja viu abortar, e chegar na sintese sem saber por que.
+      erroLlm = `orcamento_insuficiente_para_escrita (${escritaSalvamento}, autorizado ${Math.round(tetoEscrita.autorizado_ms / 1000)}s)`;
+    } else {
+      if (erroLlm) relatorio = "";
+      messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
+      const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoEscrita.ms });
+      if (rf.erro) { erroLlm = String(rf.erro); escritaSalvamento = `falhou: ${rf.erro}`.slice(0, 120); }
+      if (!rf.erro) {
+        erroLlm = null; // a escrita forcada salvou o relatorio: nao houve perda de coleta
+        escritaSalvamento = "salvou";
+        const u = usoDe(rf.parsed); tin += u.tin; tout += u.tout;
+        relatorio = String(rf.parsed?.choices?.[0]?.message?.content ?? "");
+        finish = String(rf.parsed?.choices?.[0]?.finish_reason ?? finish) + "+forcado";
+      }
     }
   }
   // v1.1: CONTINUACAO INTERNA DO RELATORIO. Se o relatorio cortou em length, continua em
@@ -2320,10 +2410,14 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   // stop, esgotar as partes ou o prazo apertar. Sem tools de proposito: e hora de ESCREVER.
   let partes = relatorio ? 1 : 0;
   while (relatorio && finish.startsWith("length") && partes < SUB_RELATORIO_MAX_PARTES && prazo() > 25_000) {
+    // Continuar e opcional: ja existe relatorio na mao. Se a reserva nao autoriza a chamada, fica
+    // o que ha — que e melhor do que gastar parede para nao acrescentar nada.
+    const tetoParte = tetoDaChamada(false);
+    if (!tetoParte.viavel) break;
     messages.push({ role: "assistant", content: relatorio });
     messages.push({ role: "user", content: "Seu relatorio foi cortado por limite de tamanho. Continue EXATAMENTE do ponto onde parou, na proxima palavra. Nao repita nada, nao reescreva secoes; ao concluir, termine com a linha LACUNAS:." });
     const maxTok = Math.max(1500, Math.min(SUB_MAX_TOKENS, Math.floor((prazo() / 1000) * TOKENS_POR_SEGUNDO)));
-    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
+    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoParte.ms });
     if (rc.erro) break;
     const u = usoDe(rc.parsed); tin += u.tin; tout += u.tout;
     const pedaco = String(rc.parsed?.choices?.[0]?.message?.content ?? "");
@@ -2351,13 +2445,16 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     nome, relatorio, completo: relatorioCompleto, partes, tools: usadas,
     tokens_in: tin, tokens_out: tout, reasoning_tokens: reas, finish, erro: erroLlm,
     // Fatos de ORCAMENTO da coleta. Sao o que permite responder "qual recurso apertou" sem
-    // reinterpretar strings: motivo de saida limpo, quantas iteracoes de 6 foram usadas, quanto
-    // do teto de consultas foi gasto, e quantas chamadas sairam no piso de 20s.
+    // reinterpretar strings: motivo de saida limpo, quantas iteracoes de 6 foram usadas, quanto do
+    // teto de consultas foi gasto, quantas chamadas a reserva RECUSOU (o piso nao existe mais) e
+    // se a escrita de salvamento conseguiu preservar a coleta paga.
     motivo_saida: motivoSaida,
     iteracoes,
     iteracoes_teto: SUB_MAX_ITER,
     tools_teto: cfg.maxToolsTotal,
     tetos_chamada: resumirTetos(tetos),
+    reserva_coleta_ms: reservaColetaMs,
+    ...(escritaSalvamento ? { escrita_salvamento: escritaSalvamento } : {}),
     prazo_ms_no_fim: prazo(),
   };
 }
@@ -3285,11 +3382,14 @@ async function pushProgresso(jobId: string, fase: string, detalhe: string) {
 async function executarLote(
   lote: { nome: string; foco: string }[], pergunta: string,
   ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number, tel: any,
+  reservaColetaMs: number,
 ): Promise<{ nome: string; relatorio: string; completo: boolean; erro?: string | null }[]> {
   const resultados = await Promise.allSettled(lote.map((p) =>
     p.nome === "analise_visual_drive"
+      // `rodarAnaliseVisual` e pipeline codificado: nao tem laco de chamadas de LLM para orcar, e
+      // ja tem o proprio freio em `VISAO_MIN_PRAZO_MS`.
       ? rodarAnaliseVisual(p.foco, ctx, prazo, tel)
-      : rodarSubagente(p.nome, p.foco, pergunta, ctx, prazo)));
+      : rodarSubagente(p.nome, p.foco, pergunta, ctx, prazo, reservaColetaMs)));
   const saida: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
   for (let i = 0; i < resultados.length; i++) {
     const res = resultados[i];
