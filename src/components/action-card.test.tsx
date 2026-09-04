@@ -79,7 +79,9 @@ describe("reexecutarApproval", () => {
   });
 
   it("devolve a mensagem do erro em vez de lancar", async () => {
-    rpcMock.mockResolvedValue({ error: { message: "não é possível re-executar (houve escrita parcial)" } });
+    rpcMock.mockResolvedValue({
+      error: { message: "não é possível re-executar (houve escrita parcial)" },
+    });
     expect(await reexecutarApproval(ID)).toEqual({
       error: "não é possível re-executar (houve escrita parcial)",
     });

@@ -4,10 +4,7 @@
  * 504: a edge pode ainda estar gravando (medido 20/08). 502 rapido: a funcao
  * ja devolveu; esperar 45s so gera rajada REST (ERR_CONNECTION_CLOSED).
  */
-export function esperaGravacaoAposErroHttp(opts: {
-  status?: number;
-  elapsedMs: number;
-}): number {
+export function esperaGravacaoAposErroHttp(opts: { status?: number; elapsedMs: number }): number {
   const st = Number(opts.status ?? 0);
   const elapsed = Math.max(0, Number(opts.elapsedMs ?? 0));
   if (st === 504 || st === 408) return 45_000;

@@ -66,7 +66,11 @@ const RE_ATO_DE_LEGENDA =
 export function pedidoSoLegendasSemEmissao(pedido: string): boolean {
   const p = deacc(String(pedido ?? "").toLowerCase());
   if (!p) return false;
-  if (/\b(cards?|aprovacao|aprovacoes|emit\w*|publiq\w*|publicar|anunci\w*|pause|pausar|suba|subir)\b/.test(p)) {
+  if (
+    /\b(cards?|aprovacao|aprovacoes|emit\w*|publiq\w*|publicar|anunci\w*|pause|pausar|suba|subir)\b/.test(
+      p,
+    )
+  ) {
     return false;
   }
   return RE_ATO_DE_LEGENDA.test(p);
@@ -135,9 +139,13 @@ export function recusaFalsaMoldeTrafego(texto: string): boolean {
 export function ehPedidoUploadLote(pedido: string): boolean {
   const p = deacc(String(pedido ?? "").toLowerCase());
   const verbo =
-    /\b(suba|subir|envie|enviar|carregue|carregar|uploade?|faca upload|fazer upload|termine de subir|terminar de subir)\b/.test(p);
+    /\b(suba|subir|envie|enviar|carregue|carregar|uploade?|faca upload|fazer upload|termine de subir|terminar de subir)\b/.test(
+      p,
+    );
   const alvo =
-    /\b(videos?|midia|pecas?|arquivos?|restantes?|faltantes?|pendentes?|biblioteca|drive|acervo|na meta|ficaram de fora)\b/.test(p);
+    /\b(videos?|midia|pecas?|arquivos?|restantes?|faltantes?|pendentes?|biblioteca|drive|acervo|na meta|ficaram de fora)\b/.test(
+      p,
+    );
   const inventario =
     /\b(ja estao na meta|ficaram de fora|quais dos \d+)\b/.test(p) &&
     /\b(video|peca|arquivo|biblioteca|meta)\b/.test(p);
@@ -148,8 +156,9 @@ export function ehPedidoUploadLote(pedido: string): boolean {
 export function ehUploadLoteCurto(pedido: string, nPendentes?: number): boolean {
   if (typeof nPendentes === "number" && nPendentes > 0 && nPendentes <= 3) return true;
   const p = deacc(String(pedido ?? "").toLowerCase());
-  return /\b([123]|um|dois|tres)\b/.test(p) &&
-    /\b(ultimos?|pendentes?|faltantes?|restantes?)\b/.test(p);
+  return (
+    /\b([123]|um|dois|tres)\b/.test(p) && /\b(ultimos?|pendentes?|faltantes?|restantes?)\b/.test(p)
+  );
 }
 
 /** Detalhamento de campanha/anúncio/série diária — coleta completa, nao Q&A pontual. */
@@ -157,10 +166,14 @@ export function ehPedidoDetalhamentoCampanha(pedido: string): boolean {
   const p = deacc(String(pedido ?? "").toLowerCase());
   if (!p) return false;
   const pedeDetalhe =
-    /\b(detalhamento|detalhe|detalha|detalhar|maturacao|serie diaria|desempenho.{0,60}(campanha|anuncio|conjunto|criativ)|por anuncio|por conjunto|ranking por|abertura por (anuncio|peca|criativo))\b/.test(p)
-    || (/\b(campanha|anuncio|conjunto)\b/.test(p) && /\b(id\b|external_id|7 dias|sete dias|janela)\b/.test(p) &&
-      /\b(gasto|ctr|formular|engaj|impress|alcance|desempenho|resultado)\b/.test(p))
-    || (/\bcampanhas?\b/.test(p) && /\d{8,}/.test(p) &&
+    /\b(detalhamento|detalhe|detalha|detalhar|maturacao|serie diaria|desempenho.{0,60}(campanha|anuncio|conjunto|criativ)|por anuncio|por conjunto|ranking por|abertura por (anuncio|peca|criativo))\b/.test(
+      p,
+    ) ||
+    (/\b(campanha|anuncio|conjunto)\b/.test(p) &&
+      /\b(id\b|external_id|7 dias|sete dias|janela)\b/.test(p) &&
+      /\b(gasto|ctr|formular|engaj|impress|alcance|desempenho|resultado)\b/.test(p)) ||
+    (/\bcampanhas?\b/.test(p) &&
+      /\d{8,}/.test(p) &&
       /\b(janela|\d+\s*dias|anuncio|conjunto|desempenho|analise|detalh)\b/.test(p));
   const temAlvo = /\b(campanhas?|anuncios?|conjuntos?|criativ|ad set|adset)\b/.test(p);
   return pedeDetalhe && temAlvo;
@@ -182,8 +195,14 @@ export function ehPedidoOrigemDriveDosAnuncios(pedido: string): boolean {
     /\b(anuncios?|criativos?)\b/.test(p) &&
     (/\bconj(?:unto)?s?\b/.test(p) || /\bregistrad/.test(p) || /\b(no ar|de pe|ativos?)\b/.test(p));
   const pasta =
-    /\b(qual pasta|quais pastas|pasta do drive|pastas do drive|pertencem a qual|de qual pasta|origem.{0,40}drive|vinculo.{0,40}drive|drive_file_id)\b/.test(p);
-  if (/\bselecion/.test(p) && /\b(video|peca|arquivo)\b/.test(p) && !/\b(qual pasta|pertencem|registrad)\b/.test(p)) {
+    /\b(qual pasta|quais pastas|pasta do drive|pastas do drive|pertencem a qual|de qual pasta|origem.{0,40}drive|vinculo.{0,40}drive|drive_file_id)\b/.test(
+      p,
+    );
+  if (
+    /\bselecion/.test(p) &&
+    /\b(video|peca|arquivo)\b/.test(p) &&
+    !/\b(qual pasta|pertencem|registrad)\b/.test(p)
+  ) {
     return false;
   }
   return anuncioOuConj && pasta;
@@ -193,8 +212,10 @@ export function ehPedidoOrigemDriveDosAnuncios(pedido: string): boolean {
 export function ehPedidoLeituraCruzada(pedido: string): boolean {
   if (ehPedidoOrigemDriveDosAnuncios(pedido)) return true;
   const p = deacc(String(pedido ?? "").toLowerCase());
-  return /\b(casar|cruzar|vincular|associar|de onde veio|origem da peca)\b/.test(p)
-    && /\b(drive|anuncio|criativo|conjunto)\b/.test(p);
+  return (
+    /\b(casar|cruzar|vincular|associar|de onde veio|origem da peca)\b/.test(p) &&
+    /\b(drive|anuncio|criativo|conjunto)\b/.test(p)
+  );
 }
 
 /**
@@ -205,23 +226,25 @@ export function replyLeituraIncompleta(texto: string): boolean {
   const t = deacc(String(texto ?? "").toLowerCase());
   if (!t) return false;
   const lacuna =
-    /nao (foi |foram )?(retornad|lid[oa]|disponivel|coletad).{0,60}nesta (rodada|consulta|resposta)/.test(t)
-    || /nao ficou disponivel nesta rodada/.test(t)
-    || /nao foi possivel (confirmar|verificar) nesta (resposta|rodada)/.test(t)
-    || /nao (foi |foram )?possivel verificar nesta rodada/.test(t)
-    || /o levantamento veio incompleto/.test(t)
-    || /serie diaria.{0,400}nao (disponivel|retornada|lida)/.test(t)
-    || /detalhamento (dos anuncios|por anuncio).{0,400}nao (foi |foram )?(lid|retorn)/.test(t)
-    || /consulta nao realizada nesta rodada/.test(t)
-    || /sem vinculo (rastreavel|registrado)/.test(t)
-    || /nao ha evidencia suficiente/.test(t)
-    || /nao rastreavel no cadastro/.test(t)
-    || /drive_file_id necessario/.test(t);
+    /nao (foi |foram )?(retornad|lid[oa]|disponivel|coletad).{0,60}nesta (rodada|consulta|resposta)/.test(
+      t,
+    ) ||
+    /nao ficou disponivel nesta rodada/.test(t) ||
+    /nao foi possivel (confirmar|verificar) nesta (resposta|rodada)/.test(t) ||
+    /nao (foi |foram )?possivel verificar nesta rodada/.test(t) ||
+    /o levantamento veio incompleto/.test(t) ||
+    /serie diaria.{0,400}nao (disponivel|retornada|lida)/.test(t) ||
+    /detalhamento (dos anuncios|por anuncio).{0,400}nao (foi |foram )?(lid|retorn)/.test(t) ||
+    /consulta nao realizada nesta rodada/.test(t) ||
+    /sem vinculo (rastreavel|registrado)/.test(t) ||
+    /nao ha evidencia suficiente/.test(t) ||
+    /nao rastreavel no cadastro/.test(t) ||
+    /drive_file_id necessario/.test(t);
   const pedeEco =
-    /envie (novamente|de novo) (uma )?(nova )?pergunta/.test(t)
-    || /manda(r)? enviar novamente/.test(t)
-    || /peca (de novo|novamente).{0,50}(focado|pergunta|pedido|forma mais)/.test(t)
-    || /item ficou para a proxima/.test(t)
-    || /para o usuario poder pedir so esses depois/.test(t);
+    /envie (novamente|de novo) (uma )?(nova )?pergunta/.test(t) ||
+    /manda(r)? enviar novamente/.test(t) ||
+    /peca (de novo|novamente).{0,50}(focado|pergunta|pedido|forma mais)/.test(t) ||
+    /item ficou para a proxima/.test(t) ||
+    /para o usuario poder pedir so esses depois/.test(t);
   return lacuna || pedeEco;
 }

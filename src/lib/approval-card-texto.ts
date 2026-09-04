@@ -40,7 +40,10 @@ function campo(payload: unknown, ...chaves: string[]): string | null {
   return null;
 }
 
-export function tituloDoCardAprovacao(action: string | null | undefined, summary?: string | null): string {
+export function tituloDoCardAprovacao(
+  action: string | null | undefined,
+  summary?: string | null,
+): string {
   const acao = String(action ?? "").trim();
   if (acao && TITULO_POR_ACAO[acao]) return TITULO_POR_ACAO[acao];
   const primeira = String(summary ?? "")
@@ -62,12 +65,7 @@ export function previaDoCardAprovacao(
   payload: unknown,
 ): { campanha?: string; conjunto?: string; criativo?: string } {
   const acao = String(action ?? "").trim();
-  const campanha = campo(
-    payload,
-    "campanha_destino_nome",
-    "campanha_nome",
-    "nome_campanha",
-  );
+  const campanha = campo(payload, "campanha_destino_nome", "campanha_nome", "nome_campanha");
   const conjunto = campo(payload, "conjunto_destino_nome", "conjunto_nome", "nome_conjunto");
   const criativo = campo(payload, "nome_novo", "nome_criativo", "target_name");
 
@@ -88,22 +86,34 @@ export function previaDoCardAprovacao(
     };
   }
   if (
-    acao === "pausar_conjunto" || acao === "ativar_conjunto" ||
-    acao === "ajustar_posicionamentos_do_conjunto" || acao === "renomear_conjunto"
+    acao === "pausar_conjunto" ||
+    acao === "ativar_conjunto" ||
+    acao === "ajustar_posicionamentos_do_conjunto" ||
+    acao === "renomear_conjunto"
   ) {
     return { conjunto: campo(payload, "target_name") ?? conjunto ?? undefined };
   }
-  if (acao === "pausar_campanha" || acao === "ativar_campanha" || acao === "renomear_campanha" || acao === "alterar_orcamento" || acao === "alterar_categoria_especial_campanha") {
+  if (
+    acao === "pausar_campanha" ||
+    acao === "ativar_campanha" ||
+    acao === "renomear_campanha" ||
+    acao === "alterar_orcamento" ||
+    acao === "alterar_categoria_especial_campanha"
+  ) {
     return { campanha: campo(payload, "target_name", "novo_nome") ?? campanha ?? undefined };
   }
   if (
-    acao === "pausar_criativo" || acao === "ativar_criativo" ||
-    acao === "escalar_criativo" || acao === "renomear_criativo"
+    acao === "pausar_criativo" ||
+    acao === "ativar_criativo" ||
+    acao === "escalar_criativo" ||
+    acao === "renomear_criativo"
   ) {
     return { criativo: campo(payload, "target_name") ?? criativo ?? undefined };
   }
   if (acao === "vincular_instagram_dos_anuncios") {
-    return { campanha: campo(payload, "campanha_destino_nome", "target_name") ?? campanha ?? undefined };
+    return {
+      campanha: campo(payload, "campanha_destino_nome", "target_name") ?? campanha ?? undefined,
+    };
   }
   return {
     campanha: campanha ?? undefined,
@@ -112,7 +122,11 @@ export function previaDoCardAprovacao(
   };
 }
 
-function nomesDoSummary(summary?: string | null): { campanha?: string; conjunto?: string; criativo?: string } {
+function nomesDoSummary(summary?: string | null): {
+  campanha?: string;
+  conjunto?: string;
+  criativo?: string;
+} {
   const out: { campanha?: string; conjunto?: string; criativo?: string } = {};
   for (const line of String(summary ?? "").split(/\n/)) {
     const m = line.trim().match(/^(Campanha|Conjunto|Criativo):\s*(.+)$/i);

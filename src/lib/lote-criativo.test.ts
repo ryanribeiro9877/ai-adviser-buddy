@@ -1,12 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto } from "./lote-criativo";
+import {
+  pedidoLoteCriativo,
+  replyLoteComLegendas,
+  replyLoteCriativoIncompleto,
+} from "./lote-criativo";
 
 describe("pedidoLoteCriativo", () => {
   it("reconhece pedido de 6 criativos diferentes + legendas", () => {
     expect(
-      pedidoLoteCriativo(
-        "escolha 6 criativos diferentes do conjunto ativo e gere as legendas",
-      ),
+      pedidoLoteCriativo("escolha 6 criativos diferentes do conjunto ativo e gere as legendas"),
     ).toBe(true);
   });
 

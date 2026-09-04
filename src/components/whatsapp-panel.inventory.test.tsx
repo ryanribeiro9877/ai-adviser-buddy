@@ -3,16 +3,12 @@ import { isClickToWhatsApp, isWabaInventory } from "@/components/whatsapp-panel"
 
 describe("isWabaInventory / isClickToWhatsApp", () => {
   it("trata CLOUD_API como inventário WABA", () => {
-    expect(
-      isWabaInventory({ platform_type: "CLOUD_API", external_id: "123" }),
-    ).toBe(true);
+    expect(isWabaInventory({ platform_type: "CLOUD_API", external_id: "123" })).toBe(true);
   });
 
   it("trata ON_PREMISE e platform_type null (sync antigo) como WABA", () => {
     expect(isWabaInventory({ platform_type: "ON_PREMISE", external_id: "1" })).toBe(true);
-    expect(isWabaInventory({ platform_type: null, external_id: "1075095699012418" })).toBe(
-      true,
-    );
+    expect(isWabaInventory({ platform_type: null, external_id: "1075095699012418" })).toBe(true);
   });
 
   it("exclui Click-to-WhatsApp e ads-wa:", () => {

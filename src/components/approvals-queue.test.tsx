@@ -283,11 +283,15 @@ describe("ApprovalsQueue — decisao", () => {
   });
 
   it("erro na reexecucao aparece no toast, sem sucesso", async () => {
-    reexecutarApprovalMock.mockResolvedValue({ error: "não é possível re-executar (houve escrita parcial)" });
+    reexecutarApprovalMock.mockResolvedValue({
+      error: "não é possível re-executar (houve escrita parcial)",
+    });
     montar();
     await userEvent.click(await screen.findByText("retry a1"));
     await waitFor(() =>
-      expect(toastErrorMock).toHaveBeenCalledWith("não é possível re-executar (houve escrita parcial)"),
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "não é possível re-executar (houve escrita parcial)",
+      ),
     );
     expect(toastSuccessMock).not.toHaveBeenCalled();
   });

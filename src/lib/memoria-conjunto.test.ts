@@ -87,7 +87,11 @@ describe("pareceNomeDePecaNaoMolde", () => {
 describe("ehSentinelaSemMolde", () => {
   it("reconhece sem_molde mesmo depois da norm() do chat (que remove _)", () => {
     const norm = (s: string) =>
-      s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[-_\s]+/g, "");
+      s
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/[-_\s]+/g, "");
     expect(norm("sem_molde")).toBe("semmolde");
     expect(norm("sem_molde") === "sem_molde").toBe(false);
     expect(ehSentinelaSemMolde("sem_molde")).toBe(true);
@@ -144,8 +148,12 @@ describe("trava de nome livre do contrato", () => {
 
   it("marca [WA][LEADS] como fora do escopo de trafego", () => {
     expect(ehNomeCompostoEstruturado("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(true);
-    expect(nomeCompostoForaDeEscopoTrafego("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(true);
-    expect(nomeCompostoForaDeEscopoTrafego("JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02")).toBe(false);
+    expect(nomeCompostoForaDeEscopoTrafego("[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]")).toBe(
+      true,
+    );
+    expect(nomeCompostoForaDeEscopoTrafego("JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02")).toBe(
+      false,
+    );
   });
 });
 
@@ -264,7 +272,11 @@ describe("extrairSlateDaFala", () => {
     // Sem o fallback duas pecas de nome ilegivel colidiriam em "conjunto_2_",
     // e a segunda sobrescreveria a primeira no slate.
     expect(
-      pecaChaveDoSlate({ conjunto: 2, nome: "###.mp4", drive_file_id: "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }),
+      pecaChaveDoSlate({
+        conjunto: 2,
+        nome: "###.mp4",
+        drive_file_id: "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      }),
     ).toBe("conjunto_2_1AAAAAAAAAAA");
   });
 });

@@ -54,7 +54,13 @@ export function extrairOrcamentoDiarioDaFala(texto: string): number | null {
 }
 
 export function ehFlagOrcamentoConfirmadoReais(v: unknown): boolean {
-  return v === true || v === 1 || String(v ?? "").trim().toLowerCase() === "true";
+  return (
+    v === true ||
+    v === 1 ||
+    String(v ?? "")
+      .trim()
+      .toLowerCase() === "true"
+  );
 }
 
 export function conferirOrcamentoReais(opts: {
@@ -67,12 +73,14 @@ export function conferirOrcamentoReais(opts: {
     return {
       ok: false,
       erro: "orcamento_invalido",
-      detalhe: "orcamento_diario_reais tem de ser um valor positivo em REAIS por dia (ex.: 30, nao 3000).",
+      detalhe:
+        "orcamento_diario_reais tem de ser um valor positivo em REAIS por dia (ex.: 30, nao 3000).",
     };
   }
-  const contrato = opts.contrato != null && Number(opts.contrato) > 0
-    ? Math.round(Number(opts.contrato) * 100) / 100
-    : null;
+  const contrato =
+    opts.contrato != null && Number(opts.contrato) > 0
+      ? Math.round(Number(opts.contrato) * 100) / 100
+      : null;
 
   if (contrato != null) {
     if (Math.abs(reais - contrato) < 0.009) return { ok: true, reais };

@@ -26,7 +26,9 @@ describe("pedidoSoLegendasSemEmissao", () => {
 
   it("mantem emissao quando o gestor pede card, aprovacao ou anuncio", () => {
     expect(
-      pedidoSoLegendasSemEmissao("selecione 6 videos, crie legendas e emita os primeiros cards para aprovacao"),
+      pedidoSoLegendasSemEmissao(
+        "selecione 6 videos, crie legendas e emita os primeiros cards para aprovacao",
+      ),
     ).toBe(false);
     expect(pedidoSoLegendasSemEmissao("crie legendas e monte os anuncios")).toBe(false);
     expect(pedidoSoLegendasSemEmissao("emita os 3 cards do conjunto 2")).toBe(false);
@@ -40,9 +42,9 @@ describe("ehPerguntaDeLeitura", () => {
         "antes da aprovação, o anúncio está com o mesmo link de destino do conjunto?",
       ),
     ).toBe(true);
-    expect(ehPedidoDeAto("antes da aprovação, o anúncio está com o mesmo link de destino do conjunto?")).toBe(
-      false,
-    );
+    expect(
+      ehPedidoDeAto("antes da aprovação, o anúncio está com o mesmo link de destino do conjunto?"),
+    ).toBe(false);
   });
 
   it("nao classifica pedido de emitir card como pergunta", () => {
@@ -60,7 +62,9 @@ describe("ehPerguntaDeLeitura", () => {
   });
 
   it("reconhece checagem de link sem interrogacao", () => {
-    expect(ehPerguntaDeLeitura("o anúncio está com o mesmo link de destino do conjunto")).toBe(true);
+    expect(ehPerguntaDeLeitura("o anúncio está com o mesmo link de destino do conjunto")).toBe(
+      true,
+    );
   });
 });
 
@@ -80,9 +84,11 @@ describe("ehPedidoUploadLote", () => {
   it("reconhece subir videos restantes", () => {
     expect(ehPedidoUploadLote("suba os 2 últimos vídeos que ficaram pendentes")).toBe(true);
     expect(ehPedidoUploadLote("carregue as peças na biblioteca")).toBe(true);
-    expect(ehPedidoUploadLote(
-      "termine de subir os vídeos e me informe quais dos 34 já estão na meta e quais ficaram de fora",
-    )).toBe(true);
+    expect(
+      ehPedidoUploadLote(
+        "termine de subir os vídeos e me informe quais dos 34 já estão na meta e quais ficaram de fora",
+      ),
+    ).toBe(true);
     expect(ehPedidoUploadLote("qual o gasto de ontem?")).toBe(false);
   });
 

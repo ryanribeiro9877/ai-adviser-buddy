@@ -36,13 +36,23 @@ import {
 import { Markdown } from "@/components/markdown";
 import { JobProgressCard } from "@/components/job-progress-card";
 import { replyLoteComLegendas, replyLoteCriativoIncompleto } from "@/lib/lote-criativo";
-import { ehPedidoUploadLote, ehUploadLoteCurto, replyLeituraIncompleta } from "@/lib/intencao-turno";
+import {
+  ehPedidoUploadLote,
+  ehUploadLoteCurto,
+  replyLeituraIncompleta,
+} from "@/lib/intencao-turno";
 import {
   esperaGravacaoAposErroHttp,
   statusDeErroInvoke,
   turnoSincronoOrfao,
 } from "@/lib/chat-http-erro";
-import { ActionCard, decideApproval, reexecutarApproval, type Approval, type Decision } from "@/components/action-card";
+import {
+  ActionCard,
+  decideApproval,
+  reexecutarApproval,
+  type Approval,
+  type Decision,
+} from "@/components/action-card";
 import { APPROVAL_SELECT } from "@/components/approvals-queue";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -97,7 +107,10 @@ const MAX_CONTINUATIONS = 6;
 const MAX_CONTINUATIONS_UPLOAD = 8;
 const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
 const needsAutoContinue = (data?: ChatReply | null) =>
-  !!data && data.continuar === true && !!data.finish_reason && data.finish_reason.startsWith("continuar_turno");
+  !!data &&
+  data.continuar === true &&
+  !!data.finish_reason &&
+  data.finish_reason.startsWith("continuar_turno");
 
 function deaccFront(s: string) {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -154,7 +167,9 @@ function liveOverlayText(acc: string): string {
 
 /** Stub gravado pelo traffic-agent-job no catch — nao conta como resposta real. */
 function isJobFailureStub(text: string): boolean {
-  return /processamento em segundo plano falhou|modelo ficou sobrecarregado nesta rodada/i.test(text ?? "");
+  return /processamento em segundo plano falhou|modelo ficou sobrecarregado nesta rodada/i.test(
+    text ?? "",
+  );
 }
 
 /** Há resposta substantiva (não stub/progresso) depois do último user. */
@@ -181,8 +196,11 @@ function looksLikeCompleteTurn(text: string): boolean {
   if (replyLeituraIncompleta(raw)) return false;
   if (/##\s*status do upload/i.test(raw) && /ainda fora da meta/i.test(raw)) return false;
   const t = deaccFront(raw.toLowerCase());
-  if (/\?/.test(raw) && !/envie (novamente|de novo)|nova pergunta|peca de novo/.test(t)) return true;
-  return /\b(preciso (da sua|que voce|confirmar|saber)|qual (o |a )?(objetivo|opcao|caminho|meta)|me (confirma|diga|escolha)|antes de (criar|emitir|propor)|contradic|aguardo (sua|a) (resposta|decisao)|escolha (uma|o|a)|decida)\b/.test(t);
+  if (/\?/.test(raw) && !/envie (novamente|de novo)|nova pergunta|peca de novo/.test(t))
+    return true;
+  return /\b(preciso (da sua|que voce|confirmar|saber)|qual (o |a )?(objetivo|opcao|caminho|meta)|me (confirma|diga|escolha)|antes de (criar|emitir|propor)|contradic|aguardo (sua|a) (resposta|decisao)|escolha (uma|o|a)|decida)\b/.test(
+    t,
+  );
 }
 
 function lastUserContent(msgs: Message[]): string {
@@ -719,7 +737,9 @@ export function OperacaoChat() {
     const reenvio = typeof textoOverride === "string";
     const text = (reenvio ? textoOverride : input).trim();
     const capCont = ehPedidoUploadLote(text)
-      ? (ehUploadLoteCurto(text) ? 3 : MAX_CONTINUATIONS_UPLOAD)
+      ? ehUploadLoteCurto(text)
+        ? 3
+        : MAX_CONTINUATIONS_UPLOAD
       : MAX_CONTINUATIONS;
     if (sending || transcribing || !companyId) return;
     if (!reenvio && !canSend) return;
@@ -898,7 +918,8 @@ export function OperacaoChat() {
       let acc = data!.reply ?? "";
       let finish = data!.finish_reason;
       let autoCont = needsAutoContinue(data) && !looksLikeCompleteTurn(acc);
-      if (isTruncated(finish) || autoCont) setLive({ convId, text: liveOverlayText(acc), continuing: 0 });
+      if (isTruncated(finish) || autoCont)
+        setLive({ convId, text: liveOverlayText(acc), continuing: 0 });
 
       for (let n = 1; n <= capCont && (isTruncated(finish) || autoCont); n++) {
         if (autoCont) {
@@ -957,8 +978,9 @@ export function OperacaoChat() {
     } catch (err) {
       const msg = String((err as any)?.message ?? err ?? "");
       const pareceTimeout =
-        /FunctionsHttpError|504|Gateway Timeout|Failed to fetch|AbortError|timed out|timeout/i.test(msg) ||
-        /non-2xx|Edge Function/i.test(msg);
+        /FunctionsHttpError|504|Gateway Timeout|Failed to fetch|AbortError|timed out|timeout/i.test(
+          msg,
+        ) || /non-2xx|Edge Function/i.test(msg);
       if (convIdAtSend) setFalhaHttpTurno({ convId: convIdAtSend, texto: text });
       toast.error(
         pareceTimeout
@@ -1099,7 +1121,9 @@ export function OperacaoChat() {
 
   const lastAsstBubble = [...msgs].reverse().find((m) => m.role === "assistant");
   const liveCopiaUltima = !!(
-    live && lastAsstBubble && mesmaProsa(live.text, lastAsstBubble.content ?? "")
+    live &&
+    lastAsstBubble &&
+    mesmaProsa(live.text, lastAsstBubble.content ?? "")
   );
   const liveMostraMarkdown = !!(
     live &&
@@ -1109,7 +1133,9 @@ export function OperacaoChat() {
     !liveCopiaUltima
   );
   const capLiveOverlay = ehPedidoUploadLote(lastUserContent(msgs))
-    ? (ehUploadLoteCurto(lastUserContent(msgs)) ? 3 : MAX_CONTINUATIONS_UPLOAD)
+    ? ehUploadLoteCurto(lastUserContent(msgs))
+      ? 3
+      : MAX_CONTINUATIONS_UPLOAD
     : MAX_CONTINUATIONS;
 
   // Estado da conversa ABERTA: derivado das mensagens carregadas (não do recorte
@@ -1140,9 +1166,7 @@ export function OperacaoChat() {
   // turno já entregou texto — inclusive após rate-limit transitório com reply no banco.
   const respostaRealJaChegou = hasSubstantiveReplyAfterLastUser(msgs);
   const soStubDeFalha =
-    !!ultimaMsg &&
-    ultimaMsg.role === "assistant" &&
-    isJobFailureStub(ultimaMsg.content ?? "");
+    !!ultimaMsg && ultimaMsg.role === "assistant" && isJobFailureStub(ultimaMsg.content ?? "");
 
   // Job de análise profunda desta conversa. Vem do state (quem enviou) ou do banco (quem só
   // abriu a conversa / voltou depois) — mesmo princípio do indicador síncrono: o estado é

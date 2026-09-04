@@ -22,9 +22,7 @@ export function numeroConjuntoDaFala(s: string): number | null {
 }
 
 /** Unico CONJ.N compartilhado pelos sinais; ambiguo (1 e 4) → null. */
-export function numeroConjuntoDeSinais(
-  ...sinais: Array<string | null | undefined>
-): number | null {
+export function numeroConjuntoDeSinais(...sinais: Array<string | null | undefined>): number | null {
   const nums = new Set<number>();
   for (const s of sinais) {
     if (s == null || !String(s).trim()) continue;
@@ -57,10 +55,7 @@ export function extrairLinksWaMePorConjunto(texto: string): Record<number, strin
   let m: RegExpExecArray | null;
   while ((m = rePar.exec(t))) gravar(Number(m[1] || m[2]), m[3]);
 
-  const reTab = new RegExp(
-    `conj(?:unto)?\\.?\\s*0*(\\d+)[^\\n]{0,220}?(${RE_WAME})`,
-    "gi",
-  );
+  const reTab = new RegExp(`conj(?:unto)?\\.?\\s*0*(\\d+)[^\\n]{0,220}?(${RE_WAME})`, "gi");
   while ((m = reTab.exec(t))) gravar(Number(m[1]), m[2]);
 
   return out;
@@ -85,7 +80,9 @@ export function ehSentinelaSemMolde(nome: unknown): boolean {
 /** params.sem_molde — o LLM as vezes manda string "true". */
 export function ehFlagSemMolde(v: unknown): boolean {
   if (v === true || v === 1) return true;
-  const s = String(v ?? "").trim().toLowerCase();
+  const s = String(v ?? "")
+    .trim()
+    .toLowerCase();
   return s === "true" || s === "1";
 }
 
@@ -140,7 +137,9 @@ export function nomeCriativoDoConjunto(nome: string, n: number): boolean {
 }
 
 export function numeroAnuncioDaChave(s: string): number | null {
-  const m = String(s ?? "").toUpperCase().match(/_AD0?([1-9]\d?)(?:_|$)/);
+  const m = String(s ?? "")
+    .toUpperCase()
+    .match(/_AD0?([1-9]\d?)(?:_|$)/);
   if (!m) return null;
   const n = Number(m[1]);
   return n >= 1 && n <= 99 ? n : null;
@@ -203,8 +202,7 @@ export function escolherNomeCriativoTravado(opts: {
     return {
       ok: false,
       erro: "nome_do_contrato_ambiguo",
-      detalhe:
-        `Esta conversa definiu ${livres.length} nomes ainda nao usados. Informe params.nome_novo com UM deles: ${livres.join(", ")}.`,
+      detalhe: `Esta conversa definiu ${livres.length} nomes ainda nao usados. Informe params.nome_novo com UM deles: ${livres.join(", ")}.`,
       nomes_contrato: livres,
     };
   }
@@ -251,7 +249,11 @@ export function temSlateNoTexto(s: string): boolean {
   return /conj(?:unto)?\.?\s*0*[1-9]/i.test(t) && RE_DRIVE_ID.test(t) && /\.mp4/i.test(t);
 }
 
-export function pecaChaveDoSlate(p: { conjunto: number; nome: string; drive_file_id: string }): string {
+export function pecaChaveDoSlate(p: {
+  conjunto: number;
+  nome: string;
+  drive_file_id: string;
+}): string {
   const slug = String(p.nome ?? "")
     .replace(/\.[a-z0-9]+$/i, "")
     .normalize("NFD")
@@ -288,7 +290,8 @@ export function extrairSlateDaFala(texto: string): PecaSlate[] {
       ctaConj = undefined;
       continue;
     }
-    const ang = line.match(/\*\*Ângulo[^*]*\*\*:?\s*(.+)/i) || line.match(/\*\*Angulo[^*]*\*\*:?\s*(.+)/i);
+    const ang =
+      line.match(/\*\*Ângulo[^*]*\*\*:?\s*(.+)/i) || line.match(/\*\*Angulo[^*]*\*\*:?\s*(.+)/i);
     if (ang) {
       anguloConj = ang[1].replace(/\*+/g, "").trim();
       stampMeta();
@@ -307,11 +310,16 @@ export function extrairSlateDaFala(texto: string): PecaSlate[] {
     if (!idM || !nomeM) continue;
     const drive = idM[0];
     const nome = nomeM[1].replace(/^[|\s`]+|[|\s`]+$/g, "").trim();
-    const cells = line.split("|").map((c) => c.replace(/`/g, "").trim()).filter(Boolean);
-    const pasta = cells[2] && !RE_DRIVE_ID.test(cells[2]) && !/\.mp4/i.test(cells[2]) ? cells[2] : undefined;
-    const motivacao = cells.length >= 5 && !RE_DRIVE_ID.test(cells[cells.length - 1])
-      ? cells[cells.length - 1]
-      : undefined;
+    const cells = line
+      .split("|")
+      .map((c) => c.replace(/`/g, "").trim())
+      .filter(Boolean);
+    const pasta =
+      cells[2] && !RE_DRIVE_ID.test(cells[2]) && !/\.mp4/i.test(cells[2]) ? cells[2] : undefined;
+    const motivacao =
+      cells.length >= 5 && !RE_DRIVE_ID.test(cells[cells.length - 1])
+        ? cells[cells.length - 1]
+        : undefined;
     const peca: PecaSlate = {
       conjunto,
       drive_file_id: drive,
@@ -325,7 +333,9 @@ export function extrairSlateDaFala(texto: string): PecaSlate[] {
     byId.set(drive, peca);
   }
   stampMeta();
-  return [...byId.values()].sort((a, b) => a.conjunto - b.conjunto || a.nome.localeCompare(b.nome, "pt"));
+  return [...byId.values()].sort(
+    (a, b) => a.conjunto - b.conjunto || a.nome.localeCompare(b.nome, "pt"),
+  );
 }
 
 export function pecasDoConjunto(pecas: PecaSlate[], n: number): PecaSlate[] {
@@ -338,16 +348,16 @@ export const ERRO_CRUZAMENTO_LINHA_PRODUTO = "cruzamento_linha_produto";
 export const ERRO_VOZ_LINHA_ERRADA = "voz_linha_errada";
 
 function textoTemSistemaOcularLinha(n: string): boolean {
-  return /vistta/.test(n) ||
+  return (
+    /vistta/.test(n) ||
     /sistema[\s_-]*ocular/.test(n) ||
     /\bocular\b/.test(n) ||
     /oftalm/.test(n) ||
-    /oculos/.test(n);
+    /oculos/.test(n)
+  );
 }
 
-function linhasProdutoNoTexto(
-  ...sinais: Array<string | null | undefined>
-): LinhaProdutoCohapm[] {
+function linhasProdutoNoTexto(...sinais: Array<string | null | undefined>): LinhaProdutoCohapm[] {
   const n = sinais
     .filter((s) => s != null && String(s).trim())
     .map((s) => deacc(String(s)).toLowerCase())
@@ -416,12 +426,12 @@ function hintDestinoLinha(l: LinhaProdutoCohapm): string {
 export type RecusaCruzamentoLinhaProduto =
   | { ok: true; dest: LinhaProdutoCohapm | null; peca: LinhaProdutoCohapm | null }
   | {
-    ok: false;
-    erro: typeof ERRO_CRUZAMENTO_LINHA_PRODUTO | typeof ERRO_VOZ_LINHA_ERRADA;
-    detalhe: string;
-    dest: LinhaProdutoCohapm;
-    peca: LinhaProdutoCohapm | null;
-  };
+      ok: false;
+      erro: typeof ERRO_CRUZAMENTO_LINHA_PRODUTO | typeof ERRO_VOZ_LINHA_ERRADA;
+      detalhe: string;
+      dest: LinhaProdutoCohapm;
+      peca: LinhaProdutoCohapm | null;
+    };
 
 export function recusarCruzamentoLinhaProduto(opts: {
   estruturaNomes: Array<string | null | undefined>;
@@ -436,10 +446,17 @@ export function recusarCruzamentoLinhaProduto(opts: {
   }
   const dest = classificarLinhaProdutoCohapm(...opts.estruturaNomes);
   const peca = classificarLinhaProdutoCohapm(...identidade);
-  const destTxt = opts.estruturaNomes.map((s) => String(s ?? "").trim()).filter(Boolean).join(" / ") ||
-    "(sem nome)";
-  const pecaTxt = opts.pecaSinais.map((s) => String(s ?? "").trim()).filter(Boolean).slice(0, 6).join(" / ") ||
-    "(sem nome)";
+  const destTxt =
+    opts.estruturaNomes
+      .map((s) => String(s ?? "").trim())
+      .filter(Boolean)
+      .join(" / ") || "(sem nome)";
+  const pecaTxt =
+    opts.pecaSinais
+      .map((s) => String(s ?? "").trim())
+      .filter(Boolean)
+      .slice(0, 6)
+      .join(" / ") || "(sem nome)";
 
   if (dest && peca && dest !== peca) {
     return {
@@ -486,8 +503,8 @@ export function escolherConjuntosDaMesmaLinha<T extends { name?: string | null }
     ...pecaSinais.filter((s) => s != null && !ehProsaDeLegenda(String(s))),
   );
   if (!peca) return hits;
-  return hits.filter((h) =>
-    classificarLinhaProdutoCohapm(String(h.name ?? ""), campanhaDe(h)) === peca
+  return hits.filter(
+    (h) => classificarLinhaProdutoCohapm(String(h.name ?? ""), campanhaDe(h)) === peca,
   );
 }
 
@@ -509,12 +526,12 @@ export const ERRO_CONJUNTO_ERRADO = "conjunto_numero_errado";
 export type RecusaConjuntoErrado =
   | { ok: true; pedido: number | null; dest: number | null }
   | {
-    ok: false;
-    erro: typeof ERRO_CONJUNTO_ERRADO;
-    detalhe: string;
-    pedido: number;
-    dest: number | null;
-  };
+      ok: false;
+      erro: typeof ERRO_CONJUNTO_ERRADO;
+      detalhe: string;
+      pedido: number;
+      dest: number | null;
+    };
 
 /**
  * Hard block: peca/slate/fala pediu CONJ.N e o destino e outro (CONJ.1 ↛ CONJ.4).
@@ -549,7 +566,9 @@ export function recusarConjuntoErrado(opts: {
  * CAMPAIGN_PAUSED / ADSET_PAUSED / PAUSED / ACTIVE continuam no inventario.
  */
 export function statusObjetoOperacional(status: unknown): boolean {
-  const st = String(status ?? "").trim().toUpperCase();
+  const st = String(status ?? "")
+    .trim()
+    .toUpperCase();
   return st !== "DELETED" && st !== "ARCHIVED";
 }
 

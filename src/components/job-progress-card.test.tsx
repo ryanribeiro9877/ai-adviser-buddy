@@ -215,10 +215,13 @@ describe("especialistas", () => {
   it("ignora sufixo de plano padrao no chip (nao vaza texto tecnico)", async () => {
     montar();
     chegaDoBanco({
-      progresso: [{
-        fase: "planner",
-        detalhe: "especialistas: desempenho_campanhas, criativos (plano padrao - planejador nao devolveu JSON valido) [lite]",
-      }],
+      progresso: [
+        {
+          fase: "planner",
+          detalhe:
+            "especialistas: desempenho_campanhas, criativos (plano padrao - planejador nao devolveu JSON valido) [lite]",
+        },
+      ],
     });
     expect(await screen.findByText("Desempenho")).toBeInTheDocument();
     expect(screen.getByText("Criativos")).toBeInTheDocument();

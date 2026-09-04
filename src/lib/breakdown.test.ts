@@ -229,7 +229,12 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
 describe("resultForCampaign — a metrica que a BASE declarada manda", () => {
   it("formularios: mostra o rotulo da base, nao 'CPL'", () => {
     const r = resultForCampaign(
-      campanha({ base_de_resultado: "formularios", resultados: 20, custo_por_resultado: 15, spend: 300 }),
+      campanha({
+        base_de_resultado: "formularios",
+        resultados: 20,
+        custo_por_resultado: 15,
+        spend: 300,
+      }),
     );
     expect(r).toMatchObject({
       label: "Formulários",
@@ -249,7 +254,11 @@ describe("resultForCampaign — a metrica que a BASE declarada manda", () => {
         spend: 250,
       }),
     );
-    expect(r).toMatchObject({ label: "Conversas", value: "50", costLabel: "Custo por conversa iniciada" });
+    expect(r).toMatchObject({
+      label: "Conversas",
+      value: "50",
+      costLabel: "Custo por conversa iniciada",
+    });
     expect(r.costValue).toBe(`R$${NB}5,00`);
   });
 
@@ -286,7 +295,12 @@ describe("resultForCampaign — a metrica que a BASE declarada manda", () => {
 
   it("custo ausente cai para o calculo local, em vez de sumir com o numero", () => {
     const r = resultForCampaign(
-      campanha({ base_de_resultado: "conversas", resultados: 4, custo_por_resultado: null, spend: 100 }),
+      campanha({
+        base_de_resultado: "conversas",
+        resultados: 4,
+        custo_por_resultado: null,
+        spend: 100,
+      }),
     );
     expect(r.costValue).toBe(`R$${NB}25,00`);
   });

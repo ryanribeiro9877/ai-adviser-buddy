@@ -5,7 +5,13 @@ import { supabase } from "@/integrations/supabase/client";
 import { useApp } from "@/lib/app-context";
 import { useNotificacoes } from "@/hooks/use-notificacoes";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ActionCard, decideApproval, reexecutarApproval, type Approval, type Decision } from "@/components/action-card";
+import {
+  ActionCard,
+  decideApproval,
+  reexecutarApproval,
+  type Approval,
+  type Decision,
+} from "@/components/action-card";
 
 export const APPROVAL_SELECT =
   "id, action, entity_type, summary, payload, status, review_note, reviewed_at, requested_by, reviewed_by, created_at, conversation_id, expires_at, executed_at, execution_result, ultima_falha";

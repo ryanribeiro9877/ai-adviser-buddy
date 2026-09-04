@@ -36,11 +36,7 @@ export function isWabaInventory(p: { platform_type: string | null; external_id: 
   if (isClickToWhatsApp(p)) return false;
   // NOT_APPLICABLE = migrado/inativo sem qualidade legível — fica em "outros".
   if (p.platform_type === "NOT_APPLICABLE") return false;
-  return (
-    p.platform_type === CLOUD ||
-    p.platform_type === "ON_PREMISE" ||
-    p.platform_type == null
-  );
+  return p.platform_type === CLOUD || p.platform_type === "ON_PREMISE" || p.platform_type == null;
 }
 
 type Phone = {
@@ -313,45 +309,47 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
     <div className="space-y-6">
       {soAnuncios && (
         <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
-          Esta empresa não tem WABA Cloud API no sync oficial. Abaixo estão os números usados
-          como destino Click-to-WhatsApp nos anúncios (sem qualidade/tier da Meta Cloud API).
+          Esta empresa não tem WABA Cloud API no sync oficial. Abaixo estão os números usados como
+          destino Click-to-WhatsApp nos anúncios (sem qualidade/tier da Meta Cloud API).
         </div>
       )}
 
       {/* 1) Resumo Cloud API — só quando há números vivos */}
       {vivos.length > 0 && (
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Card className="p-4">
-          <div className="text-xs text-muted-foreground">Números ativos (Cloud API)</div>
-          <div className="mt-1 text-2xl font-semibold">{resumo.vivos}</div>
-          <div className="mt-1 text-[11px] text-muted-foreground">
-            de {phones.length} cadastrados
-          </div>
-        </Card>
-        <Card className="p-4">
-          <div className="text-xs text-muted-foreground">Qualidade</div>
-          <div className="mt-1 flex items-baseline gap-3 text-2xl font-semibold">
-            <span className="text-[color:var(--color-success)]">{resumo.green}</span>
-            <span className="text-[color:var(--color-warning)]">{resumo.yellow}</span>
-            <span className="text-destructive">{resumo.red}</span>
-          </div>
-          <div className="mt-1 text-[11px] text-muted-foreground">boa · atenção · crítica</div>
-        </Card>
-        <Card className="p-4">
-          <div className="text-xs text-muted-foreground">Tier predominante</div>
-          <div className="mt-1 text-2xl font-semibold">{resumo.tier}</div>
-          <div className="mt-1 text-[11px] text-muted-foreground">
-            {resumo.tierQtd} de {resumo.vivos} números
-          </div>
-        </Card>
-        <Card className="p-4">
-          <div className="text-xs text-muted-foreground">Contas (WABAs)</div>
-          <div className="mt-1 text-2xl font-semibold">{wabasCloud.length}</div>
-          <div className="mt-1 text-[11px] text-muted-foreground">
-            {wabasSemAcesso.length > 0 ? `${wabasSemAcesso.length} sem acesso` : "todas com acesso"}
-          </div>
-        </Card>
-      </div>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Card className="p-4">
+            <div className="text-xs text-muted-foreground">Números ativos (Cloud API)</div>
+            <div className="mt-1 text-2xl font-semibold">{resumo.vivos}</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              de {phones.length} cadastrados
+            </div>
+          </Card>
+          <Card className="p-4">
+            <div className="text-xs text-muted-foreground">Qualidade</div>
+            <div className="mt-1 flex items-baseline gap-3 text-2xl font-semibold">
+              <span className="text-[color:var(--color-success)]">{resumo.green}</span>
+              <span className="text-[color:var(--color-warning)]">{resumo.yellow}</span>
+              <span className="text-destructive">{resumo.red}</span>
+            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground">boa · atenção · crítica</div>
+          </Card>
+          <Card className="p-4">
+            <div className="text-xs text-muted-foreground">Tier predominante</div>
+            <div className="mt-1 text-2xl font-semibold">{resumo.tier}</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              {resumo.tierQtd} de {resumo.vivos} números
+            </div>
+          </Card>
+          <Card className="p-4">
+            <div className="text-xs text-muted-foreground">Contas (WABAs)</div>
+            <div className="mt-1 text-2xl font-semibold">{wabasCloud.length}</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              {wabasSemAcesso.length > 0
+                ? `${wabasSemAcesso.length} sem acesso`
+                : "todas com acesso"}
+            </div>
+          </Card>
+        </div>
       )}
 
       {emAnuncios.length > 0 && vivos.length === 0 && (
@@ -366,12 +364,16 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
             <div className="mt-1 text-2xl font-semibold">
               {emAnuncios.filter((p) => p.status === "IN_ACTIVE_ADS").length}
             </div>
-            <div className="mt-1 text-[11px] text-muted-foreground">sinal de anúncio/conjunto ativo</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              sinal de anúncio/conjunto ativo
+            </div>
           </Card>
           <Card className="p-4">
             <div className="text-xs text-muted-foreground">Cloud API</div>
             <div className="mt-1 text-2xl font-semibold">0</div>
-            <div className="mt-1 text-[11px] text-muted-foreground">sem WABA conectada nesta empresa</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              sem WABA conectada nesta empresa
+            </div>
           </Card>
         </div>
       )}
@@ -395,10 +397,10 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
 
       {/* 2) Números Cloud API */}
       {vivos.length > 0 && (
-      <div>
-        <div className="mb-2 flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold">Números (Cloud API)</h2>
-          <Button
+        <div>
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">Números (Cloud API)</h2>
+            <Button
               size="sm"
               variant="outline"
               onClick={() =>
@@ -420,63 +422,65 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
               <Download className="mr-1 h-4 w-4" />
               Exportar
             </Button>
-        </div>
-        <div className="rounded-md border border-border">
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Nome verificado</TableHead>
-                  <TableHead>Número</TableHead>
-                  <TableHead>Qualidade</TableHead>
-                  <TableHead>Tier</TableHead>
-                  <TableHead>Conta (WABA)</TableHead>
-                  <TableHead>
-                    <span className="inline-flex items-center gap-1">
-                      Últimos {DIAS_HISTORICO} dias
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button type="button" className="text-muted-foreground/70">
-                            <HelpCircle className="h-3.5 w-3.5" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent className="max-w-[260px] text-left">
-                          Um bloco por dia coletado, na cor da qualidade daquele dia. A coleta
-                          diária começou em 22/07.
-                        </TooltipContent>
-                      </Tooltip>
-                    </span>
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {vivos.map((p) => (
-                  <TableRow key={p.external_id}>
-                    <TableCell className="font-medium">{p.verified_name ?? "—"}</TableCell>
-                    <TableCell className="tabular-nums">{p.display_phone_number ?? "—"}</TableCell>
-                    <TableCell>
-                      <QualidadeBadge q={p.quality_rating} />
-                    </TableCell>
-                    <TableCell>{tierLabel(p.messaging_limit_tier)}</TableCell>
-                    <TableCell className="max-w-[220px] truncate text-sm text-muted-foreground">
-                      {wabaNome.get(p.waba_external_id) ?? p.waba_external_id}
-                    </TableCell>
-                    <TableCell>
-                      <HistoricoQualidade serie={seriePorNumero.get(p.external_id) ?? []} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
           </div>
+          <div className="rounded-md border border-border">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Nome verificado</TableHead>
+                    <TableHead>Número</TableHead>
+                    <TableHead>Qualidade</TableHead>
+                    <TableHead>Tier</TableHead>
+                    <TableHead>Conta (WABA)</TableHead>
+                    <TableHead>
+                      <span className="inline-flex items-center gap-1">
+                        Últimos {DIAS_HISTORICO} dias
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button type="button" className="text-muted-foreground/70">
+                              <HelpCircle className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-[260px] text-left">
+                            Um bloco por dia coletado, na cor da qualidade daquele dia. A coleta
+                            diária começou em 22/07.
+                          </TooltipContent>
+                        </Tooltip>
+                      </span>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {vivos.map((p) => (
+                    <TableRow key={p.external_id}>
+                      <TableCell className="font-medium">{p.verified_name ?? "—"}</TableCell>
+                      <TableCell className="tabular-nums">
+                        {p.display_phone_number ?? "—"}
+                      </TableCell>
+                      <TableCell>
+                        <QualidadeBadge q={p.quality_rating} />
+                      </TableCell>
+                      <TableCell>{tierLabel(p.messaging_limit_tier)}</TableCell>
+                      <TableCell className="max-w-[220px] truncate text-sm text-muted-foreground">
+                        {wabaNome.get(p.waba_external_id) ?? p.waba_external_id}
+                      </TableCell>
+                      <TableCell>
+                        <HistoricoQualidade serie={seriePorNumero.get(p.external_id) ?? []} />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+          {outrosSemCloud.length > 0 && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              {outrosSemCloud.length} número(s) migrados ou sem acesso Cloud API não aparecem acima
+              (sem qualidade/tier legíveis).
+            </p>
+          )}
         </div>
-        {outrosSemCloud.length > 0 && (
-          <p className="mt-2 text-xs text-muted-foreground">
-            {outrosSemCloud.length} número(s) migrados ou sem acesso Cloud API não aparecem acima
-            (sem qualidade/tier legíveis).
-          </p>
-        )}
-      </div>
       )}
 
       {/* 2b) Números Click-to-WhatsApp em anúncios */}
@@ -521,7 +525,9 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
                       <TableCell className="max-w-[360px] truncate font-medium">
                         {p.verified_name ?? "—"}
                       </TableCell>
-                      <TableCell className="tabular-nums">{p.display_phone_number ?? "—"}</TableCell>
+                      <TableCell className="tabular-nums">
+                        {p.display_phone_number ?? "—"}
+                      </TableCell>
                       <TableCell>
                         <Badge variant={p.status === "IN_ACTIVE_ADS" ? "default" : "secondary"}>
                           {p.status === "IN_ACTIVE_ADS" ? "Em campanha ativa" : "Em anúncios"}
@@ -545,154 +551,158 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
 
       {/* 3) Templates — só faz sentido com Cloud API */}
       {!soAnuncios && (
-      <div>
-        <div className="mb-2 flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold">Templates</h2>
-          <div className="flex items-center gap-2">
-            {(templates.data ?? []).length > 0 && (
-              <Button
-                size="sm"
+        <div>
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold">Templates</h2>
+            <div className="flex items-center gap-2">
+              {(templates.data ?? []).length > 0 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    exportarXlsx(
+                      (templates.data ?? []).map((t) => ({
+                        Template: t.nome,
+                        Categoria: t.categoria,
+                        Enviados: t.sent,
+                        Entregues: t.delivered,
+                        Lidos: t.read,
+                        Cliques: t.clicked,
+                        "Taxa de clique (%)":
+                          t.sent > 0 ? Number(((t.clicked / t.sent) * 100).toFixed(1)) : null,
+                      })),
+                      `whatsapp_templates_${janela}d_${new Date().toISOString().slice(0, 10)}.xlsx`,
+                      "Templates",
+                    )
+                  }
+                >
+                  <Download className="mr-1 h-4 w-4" />
+                  Exportar
+                </Button>
+              )}
+              <ToggleGroup
+                type="single"
+                value={janela}
+                onValueChange={(v) => v && setJanela(v as "7" | "30")}
                 variant="outline"
-                onClick={() =>
-                  exportarXlsx(
-                    (templates.data ?? []).map((t) => ({
-                      Template: t.nome,
-                      Categoria: t.categoria,
-                      Enviados: t.sent,
-                      Entregues: t.delivered,
-                      Lidos: t.read,
-                      Cliques: t.clicked,
-                      "Taxa de clique (%)":
-                        t.sent > 0 ? Number(((t.clicked / t.sent) * 100).toFixed(1)) : null,
-                    })),
-                    `whatsapp_templates_${janela}d_${new Date().toISOString().slice(0, 10)}.xlsx`,
-                    "Templates",
-                  )
-                }
+                size="sm"
               >
-                <Download className="mr-1 h-4 w-4" />
-                Exportar
-              </Button>
-            )}
-            <ToggleGroup
-              type="single"
-              value={janela}
-              onValueChange={(v) => v && setJanela(v as "7" | "30")}
-              variant="outline"
-              size="sm"
-            >
-              <ToggleGroupItem value="7">7 dias</ToggleGroupItem>
-              <ToggleGroupItem value="30">30 dias</ToggleGroupItem>
-            </ToggleGroup>
+                <ToggleGroupItem value="7">7 dias</ToggleGroupItem>
+                <ToggleGroupItem value="30">30 dias</ToggleGroupItem>
+              </ToggleGroup>
+            </div>
           </div>
-        </div>
-        <div className="rounded-md border border-border">
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Template</TableHead>
-                  <TableHead>Categoria</TableHead>
-                  <TableHead className="text-right">Enviados</TableHead>
-                  <TableHead className="text-right">Entregues</TableHead>
-                  <TableHead className="text-right">Lidos</TableHead>
-                  <TableHead className="text-right">Cliques</TableHead>
-                  <TableHead className="text-right">
-                    <span className="inline-flex items-center gap-1">
-                      Taxa de clique
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button type="button" className="text-muted-foreground/70">
-                            <HelpCircle className="h-3.5 w-3.5" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent className="max-w-[260px] text-left">
-                          Cliques ÷ enviados. Pode passar de 100% quando o recibo de leitura está
-                          desligado ou o mesmo contato clica mais de uma vez — o valor é exibido
-                          como vem.
-                        </TooltipContent>
-                      </Tooltip>
-                    </span>
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {templates.isLoading &&
-                  [0, 1, 2].map((i) => (
-                    <TableRow key={i}>
-                      <TableCell colSpan={7}>
-                        <Skeleton className="h-5 w-full" />
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                {(templates.data ?? []).map((t) => {
-                  const semClique = t.sent > 0 && t.clicked === 0;
-                  return (
-                    <TableRow key={t.nome}>
-                      <TableCell className="font-medium">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="max-w-[260px] truncate">{t.nome}</span>
-                          {semClique && (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Badge variant="outline" className="font-normal text-[11px]">
-                                  auditar botão/URL
-                                </Badge>
-                              </TooltipTrigger>
-                              <TooltipContent className="max-w-[260px] text-left">
-                                Teve envio e nenhum clique registrado na janela. Vale checar se o
-                                botão/URL do template está correto e rastreável.
-                              </TooltipContent>
-                            </Tooltip>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">{t.categoria}</TableCell>
-                      <TableCell className="text-right tabular-nums">{fmtInt(t.sent)}</TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {fmtInt(t.delivered)}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">{fmtInt(t.read)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{fmtInt(t.clicked)}</TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {t.sent > 0 ? fmtPct1((t.clicked / t.sent) * 100) : "—"}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-                {!templates.isLoading && (templates.data ?? []).length === 0 && (
+          <div className="rounded-md border border-border">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
                   <TableRow>
-                    <TableCell colSpan={7} className="text-sm text-muted-foreground">
-                      Sem envios de template nesta janela.
-                    </TableCell>
+                    <TableHead>Template</TableHead>
+                    <TableHead>Categoria</TableHead>
+                    <TableHead className="text-right">Enviados</TableHead>
+                    <TableHead className="text-right">Entregues</TableHead>
+                    <TableHead className="text-right">Lidos</TableHead>
+                    <TableHead className="text-right">Cliques</TableHead>
+                    <TableHead className="text-right">
+                      <span className="inline-flex items-center gap-1">
+                        Taxa de clique
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button type="button" className="text-muted-foreground/70">
+                              <HelpCircle className="h-3.5 w-3.5" />
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-[260px] text-left">
+                            Cliques ÷ enviados. Pode passar de 100% quando o recibo de leitura está
+                            desligado ou o mesmo contato clica mais de uma vez — o valor é exibido
+                            como vem.
+                          </TooltipContent>
+                        </Tooltip>
+                      </span>
+                    </TableHead>
                   </TableRow>
-                )}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {templates.isLoading &&
+                    [0, 1, 2].map((i) => (
+                      <TableRow key={i}>
+                        <TableCell colSpan={7}>
+                          <Skeleton className="h-5 w-full" />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  {(templates.data ?? []).map((t) => {
+                    const semClique = t.sent > 0 && t.clicked === 0;
+                    return (
+                      <TableRow key={t.nome}>
+                        <TableCell className="font-medium">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="max-w-[260px] truncate">{t.nome}</span>
+                            {semClique && (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Badge variant="outline" className="font-normal text-[11px]">
+                                    auditar botão/URL
+                                  </Badge>
+                                </TooltipTrigger>
+                                <TooltipContent className="max-w-[260px] text-left">
+                                  Teve envio e nenhum clique registrado na janela. Vale checar se o
+                                  botão/URL do template está correto e rastreável.
+                                </TooltipContent>
+                              </Tooltip>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {t.categoria}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtInt(t.sent)}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {fmtInt(t.delivered)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtInt(t.read)}</TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {fmtInt(t.clicked)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {t.sent > 0 ? fmtPct1((t.clicked / t.sent) * 100) : "—"}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                  {!templates.isLoading && (templates.data ?? []).length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-sm text-muted-foreground">
+                        Sem envios de template nesta janela.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
           </div>
         </div>
-      </div>
       )}
 
       {/* 4) Envios por número — honesto sobre a coleta ainda não ativa */}
       {!soAnuncios && (
-      <div>
-        <h2 className="mb-2 text-lg font-semibold">Envios por número</h2>
-        {porNumeroAtivo ? (
-          <Card className="p-4 text-sm text-muted-foreground">
-            {(porNumero.data ?? []).length} registro(s) por número disponíveis.
-          </Card>
-        ) : (
-          <Card className="p-4">
-            <div className="text-sm font-medium">Coleta por número ainda não ativa</div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Hoje o volume de envios chega agregado por conta (WABA), sem separação por número.
-              Esta seção fica vazia de propósito — mostrar zero aqui pareceria medição, quando na
-              verdade o dado ainda não é coletado.
-            </p>
-          </Card>
-        )}
-      </div>
+        <div>
+          <h2 className="mb-2 text-lg font-semibold">Envios por número</h2>
+          {porNumeroAtivo ? (
+            <Card className="p-4 text-sm text-muted-foreground">
+              {(porNumero.data ?? []).length} registro(s) por número disponíveis.
+            </Card>
+          ) : (
+            <Card className="p-4">
+              <div className="text-sm font-medium">Coleta por número ainda não ativa</div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Hoje o volume de envios chega agregado por conta (WABA), sem separação por número.
+                Esta seção fica vazia de propósito — mostrar zero aqui pareceria medição, quando na
+                verdade o dado ainda não é coletado.
+              </p>
+            </Card>
+          )}
+        </div>
       )}
 
       {/* 5) Contas (WABAs) */}
