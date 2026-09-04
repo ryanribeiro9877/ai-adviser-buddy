@@ -976,7 +976,7 @@ export function OperacaoChat() {
       setPending(null);
       setLive(null); // as mensagens canônicas do banco assumem a partir daqui
     } catch (err) {
-      const msg = String((err as any)?.message ?? err ?? "");
+      const msg = String((err as { message?: unknown } | null)?.message ?? err ?? "");
       const pareceTimeout =
         /FunctionsHttpError|504|Gateway Timeout|Failed to fetch|AbortError|timed out|timeout/i.test(
           msg,
