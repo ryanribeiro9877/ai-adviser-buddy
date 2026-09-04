@@ -2188,8 +2188,19 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     relatorio = String(msg.content ?? "");
     break;
   }
-  if (!relatorio) {
-    // Estourou iteracoes/prazo coletando: forca o relatorio com o que ha.
+  /**
+   * DEFEITO CORRIGIDO EM 04/09/2026: a string de falha bloqueava o proprio salvamento.
+   *
+   * A condicao era `if (!relatorio)`. So que, quando a chamada erra, a linha do erro ja escreveu
+   * "(subagente X falhou: ...)" em `relatorio` — entao `relatorio` era truthy e esta escrita
+   * forcada NUNCA rodava, justamente no caso para o qual ela foi feita. O especialista morria com
+   * as ferramentas ja chamadas e os dados no contexto, e nada disso era aproveitado: ia tudo fora
+   * e a sintese recebia a frase de erro. Agora o erro tambem dispara o salvamento, sem tools e sem
+   * raciocinio, que e a chance de transformar coleta ja paga em relatorio.
+   */
+  if (!relatorio || erroLlm) {
+    // Estourou iteracoes/prazo coletando, ou a ultima chamada falhou: forca o relatorio com o que ha.
+    if (erroLlm) relatorio = "";
     messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
     const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
     if (rf.erro) erroLlm = String(rf.erro);
