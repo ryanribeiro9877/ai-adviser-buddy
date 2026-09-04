@@ -81,49 +81,69 @@ jobs:
         with:
           deno-version: v2.9.3
 
-      - name: deno check nas 31 edges
-        # Passa em 31/31. O "24/24 desde a auditoria de 13/08" que ficou escrito aqui valeu
-        # por dois dias: entre 15/08 e 02/09 quatro mudanças independentes deixaram 5 edges
-        # sem compilar (nível "campanha" só no produtor; fallback de conta com 4 de 13 chaves;
-        # cast que matava o estreitamento de token/ref; `new Map` sem anotação de tupla) e o
-        # job ficou vermelho semanas sem ninguém ler o log. Falha aqui é regressão real — e
-        # este número também é uma afirmação, que envelhece se ninguém a conferir.
+      - name: deno check das edges
+        # Quantas edges existem e quantas passaram sai no LOG deste passo, de propósito. O
+        # comentário anterior afirmava "24 edges, 24/24 desde a auditoria de 13/08" e as duas
+        # metades eram falsas: eram 31, e o job ficou vermelho de 15/08 a 03/09 porque quatro
+        # mudanças independentes deixaram 5 edges sem compilar (nível "campanha" só no produtor;
+        # fallback de conta com 4 de 13 chaves; cast que matava o estreitamento de token/ref;
+        # `new Map` sem anotação de tupla). Número escrito à mão em comentário envelhece calado.
         #
         # O passo checa `supabase/functions/*/index.ts` do checkout, então uma edge de rascunho
         # não commitada não é vista aqui — conferir contra `git ls-files`, não contra o disco.
         run: |
           set -e
+          total=0
           falhas=0
           for d in supabase/functions/*/; do
             [ -f "${d}index.ts" ] || continue
+            total=$((total+1))
             echo "::group::deno check ${d}"
             if ! deno check "${d}index.ts"; then
-              echo "::error::deno check falhou em ${d}"
+              echo "::error file=${d}index.ts::deno check falhou em ${d}"
               falhas=$((falhas+1))
             fi
             echo "::endgroup::"
           done
-          echo "edges com falha: $falhas"
+          echo "edges checadas: ${total} | com falha: ${falhas}"
           [ "$falhas" -eq 0 ]
 
       - name: Provas do _shared
-        # As 34 provas usam Deno.exit(1)/throw, então exit code já é o veredito. Eram 4 quando
-        # esta linha foi escrita. Passo BLOQUEANTE: `set -e` derruba o job na primeira que cair.
+        # Roda TODAS as provas e só falha no fim, listando as vermelhas de uma vez.
+        #
+        # Antes era `set -e` com o `deno run` solto no loop: a PRIMEIRA prova a cair abortava o
+        # passo e escondia as outras. Foi exatamente assim que se acreditou por semanas que
+        # havia uma prova vermelha quando havia duas — a segunda só apareceu depois de consertar
+        # a primeira, um dia de atraso por falha escondida. Continua BLOQUEANTE: qualquer prova
+        # vermelha derruba o job. O que mudou é ver o estrago inteiro numa execução só.
+        #
+        # Cada prova usa throw/Deno.exit(1), então o exit code de cada uma é o veredito dela.
+        # Quantas provas existem sai no log, não neste comentário.
         run: |
-          set -e
+          falhas=()
+          total=0
           for f in supabase/functions/_shared/_prova_*.ts; do
+            total=$((total+1))
             echo "::group::$f"
-            deno run --allow-all "$f"
+            if ! deno run --allow-all "$f"; then
+              echo "::error file=${f}::prova vermelha"
+              falhas+=("$f")
+            fi
             echo "::endgroup::"
           done
+          echo "provas rodadas: ${total} | vermelhas: ${#falhas[@]}"
+          if [ "${#falhas[@]}" -ne 0 ]; then
+            echo "== provas vermelhas =="
+            printf '  - %s\n' "${falhas[@]}"
+            exit 1
+          fi
 
       - name: deno lint (informativo)
-        # O eslint ignora supabase/functions (código Deno tem toolchain própria);
-        # este passo é o dono legítimo desses achados. NÃO bloqueia: são 898
-        # problemas (medidos em 03/09/2026), a esmagadora maioria de no-explicit-any, e um job
-        # que nasce vermelho ensina a ignorar o CI. Vira bloqueante quando o `any` for
-        # reduzido. Estava escrito "498" aqui desde 13/08 — como o passo é informativo,
-        # ninguém confere o log, e o número dobrou sem ninguém corrigir.
+        # O eslint ignora supabase/functions (código Deno tem toolchain própria); este passo é o
+        # dono legítimo desses achados. NÃO bloqueia: a esmagadora maioria é no-explicit-any, e
+        # um job que nasce vermelho ensina a ignorar o CI. Vira bloqueante quando o `any` for
+        # reduzido. O total sai no log — estava escrito "498" aqui desde 13/08 e já eram 898
+        # quando alguém foi conferir: justamente porque o passo é informativo, ninguém lê o log.
         continue-on-error: true
         run: deno lint supabase/functions
 
