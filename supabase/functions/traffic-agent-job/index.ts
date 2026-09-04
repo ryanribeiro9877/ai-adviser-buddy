@@ -1,4 +1,10 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.18)
+// supabase/functions/traffic-agent-job/index.ts (v4.19)
+// v4.19 (04/09/2026) - TELEMETRIA DA COLETA: motivo de saida do especialista separado do
+//   finish_reason do provider (o `||` da reserva nunca entregava o valor novo), teto por chamada
+//   declarando quando saiu no PISO de 20s, parede livre no fim da coleta (o campo antigo saturava
+//   em 160s) e aproveitamento da coleta medido por conteudo conferivel, nunca por comprimento.
+//   Mediu-se que janela, parede e encerramento voluntario NAO limitam a coleta — ver o registro
+//   junto de CUSTO_REINVOCACAO_MS.
 // v4.18 (02/09/2026) - origem_drive_dos_anuncios + varredura desce ano/mes VISTTA;
 //   pedido de pasta dos anuncios no ar deixa de ser inventario de pecas novas.
 // v4.17 (02/09/2026) - Ranking ignora anuncios DELETED/ARCHIVED (mesma regra do chat v28.94).
@@ -258,6 +264,14 @@ import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto, statusObjetoOpera
 import { carregarMemoriaInstitucional, type FatoMemoria } from "../_shared/agent_memory.ts";
 import { selecionarMemoria } from "../_shared/memoria_relevante.ts";
 import {
+  fidelidadeDaColeta,
+  janelaLivre,
+  type MotivoSaida,
+  resumirTetos,
+  type TetoConcedido,
+  tetoDaChamadaMs,
+} from "../_shared/diagnostico_coleta.ts";
+import {
   agenteDoSubagente,
   carregarCatalogoAgentes,
   montarPromptDelegacao,
@@ -425,6 +439,52 @@ const DEVOLUCAO_MIN_MS = 90_000;
 // Custo medido de abrir outro segmento (gravar checkpoint + reinvocar + reconstruir estado):
 // no job 1403d076 a parede caiu de 79s para 32s entre o checkpoint e a chamada de sintese.
 const CUSTO_REINVOCACAO_MS = 45_000;
+/**
+ * O QUE DE FATO LIMITA A COLETA DO DEEP — MEDIDO EM 04/09/2026 (n=39 jobs, 62 especialistas).
+ *
+ * Nao mexa em `SINT_RESERVA_MS`, `CUSTO_REINVOCACAO_MS` ou `JOB_LIMIT_MS` sem ler isto: os tres
+ * se compoem num quarto numero que ninguem escolheu, e e esse que aperta.
+ *
+ * A investigacao tinha tres suspeitos. A telemetria derrubou os TRES:
+ *
+ *   JANELA — nao. Entrada da sintese ~8.500 tokens contra 500k de contexto (98% livre). O
+ *     especialista fecha com 3.300-4.300 tokens de saida contra teto de 5.000, e `length` aparece
+ *     em 1 de 62 execucoes. Liberar 12.700 tokens (commits 8fdb9b7/c33b2a3) nao destravou coleta
+ *     porque nada no codigo liga janela da sintese a orcamento de coleta — a folga seria gasta em
+ *     recurso que nao estava escasso.
+ *   PAREDE — nao. A coleta encerra com MEDIANA de 398,5s livres dos 480s (83% intactos), em 18 de
+ *     18 jobs concluidos. Quem aperta e o teto POR INVOCACAO (270s), nunca a parede de politica.
+ *   ENCERRAMENTO VOLUNTARIO — nao. `finish: stop`, o unico estado em que o especialista decidiu
+ *     que terminou, sao 8 de 62 (13%). Os outros 81% terminaram em chamada abortada por relogio.
+ *
+ * O QUE APERTA e um numero derivado: `tetoDaChamada` = max(20s, min(150s, prazo() - 195s)), com
+ * `prazo()` limitado pelos 270s por invocacao e a reserva sendo 150s de sintese + 45s de
+ * reinvocacao. Isso da a coleta 65s de pista em que o teto por chamada e real. Passados os 65s,
+ * `autorizado_ms` fica negativo e TODA chamada sai no piso de 20s — que e menos do que uma
+ * chamada de raciocinio xhigh leva para voltar. A assinatura no banco e literal:
+ * `openrouter_timeout_20000`, onde 20000 nao e teto escolhido, e o piso.
+ *
+ * Bate com o observado: a coleta morre entre 71s e 104s de parede em todos os jobs concluidos.
+ *
+ * O QUE DESTRAVARIA — PROPOSTO, NAO IMPLEMENTADO (mexe em relogio, e decisao do gestor):
+ *
+ *   (a) DESCONTAR A RESERVA DA PAREDE, NAO DA INVOCACAO. A reserva existe para garantir a
+ *       escrita, e a escrita pode rodar no segmento seguinte, onde o relogio de invocacao nasce
+ *       zerado. Reservar contra `prazoDeParede()` em vez de `prazo()` daria a coleta ~245s de
+ *       pista sem tocar nos 480s nem no teto de 270s.
+ *   (b) NAO COBRAR `CUSTO_REINVOCACAO_MS` QUANDO NAO HA REINVOCACAO POSSIVEL. Em
+ *       `segmento === MAX_SEGMENTOS` os 45s sao cobrados de uma reinvocacao que nao vai
+ *       acontecer: 45s de pista jogados fora por aritmetica.
+ *   (c) TROCAR O PISO POR PARADA HONESTA. Chamada no piso tem 0 de 4 sucessos medidos e ainda
+ *       queima parede antes de abortar. Parar a coleta e ir para a escrita de salvamento (que o
+ *       commit abe7d15 acabou de liberar) preserva coleta ja paga em vez de perde-la.
+ *   (d) A reserva de 150s esta bem dimensionada para a mediana e curta na cauda: a sintese leva
+ *       106s de mediana, mas 201,5s no p90 e 239,9s no maximo. Alargar coleta sem olhar esta
+ *       cauda troca "resposta curta" por "erro" — foi o que aconteceu com 370s por invocacao.
+ *
+ * Ordem sugerida: (b) e (c) sao baratos e conservadores; (a) e o ganho grande e precisa de (d)
+ * medido junto, com amostra grande — n=5 ja mentiu duas vezes neste problema.
+ */
 // v3.5/v4.0: caps por tier de capacidade (roteador deterministico).
 const LITE_MAX_ESPECIALISTAS = 1;
 const STANDARD_MAX_ESPECIALISTAS = 2;
@@ -457,6 +517,15 @@ const SUB_REASONING = { max_tokens: 600 };
 // Sintese: partes de ate 8000 tokens, com continuacao interna ate 3 partes.
 const SINT_MAX_TOKENS = 8_000;
 const SINT_MAX_PARTES = 3;
+/**
+ * Janela do modelo padrao da casa (x-ai/grok-4.6), conferida na /api/v1/models em 03/09/2026 e
+ * registrada em `_shared/llm_catalogo.ts`.
+ *
+ * Existe para "sobrou janela?" ser CONSULTA e nao conta de cabeca. Com a entrada da sintese em
+ * ~8.500 tokens, a resposta e 98% livre — e foi assim que a hipotese de janela morreu: nao havia
+ * janela apertando nem antes nem depois de liberar 12.700 tokens.
+ */
+const CONTEXTO_MODELO_TOKENS = 500_000;
 const REASONING_OFF = { enabled: false };
 // 03/09/2026: piso de max_tokens quando o roteador dita esforco de raciocinio.
 //
@@ -2141,28 +2210,58 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   // sem isto, um especialista que morreu no timeout era contabilizado como coleta bem-sucedida.
   let erroLlm: string | null = null;
   /**
+   * MOTIVO DE SAIDA — separado do `finish_reason` do provider, e o campo que faltava.
+   *
+   * O codigo antigo empilhava as duas coisas em `finish`, e a linha da reserva era
+   * `finish = finish || "reserva_sintese"`. Como `finish` ja vinha preenchido pela iteracao
+   * anterior, o `||` NUNCA entregava o valor novo: parada por reserva era gravada como
+   * `tool_calls`. Nas 62 execucoes medidas em 04/09, `reserva_sintese` aparece zero vezes — nao
+   * por nao ter acontecido, mas porque o campo era incapaz de dizer. Era esse o instrumento que
+   * fazia "encerrou sozinho" e "morreu de relogio" chegarem com o mesmo rotulo na auditoria.
+   */
+  let motivoSaida: MotivoSaida | null = null;
+  let iteracoes = 0;
+  const tetos: TetoConcedido[] = [];
+  /**
    * Teto DESTA chamada, preso ao que sobra depois de reservar a sintese e a reinvocacao.
    *
    * O guard abaixo so olha o relogio ENTRE chamadas. Sem este teto, uma chamada que comeca com
    * orcamento suficiente pode correr os 150s inteiros e atravessar a reserva da sintese — foi
    * assim que tres jobs seguidos coletaram bem e depois estouraram na hora de escrever. Piso de
    * 20s porque chamada com menos que isso nao volta nada util, so queima parede.
+   *
+   * A aritmetica mudou de lugar (para `_shared/diagnostico_coleta.ts`) e NAO mudou de valor: o
+   * que se ganha e `no_piso`, que separa "teto que o relogio concedeu" de "piso emitido apesar de
+   * a reserva nao autorizar". Toda chamada no piso e uma chamada que a medicao de 04/09 viu
+   * abortar em `openrouter_timeout_20000`.
    */
-  const tetoDaChamada = () => Math.max(
-    20_000,
-    Math.min(OPENROUTER_TIMEOUT_MS, prazo() - (SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS)),
-  );
+  const tetoDaChamada = () => {
+    const t = tetoDaChamadaMs({
+      prazoMs: prazo(),
+      tetoProviderMs: OPENROUTER_TIMEOUT_MS,
+      reservaMs: SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS,
+      pisoMs: 20_000,
+    });
+    tetos.push(t);
+    return t.ms;
+  };
   for (let iter = 0; iter < SUB_MAX_ITER; iter++) {
+    iteracoes = iter + 1;
     // Reserva da sintese: para de coletar e escreve com o que tem. Inclui o custo de reinvocar
     // porque, quando o job segmenta, a sintese roda no segmento seguinte e paga esse pedagio.
-    if (prazo() < SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS) { finish = finish || "reserva_sintese"; break; }
-    if (prazo() <= 0) { finish = "prazo_do_job"; break; }
+    if (prazo() < SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS) {
+      iteracoes = iter;
+      finish = finish || "reserva_sintese";
+      motivoSaida = "reserva_sintese";
+      break;
+    }
+    if (prazo() <= 0) { iteracoes = iter; finish = "prazo_do_job"; motivoSaida = "prazo_do_job"; break; }
     const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
-    if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; erroLlm = String(r.erro); break; }
+    if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; motivoSaida = "erro_llm"; erroLlm = String(r.erro); break; }
     const u = usoDe(r.parsed); tin += u.tin; tout += u.tout; reas += u.reas;
     finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
     const msg = r.parsed?.choices?.[0]?.message;
-    if (!msg) { relatorio = `(subagente ${nome}: resposta vazia do provider)`; break; }
+    if (!msg) { relatorio = `(subagente ${nome}: resposta vazia do provider)`; motivoSaida = "resposta_vazia"; break; }
     if (msg.tool_calls?.length) {
       messages.push(msg);
       for (const tc of msg.tool_calls) {
@@ -2185,9 +2284,14 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
       }
       continue;
     }
+    // Texto sem pedido de ferramenta: ELE decidiu que terminou. E o unico estado que conta como
+    // encerramento voluntario, e a medicao de 04/09 achou 8 destes em 62 execucoes.
     relatorio = String(msg.content ?? "");
+    motivoSaida = "voluntario";
     break;
   }
+  // Saiu do `for` sem `break`: bateu SUB_MAX_ITER ainda querendo ferramenta.
+  if (!motivoSaida && iteracoes >= SUB_MAX_ITER) motivoSaida = "iteracoes_esgotadas";
   /**
    * DEFEITO CORRIGIDO EM 04/09/2026: a string de falha bloqueava o proprio salvamento.
    *
@@ -2243,7 +2347,19 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   const relatorioCompleto = houveRelatorioReal && !finish.startsWith("length");
   if (!houveRelatorioReal) partes = 0;
   if (!relatorio) relatorio = `(subagente ${nome}: sem relatorio - registre como lacuna do job)`;
-  return { nome, relatorio, completo: relatorioCompleto, partes, tools: usadas, tokens_in: tin, tokens_out: tout, reasoning_tokens: reas, finish, erro: erroLlm };
+  return {
+    nome, relatorio, completo: relatorioCompleto, partes, tools: usadas,
+    tokens_in: tin, tokens_out: tout, reasoning_tokens: reas, finish, erro: erroLlm,
+    // Fatos de ORCAMENTO da coleta. Sao o que permite responder "qual recurso apertou" sem
+    // reinterpretar strings: motivo de saida limpo, quantas iteracoes de 6 foram usadas, quanto
+    // do teto de consultas foi gasto, e quantas chamadas sairam no piso de 20s.
+    motivo_saida: motivoSaida,
+    iteracoes,
+    iteracoes_teto: SUB_MAX_ITER,
+    tools_teto: cfg.maxToolsTotal,
+    tetos_chamada: resumirTetos(tetos),
+    prazo_ms_no_fim: prazo(),
+  };
 }
 
 // ============================================================================
@@ -3186,6 +3302,8 @@ async function executarLote(
       const t = res.value as Partial<{
         tools: unknown; tokens_in: number; tokens_out: number;
         reasoning_tokens: number; finish: string; partes: number; erro: string | null;
+        motivo_saida: string | null; iteracoes: number; iteracoes_teto: number;
+        tools_teto: number; tetos_chamada: unknown; prazo_ms_no_fim: number;
       }>;
       tel.subagentes.push({
         nome: res.value.nome, relatorio_completo: res.value.completo,
@@ -3198,6 +3316,14 @@ async function executarLote(
         ...(t.reasoning_tokens !== undefined ? { reasoning_tokens: t.reasoning_tokens } : {}),
         ...(t.finish !== undefined ? { finish: t.finish } : {}),
         ...(t.partes !== undefined ? { partes_relatorio: t.partes } : {}),
+        // `rodarAnaliseVisual` e pipeline codificado e nao tem laco de tools: os campos de
+        // orcamento simplesmente nao entram, em vez de gravar undefined em silencio.
+        ...(t.motivo_saida !== undefined ? { motivo_saida: t.motivo_saida } : {}),
+        ...(t.iteracoes !== undefined ? { iteracoes: t.iteracoes } : {}),
+        ...(t.iteracoes_teto !== undefined ? { iteracoes_teto: t.iteracoes_teto } : {}),
+        ...(t.tools_teto !== undefined ? { tools_teto: t.tools_teto } : {}),
+        ...(t.tetos_chamada !== undefined ? { tetos_chamada: t.tetos_chamada } : {}),
+        ...(t.prazo_ms_no_fim !== undefined ? { prazo_ms_no_fim: t.prazo_ms_no_fim } : {}),
       });
     } else {
       saida.push({ nome: lote[i].nome, relatorio: `(especialista falhou: ${String(res.reason).slice(0, 200)} - trate como LACUNA)`, completo: false });
@@ -3296,7 +3422,18 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   JOB_TIER = cap.tier;
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
-  tel.versao = "job-v4.18";
+  /**
+   * A VERSAO TEM DE ANDAR QUANDO A MEDICAO ANDA.
+   *
+   * `job-v4.18` ficou parada por 16 commits, entre eles duas correcoes que mudaram o SIGNIFICADO
+   * de `relatorio_completo` (74dc717 e abe7d15, ambas de 04/09). Resultado: no banco, linhas de
+   * antes e de depois da correcao ficaram indistinguiveis, e a consulta que separava "coleta boa"
+   * de "falha contada como coleta" nao tinha por onde cortar. Parte da razao pela qual a amostra
+   * pequena mentiu duas vezes esta aqui, e nao no tamanho da amostra.
+   *
+   * v4.19 = telemetria de coleta (motivo_saida, tetos_chamada, tel.coleta, tel.fidelidade).
+   */
+  tel.versao = "job-v4.19";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -3394,6 +3531,10 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         escopo,
       });
       if (texto0 === null) return; // resgate reinvocou
+      // Mesma medida do caminho fresco: sem isto, job que segmentou ficava fora da amostra de
+      // aproveitamento e a base de medicao nasceria enviesada para os jobs de um segmento so.
+      tel.fidelidade = fidelidadeDaColeta(relatorios, texto0);
+      tel.janela_sintese = janelaLivre(tel.sintese?.tokens_in ?? 0, CONTEXTO_MODELO_TOKENS);
       tel.ms_total = Date.now() - t0;
       const finishSint0 = tel.sintese?.finish_reason ?? "stop";
       await supa.from("chat_messages").insert({
@@ -3428,6 +3569,25 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
     let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel);
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
+    /**
+     * PAREDE NO FIM DA COLETA — o numero que faltava para responder "qual recurso apertou".
+     *
+     * A telemetria antiga so tinha `restante_ms_1a_parte`, que satura em `SINT_FASE_HARD_MS`
+     * (160s): em 10 de 13 jobs ele marcava exatamente 160000, entao nao dava para saber se a
+     * parede tinha sobrado 20s ou 400s. Reconstruir isso de `progresso` funcionou para a medicao
+     * de 04/09 mas depende de string de mensagem de tela — nao e instrumento, e arqueologia.
+     *
+     * Estes tres campos dizem direto: quanto da parede de POLITICA (480s) sobrou, quanto o teto
+     * POR INVOCACAO (270s) deixou, e qual dos dois estava apertando. A medicao de 04/09 respondeu
+     * "por invocacao" em 18 de 18 jobs concluidos, com a parede intacta em ~83%.
+     */
+    tel.coleta = {
+      parede_livre_ms: prazoDeParede(),
+      prazo_ms: prazo(),
+      quem_aperta: prazo() < prazoDeParede() ? "por_invocacao" : "parede_global",
+      reserva_ms: SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS,
+      ms_desde_created: Date.now() - createdMs,
+    };
 
     // FASE 2.5 - VALIDACAO + DEVOLUCAO (v4.0: deep/standard = 0 por padrao)
     let rodada = 0;
@@ -3508,6 +3668,22 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       escopo,
     });
     if (texto === null) return;
+
+    /**
+     * APROVEITAMENTO DA COLETA — a unica medida de coleta que este projeto aceita.
+     *
+     * NAO se mede por comprimento de saida: ja esta medido que a dispersao de tamanho e do
+     * proprio modelo (119 a 13.254 chars com `tokens_in` identico ao token, `finish: stop` em
+     * cinco de seis). Comprimento aqui e ruido, e `chars_visiveis` continua no registro apenas
+     * como descricao, nunca como veredito.
+     *
+     * A unidade e conteudo conferivel: numero concreto e entidade nomeada que existem no
+     * relatorio do especialista e podem ser procurados na resposta. `ausentes_amostra` mostra o
+     * que a coleta pagou e a resposta nao citou — e o produto que permite revisar, do mesmo jeito
+     * que `dispensados_lista` permite revisar o estreitamento da memoria.
+     */
+    tel.fidelidade = fidelidadeDaColeta(relatorios, texto);
+    tel.janela_sintese = janelaLivre(tel.sintese?.tokens_in ?? 0, CONTEXTO_MODELO_TOKENS);
 
     tel.ms_total = Date.now() - t0;
     const finishSint = tel.sintese?.finish_reason ?? "stop";
