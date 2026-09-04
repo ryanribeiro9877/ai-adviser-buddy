@@ -35,17 +35,36 @@ import {
 } from "@/lib/attachments";
 import { Markdown } from "@/components/markdown";
 import { JobProgressCard } from "@/components/job-progress-card";
-import { replyLoteComLegendas, replyLoteCriativoIncompleto } from "@/lib/lote-criativo";
-import {
-  ehPedidoUploadLote,
-  ehUploadLoteCurto,
-  replyLeituraIncompleta,
-} from "@/lib/intencao-turno";
+import { replyLoteCriativoIncompleto } from "@/lib/lote-criativo";
 import {
   esperaGravacaoAposErroHttp,
   statusDeErroInvoke,
   turnoSincronoOrfao,
 } from "@/lib/chat-http-erro";
+// Semantica do fio (o que conta como resposta, quando parar de continuar) mora
+// em lib e tem teste proprio — ver o cabecalho de fio-chat.ts.
+import {
+  CONTINUE_PROMPT,
+  actionCardIds,
+  capContinuacoes,
+  devePararContinuacao,
+  hasSubstantiveReplyAfterLastUser,
+  isJobFailureStub,
+  isProgressOnlyReply,
+  isTruncated,
+  lastUserContent,
+  liveOverlayText,
+  looksLikeCompleteTurn,
+  mergeAssistantContent,
+  mergeLivePiece,
+  mesmaProsa,
+  needsAutoContinue,
+  storedAttachments,
+  toolNames,
+  type AttachmentMeta,
+  type ChatReply,
+  type Message,
+} from "@/lib/fio-chat";
 import {
   ActionCard,
   decideApproval,
@@ -69,189 +88,6 @@ import {
 import { cn } from "@/lib/utils";
 
 type Conversation = { id: string; title: string | null; updated_at: string };
-type Message = {
-  id: string;
-  role: string;
-  content: string | null;
-  tool_calls: unknown;
-  attachments: unknown;
-  model: string | null;
-  created_at: string;
-};
-
-type ChatReply = {
-  ok: boolean;
-  conversation_id: string;
-  reply: string;
-  tools_used?: string[];
-  // "stop" = completa; começa com "length" = cortada pelo limite de tamanho;
-  // "continuar_turno" = orçamento esgotou com checkpoint — retomar automaticamente.
-  finish_reason?: string;
-  // A edge pode encaminhar o pedido para a rota assíncrona antes de responder. Nesse caso
-  // não há `reply`: o que volta é o job, e a resposta chega pela conversa (Realtime).
-  async?: boolean;
-  job_id?: string;
-  roteado_para_job?: boolean;
-  /** v28.37: turno sincrono pediu novo segmento (checkpoint gravado). */
-  continuar?: boolean;
-  segmento?: number;
-  aviso?: string;
-};
-
-// Costura de respostas longas no FRONT: cada requisição fica dentro dos 150s da
-// plataforma e o cliente emenda os pedaços. Texto exigido pelo briefing.
-const CONTINUE_PROMPT =
-  "Sua resposta anterior foi cortada pelo limite de tamanho. Continue EXATAMENTE do ponto onde parou, na próxima palavra ou linha. Não repita nada do que já escreveu, não reintroduza o assunto, não reescreva títulos já entregues, não cumprimente. Apenas continue até concluir.";
-// Segmentos extras alem da costura por tamanho (checkpoint de orçamento / ato).
-const MAX_CONTINUATIONS = 6;
-const MAX_CONTINUATIONS_UPLOAD = 8;
-const isTruncated = (fr?: string) => !!fr && fr.startsWith("length");
-const needsAutoContinue = (data?: ChatReply | null) =>
-  !!data &&
-  data.continuar === true &&
-  !!data.finish_reason &&
-  data.finish_reason.startsWith("continuar_turno");
-
-function deaccFront(s: string) {
-  return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-}
-
-/** Mensagens de progresso / checkpoint — nao contam como resposta ao gestor. */
-function isProgressOnlyReply(text: string): boolean {
-  const raw = (text ?? "").trim();
-  if (!raw) return true;
-  if (/##\s*status do upload/i.test(raw)) return false;
-  const t = deaccFront(raw.toLowerCase());
-  if (raw.length < 80 && /continuando|montando os pedidos/.test(t)) return true;
-  return (
-    /^montando os pedidos de aprovacao/.test(t) ||
-    /^continuando automaticamente/.test(t) ||
-    /continuando automaticamente para emitir/.test(t) ||
-    /^\[continuacao automatica do sistema/.test(t)
-  );
-}
-
-function mesmaProsa(a: string, b: string): boolean {
-  return deaccFront((a ?? "").trim().toLowerCase()) === deaccFront((b ?? "").trim().toLowerCase());
-}
-
-/** Junta bolhas consecutivas sem duplicar stub de progresso. */
-function mergeAssistantContent(prev: string, next: string): string {
-  const p = (prev ?? "").trim();
-  const n = (next ?? "").trim();
-  if (!n) return prev ?? "";
-  if (!p) return next ?? "";
-  if (mesmaProsa(p, n)) return prev;
-  if (isProgressOnlyReply(p) && isProgressOnlyReply(n)) return prev;
-  if (isProgressOnlyReply(p) && !isProgressOnlyReply(n)) return next;
-  if (!isProgressOnlyReply(p) && isProgressOnlyReply(n)) return prev;
-  return `${prev ?? ""}\n${next ?? ""}`;
-}
-
-function mergeLivePiece(acc: string, piece: string): string {
-  const a = (acc ?? "").trim();
-  const p = (piece ?? "").trim();
-  if (!p) return acc;
-  if (mesmaProsa(a, p) || (isProgressOnlyReply(p) && isProgressOnlyReply(a))) return acc;
-  if (/##\s*status do upload/i.test(p)) return p;
-  if (isProgressOnlyReply(p)) return a && !isProgressOnlyReply(a) ? acc : "";
-  if (!a || isProgressOnlyReply(a)) return p;
-  return `${acc}\n\n${p}`;
-}
-
-function liveOverlayText(acc: string): string {
-  const t = (acc ?? "").trim();
-  if (!t || isProgressOnlyReply(t)) return "continuando a resposta…";
-  return acc;
-}
-
-/** Stub gravado pelo traffic-agent-job no catch — nao conta como resposta real. */
-function isJobFailureStub(text: string): boolean {
-  return /processamento em segundo plano falhou|modelo ficou sobrecarregado nesta rodada/i.test(
-    text ?? "",
-  );
-}
-
-/** Há resposta substantiva (não stub/progresso) depois do último user. */
-function hasSubstantiveReplyAfterLastUser(msgs: Message[]): boolean {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (m.role === "user") return false;
-    if (
-      m.role === "assistant" &&
-      !isProgressOnlyReply(m.content ?? "") &&
-      !isJobFailureStub(m.content ?? "")
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Resposta que ja fecha o turno (clarificacao / decisao) — front nao deve auto-continuar. */
-function looksLikeCompleteTurn(text: string): boolean {
-  const raw = (text ?? "").trim();
-  if (raw.length < 100 || isProgressOnlyReply(raw)) return false;
-  if (replyLoteCriativoIncompleto(raw) || replyLoteComLegendas(raw)) return false;
-  if (replyLeituraIncompleta(raw)) return false;
-  if (/##\s*status do upload/i.test(raw) && /ainda fora da meta/i.test(raw)) return false;
-  const t = deaccFront(raw.toLowerCase());
-  if (/\?/.test(raw) && !/envie (novamente|de novo)|nova pergunta|peca de novo/.test(t))
-    return true;
-  return /\b(preciso (da sua|que voce|confirmar|saber)|qual (o |a )?(objetivo|opcao|caminho|meta)|me (confirma|diga|escolha)|antes de (criar|emitir|propor)|contradic|aguardo (sua|a) (resposta|decisao)|escolha (uma|o|a)|decida)\b/.test(
-    t,
-  );
-}
-
-function lastUserContent(msgs: Message[]): string {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i].role === "user") return msgs[i].content ?? "";
-  }
-  return "";
-}
-
-function uploadLoteAberto(msgs: Message[]): boolean {
-  return ehPedidoUploadLote(lastUserContent(msgs));
-}
-
-function leituraAindaAberta(msgs: Message[]): boolean {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (m.role === "user") break;
-    if (m.role !== "assistant") continue;
-    if (replyLeituraIncompleta(m.content ?? "")) return true;
-  }
-  return false;
-}
-
-function devePararContinuacao(msgs: Message[]): boolean {
-  if (uploadLoteAberto(msgs)) return false;
-  if (leituraAindaAberta(msgs)) return false;
-  return countSubstantiveAssistantsSinceLastUser(msgs) >= 2 && !loteAindaAberto(msgs);
-}
-
-/** Lote de criativos ainda em curso: nao cortar a continuacao na 2a bolha. */
-function loteAindaAberto(msgs: Message[]): boolean {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (m.role === "user") break;
-    if (m.role !== "assistant") continue;
-    const c = m.content ?? "";
-    if (replyLoteCriativoIncompleto(c) || replyLoteComLegendas(c)) return true;
-  }
-  return false;
-}
-
-/** Conta assistants substantivos apos o ultimo user (protege contra 2a bolha). */
-function countSubstantiveAssistantsSinceLastUser(msgs: Message[]): number {
-  let count = 0;
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (m.role === "user") break;
-    if (m.role === "assistant" && !isProgressOnlyReply(m.content ?? "")) count++;
-  }
-  return count;
-}
 
 // Estado de processamento é DERIVADO do banco, não guardado em memória: um turno
 // está em andamento quando a última mensagem da conversa é 'user' e nenhuma
@@ -288,8 +124,6 @@ type PendingFile = {
   url?: string;
 };
 
-type AttachmentMeta = { name?: string; mime?: string; kb?: number };
-
 const ICON_BY_KIND: Record<AttachmentKind, typeof FileIcon> = {
   image: ImageIcon,
   pdf: FileText,
@@ -305,39 +139,6 @@ const fmtDuration = (ms: number) => {
   const s = Math.floor(ms / 1000);
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 };
-
-// Normaliza as tools para chips: uma ocorrencia por nome (1a aparicao).
-function toolNames(toolCalls: unknown): string[] {
-  if (!Array.isArray(toolCalls)) return [];
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const raw of toolCalls) {
-    const t = raw && typeof raw === "object" ? (raw as { tool?: string }).tool : undefined;
-    if (typeof t !== "string" || !t || seen.has(t)) continue;
-    seen.add(t);
-    out.push(t);
-  }
-  return out;
-}
-
-function storedAttachments(att: unknown): AttachmentMeta[] {
-  if (!Array.isArray(att)) return [];
-  return att.filter((x): x is AttachmentMeta => !!x && typeof x === "object");
-}
-
-// Marcadores de ActionCard nos attachments da mensagem assistant: extrai os approval_id.
-function actionCardIds(att: unknown): string[] {
-  if (!Array.isArray(att)) return [];
-  return att
-    .filter(
-      (x): x is { approval_id: string } =>
-        !!x &&
-        typeof x === "object" &&
-        (x as { tipo?: unknown }).tipo === "action_card" &&
-        typeof (x as { approval_id?: unknown }).approval_id === "string",
-    )
-    .map((x) => x.approval_id);
-}
 
 async function fetchMessages(conversationId: string): Promise<Message[]> {
   const { data, error } = await supabase
@@ -736,11 +537,7 @@ export function OperacaoChat() {
   const send = async (textoOverride?: string) => {
     const reenvio = typeof textoOverride === "string";
     const text = (reenvio ? textoOverride : input).trim();
-    const capCont = ehPedidoUploadLote(text)
-      ? ehUploadLoteCurto(text)
-        ? 3
-        : MAX_CONTINUATIONS_UPLOAD
-      : MAX_CONTINUATIONS;
+    const capCont = capContinuacoes(text);
     if (sending || transcribing || !companyId) return;
     if (!reenvio && !canSend) return;
     if (reenvio && !text) return;
@@ -1132,11 +929,7 @@ export function OperacaoChat() {
     !isProgressOnlyReply(live.text) &&
     !liveCopiaUltima
   );
-  const capLiveOverlay = ehPedidoUploadLote(lastUserContent(msgs))
-    ? ehUploadLoteCurto(lastUserContent(msgs))
-      ? 3
-      : MAX_CONTINUATIONS_UPLOAD
-    : MAX_CONTINUATIONS;
+  const capLiveOverlay = capContinuacoes(lastUserContent(msgs));
 
   // Estado da conversa ABERTA: derivado das mensagens carregadas (não do recorte
   // de 30 min da lista) — assim uma conversa órfã antiga também é reconhecida ao
