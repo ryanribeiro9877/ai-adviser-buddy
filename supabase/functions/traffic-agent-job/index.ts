@@ -369,10 +369,39 @@ const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? 
  * Esta parede e politica de produto, nao teto tecnico, e pode crescer: com coleta no segmento 1
  * e sintese no segmento 2, cada uma roda num worker novo, com relogio novo da plataforma.
  */
-const GLOBAL_WALL_MS = 390_000;     // 6,5 min desde created_at do job
+// 04/09/2026 — A PAREDE CRESCE PORQUE ELA NUNCA FOI O TETO DA PLATAFORMA.
+//
+// Os ~400s do worker do Supabase sao POR INVOCACAO. Esta parede e GLOBAL: medida de `created_at`
+// (ver `prazoDeParede`), ela atravessa invocacoes. O job gasta no maximo `JOB_LIMIT_MS` (270s)
+// em cada uma, entao cada segmento nasce com folga de plataforma de sobra — o que limitava o
+// trabalho era esta constante, nao o worker. Eu mesmo escrevi aqui que "390s ja encosta no
+// limite do worker"; estava errado, e o erro custou tres jobs falhados.
+//
+// A conta que 480s compra, com os tempos medidos: coleta ate ~200s no segmento 1, reinvocacao
+// 45s, sintese ~122s no segmento 2 (worker novo, relogio novo) = ~367s, com ~113s de folga.
+// Nenhuma invocacao isolada passa de 270s, bem abaixo dos 400s da plataforma.
+//
+// O que 480s CUSTA: o gestor espera ate 8 min por uma pesquisa profunda em vez de 6,5. E o preco
+// de manter `xhigh` e o relatorio cheio — com 390s so cabia a versao faminta, que devolvia
+// preambulo de 84 chars quando concluia e `sintese_vazia` quando nao concluia.
+const GLOBAL_WALL_MS = 480_000;     // 8 min desde created_at do job (parede de POLITICA, ver acima)
+// 270s, e a tentativa de subir para 370s esta MEDIDA e descartada — fica registrada para nao ser
+// refeita. A hipotese era boa: `prazo()` e o MINIMO entre invocacao e parede, entao 270s prende
+// `prazo()` em ~260s e o teto por chamada (`tetoDaChamada`, que reserva 195s) cai para ~65s, o
+// que explicava os especialistas continuarem morrendo mesmo com a parede global em 480s.
+//
+// Subir para 370s de fato soltou o subagente — no job 32887de7 o especialista `criativos` fechou
+// em `finish: stop` com 3.034 tokens visiveis, relatorio completo. Mas soltou DEMAIS: a coleta se
+// expande para ocupar o orcamento que existir, o job foi ate 467s, segmentou, e a sintese estourou
+// em `openrouter_timeout_150000`. Resultado pior que o de partida — erro, nao resposta curta.
+//
+// Com 270s o job 83a4adce fechou em 160s, `finish: stop`, sem segmentar, com 1.207 chars que
+// declaram explicitamente o que nao foi coletado. E degradado, mas conclui e nao mente.
 const JOB_LIMIT_MS = 270_000;       // teto por invocacao (ainda limitado pelo global)
 const RESERVA_FINAL_MS = 10_000;
-const SINT_RESERVA_MS = 75_000;     // reserva minima para escrever a resposta
+// 150s, nao 75s: a sintese `xhigh` com relatorio cheio na entrada leva 121,9s medidos. Com 75s
+// ela era cortada no meio e voltava `sintese_vazia` — o erro que quebrou o deep em producao.
+const SINT_RESERVA_MS = 150_000;    // reserva minima para escrever a resposta (medida, nao arbitrada)
 // Segmentos: no maximo 2 — o 2o so para resgate de sintese (429/timeout), nao maratona.
 const MAX_SEGMENTOS = 2;
 const DEVOLUCOES_MAX = 0;           // v4.0: deep nao reexecuta (custo > ganho sob teto 5min)
@@ -401,7 +430,11 @@ const STANDARD_MAX_ESPECIALISTAS = 2;
 const DEEP_MAX_ESPECIALISTAS = 3;
 const LITE_OPENROUTER_TIMEOUT_MS = 45_000;
 const STANDARD_OPENROUTER_TIMEOUT_MS = 60_000;
-const OPENROUTER_TIMEOUT_MS = 75_000;
+// 150s, nao 75s. Medido chamada a chamada: especialista `high` fecha em 127,6s e a sintese
+// `xhigh` em 121,9s. Com 75s TODA chamada do caminho profundo era cortada, e o corte tem
+// assinatura no banco — os especialistas voltavam `finish: erro_llm` com ~400 a 1.000 tokens
+// visiveis em vez dos ~4.000 a 7.700 que entregam quando terminam.
+const OPENROUTER_TIMEOUT_MS = 150_000;
 const LITE_DEVOLUCOES_MAX = 0;
 const STANDARD_DEVOLUCOES_MAX = 0;
 // deep usa DEVOLUCOES_MAX (0 em v4.0)
@@ -414,7 +447,10 @@ const TOKENS_POR_SEGUNDO = 60;
 const PLANNER_MAX_TOKENS = 800;
 // Subagente: v4.0 — menos iteracoes/reasoning; prioriza tools locais e fecha o relatorio.
 const SUB_MAX_ITER = 6;
-const SUB_MAX_TOKENS = 4000;
+// 5000: com teto 4.000 o relatorio do especialista voltava colado no teto (`finish: length`,
+// exatamente 4.000 visiveis), ou seja, truncado. O raciocinio corre por fora do teto, entao
+// alargar o canal visivel nao rouba raciocinio — custa parede, que a parede de 480s agora paga.
+const SUB_MAX_TOKENS = 5000;
 const SUB_RELATORIO_MAX_PARTES = 2;
 const SUB_REASONING = { max_tokens: 600 };
 // Sintese: partes de ate 8000 tokens, com continuacao interna ate 3 partes.
@@ -648,7 +684,9 @@ async function enriquecerEscopoComDatas(companyId: string, escopo: EscopoPedido)
 // Parede da fase de sintese: alem do timeout por chamada OpenRouter, a fase inteira
 // nao pode ficar "escrevendo" alem disto (worker morto deixa job running para sempre).
 // v4.0: 90s — cabe no teto de 5 min com coleta magra.
-const SINT_FASE_HARD_MS = 90_000;
+// 160s: precisa ser MAIOR que OPENROUTER_TIMEOUT_MS (150s), senao o teto duro da fase mata a
+// chamada de sintese antes de ela poder usar o proprio orcamento.
+const SINT_FASE_HARD_MS = 160_000;
 // Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
 const SINT_CHARS_SEGMENTAR = 70_000;
 const SINT_COOLDOWN_POS_429_MS = 6_000;
@@ -2098,11 +2136,24 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
   let tin = 0, tout = 0, reas = 0, relatorio = "", finish = "";
+  /**
+   * Teto DESTA chamada, preso ao que sobra depois de reservar a sintese e a reinvocacao.
+   *
+   * O guard abaixo so olha o relogio ENTRE chamadas. Sem este teto, uma chamada que comeca com
+   * orcamento suficiente pode correr os 150s inteiros e atravessar a reserva da sintese — foi
+   * assim que tres jobs seguidos coletaram bem e depois estouraram na hora de escrever. Piso de
+   * 20s porque chamada com menos que isso nao volta nada util, so queima parede.
+   */
+  const tetoDaChamada = () => Math.max(
+    20_000,
+    Math.min(OPENROUTER_TIMEOUT_MS, prazo() - (SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS)),
+  );
   for (let iter = 0; iter < SUB_MAX_ITER; iter++) {
-    // Reserva da sintese: para de coletar e escreve com o que tem.
-    if (prazo() < SINT_RESERVA_MS) { finish = finish || "reserva_sintese"; break; }
+    // Reserva da sintese: para de coletar e escreve com o que tem. Inclui o custo de reinvocar
+    // porque, quando o job segmenta, a sintese roda no segmento seguinte e paga esse pedagio.
+    if (prazo() < SINT_RESERVA_MS + CUSTO_REINVOCACAO_MS) { finish = finish || "reserva_sintese"; break; }
     if (prazo() <= 0) { finish = "prazo_do_job"; break; }
-    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome });
+    const r = await chamarLLM(messages, { tools, maxTokens: SUB_MAX_TOKENS, reasoning: SUB_REASONING, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
     if (r.erro) { relatorio = `(subagente ${nome} falhou: ${r.erro})`; finish = "erro_llm"; break; }
     const u = usoDe(r.parsed); tin += u.tin; tout += u.tout; reas += u.reas;
     finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
@@ -2136,7 +2187,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   if (!relatorio) {
     // Estourou iteracoes/prazo coletando: forca o relatorio com o que ha.
     messages.push({ role: "user", content: "PARE de usar ferramentas. Escreva AGORA o relatorio final com os dados ja coletados, terminando com a linha LACUNAS:." });
-    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome });
+    const rf = await chamarLLM(messages, { maxTokens: SUB_MAX_TOKENS, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
     if (!rf.erro) {
       const u = usoDe(rf.parsed); tin += u.tin; tout += u.tout;
       relatorio = String(rf.parsed?.choices?.[0]?.message?.content ?? "");
@@ -2151,7 +2202,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     messages.push({ role: "assistant", content: relatorio });
     messages.push({ role: "user", content: "Seu relatorio foi cortado por limite de tamanho. Continue EXATAMENTE do ponto onde parou, na proxima palavra. Nao repita nada, nao reescreva secoes; ao concluir, termine com a linha LACUNAS:." });
     const maxTok = Math.max(1500, Math.min(SUB_MAX_TOKENS, Math.floor((prazo() / 1000) * TOKENS_POR_SEGUNDO)));
-    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome });
+    const rc = await chamarLLM(messages, { maxTokens: maxTok, reasoning: REASONING_OFF, tipo: "subagente", especialista: nome, timeoutMs: tetoDaChamada() });
     if (rc.erro) break;
     const u = usoDe(rc.parsed); tin += u.tin; tout += u.tout;
     const pedaco = String(rc.parsed?.choices?.[0]?.message?.content ?? "");
