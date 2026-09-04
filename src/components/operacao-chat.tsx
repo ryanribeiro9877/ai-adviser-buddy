@@ -659,7 +659,20 @@ export function OperacaoChat() {
               "traffic-chat",
               { body: { continuar: true, conversation_id: convIdAtSend, company: companyName } },
             );
-            if (contErr || !more || more.aviso === "sem_checkpoint") {
+            // Tres desfechos diferentes, nao um. `sem_checkpoint` e fim
+            // legitimo (nao ha o que retomar); segmento que falhou ou voltou
+            // 200 sem corpo e INTERRUPCAO, e o gestor precisa saber que a
+            // resposta parou no meio. O laco normal (adiante) ja fazia essa
+            // distincao; este, que e justamente o caminho de recuperacao pos
+            // erro de HTTP — logo o MAIS propenso a ser interrompido —
+            // colapsava os tres e terminava calado. Mesma familia de defeito
+            // das telas que liam consulta falhada como lista vazia.
+            if (more?.aviso === "sem_checkpoint") {
+              contFinish = false;
+              break;
+            }
+            if (contErr || !more) {
+              setInterrupted(true);
               contFinish = false;
               break;
             }

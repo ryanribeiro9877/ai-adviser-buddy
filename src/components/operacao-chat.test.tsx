@@ -675,3 +675,497 @@ describe("OperacaoChat — compositor", () => {
     expect(screen.queryByText(/planilha\.csv/)).not.toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// A COSTURA DE RESPOSTA LONGA
+//
+// As DECISOES da costura ja estao defendidas em fio-chat.test.ts (isTruncated,
+// needsAutoContinue, looksLikeCompleteTurn, devePararContinuacao). O que faltava
+// era o LACO em volta: quem encadeia as chamadas de invoke, decide o corpo de
+// cada uma, respeita o teto e — o que mais importa — o que acontece com o texto
+// que JA CHEGOU quando um segmento no meio falha.
+//
+// Perder texto ja recebido e o pior desfecho possivel desta tela, e a costura e
+// exatamente o mecanismo capaz de causar isso: sao N chamadas HTTP para produzir
+// UMA resposta, e qualquer uma delas pode morrer no meio.
+//
+// Os quatro desfechos cobertos aqui:
+//   (1) continuacao que NAO deveria parar e para  -> perde o resto da resposta;
+//   (2) continuacao que DEVERIA parar e nao para  -> gasta turnos e repete bolha;
+//   (3) segmento repetido / fora de ordem         -> texto duplicado na tela;
+//   (4) resposta que termina no meio              -> silencio passando por fim.
+
+/** Resposta da edge, com o desfecho fechado por padrao. */
+function respostaChat(over: Record<string, unknown> = {}) {
+  return {
+    data: { ok: true, conversation_id: CONV, reply: "corpo", finish_reason: "stop", ...over },
+    error: null,
+  };
+}
+
+/** Promessa que so resolve quando o teste quiser: prova o MEIO da costura. */
+function pendente<T>() {
+  let resolver!: (v: T) => void;
+  const promessa = new Promise<T>((r) => {
+    resolver = r;
+  });
+  return { promessa, resolver };
+}
+
+/** Corpo da n-esima chamada de invoke (0 = o envio original). */
+function corpoDaChamada(n: number) {
+  return (invokeMock.mock.calls[n]?.[1] as { body?: Record<string, unknown> })?.body ?? {};
+}
+
+/**
+ * Conversa aberta cujo `chat_messages` reflete o que a edge JA GRAVOU. A
+ * garantia do componente e "o texto recebido ja esta gravado no banco" — sem
+ * modelar isso, um teste de perda de texto nao prova nada.
+ */
+function conversaComBanco(gravadas: () => unknown[]) {
+  buscaAtual = { conv: CONV };
+  porTabela = {
+    chat_conversations: () => Promise.resolve({ data: [conversa()], error: null }),
+    chat_messages: () => Promise.resolve({ data: gravadas(), error: null }),
+    approval_requests: () => Promise.resolve({ data: [], error: null }),
+    chat_jobs: () => Promise.resolve({ data: null, error: null }),
+  };
+}
+
+describe("costura por tamanho (finish_reason=length)", () => {
+  it("emenda os segmentos ate a edge dizer stop, e nao alem", async () => {
+    conversaComBanco(() => []);
+    invokeMock
+      .mockResolvedValueOnce(respostaChat({ reply: "parte 1", finish_reason: "length" }))
+      .mockResolvedValueOnce(respostaChat({ reply: "parte 2", finish_reason: "length" }))
+      .mockResolvedValueOnce(respostaChat({ reply: "parte 3", finish_reason: "stop" }));
+    montar();
+    await enviar("faca a leitura completa da semana");
+
+    // 1 envio + 2 continuacoes. A terceira resposta veio com stop, entao o laco
+    // NAO pede um quarto segmento: continuar depois de stop gasta um turno para
+    // receber texto repetido.
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    await new Promise((r) => setTimeout(r, 80));
+    expect(invokeMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("a continuacao por tamanho manda o CONTINUE_PROMPT, nao a flag de checkpoint", async () => {
+    // A distincao e cara: mandar `continuar: true` sem checkpoint gravado volta
+    // com `aviso: sem_checkpoint` e queima o turno inteiro.
+    conversaComBanco(() => []);
+    invokeMock
+      .mockResolvedValueOnce(respostaChat({ reply: "parte 1", finish_reason: "length" }))
+      .mockResolvedValueOnce(respostaChat({ reply: "parte 2", finish_reason: "stop" }));
+    montar();
+    await enviar("faca a leitura completa da semana");
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    const corpo = corpoDaChamada(1);
+    expect(String(corpo.message)).toMatch(/continue exatamente do ponto onde parou/i);
+    expect(corpo.continuar).toBeUndefined();
+    expect(corpo.conversation_id).toBe(CONV);
+  });
+
+  it("respeita o teto de 6 segmentos quando a edge NUNCA diz stop", async () => {
+    // Desfecho (2): sem teto, uma edge que devolve `length` para sempre faria o
+    // front pedir segmento indefinidamente — turnos e dinheiro sem fim.
+    conversaComBanco(() => []);
+    invokeMock.mockResolvedValue(
+      respostaChat({ reply: "mais um pedaco", finish_reason: "length" }),
+    );
+    montar();
+    await enviar("faca a leitura completa da semana");
+
+    // 1 envio + MAX_CONTINUATIONS (6).
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(7), { timeout: 10_000 });
+    await new Promise((r) => setTimeout(r, 120));
+    expect(invokeMock).toHaveBeenCalledTimes(7);
+  });
+
+  it("pedido de upload em lote ganha teto maior (8), e o curto ganha teto menor (3)", async () => {
+    // Prova que capContinuacoes esta LIGADO ao laco, e nao apenas testado a
+    // parte: cortar um lote de criativos na 6a peca entrega menos do que o
+    // gestor pediu, sem nada acusando.
+    conversaComBanco(() => []);
+    invokeMock.mockResolvedValue(respostaChat({ reply: "subi mais um", finish_reason: "length" }));
+    montar();
+    await enviar("suba os vídeos restantes da biblioteca");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(9), { timeout: 12_000 });
+
+    invokeMock.mockClear();
+    invokeMock.mockResolvedValue(respostaChat({ reply: "subi mais um", finish_reason: "length" }));
+    await enviar("suba os 3 vídeos pendentes");
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(4), { timeout: 10_000 });
+  });
+
+  it("stop na primeira resposta nao dispara costura nenhuma", async () => {
+    conversaComBanco(() => []);
+    invokeMock.mockResolvedValueOnce(respostaChat({ reply: "resposta curta e completa" }));
+    montar();
+    await enviar("quanto gastei ontem");
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 80));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("costura por checkpoint (continuar=true)", () => {
+  it("retoma com a flag de checkpoint, e nao com o CONTINUE_PROMPT", async () => {
+    conversaComBanco(() => []);
+    invokeMock
+      .mockResolvedValueOnce(
+        respostaChat({
+          reply: "primeiro trecho",
+          finish_reason: "continuar_turno",
+          continuar: true,
+        }),
+      )
+      .mockResolvedValueOnce(respostaChat({ reply: "trecho final", finish_reason: "stop" }));
+    montar();
+    await enviar("monte os pedidos de aprovacao da semana");
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    const corpo = corpoDaChamada(1);
+    expect(corpo.continuar).toBe(true);
+    expect(corpo.message).toBeUndefined();
+  });
+
+  it("continuar=true sem finish_reason de checkpoint NAO retoma", async () => {
+    // As duas condicoes sao obrigatorias. Retomar so com a flag pede segmento
+    // para um turno que nao tem checkpoint gravado.
+    conversaComBanco(() => []);
+    invokeMock.mockResolvedValueOnce(respostaChat({ reply: "resposta", continuar: true }));
+    montar();
+    await enviar("quanto gastei ontem");
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 80));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("resposta que JA fecha o turno (clarificacao) nao e continuada, mesmo com continuar=true", async () => {
+    // Desfecho (2) na sua forma mais irritante: o sistema pergunta algo ao
+    // gestor e, em vez de esperar, continua sozinho falando com o proprio
+    // checkpoint. Guarda da v28.38, aqui provada no laco.
+    conversaComBanco(() => []);
+    invokeMock.mockResolvedValueOnce(
+      respostaChat({
+        reply:
+          "Antes de emitir os cards, qual objetivo você quer priorizar nesta rodada: reduzir o custo por lead ou aumentar o volume de leads?",
+        finish_reason: "continuar_turno",
+        continuar: true,
+      }),
+    );
+    montar();
+    await enviar("monte os pedidos de aprovacao da semana");
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("aviso 'sem_checkpoint' encerra a costura na hora", async () => {
+    conversaComBanco(() => []);
+    invokeMock
+      .mockResolvedValueOnce(
+        respostaChat({
+          reply: "primeiro trecho",
+          finish_reason: "continuar_turno",
+          continuar: true,
+        }),
+      )
+      // A edge avisa que nao ha checkpoint: insistir e pedir o mesmo nada de novo.
+      .mockResolvedValueOnce(
+        respostaChat({
+          reply: "",
+          aviso: "sem_checkpoint",
+          finish_reason: "continuar_turno",
+          continuar: true,
+        }),
+      );
+    montar();
+    await enviar("monte os pedidos de aprovacao da semana");
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("para de continuar quando o banco JA tem duas respostas substantivas no turno", async () => {
+    // Esta e a trava do episodio em que o modelo anunciou seis cards que nao
+    // existiam: o laco reconsulta o banco antes de cada segmento de checkpoint.
+    // Aqui o banco ja mostra duas respostas -> nao pede a terceira.
+    conversaComBanco(() => [
+      linha("user", "monte os pedidos de aprovacao da semana"),
+      linha("assistant", "Primeira parte, com o gasto por campanha da semana."),
+      linha("assistant", "Segunda parte, com o custo por lead de cada conjunto."),
+    ]);
+    invokeMock.mockResolvedValue(
+      respostaChat({ reply: "mais um trecho", finish_reason: "continuar_turno", continuar: true }),
+    );
+    montar();
+    await enviar("monte os pedidos de aprovacao da semana");
+
+    // Janela larga de proposito: cada iteracao do laco reconsulta o banco e
+    // invalida queries, e uma espera curta daria verde mesmo com a trava
+    // removida — o teste passaria sem provar nada. Medido: com a trava
+    // neutralizada, o 2o invoke sai dentro desta janela.
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 900));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("costura interrompida no meio — o texto que chegou NAO se perde", () => {
+  it("segmento que falha mostra o aviso de interrupcao, em vez de terminar em silencio", async () => {
+    // Desfecho (4), o mais caro: a costura morre na 2a chamada e a tela poderia
+    // simplesmente parar, indistinguivel de uma resposta que acabou.
+    conversaComBanco(() => [
+      linha("user", "faca a leitura completa da semana"),
+      linha("assistant", "parte 1 que chegou antes da queda"),
+    ]);
+    invokeMock
+      .mockResolvedValueOnce(
+        respostaChat({ reply: "parte 1 que chegou antes da queda", finish_reason: "length" }),
+      )
+      .mockResolvedValueOnce({ data: null, error: { message: "Failed to fetch" } });
+    montar();
+    await enviar("faca a leitura completa da semana");
+
+    expect(await screen.findByText(/a resposta foi interrompida/i)).toBeInTheDocument();
+  });
+
+  it("o texto do primeiro segmento continua na tela depois da interrupcao", async () => {
+    // A garantia do componente e que o recebido esta gravado no banco. Se a
+    // interrupcao levasse o texto embora, o gestor perderia a parte que JA foi
+    // paga e entregue.
+    conversaComBanco(() => [
+      linha("user", "faca a leitura completa da semana"),
+      linha("assistant", "parte 1 que chegou antes da queda"),
+    ]);
+    invokeMock
+      .mockResolvedValueOnce(
+        respostaChat({ reply: "parte 1 que chegou antes da queda", finish_reason: "length" }),
+      )
+      .mockResolvedValueOnce({ data: null, error: { message: "Failed to fetch" } });
+    montar();
+    await enviar("faca a leitura completa da semana");
+
+    await screen.findByText(/a resposta foi interrompida/i);
+    expect(screen.getByText("parte 1 que chegou antes da queda")).toBeInTheDocument();
+  });
+
+  it("segmento que volta 200 mas SEM data tambem conta como interrupcao", async () => {
+    // 200 vazio e a familia de defeito deste projeto: ausencia passando por
+    // sucesso. Aqui ela viraria "resposta terminou" sem nada avisando.
+    conversaComBanco(() => [
+      linha("user", "faca a leitura completa da semana"),
+      linha("assistant", "parte 1"),
+    ]);
+    invokeMock
+      .mockResolvedValueOnce(respostaChat({ reply: "parte 1", finish_reason: "length" }))
+      .mockResolvedValueOnce({ data: null, error: null });
+    montar();
+    await enviar("faca a leitura completa da semana");
+
+    expect(await screen.findByText(/a resposta foi interrompida/i)).toBeInTheDocument();
+  });
+
+  it("durante a costura, o texto ja recebido aparece na tela (nao fica escondido atras do spinner)", async () => {
+    // Se o acumulado nao aparecesse, uma costura de 6 segmentos deixaria o
+    // gestor 6 requisicoes olhando um spinner, sem saber que ja havia resposta.
+    conversaComBanco(() => []);
+    const segundo = pendente<Resposta>();
+    invokeMock
+      .mockResolvedValueOnce(respostaChat({ reply: "parte 1 visivel", finish_reason: "length" }))
+      .mockReturnValueOnce(segundo.promessa);
+    montar();
+    await enviar("faca a leitura completa da semana");
+
+    // Com a 2a chamada ainda pendurada, a bolha ao vivo mostra o que chegou.
+    await waitFor(() =>
+      expect(
+        screen.getAllByTestId("md").some((n) => n.textContent?.includes("parte 1 visivel")),
+      ).toBe(true),
+    );
+    // E diz que ainda esta costurando, com o contador de segmentos.
+    expect(screen.getByText(/continuando a resposta… \(1\/6\)/)).toBeInTheDocument();
+
+    segundo.resolver(respostaChat({ reply: "parte 2", finish_reason: "stop" }));
+  });
+});
+
+describe("costura com segmento repetido ou fora de ordem", () => {
+  it("segmento identico ao anterior nao duplica a prosa na bolha ao vivo", async () => {
+    // Desfecho (3): a edge reenvia o mesmo trecho (retry interno, checkpoint
+    // relido). Duplicar na tela faz a resposta parecer gaguejar e, em lote de
+    // criativos, faz o gestor achar que ha peca repetida.
+    conversaComBanco(() => []);
+    const terceiro = pendente<Resposta>();
+    invokeMock
+      .mockResolvedValueOnce(
+        respostaChat({
+          reply: "trecho repetido",
+          finish_reason: "continuar_turno",
+          continuar: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        respostaChat({
+          reply: "trecho repetido",
+          finish_reason: "continuar_turno",
+          continuar: true,
+        }),
+      )
+      .mockReturnValueOnce(terceiro.promessa);
+    montar();
+    await enviar("monte os pedidos de aprovacao da semana");
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    const bolha = screen
+      .getAllByTestId("md")
+      .find((n) => n.textContent?.includes("trecho repetido"));
+    expect(bolha).toBeDefined();
+    // Uma ocorrencia, nao duas.
+    expect(bolha!.textContent!.match(/trecho repetido/g)).toHaveLength(1);
+
+    terceiro.resolver(respostaChat({ reply: "fim", finish_reason: "stop" }));
+  });
+
+  it("stub de progresso no meio da costura nao substitui o texto real ja recebido", async () => {
+    // A edge grava stubs de progresso ("continuando automaticamente…"). Se um
+    // deles sobrescrevesse o acumulado, o gestor veria a resposta REGREDIR para
+    // um aviso de sistema — texto recebido perdido na tela.
+    conversaComBanco(() => []);
+    const terceiro = pendente<Resposta>();
+    invokeMock
+      .mockResolvedValueOnce(
+        respostaChat({
+          reply: "numeros reais do gasto da semana",
+          finish_reason: "continuar_turno",
+          continuar: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        respostaChat({
+          reply: "Continuando automaticamente para emitir os cards restantes.",
+          finish_reason: "continuar_turno",
+          continuar: true,
+        }),
+      )
+      .mockReturnValueOnce(terceiro.promessa);
+    montar();
+    await enviar("monte os pedidos de aprovacao da semana");
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(3));
+    const bolhas = screen.getAllByTestId("md").map((n) => n.textContent ?? "");
+    expect(bolhas.some((t) => t.includes("numeros reais do gasto da semana"))).toBe(true);
+
+    terceiro.resolver(respostaChat({ reply: "fim", finish_reason: "stop" }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// O SEGUNDO LACO DE COSTURA: retomada depois de erro de HTTP
+//
+// Achado desta rodada. O componente tem DOIS lacos de continuacao, nao um. Este
+// e o caminho de recuperacao: o gateway devolve 504 enquanto a edge ainda grava
+// (medido 20/08), o front acha a resposta no banco e retoma o turno a partir do
+// checkpoint. Ninguem tinha teste, e a diferenca com o laco normal era de
+// comportamento, nao de forma: ele colapsava `sem_checkpoint` (fim legitimo)
+// com segmento que falhou (interrupcao) num unico `break` silencioso.
+//
+// Ou seja: o caminho MAIS propenso a ser interrompido — porque ja entrou nele
+// por causa de uma falha — era o unico que nao avisava quando era interrompido.
+
+/** Erro de invoke com status, para o front escolher a janela de espera. */
+function erroHttp(status: number) {
+  return { data: null, error: { message: "FunctionsHttpError", context: { status } } };
+}
+
+/**
+ * Leva a tela ao laco de recuperacao: 504 no envio + resposta JA gravada no
+ * banco (user seguido de assistant) faz `waitAssistantAfterUser` achar o turno
+ * e retomar em vez de falhar.
+ */
+function conversaRecuperavel(texto: string, gravadas: () => unknown[]) {
+  conversaComBanco(gravadas);
+  invokeMock.mockResolvedValueOnce(erroHttp(504));
+  return texto;
+}
+
+describe("costura na retomada pos-erro-HTTP", () => {
+  const TEXTO = "faca a leitura completa da semana";
+  const gravado = () => [linha("user", TEXTO), linha("assistant", "parte 1 gravada antes do 504")];
+
+  it("retoma o turno com a flag de checkpoint depois de recuperar do 504", async () => {
+    conversaRecuperavel(TEXTO, gravado);
+    invokeMock.mockResolvedValueOnce(respostaChat({ reply: "parte 2", finish_reason: "stop" }));
+    montar();
+    await enviar(TEXTO);
+
+    // 1 envio (504) + 1 retomada. E a retomada usa a flag, nao o CONTINUE_PROMPT:
+    // aqui NAO ha resposta em maos para emendar, ha checkpoint no banco.
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    expect(corpoDaChamada(1).continuar).toBe(true);
+    // Recuperou: nao pode cair no toast de "nao foi possivel obter resposta".
+    expect(toastErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("retomada que falha AVISA que a resposta foi interrompida", async () => {
+    // Antes desta rodada este caminho terminava calado: o laco dava break, o
+    // overlay sumia e a tela ficava identica a de um turno concluido.
+    conversaRecuperavel(TEXTO, gravado);
+    invokeMock.mockResolvedValueOnce({ data: null, error: { message: "Failed to fetch" } });
+    montar();
+    await enviar(TEXTO);
+
+    expect(await screen.findByText(/a resposta foi interrompida/i)).toBeInTheDocument();
+    // E o texto que chegou antes do 504 continua na tela.
+    expect(screen.getByText("parte 1 gravada antes do 504")).toBeInTheDocument();
+  });
+
+  it("retomada com 200 sem corpo tambem AVISA (ausencia nao e conclusao)", async () => {
+    conversaRecuperavel(TEXTO, gravado);
+    invokeMock.mockResolvedValueOnce({ data: null, error: null });
+    montar();
+    await enviar(TEXTO);
+
+    expect(await screen.findByText(/a resposta foi interrompida/i)).toBeInTheDocument();
+  });
+
+  it("'sem_checkpoint' encerra SEM acusar interrupcao — fim legitimo e coisa diferente", async () => {
+    // O par do teste acima, e a razao de os tres desfechos nao poderem viver no
+    // mesmo `if`: nao havia o que retomar, entao nada foi interrompido. Avisar
+    // aqui seria alarme falso, e alarme falso e o que faz aviso verdadeiro ser
+    // ignorado depois.
+    conversaRecuperavel(TEXTO, gravado);
+    invokeMock.mockResolvedValueOnce(respostaChat({ reply: "", aviso: "sem_checkpoint" }));
+    montar();
+    await enviar(TEXTO);
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(2));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(screen.queryByText(/a resposta foi interrompida/i)).not.toBeInTheDocument();
+  });
+
+  it("para de retomar quando o banco JA tem duas respostas substantivas", async () => {
+    conversaRecuperavel(TEXTO, () => [
+      linha("user", TEXTO),
+      linha("assistant", "Primeira parte, com o gasto por campanha da semana."),
+      linha("assistant", "Segunda parte, com o custo por lead de cada conjunto."),
+    ]);
+    invokeMock.mockResolvedValue(
+      respostaChat({ reply: "mais um trecho", finish_reason: "continuar_turno", continuar: true }),
+    );
+    montar();
+    await enviar(TEXTO);
+
+    // Recuperou e NAO pediu segmento: o turno ja tem duas respostas no banco.
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 900));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+  });
+});
