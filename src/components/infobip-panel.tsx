@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
@@ -288,6 +289,16 @@ export function InfobipPanel({ companyId }: { companyId: string }) {
 
       {dados.isLoading ? (
         <Skeleton className="h-24 w-full" />
+      ) : dados.isError ? (
+        // Esta tela ja distinguia "periodo sem movimento" de "nada importado" —
+        // faltava o terceiro caso, que e nao ter conseguido perguntar. Sem ele o
+        // erro de consulta caia no ramo `vazio` e virava "Nenhum dado da Infobip
+        // importado", uma afirmacao sobre o banco que ninguem verificou.
+        <FalhaDeCarga
+          oQue="os envios da Infobip"
+          erro={dados.error}
+          onTentarDeNovo={() => dados.refetch()}
+        />
       ) : vazio && (totalGeral.data ?? 0) > 0 ? (
         <Card className="p-4">
           <div className="text-sm font-medium">Nenhum envio no período selecionado</div>
@@ -295,6 +306,25 @@ export function InfobipPanel({ companyId }: { companyId: string }) {
             Há {fmtInt(totalGeral.data ?? 0)} registro(s) importados nesta empresa, mas nenhum no
             intervalo escolhido. Amplie o período ou use “Tudo”.
           </p>
+        </Card>
+      ) : vazio && totalGeral.isError ? (
+        // O periodo veio vazio E a contagem geral falhou: nao da para saber se
+        // ha dado fora do intervalo. Afirmar "nada importado" aqui seria
+        // adivinhar, e a saida errada manda o admin reimportar o que ja existe.
+        <Card className="p-4">
+          <div className="text-sm font-medium">Nenhum envio no período selecionado</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Não foi possível verificar se existe dado fora deste intervalo — a contagem geral
+            falhou. Amplie o período ou tente de novo antes de concluir que não há importação.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-2"
+            onClick={() => void totalGeral.refetch()}
+          >
+            Tentar de novo
+          </Button>
         </Card>
       ) : vazio ? (
         <Card className="p-4">

@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 const navigateMock = vi.fn();
 const signOutMock = vi.fn();
 const setSelectedCompanyIdMock = vi.fn();
+const refreshCompaniesMock = vi.fn();
 let caminho = "/dashboard";
 let ctx = {
   user: { email: "ryan@cohapm.com.br" } as { email?: string },
@@ -24,6 +25,9 @@ let ctx = {
     name: string;
     industry: string | null;
   } | null,
+  companiesFalhou: false,
+  companiesErro: null as unknown,
+  refreshCompanies: refreshCompaniesMock,
   setSelectedCompanyId: setSelectedCompanyIdMock,
 };
 
@@ -80,8 +84,12 @@ beforeEach(() => {
       { id: "c2", name: "Outra", industry: null },
     ],
     selectedCompany: { id: "c1", name: "JCR2", industry: null },
+    companiesFalhou: false,
+    companiesErro: null,
+    refreshCompanies: refreshCompaniesMock,
     setSelectedCompanyId: setSelectedCompanyIdMock,
   };
+  refreshCompaniesMock.mockReset();
 });
 
 describe("navegação", () => {
@@ -186,6 +194,37 @@ describe("seletor de empresa", () => {
     ctx = { ...ctx, selectedCompany: null };
     render(<AppShell />);
     expect(screen.getByText("Nenhuma empresa")).toBeInTheDocument();
+  });
+
+  // Este e o instancia-raiz de "ausencia vira informacao" no app: se a consulta
+  // das empresas falha, `companies` chega vazio por `?? []`, nenhuma empresa e
+  // selecionada, e TODA tela abaixo entra em modo "escolha uma empresa". Um erro
+  // de RLS fazia a conta inteira do cliente parecer conta nova.
+  it("FALHA ao carregar empresas nao vira 'Nenhuma empresa'", () => {
+    ctx = { ...ctx, companies: [], selectedCompany: null, companiesFalhou: true };
+    render(<AppShell />);
+    expect(screen.getByText("Empresas não carregaram")).toBeInTheDocument();
+    expect(screen.queryByText("Nenhuma empresa")).not.toBeInTheDocument();
+  });
+
+  it("conta genuinamente sem empresa mostra o cadastro vazio, e NAO acusa falha", async () => {
+    ctx = { ...ctx, companies: [], selectedCompany: null };
+    render(<AppShell />);
+    await userEvent.click(screen.getByRole("button", { name: /Nenhuma empresa/ }));
+    expect(await screen.findByText("Nenhuma empresa cadastrada")).toBeInTheDocument();
+    expect(screen.queryByText(/não foi possível carregar/i)).not.toBeInTheDocument();
+  });
+
+  it("no menu, a falha se identifica e oferece tentar de novo", async () => {
+    ctx = { ...ctx, companies: [], selectedCompany: null, companiesFalhou: true };
+    render(<AppShell />);
+    await userEvent.click(screen.getByRole("button", { name: /Empresas não carregaram/ }));
+    expect(await screen.findByText(/não foi possível carregar as empresas/i)).toBeInTheDocument();
+    // "Nenhuma empresa cadastrada" e uma afirmacao sobre o banco; nao cabe aqui.
+    expect(screen.queryByText("Nenhuma empresa cadastrada")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /tentar de novo/i }));
+    expect(refreshCompaniesMock).toHaveBeenCalled();
   });
 
   it("trocar de empresa chama o contexto (que reflete na URL)", async () => {

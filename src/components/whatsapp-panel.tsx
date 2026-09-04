@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
@@ -291,6 +292,23 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
         <Skeleton className="h-24 w-full" />
         <Skeleton className="h-56 w-full" />
       </div>
+    );
+  }
+
+  // "Nada conectado" e uma afirmacao sobre a conta do cliente; so cabe depois de
+  // conseguir perguntar. Com a consulta falhando, as duas listas chegam vazias
+  // por `?? []` e a tela dizia que nao ha conta nem numero — quando o que houve
+  // foi nao ter conseguido olhar.
+  if (numeros.isError || wabas.isError) {
+    return (
+      <FalhaDeCarga
+        oQue="as contas de WhatsApp desta empresa"
+        erro={numeros.error ?? wabas.error}
+        onTentarDeNovo={() => {
+          void numeros.refetch();
+          void wabas.refetch();
+        }}
+      />
     );
   }
 
@@ -670,13 +688,27 @@ export function WhatsAppPanel({ companyId }: { companyId: string }) {
                       </TableRow>
                     );
                   })}
-                  {!templates.isLoading && (templates.data ?? []).length === 0 && (
+                  {templates.isError && (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-sm text-muted-foreground">
-                        Sem envios de template nesta janela.
+                      <TableCell colSpan={7} className="p-0">
+                        <FalhaDeCarga
+                          compacto
+                          oQue="os envios de template"
+                          erro={templates.error}
+                          onTentarDeNovo={() => void templates.refetch()}
+                        />
                       </TableCell>
                     </TableRow>
                   )}
+                  {!templates.isLoading &&
+                    !templates.isError &&
+                    (templates.data ?? []).length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={7} className="text-sm text-muted-foreground">
+                          Sem envios de template nesta janela.
+                        </TableCell>
+                      </TableRow>
+                    )}
                 </TableBody>
               </Table>
             </div>

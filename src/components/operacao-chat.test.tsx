@@ -254,6 +254,9 @@ describe("OperacaoChat — carregando nao e 'nao ha nada'", () => {
     porTabela = { chat_conversations: () => Promise.resolve({ data: [], error: null }) };
     montar();
     expect(await screen.findByText(/nenhuma conversa ainda/i)).toBeInTheDocument();
+    // Metade do par: vazio legitimo NAO pode acusar falha. Junto com o teste
+    // seguinte, este par reprova se alguem reunificar os dois estados.
+    expect(screen.queryByText(/não foi possível carregar/i)).not.toBeInTheDocument();
   });
 
   it("sem conversa aberta mostra o convite, nao esqueleto de mensagem", async () => {
@@ -273,6 +276,70 @@ describe("OperacaoChat — carregando nao e 'nao ha nada'", () => {
     expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0);
     // O ponto: nada de cartao de falha nem de "nada aqui" enquanto carrega.
     expect(screen.queryByText(/a resposta não chegou/i)).not.toBeInTheDocument();
+  });
+});
+
+// Terceiro estado, o que faltava. Os dois testes acima ja separavam CARREGANDO
+// de VAZIO; ninguem havia separado VAZIO de FALHOU. Verificado na tela, nao
+// deduzido: com `permission denied` a barra lateral dizia "Nenhuma conversa
+// ainda" e o fio abria sem uma unica mensagem — os dois apresentando erro de
+// consulta como estado legitimo da conta.
+describe("OperacaoChat — falha de consulta nao e 'nao ha nada'", () => {
+  const NEGADO = {
+    data: null,
+    error: { message: 'permission denied for table "chat_conversations"' },
+  };
+
+  it("lista: FALHA se identifica como falha e nao como historico vazio", async () => {
+    porTabela = { chat_conversations: () => Promise.resolve(NEGADO) };
+    montar();
+
+    expect(await screen.findByText(/não foi possível carregar as conversas/i)).toBeInTheDocument();
+    // A frase do vazio nao pode aparecer: era ela que fazia o historico do
+    // gestor parecer conta nova.
+    expect(screen.queryByText(/nenhuma conversa ainda/i)).not.toBeInTheDocument();
+  });
+
+  it("lista: a falha oferece tentar de novo, e a lista aparece quando a consulta passa", async () => {
+    porTabela = { chat_conversations: () => Promise.resolve(NEGADO) };
+    montar();
+    const botao = await screen.findByRole("button", { name: /tentar de novo/i });
+
+    porTabela.chat_conversations = () => Promise.resolve({ data: [conversa()], error: null });
+    await userEvent.setup({ delay: null }).click(botao);
+
+    await waitFor(() =>
+      expect(screen.queryByText(/não foi possível carregar as conversas/i)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("fio: FALHA nas mensagens nao deixa a conversa abrir muda", async () => {
+    // Era o pior dos dois: uma conversa existente abria SEM NENHUMA mensagem e
+    // sem aviso. O gestor podia reenviar um pedido ja feito, ou concluir que a
+    // resposta que leu ontem se perdeu.
+    abrirConversa([]);
+    porTabela.chat_messages = () =>
+      Promise.resolve({
+        data: null,
+        error: { message: 'permission denied for table "chat_messages"' },
+      });
+    montar();
+
+    expect(
+      await screen.findByText(/não foi possível carregar as mensagens desta conversa/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /tentar de novo/i })).toBeInTheDocument();
+  });
+
+  it("fio: conversa genuinamente sem mensagens NAO acusa falha", async () => {
+    // O par do teste acima. Conversa vazia de verdade existe (recem-criada), e
+    // acusar falha nela seria o defeito espelhado.
+    abrirConversa([]);
+    montar();
+    await waitFor(() =>
+      expect(screen.queryByText(/converse com o gestor de tráfego/i)).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/não foi possível carregar as mensagens/i)).not.toBeInTheDocument();
   });
 });
 

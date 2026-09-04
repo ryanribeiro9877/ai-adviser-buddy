@@ -147,6 +147,53 @@ describe("ApprovalsQueue — estados de tela", () => {
     respostaDaBusca = { data: [], error: null };
     montar();
     expect(await screen.findByText(/nenhum pedido de aprovação/i)).toBeInTheDocument();
+    // A outra metade do par: vazio LEGITIMO nao pode acusar falha. Se alguem
+    // reunificar os dois estados, um dos dois lados deste par reprova.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /tentar de novo/i })).not.toBeInTheDocument();
+  });
+
+  // ESTE e o caso que faltava, e era o mais caro do projeto: a consulta falha,
+  // `data` volta undefined, `rows` fica vazio e a fila anunciava "Nenhum pedido
+  // de aprovação" — o gestor conclui que nao ha nada esperando decisao dele
+  // enquanto o pedido segue pending no banco, com dinheiro do outro lado.
+  it("FALHA na busca nao vira 'nenhum pedido': se identifica como falha, com opcao de tentar de novo", async () => {
+    respostaDaBusca = {
+      data: null,
+      error: { message: 'permission denied for table "approval_requests"' },
+    };
+    montar();
+
+    expect(
+      await screen.findByText(/não foi possível carregar os pedidos de aprovação/i),
+    ).toBeInTheDocument();
+    // A frase do vazio nao pode aparecer: e ela que fazia o gestor concluir que
+    // a fila estava limpa.
+    expect(screen.queryByText(/nenhum pedido de aprovação/i)).not.toBeInTheDocument();
+    // Falha sem saida e falha que obriga a recarregar a pagina.
+    expect(screen.getByRole("button", { name: /tentar de novo/i })).toBeInTheDocument();
+  });
+
+  it("a falha mostra a causa, em vez de esconder o motivo", async () => {
+    respostaDaBusca = {
+      data: null,
+      error: { message: 'permission denied for table "approval_requests"' },
+    };
+    montar();
+    expect(await screen.findByText(/permission denied for table/i)).toBeInTheDocument();
+  });
+
+  it("tentar de novo refaz a consulta, e a fila aparece quando ela passa", async () => {
+    respostaDaBusca = { data: null, error: { message: "permission denied" } };
+    montar();
+    const botao = await screen.findByRole("button", { name: /tentar de novo/i });
+
+    // O banco volta ao normal entre a falha e o clique.
+    respostaDaBusca = { data: [pedido({ id: "a1" })], error: null };
+    await userEvent.click(botao);
+
+    await waitFor(() => expect(screen.getAllByTestId("card")).toHaveLength(1));
+    expect(screen.queryByText(/não foi possível carregar/i)).not.toBeInTheDocument();
   });
 
   it("renderiza um cartao por pedido", async () => {

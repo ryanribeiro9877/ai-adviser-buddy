@@ -77,6 +77,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
@@ -1006,7 +1007,19 @@ export function OperacaoChat() {
   const ConversationList = ({ onPick }: { onPick?: () => void }) => (
     <div className="flex flex-col gap-1">
       {convos.isLoading && [0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-9 w-full" />)}
-      {!convos.isLoading && conversations.length === 0 && (
+      {/* Tres estados, nao dois. Verificado na tela com `permission denied`: a
+          consulta falhava e a barra lateral dizia "Nenhuma conversa ainda" —
+          historico inteiro do gestor apresentado como conta nova, sem nada
+          acusando que houve erro nem como tentar de novo. */}
+      {convos.isError && (
+        <FalhaDeCarga
+          compacto
+          oQue="as conversas"
+          erro={convos.error}
+          onTentarDeNovo={() => void convos.refetch()}
+        />
+      )}
+      {!convos.isLoading && !convos.isError && conversations.length === 0 && (
         <div className="px-2 py-3 text-xs text-muted-foreground">Nenhuma conversa ainda.</div>
       )}
       {conversations.map((c) => (
@@ -1111,6 +1124,19 @@ export function OperacaoChat() {
               {messages.isLoading &&
                 activeId &&
                 [0, 1].map((i) => <Skeleton key={i} className="h-20 w-full" />)}
+
+              {/* O fio vazio por falha era o pior dos dois casos: sem lista e sem
+                  aviso, uma conversa existente aparecia SEM NENHUMA mensagem.
+                  Nao e so ausencia de informacao — o gestor podia reenviar um
+                  pedido que ja tinha sido feito, ou concluir que a resposta que
+                  leu ontem se perdeu. */}
+              {messages.isError && activeId && (
+                <FalhaDeCarga
+                  oQue="as mensagens desta conversa"
+                  erro={messages.error}
+                  onTentarDeNovo={() => void messages.refetch()}
+                />
+              )}
 
               {msgs.map((m) => (
                 <MessageBubble

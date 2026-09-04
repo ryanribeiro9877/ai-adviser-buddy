@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Table,
@@ -183,6 +184,19 @@ export function TargetsTable({ companyId }: { companyId: string }) {
           <Skeleton key={i} className="h-12 w-full" />
         ))}
       </div>
+    );
+  }
+
+  // Antes do vazio: metas sao a regua contra a qual o desempenho e julgado.
+  // Consulta que falha e apresentada como "nenhuma meta cadastrada" faz o
+  // gestor concluir que nao ha meta definida — e a meta continua no banco.
+  if (query.isError) {
+    return (
+      <FalhaDeCarga
+        oQue="as metas desta empresa"
+        erro={query.error}
+        onTentarDeNovo={() => query.refetch()}
+      />
     );
   }
 

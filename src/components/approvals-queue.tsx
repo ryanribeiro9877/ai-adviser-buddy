@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useApp } from "@/lib/app-context";
 import { useNotificacoes } from "@/hooks/use-notificacoes";
 import { Skeleton } from "@/components/ui/skeleton";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import {
   ActionCard,
   decideApproval,
@@ -129,6 +130,20 @@ export function ApprovalsQueue({
           <Skeleton key={i} className="h-24 w-full" />
         ))}
       </div>
+    );
+  }
+  // ANTES de decidir que a fila esta vazia. Sem esta guarda, uma consulta que
+  // falha (RLS, rede, token expirado) chega aqui com `data` undefined, `rows`
+  // vazio, e a tela afirma "Nenhum pedido de aprovação" — o gestor conclui que
+  // nao ha nada esperando decisao dele. É o fail-open de sempre, agora no portao
+  // que tem dinheiro do outro lado: o pedido continua pending no banco.
+  if (query.isError) {
+    return (
+      <FalhaDeCarga
+        oQue="os pedidos de aprovação"
+        erro={query.error}
+        onTentarDeNovo={() => query.refetch()}
+      />
     );
   }
   if (rows.length === 0) {

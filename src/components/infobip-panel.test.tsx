@@ -16,6 +16,8 @@ const userEvent = userEventBase.setup({ delay: null });
 
 let isAdmin = true;
 let linhas: Record<string, unknown>[] = [];
+/** Erro da consulta de envios: prova que falha ≠ "nenhum dado importado". */
+let erroDosEnvios: unknown = null;
 const lerMock = vi.fn();
 const enviarMock = vi.fn();
 const exportarMock = vi.fn();
@@ -54,7 +56,10 @@ vi.mock("@/integrations/supabase/client", () => {
     lteMock(...a);
     return chain;
   };
-  chain.limit = () => Promise.resolve({ data: linhas, error: null });
+  chain.limit = () =>
+    Promise.resolve(
+      erroDosEnvios ? { data: null, error: erroDosEnvios } : { data: linhas, error: null },
+    );
   chain.eq = () => chain;
   chain.select = () => chain;
   return { supabase: { from: () => chain } };
@@ -91,6 +96,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-08-13T12:00:00Z"));
   isAdmin = true;
   linhas = [];
+  erroDosEnvios = null;
   lerMock.mockReset().mockResolvedValue({ rows: [{ message_id: "m1" }], meta: META });
   enviarMock.mockReset().mockResolvedValue({ gravadas: 1 });
   exportarMock.mockReset();
@@ -100,6 +106,31 @@ beforeEach(() => {
   lteMock.mockReset();
   Element.prototype.hasPointerCapture = vi.fn(() => false);
   Element.prototype.scrollIntoView = vi.fn();
+});
+
+// Esta tela ja distinguia "periodo sem movimento" de "nada importado" — o
+// comentario no fonte prova que alguem pensou nisso. Faltava o terceiro caso:
+// nao ter conseguido perguntar. Erro de consulta caia no ramo `vazio` e virava
+// "Nenhum dado da Infobip importado", uma afirmacao sobre o banco que ninguem
+// verificou — e que manda o admin reimportar o que talvez ja exista.
+describe("falha de consulta nao e 'nada importado'", () => {
+  it("FALHA se identifica como falha, com opcao de tentar de novo", async () => {
+    erroDosEnvios = { message: 'permission denied for table "infobip_dispatches"' };
+    montar();
+    expect(
+      await screen.findByText(/não foi possível carregar os envios da infobip/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/nenhum dado da infobip importado/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /tentar de novo/i })).toBeInTheDocument();
+  });
+
+  it("empresa genuinamente sem importacao mostra o vazio, e NAO acusa falha", async () => {
+    // O par: reunificar os dois estados reprova aqui ou no teste acima.
+    linhas = [];
+    montar();
+    expect(await screen.findByText(/nenhum dado da infobip importado/i)).toBeInTheDocument();
+    expect(screen.queryByText(/não foi possível carregar/i)).not.toBeInTheDocument();
+  });
 });
 
 describe("gate de admin", () => {

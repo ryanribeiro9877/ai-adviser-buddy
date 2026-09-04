@@ -22,6 +22,8 @@ import type { ReactNode } from "react";
 let isAdmin = true;
 let linhas: Record<string, unknown>[] = [];
 let leituraFresh: { data: unknown; error: unknown } = { data: null, error: null };
+/** Erro da LISTAGEM. Sem isto nao havia como provar que falha ≠ lista vazia. */
+let erroDaListagem: unknown = null;
 let erroDoUpdate: unknown = null;
 const updateMock = vi.fn();
 const logAuditMock = vi.fn();
@@ -51,7 +53,14 @@ vi.mock("@/integrations/supabase/client", () => ({
         return {
           eq: () => ({
             is: () => ({
-              eq: () => ({ order: () => Promise.resolve({ data: linhas, error: null }) }),
+              eq: () => ({
+                order: () =>
+                  Promise.resolve(
+                    erroDaListagem
+                      ? { data: null, error: erroDaListagem }
+                      : { data: linhas, error: null },
+                  ),
+              }),
             }),
           }),
         };
@@ -111,6 +120,7 @@ beforeEach(() => {
   isAdmin = true;
   linhas = [meta()];
   leituraFresh = { data: { valor: 20, memoria: {} }, error: null };
+  erroDaListagem = null;
   erroDoUpdate = null;
   updateMock.mockReset();
   logAuditMock.mockReset().mockResolvedValue(undefined);
@@ -135,6 +145,25 @@ describe("listagem", () => {
     linhas = [meta({ fonte: "manual" })];
     montar();
     expect(await screen.findByText("Editado manualmente")).toBeInTheDocument();
+  });
+
+  // Metas sao a regua contra a qual o desempenho e julgado. Consulta que falha
+  // sendo apresentada como "nenhuma meta cadastrada" faz o gestor concluir que
+  // nao ha meta definida — e a meta continua no banco, valendo.
+  it("FALHA na listagem nao vira 'nenhuma meta cadastrada'", async () => {
+    erroDaListagem = { message: 'permission denied for table "targets"' };
+    montar();
+    expect(await screen.findByText(/não foi possível carregar as metas/i)).toBeInTheDocument();
+    expect(screen.queryByText(/nenhuma meta cadastrada/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /tentar de novo/i })).toBeInTheDocument();
+  });
+
+  it("empresa genuinamente sem meta mostra o vazio, e NAO acusa falha", async () => {
+    // O par do teste acima: reunificar os dois estados reprova aqui ou ali.
+    linhas = [];
+    montar();
+    expect(await screen.findByText(/nenhuma meta cadastrada/i)).toBeInTheDocument();
+    expect(screen.queryByText(/não foi possível carregar/i)).not.toBeInTheDocument();
   });
 
   it("metrica desconhecida nao derruba a tabela", async () => {

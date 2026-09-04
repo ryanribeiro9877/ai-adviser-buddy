@@ -12,6 +12,17 @@ type Ctx = {
   role: AppRole;
   isAdmin: boolean;
   companies: Company[];
+  /**
+   * A consulta das empresas FALHOU — diferente de `companies` vazio, que
+   * significa conta sem empresa cadastrada. Sem esta distincao, um erro de RLS
+   * ou de rede fazia `data` virar undefined, `?? []` virar lista vazia, e o
+   * seletor do app-shell anunciar "Nenhuma empresa cadastrada": uma consulta
+   * que ninguem conseguiu fazer sendo apresentada como conta vazia. Pior: sem
+   * empresa selecionada, TODA tela abaixo entra em modo "escolha uma empresa",
+   * e o app inteiro parece uma conta nova.
+   */
+  companiesFalhou: boolean;
+  companiesErro: unknown;
   selectedCompanyId: string | null;
   selectedCompany: Company | null;
   setSelectedCompanyId: (id: string) => void;
@@ -90,6 +101,8 @@ export function AppProvider({ user, children }: { user: User; children: ReactNod
         role,
         isAdmin: role === "admin",
         companies,
+        companiesFalhou: companiesQuery.isError,
+        companiesErro: companiesQuery.error,
         selectedCompanyId,
         selectedCompany,
         setSelectedCompanyId,

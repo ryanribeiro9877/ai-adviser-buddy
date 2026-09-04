@@ -27,6 +27,7 @@ import { FEATURES } from "@/lib/features";
 import { supabase } from "@/integrations/supabase/client";
 import { NotificacoesProvider } from "@/hooks/use-notificacoes";
 import { NotificationBell } from "@/components/notification-bell";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -129,7 +130,16 @@ function SidebarContent({
 }
 
 export function AppShell() {
-  const { user, isAdmin, companies, selectedCompany, setSelectedCompanyId } = useApp();
+  const {
+    user,
+    isAdmin,
+    companies,
+    companiesFalhou,
+    companiesErro,
+    refreshCompanies,
+    selectedCompany,
+    setSelectedCompanyId,
+  } = useApp();
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -180,14 +190,30 @@ export function AppShell() {
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="sm" className="gap-2 min-w-0">
                     <Building2 className="h-4 w-4 shrink-0" />
-                    <span className="truncate">{selectedCompany?.name ?? "Nenhuma empresa"}</span>
+                    {/* Tres rotulos, nao dois: sem empresa selecionada e uma
+                        coisa, nao ter conseguido perguntar quais existem e
+                        outra. Colapsar as duas em "Nenhuma empresa" faz um erro
+                        de RLS parecer conta vazia. */}
+                    <span className="truncate">
+                      {companiesFalhou && !selectedCompany
+                        ? "Empresas não carregaram"
+                        : (selectedCompany?.name ?? "Nenhuma empresa")}
+                    </span>
                     <ChevronDown className="h-3.5 w-3.5 opacity-60 shrink-0" />
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="w-64">
                   <DropdownMenuLabel>Empresas</DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  {companies.length === 0 && (
+                  {companiesFalhou && (
+                    <FalhaDeCarga
+                      compacto
+                      oQue="as empresas"
+                      erro={companiesErro}
+                      onTentarDeNovo={() => void refreshCompanies()}
+                    />
+                  )}
+                  {!companiesFalhou && companies.length === 0 && (
                     <DropdownMenuItem disabled>Nenhuma empresa cadastrada</DropdownMenuItem>
                   )}
                   {companies.map((c) => (
