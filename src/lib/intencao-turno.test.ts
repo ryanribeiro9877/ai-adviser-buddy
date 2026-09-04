@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  deveForcarEmissao,
   ehPedidoDeAto,
   ehPedidoEmitirConjunto,
+  ehPedidoLeituraCruzada,
   ehPerguntaDeLeitura,
   recusaFalsaMoldeTrafego,
   ehPedidoUploadLote,
@@ -191,5 +193,64 @@ describe("objetivoDoFio", () => {
     expect(objetivoDoFio("emita os 3 cards do conjunto 2", [criar])).toBe(
       "emita os 3 cards do conjunto 2",
     );
+  });
+
+  it("fala vazia volta vazia, e sem historico nao ha o que compor", () => {
+    expect(objetivoDoFio("", [criar])).toBe("");
+    expect(objetivoDoFio("serao 4 conjuntos", [])).toBe("serao 4 conjuntos");
+  });
+
+  it("follow-up sem assunto de ato no historico nao e composto", () => {
+    expect(objetivoDoFio("os numeros sao esses", ["qual o gasto de ontem?"])).toBe(
+      "os numeros sao esses",
+    );
+  });
+});
+
+describe("deveForcarEmissao", () => {
+  // A trava do incidente de 01/09: o modelo narrou "6 Cards de Pausa Emitidos"
+  // sem UMA chamada de propose_action, e nenhum card existia. Nunca teve teste —
+  // se ela inverter, volta-se a aceitar o turno que so fala que emitiu.
+  const base = { pedido: "emita os cards do conjunto 2", chamouPropose: false, cardsEmitidos: 0 };
+
+  it("pedido de ato que terminou sem propose_action devolve o turno ao modelo", () => {
+    expect(deveForcarEmissao(base)).toBe(true);
+  });
+
+  it("propose_action chamada NAO insiste, mesmo que ela tenha recusado", () => {
+    // Recusa e informacao honesta com motivo; insistir repetiria o mesmo erro.
+    expect(deveForcarEmissao({ ...base, chamouPropose: true })).toBe(false);
+  });
+
+  it("card ja emitido nao insiste", () => {
+    expect(deveForcarEmissao({ ...base, cardsEmitidos: 1 })).toBe(false);
+  });
+
+  it("nao insiste duas vezes no mesmo turno nem sem tempo de janela", () => {
+    // Insistir sem fim gastaria a janela inteira sem entregar nada.
+    expect(deveForcarEmissao({ ...base, jaInsistiu: true })).toBe(false);
+    expect(deveForcarEmissao({ ...base, semTempo: true })).toBe(false);
+  });
+
+  it("pedido de legenda tem verbo de ato mas nao e emissao de card", () => {
+    expect(deveForcarEmissao({ ...base, pedido: "crie as legendas para cada video" })).toBe(false);
+  });
+
+  it("pergunta de leitura nunca forca emissao", () => {
+    expect(deveForcarEmissao({ ...base, pedido: "o anuncio esta com o mesmo link?" })).toBe(false);
+  });
+});
+
+describe("ehPedidoLeituraCruzada", () => {
+  it("pergunta de origem no Drive e leitura cruzada", () => {
+    expect(ehPedidoLeituraCruzada("de qual pasta do drive sao os anuncios do conj 1?")).toBe(true);
+  });
+
+  it("cruzar anuncio no ar com peca do Drive e leitura cruzada", () => {
+    expect(ehPedidoLeituraCruzada("preciso cruzar os anuncios com as pecas do drive")).toBe(true);
+  });
+
+  it("pergunta de desempenho solta nao e leitura cruzada", () => {
+    expect(ehPedidoLeituraCruzada("qual o gasto de ontem?")).toBe(false);
   });
 });

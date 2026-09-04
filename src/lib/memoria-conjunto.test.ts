@@ -10,16 +10,24 @@ import {
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
   ehNomeCompostoEstruturado,
+  ehProsaDeLegenda,
   ehSentinelaSemMolde,
   extrairLinksWaMePorConjunto,
   extrairNomesCriativoDaFala,
   extrairSlateDaFala,
+  filtrarOperacionais,
   nomeCompostoForaDeEscopoTrafego,
+  nomeCriativoDoConjunto,
+  numeroAnuncioDaChave,
   numeroConjuntoDaFala,
+  numeroConjuntoDeSinais,
+  pecaChaveDoSlate,
   pecasDoConjunto,
   pareceNomeDePecaNaoMolde,
   recusarConjuntoErrado,
   recusarCruzamentoLinhaProduto,
+  statusObjetoOperacional,
+  temSlateNoTexto,
 } from "./memoria-conjunto";
 
 describe("numeroConjuntoDaFala", () => {
@@ -241,5 +249,283 @@ describe("extrairSlateDaFala", () => {
     expect(slate[0].drive_file_id).toBe("1gs0uF34wD3h4KRrknI5mcZ_Q32iod-tn");
     expect(slate[0].cta).toMatch(/La Felicit/i);
     expect(slate.some((p) => p.nome.includes("Inventario"))).toBe(false);
+  });
+
+  it("texto sem os tres sinais nao e slate (nao inventa peca de conversa solta)", () => {
+    // temSlateNoTexto e o portao: sem conjunto + drive_file_id + .mp4 juntos, o
+    // resto do fluxo nao deve tratar a fala como contrato de pecas.
+    expect(temSlateNoTexto(fala)).toBe(true);
+    expect(temSlateNoTexto("CONJ.1 tem 8 criativos")).toBe(false);
+    expect(temSlateNoTexto("")).toBe(false);
+    expect(temSlateNoTexto(null as unknown as string)).toBe(false);
+  });
+
+  it("peca cujo nome vira slug vazio ainda recebe chave estavel (cai no drive id)", () => {
+    // Sem o fallback duas pecas de nome ilegivel colidiriam em "conjunto_2_",
+    // e a segunda sobrescreveria a primeira no slate.
+    expect(
+      pecaChaveDoSlate({ conjunto: 2, nome: "###.mp4", drive_file_id: "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }),
+    ).toBe("conjunto_2_1AAAAAAAAAAA");
+  });
+});
+
+describe("inventario operacional — DELETED/ARCHIVED nao existem para operacao", () => {
+  // Nunca teve teste. Se este filtro inverter, o sistema passa a emitir card
+  // para objeto Meta apagado, e o erro so aparece no Gerenciador.
+  it("apagado e arquivado saem; pausado e ativo continuam no inventario", () => {
+    expect(statusObjetoOperacional("ACTIVE")).toBe(true);
+    expect(statusObjetoOperacional("PAUSED")).toBe(true);
+    expect(statusObjetoOperacional("CAMPAIGN_PAUSED")).toBe(true);
+    expect(statusObjetoOperacional("ADSET_PAUSED")).toBe(true);
+    expect(statusObjetoOperacional("DELETED")).toBe(false);
+    expect(statusObjetoOperacional("ARCHIVED")).toBe(false);
+  });
+
+  it("compara sem depender de caixa nem de espaco em volta", () => {
+    expect(statusObjetoOperacional(" deleted ")).toBe(false);
+    expect(statusObjetoOperacional("Archived")).toBe(false);
+  });
+
+  it("status ausente NAO esconde o objeto — falta de dado nao e apagamento", () => {
+    expect(statusObjetoOperacional(null)).toBe(true);
+    expect(statusObjetoOperacional(undefined)).toBe(true);
+  });
+
+  it("filtrarOperacionais tolera lista nula e tira so os apagados", () => {
+    expect(filtrarOperacionais(null)).toEqual([]);
+    expect(filtrarOperacionais(undefined)).toEqual([]);
+    const rows = [
+      { status: "ACTIVE", name: "ativo" },
+      { status: "DELETED", name: "apagado" },
+      { status: "ARCHIVED", name: "arquivado" },
+      { status: "ADSET_PAUSED", name: "pausado" },
+    ];
+    expect(filtrarOperacionais(rows).map((r) => r.name)).toEqual(["ativo", "pausado"]);
+  });
+});
+
+describe("numeroConjuntoDeSinais — um numero so, ou nenhum", () => {
+  // O numero daqui alimenta recusarConjuntoErrado. Se sinais divergentes
+  // devolvessem um numero, a trava recusaria (ou liberaria) pelo motivo errado.
+  it("sinais que concordam viram o numero", () => {
+    expect(numeroConjuntoDeSinais("CONJ.1_LAF_8CRIATIVOS", "conjunto 1 do LAF")).toBe(1);
+  });
+
+  it("sinais divergentes (CONJ.1 e CONJ.4) nao adivinham", () => {
+    expect(numeroConjuntoDeSinais("CONJ.1_LAF", "CONJ.4_LAF")).toBe(null);
+  });
+
+  it("sinal vazio ou nulo e ignorado, nao conta como divergencia", () => {
+    expect(numeroConjuntoDeSinais(null, undefined, "   ", "CONJ.2_LAF")).toBe(2);
+  });
+
+  it("sem sinal nenhum, ou sinal sem numero, devolve null", () => {
+    expect(numeroConjuntoDeSinais()).toBe(null);
+    expect(numeroConjuntoDeSinais("peca sem numero de conjunto")).toBe(null);
+  });
+});
+
+describe("recusarConjuntoErrado — quando NAO deve recusar", () => {
+  it("pedido sem numero nao inventa recusa (sinal incompleto)", () => {
+    const r = recusarConjuntoErrado({
+      destNome: "CONJ.4_LAF_10CRIATIVOS_AGO26",
+      pecaSinais: ["peca sem numero"],
+    });
+    expect(r).toEqual({ ok: true, pedido: null, dest: 4 });
+  });
+
+  it("pedido e destino no mesmo numero passam", () => {
+    const r = recusarConjuntoErrado({ pedidoNumero: 2, destNome: "JURIDICO_CONJ.02 - MATURACAO" });
+    expect(r).toEqual({ ok: true, pedido: 2, dest: 2 });
+  });
+
+  it("deriva o numero do pedido dos sinais da peca quando nao vem explicito", () => {
+    const r = recusarConjuntoErrado({
+      destNome: "CONJ.4_LAF_10CRIATIVOS_AGO26",
+      pecaSinais: ["CONJ.1_LAF_8CRIATIVOS_JUNJUL26_AD01"],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.pedido).toBe(1);
+  });
+
+  it("destino sem CONJ.N no nome e dito com esse nome na recusa", () => {
+    // A mensagem tem de deixar claro que o destino nao tem numero, senao o
+    // modelo tenta "corrigir" para um numero que nunca existiu no nome.
+    const r = recusarConjuntoErrado({ pedidoNumero: 3, destNome: "" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.dest).toBe(null);
+      expect(r.detalhe).toMatch(/um conjunto sem CONJ\.N no nome/);
+      expect(r.detalhe).toMatch(/\(sem nome\)/);
+    }
+  });
+});
+
+describe("trava de nome — caminhos que o incidente nao cobriu", () => {
+  const contrato = [
+    "JUR_CONV_CONJ03_AD01_Emprestimo_Pessoal_LEVA02",
+    "JUR_CONV_CONJ03_AD02_Emprestimo_Conta_Corrente_LEVA02",
+    "JUR_CONV_CONJ03_AD03_Cartao_Armadilha_LEVA02",
+  ];
+
+  it("nome livre pedido pelo gestor e honrado exatamente como veio", () => {
+    const r = escolherNomeCriativoTravado({
+      nomePedido: "JUR_CONV_CONJ03_AD02_Emprestimo_Conta_Corrente_LEVA02",
+      nomesContrato: contrato,
+      conjuntoNumero: 3,
+    });
+    expect(r).toEqual({
+      ok: true,
+      nome: "JUR_CONV_CONJ03_AD02_Emprestimo_Conta_Corrente_LEVA02",
+      origem: "pedido",
+    });
+  });
+
+  it("o _AD0N da peca escolhe o nome do MESMO anuncio", () => {
+    // Sem isto a peca do AD02 poderia sair com o nome do AD01.
+    const r = escolherNomeCriativoTravado({
+      nomesContrato: contrato,
+      pecaChave: "conjunto_3_video_AD02_conta_corrente",
+      conjuntoNumero: 3,
+    });
+    expect(r).toEqual({
+      ok: true,
+      nome: "JUR_CONV_CONJ03_AD02_Emprestimo_Conta_Corrente_LEVA02",
+      origem: "conversa",
+    });
+  });
+
+  it("mais de um nome livre e ambiguidade declarada, nao escolha silenciosa", () => {
+    const r = escolherNomeCriativoTravado({ nomesContrato: contrato, conjuntoNumero: 3 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.erro).toBe("nome_do_contrato_ambiguo");
+      expect(r.nomes_contrato).toEqual(contrato);
+    }
+  });
+
+  it("sem contrato e sem pedido, exige o nome em vez de gerar um", () => {
+    const r = escolherNomeCriativoTravado({ nomesContrato: [] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.erro).toBe("nome_obrigatorio");
+      expect(r.detalhe).toMatch(/PROIBIDO gerar/);
+    }
+  });
+
+  it("sem contrato nenhum, o padrao estruturado pedido passa (nao ha memoria a perder)", () => {
+    // A recusa por [MARCA][CANAL] existe para nao APAGAR nome ja combinado;
+    // quando nao ha nome combinado, recusar seria travar sem motivo.
+    const r = escolherNomeCriativoTravado({
+      nomePedido: "[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]",
+      nomesContrato: [],
+    });
+    expect(r).toEqual({
+      ok: true,
+      nome: "[COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26]",
+      origem: "pedido",
+    });
+  });
+
+  it("todos usados e um nome so no pool: reusa esse nome em vez de travar", () => {
+    const um = [contrato[0]];
+    const r = escolherNomeCriativoTravado({ nomesContrato: um, nomesJaUsados: um });
+    expect(r).toEqual({ ok: true, nome: contrato[0], origem: "conversa" });
+  });
+
+  it("pecaChave que casa por texto puxa o nome do contrato", () => {
+    const r = escolherNomeCriativoTravado({
+      nomesContrato: contrato,
+      pecaChave: "Cartao_Armadilha",
+    });
+    expect(r).toEqual({ ok: true, nome: contrato[2], origem: "conversa" });
+  });
+
+  it("o mesmo nome citado duas vezes na fala entra uma vez", () => {
+    const fala = `1. ${contrato[0]}\nrepetindo: ${contrato[0]}`;
+    expect(extrairNomesCriativoDaFala(fala)).toEqual([contrato[0]]);
+  });
+
+  it("numeroAnuncioDaChave le _AD0N e devolve null quando nao ha anuncio na chave", () => {
+    expect(numeroAnuncioDaChave(contrato[0])).toBe(1);
+    expect(numeroAnuncioDaChave("JUR_CONV_CONJ03_AD12_x")).toBe(12);
+    expect(numeroAnuncioDaChave("conjunto_3_sem_marcador")).toBe(null);
+    expect(numeroAnuncioDaChave(null as unknown as string)).toBe(null);
+  });
+
+  it("casa CONJ0N, CONJ_0N e CONJ.0N no nome do criativo", () => {
+    expect(nomeCriativoDoConjunto("JUR_CONV_CONJ03_AD01_x", 3)).toBe(true);
+    expect(nomeCriativoDoConjunto("JUR_CONJ_03_AD01", 3)).toBe(true);
+    expect(nomeCriativoDoConjunto("JUR_CONJ.03_AD01", 3)).toBe(true);
+    expect(nomeCriativoDoConjunto("JUR_CONV_CONJ04_AD01", 3)).toBe(false);
+  });
+
+  it("[LEADS] e [WPP] sozinhos tambem saem do escopo de trafego", () => {
+    // O teste existente casa no primeiro token ([WA]) e nunca chega nos outros.
+    expect(nomeCompostoForaDeEscopoTrafego("[COHAPM][LEADS][JURIDICO][AGO26]")).toBe(true);
+    expect(nomeCompostoForaDeEscopoTrafego("[COHAPM][WPP][JURIDICO][AGO26]")).toBe(true);
+    expect(nomeCompostoForaDeEscopoTrafego("[COHAPM][SITE][JURIDICO][AGO26]")).toBe(false);
+  });
+
+  it("nome vazio ou sentinela sem_molde conta como peca, nao como molde", () => {
+    expect(pareceNomeDePecaNaoMolde("")).toBe(true);
+    expect(pareceNomeDePecaNaoMolde(null as unknown as string)).toBe(true);
+    expect(pareceNomeDePecaNaoMolde("sem_molde")).toBe(true);
+  });
+});
+
+describe("legenda vs identidade da peca", () => {
+  // A separacao decide se um texto vale como IDENTIDADE (nome/linha de produto)
+  // ou como COPY. Errar aqui faz a legenda mudar a campanha escolhida.
+  it("nome curto de peca nao e prosa", () => {
+    expect(ehProsaDeLegenda("")).toBe(false);
+    expect(ehProsaDeLegenda("CONJ.1_LAF_AD01_ChegandoEmCasa")).toBe(false);
+  });
+
+  it("texto longo e prosa", () => {
+    expect(ehProsaDeLegenda("a".repeat(80))).toBe(true);
+  });
+
+  it("frase com 12+ palavras e pontuacao e prosa, mesmo curta", () => {
+    expect(
+      ehProsaDeLegenda("voce tem sentido a vista cansada no fim do dia de trabalho hoje?"),
+    ).toBe(true);
+  });
+
+  it("chamada de CTA conhecida e prosa mesmo em poucas palavras", () => {
+    expect(ehProsaDeLegenda("fale com nossa equipe")).toBe(true);
+  });
+});
+
+describe("cruzamento linha produto — quando NAO ha erro", () => {
+  it("destino e peca na mesma linha passam, com a legenda na voz certa", () => {
+    const r = recusarCruzamentoLinhaProduto({
+      estruturaNomes: ["COHAPM_LAFELICITA_CONV_AGO26", "LAFELICITA_CONJ.01 - DESCOBERTA"],
+      pecaSinais: [
+        "CONJ.1_LAF_8CRIATIVOS_JUNJUL26_AD01_ChegandoEmCasa_V3",
+        "Venha conhecer o La Felicita e fale com nossa equipe para agendar a visita.",
+      ],
+    });
+    expect(r).toEqual({ ok: true, dest: "la_felicita", peca: "la_felicita" });
+  });
+
+  it("sem sinal nenhum nao acusa cruzamento", () => {
+    const r = recusarCruzamentoLinhaProduto({ estruturaNomes: [], pecaSinais: [] });
+    expect(r).toEqual({ ok: true, dest: null, peca: null });
+  });
+
+  it("sinal nulo no meio da lista e ignorado", () => {
+    const r = recusarCruzamentoLinhaProduto({
+      estruturaNomes: ["COHAPM_JURIDICO_CONV_LEVA01"],
+      pecaSinais: [null, "   ", "JUR_CONV_CONJ03_AD01_Emprestimo_Pessoal_LEVA02"],
+    });
+    expect(r).toEqual({ ok: true, dest: "juridico", peca: "juridico" });
+  });
+
+  it("peca sem linha identificavel nao recorta os conjuntos candidatos", () => {
+    // Filtrar por uma linha que nao foi identificada esvaziaria a lista e o
+    // auto-pick cairia no "nenhum candidato" por engano.
+    const hits = [{ name: "CONJ.1_ALGO" }, { name: "CONJ.2_OUTRO" }];
+    expect(escolherConjuntosDaMesmaLinha(hits, ["peca neutra"], () => null)).toEqual(hits);
   });
 });
