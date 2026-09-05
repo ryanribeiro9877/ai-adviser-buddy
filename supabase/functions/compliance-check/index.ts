@@ -1,8 +1,14 @@
 // supabase/functions/compliance-check/index.ts (v4)
+// v5 (05/09/2026): a regua de frases alcanca o veredito. O mapa `promessas_proibidas` deixou
+//   de ser consultado por "a empresa e de credito?" e passou a ser escopado por RAMO
+//   (`checar_promessas_proibidas_da_empresa`), e um `bloqueia` dele agora produz `reprovado`.
+//   Antes disto a LGL-JUR-01 — promovida a bloqueante pelo gestor em 04/09 — era inerte por
+//   duas barreiras independentes: nao era consultada para empresa nao-credito, e nao tinha
+//   por onde entrar no veredito. Avisos NAO escalam, de proposito (ver comentarios no corpo).
 // v4 (21/08/2026): isolamento multi-empresa. company_id governa o LLM:
-//   - Legal/credito: Guardião consignado + FIN/CET + promessas_proibidas.
+//   - Legal/credito: Guardião consignado + FIN/CET.
 //   - COHAPM/nao-credito: Guardião cooperativa/juridico WA — SEM CET/CLT/consignado;
-//     filtra regras FIN-* / LGL-01/02; nao roda mapa de promessas de credito.
+//     filtra regras FIN-* / LGL-01/02 de `compliance_rules`.
 //   Veredito continua DETERMINISTICO por severidade. sugestao_reescrita NAO inventa
 //   "Legal e Viver" / correspondente bancario fora da empresa de credito.
 // v3 (05/08/2026 CODE 1.4): substituto seguro + checar_segmentacao.
@@ -88,15 +94,41 @@ Deno.serve(async (req) => {
     }
   } catch { /* brand opcional */ }
 
-  // CODE 1.4: mapa de promessas e de CREDITO — so Legal. COHAPM nao herda substitutos CLT.
+  // 05/09/2026 — O MAPA DE FRASES PASSA A SER ESCOPADO POR RAMO, NAO POR "E DE CREDITO?".
+  //
+  // Este bloco decidia por `ehCredito` e, para toda empresa nao-credito, devolvia
+  // { avaliado:false, motivo:"promessas_proibidas e mapa de credito — nao aplica a empresa
+  // nao-credito" }. A frase era verdadeira quando foi escrita e ficou FALSA em 04/09, quando
+  // as cinco regras LGL-JUR de publicidade advocaticia entraram em promessas_proibidas com
+  // ramo 'juridico'. A COHAPM deriva ramo `juridico` e responde por 83 dos 97 anuncios
+  // ativos: era exatamente a empresa para quem a regua nova foi escrita que o portao se
+  // recusava a consultar — e explicava a recusa com um motivo que havia envelhecido. Ausencia
+  // acompanhada de justificativa confiante e errada e a forma perigosa do padrao, porque quem
+  // le para de procurar.
+  //
+  // A pergunta certa nao e "esta empresa e de credito?", e "existe regra aplicavel ao ramo
+  // desta empresa?". Quem responde isso JA EXISTE e nao e invencao desta mudanca:
+  // `checar_promessas_proibidas_da_empresa` deriva o ramo por `ramos_da_empresa`, filtra por
+  // ramo + 'qualquer' e falha FECHADO nos tres casos que importam — company_id nulo ou
+  // inexistente levanta excecao, e escopo sem nenhuma regra ativa levanta excecao em vez de
+  // deixar todo texto passar. Medido em 05/09: COHAPM -> ['juridico'], 6 regras no escopo,
+  // 1 bloqueante; Legal e Viver -> ['credito'], 10 regras, 8 bloqueantes.
   let promessas: unknown = null;
-  if (legenda && ehCredito) {
-    const { data, error } = await supa.rpc("checar_promessas_proibidas", { p_texto: legenda });
-    promessas = error ? { erro: error.message } : data;
-  } else if (legenda && !ehCredito) {
+  if (legenda && companyId) {
+    const { data, error } = await supa.rpc("checar_promessas_proibidas_da_empresa", {
+      p_company_id: companyId,
+      p_texto: legenda,
+    });
+    // `avaliado:false` no erro e deliberado: se a RPC estourou (empresa inexistente, escopo
+    // vazio), o texto NAO foi medido, e o campo tem de dizer isso em vez de parecer limpo.
+    promessas = error ? { erro: error.message, avaliado: false } : data;
+  } else if (legenda && !companyId) {
     promessas = {
       avaliado: false,
-      motivo: "promessas_proibidas e mapa de credito — nao aplica a empresa nao-credito",
+      motivo:
+        "requisicao sem company_id — o mapa de frases e escopado por ramo do negocio e nao roda sem empresa",
+      nota:
+        "Isto e LACUNA, nao aprovacao: as regras de frase nao foram medidas contra este texto. Declarar o vazio em vez de explicar por que ele nao importa foi justamente o conserto de 05/09.",
     };
   }
   let segmentacao: unknown = null;
@@ -252,8 +284,34 @@ Deno.serve(async (req) => {
       finish_reason: finish,
     }, 502);
   }
-  const temBloqueio = violacoes.some((v: any) => v.severidade === "bloqueia");
-  const veredito = violacoes.length === 0 ? "aprovado" : temBloqueio ? "reprovado" : "atencao";
+  // 05/09/2026 — O MAPA DE FRASES PASSA A ALCANCAR O VEREDITO.
+  //
+  // O veredito saia SO das violacoes casadas contra `compliance_rules`, e as regras LGL-JUR
+  // nao moram lá: moram em `promessas_proibidas`. Consequencia medida: a LGL-JUR-01,
+  // promovida a `bloqueia` por decisao do gestor em 04/09, nao tinha por onde virar
+  // `reprovado`. A decisao existia e era inerte — o portao podia detectar o bloqueio, grava-lo
+  // no corpo da resposta e ainda assim devolver `veredito:"aprovado"` ao lado.
+  //
+  // SO `bloqueios` ESCALA; `atencoes` continuam FORA do veredito, e isto e escolha, nao
+  // esquecimento. Das cinco LGL-JUR so a 01 e bloqueante; a 03 (gratuidade como chamariz)
+  // casa 42 de 42 pecas do Juridico pela medicao da propria migration e ainda vai a advogado
+  // antes de qualquer promocao. Se aviso escalasse, ligar este caminho pararia de aprovar
+  // peca juridica nenhuma — efeito colateral que ninguem decidiu e que teria sido lido como
+  // "o portao novo quebrou a operacao".
+  //
+  // Consistencia com a emissao: `checar_par_texto_e_peca`, que roda na emissao do anuncio, JA
+  // devolve veredito 'reprova' sobre estes mesmos `bloqueios`. Esta mudanca nao cria exposicao
+  // nova — faz a edge concordar com o portao que ja decide na hora de publicar.
+  const bloqueiaPorFrase = (promessas as any)?.bloqueia === true;
+  const regrasDeFrase = (arr: unknown) =>
+    (Array.isArray(arr) ? arr : [])
+      .map((x: any) => String(x?.regra ?? "(sem regra)"))
+      .slice(0, 20);
+  const bloqueiosDeFrase = regrasDeFrase((promessas as any)?.bloqueios);
+  const atencoesDeFrase = regrasDeFrase((promessas as any)?.atencoes);
+
+  const temBloqueio = violacoes.some((v: any) => v.severidade === "bloqueia") || bloqueiaPorFrase;
+  const veredito = temBloqueio ? "reprovado" : violacoes.length === 0 ? "aprovado" : "atencao";
 
   return json({
     ok: true,
@@ -265,10 +323,25 @@ Deno.serve(async (req) => {
     veredito,
     violacoes,
     sugestao_reescrita: veredicto?.sugestao_reescrita ?? null,
-    // CODE 1.4: substituto seguro + gate de segmentacao. O gate de promessas e auxiliar —
-    // o veredito acima continua sendo o do verificador LLM contra compliance_rules.
+    // CODE 1.4: substituto seguro + gate de segmentacao.
+    // 05/09/2026: este gate DEIXOU de ser auxiliar. O comentario anterior dizia que "o
+    // veredito continua sendo o do verificador LLM contra compliance_rules", e era essa
+    // afirmacao que mantinha a regua juridica inerte.
     promessas_proibidas: promessas,
     segmentacao,
+    // De onde veio o veredito. Sem isto, `reprovado` por frase e `reprovado` por LLM ficam
+    // indistinguiveis, e a revisao humana nao sabe se discute com o modelo ou com o padrao.
+    veredito_origem: [
+      ...(violacoes.length ? ["compliance_rules"] : []),
+      ...(bloqueiaPorFrase ? ["promessas_proibidas"] : []),
+    ],
+    bloqueio_por_frase: bloqueiosDeFrase.length ? bloqueiosDeFrase : null,
+    // Aviso de frase NAO escala para o veredito (ver comentario acima), mas tambem nao pode
+    // ficar invisivel: quem le "aprovado" com este campo preenchido precisa saber que houve
+    // achado que a casa decidiu nao tratar como bloqueio.
+    atencoes_de_frase_sem_escalar: atencoesDeFrase.length ? atencoesDeFrase : null,
+    ramos_aplicados: (promessas as any)?.ramos_aplicados ?? null,
+    escopo_de_ramo_resolvido: (promessas as any)?.escopo_resolvido ?? null,
     mcp_chamador: mcpChamador,
     mcp_chave_legada: mcpLegado,
     // Descarte PARCIAL nao derruba o veredito (as violacoes que casaram ja o produziram), mas
