@@ -193,10 +193,35 @@ Deno.serve(async (req) => {
     return json({ error: "openrouter_non_json" }, 502);
   }
   const out = String(parsed?.choices?.[0]?.message?.content ?? "");
+  const finish = String(parsed?.choices?.[0]?.finish_reason ?? "");
+  const raciocinio = Number(parsed?.usage?.completion_tokens_details?.reasoning_tokens ?? 0);
+  // 05/09/2026 — TETO ESTOURADO NAO PODE APROVAR. `finish_reason:length` significa que o
+  // modelo foi cortado no meio: o que voltou nao e um veredito, e um pedaco de veredito. E o
+  // pedaco podia MUITO BEM ser parseavel — bastava o JSON ter fechado antes das violacoes
+  // (`{"violacoes":[]}`) e o resto do codigo devolveria "aprovado" com `regras_aplicadas:N` ao
+  // lado, ou seja: avaliacao que nao aconteceu saindo como permissao, com aparencia de rigor.
+  // Esta e a forma perigosa do padrao — a ausencia nao so passa, ela vem explicada errado.
+  if (finish === "length") {
+    return json({
+      error: "veredito_truncado_no_teto",
+      finish_reason: finish,
+      reasoning_tokens: raciocinio,
+      fail_closed: true,
+      detalhe:
+        "O modelo estourou max_tokens antes de fechar o veredito. Avaliacao incompleta NAO aprova.",
+      bruto: out.slice(0, 400),
+    }, 502);
+  }
   const a = out.indexOf("{"),
     b = out.lastIndexOf("}");
   if (a < 0 || b <= a)
-    return json({ error: "veredito_nao_estruturado", bruto: out.slice(0, 400) }, 502);
+    return json({
+      error: "veredito_nao_estruturado",
+      finish_reason: finish,
+      reasoning_tokens: raciocinio,
+      fail_closed: true,
+      bruto: out.slice(0, 400),
+    }, 502);
   let veredicto: any;
   try {
     veredicto = JSON.parse(out.slice(a, b + 1));
@@ -205,9 +230,28 @@ Deno.serve(async (req) => {
   }
 
   // v2: severidade vem da BASE (não do modelo) e o veredito é determinístico
-  const violacoes = (Array.isArray(veredicto?.violacoes) ? veredicto.violacoes : [])
+  const relatadas = Array.isArray(veredicto?.violacoes) ? veredicto.violacoes : [];
+  const violacoes = relatadas
     .filter((v: any) => sevMap.has(String(v?.code)))
     .map((v: any) => ({ ...v, severidade: sevMap.get(String(v.code)) }));
+  // 05/09/2026 — A MESMA PORTA, PELO OUTRO LADO. O filtro acima existe por um bom motivo (a
+  // severidade e da base, nunca do modelo), mas ele silenciava o caso em que o modelo APONTOU
+  // problema e nomeou com codigo que a base nao reconhece: as violacoes eram descartadas em
+  // silencio, `violacoes.length` caia a zero e o veredito virava "aprovado". Achado de
+  // conformidade sumindo por erro de nomenclatura nao e material aprovado — e material nao
+  // avaliado, e material nao avaliado nao passa.
+  const descartadas = relatadas.filter((v: any) => !sevMap.has(String(v?.code)));
+  if (relatadas.length > 0 && violacoes.length === 0) {
+    return json({
+      error: "violacoes_com_codigo_fora_da_base",
+      fail_closed: true,
+      detalhe:
+        `O modelo relatou ${relatadas.length} violacao(oes) e NENHUMA casou com um code de compliance_rules aplicavel a esta empresa. Sem casar codigo nao ha severidade, e sem severidade nao ha veredito — isto nao e aprovacao.`,
+      codigos_recusados: descartadas.map((v: any) => String(v?.code ?? "(sem code)")).slice(0, 20),
+      regras_aplicadas: aplicaveis.length,
+      finish_reason: finish,
+    }, 502);
+  }
   const temBloqueio = violacoes.some((v: any) => v.severidade === "bloqueia");
   const veredito = violacoes.length === 0 ? "aprovado" : temBloqueio ? "reprovado" : "atencao";
 
@@ -227,6 +271,14 @@ Deno.serve(async (req) => {
     segmentacao,
     mcp_chamador: mcpChamador,
     mcp_chave_legada: mcpLegado,
+    // Descarte PARCIAL nao derruba o veredito (as violacoes que casaram ja o produziram), mas
+    // tambem nao pode ficar invisivel: se o modelo aponta cinco coisas e duas somem no filtro,
+    // quem le "atencao" merece saber que havia mais na mesa.
+    codigos_recusados: descartadas.length
+      ? descartadas.map((v: any) => String(v?.code ?? "(sem code)")).slice(0, 20)
+      : null,
+    finish_reason: finish,
+    reasoning_tokens: raciocinio,
     tokens_in: parsed?.usage?.prompt_tokens ?? null,
     tokens_out: parsed?.usage?.completion_tokens ?? null,
   });
