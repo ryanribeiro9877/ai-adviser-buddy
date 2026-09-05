@@ -7573,10 +7573,22 @@ Deno.serve(async (req) => {
         .select("id")
         .eq("company_id", company.id)
         .in("id", ids);
-      // O `throw` e OBRIGATORIO. Sem ele o erro volta como lista vazia, a conferencia le
-      // "nenhum id existe" ou "nada a conferir" e absolve em silencio — o quinto fail-open
-      // desta semana tinha exatamente esta forma.
-      if (error) throw new Error(error.message);
+          // O `throw` e OBRIGATORIO, e o motivo foi MEDIDO em 05/09/2026 — a versao anterior
+          // deste comentario dizia que sem ele a conferencia "absolve em silencio", e isso
+          // estava errado. O que acontece de fato com `return data ?? []` e o oposto: `achados`
+          // vira lista vazia, nenhum id consta como existente, e TODOS os citados sao acusados
+          // de inexistentes — inclusive os reais. Uma falha transitoria de banco vira acusacao
+          // nominal contra um card verdadeiro.
+          //
+          // O pecado de raiz e o mesmo dos cinco fail-opens da semana (afirmar como conferido o
+          // que nao foi conferido), mas a direcao e outra, e a diferenca importa: sem o throw a
+          // camada gera falso positivo, e falso positivo e o que ensina o gestor a ignorar a
+          // linha. Com o throw, o caso vira `nao_conferido` e a nota diz "nao consegui conferir".
+          // Controle positivo em _prova_verificacao_pos_resposta.ts, bloco [8.2].
+          //
+          // A absolvicao silenciosa existiu, um nivel abaixo: no `catch { return [] }` do antigo
+          // `approvalIdsInexistentes`, onde lista vazia significava "nada inventado". Fechada.
+          if (error) throw new Error(error.message);
       return data ?? [];
     },
     buscarCards: async (ids) => {

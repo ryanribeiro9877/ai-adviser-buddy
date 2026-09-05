@@ -115,6 +115,13 @@ export function vereditoDe(v: unknown): Veredito {
 // esta implementado porque e o contrato e porque custa 20 linhas, mas ele e INERTE ate alguem
 // ligar a composicao. Isso e informacao, nao defeito: quem ligar a composicao nao precisa
 // voltar aqui.
+//
+// LEVADO AO GESTOR EM 05/09/2026, com a decisao registrada: NAO ligar agora. Fica sabido, e
+// nao pendente. Quem reabrir o assunto reabre por decisao nova, nao por descoberta.
+//
+// O traffic-agent-job tambem cai 100% em `llm`, e por um motivo mais forte: ele nunca importou
+// `resposta_canonica`. Sintese de job e sempre texto de modelo, entao nem existe bloco canonico
+// para recortar. `superficie: "job"` nao muda escopo nenhum — muda so o fecho da nota.
 
 export type CaminhoDaComposicao = "canonico" | "hibrido" | "llm";
 
@@ -202,7 +209,8 @@ export function escopoDaVerificacao(opts: {
 //       `nao_conferido` sumia (ver o comentario longo em aprovacoes.ts);
 //   (2) um ponto unico, com veredito registrado, em vez de embutido no meio de uma funcao que
 //       tambem reescreve prosa;
-//   (3) o gancho para o caminho que NAO tem guarda nenhum — ver "GANCHO" no fim do arquivo.
+//   (3) cobertura do caminho que NAO tinha guarda nenhum, o traffic-agent-job — ver o fim do
+//       arquivo, secao "A COLETA PROFUNDA".
 
 export async function conferirIdentificadores(opts: {
   /** Trecho no escopo de FABRICACAO. So ele pode ter inventado. */
@@ -583,6 +591,8 @@ export async function verificarAntesDeResponder(opts: {
    * chega ao gestor igual.
    */
   turnoVaiFechar?: boolean;
+  /** Muda so o fechamento da nota. Ver `SuperficieDaResposta`. Default `chat`. */
+  superficie?: SuperficieDaResposta;
   buscarIds: (ids: string[]) => Promise<Array<{ id?: unknown }> | null>;
   buscarCards?: (ids: string[]) => Promise<CardParaConferir[] | null>;
   validarContrato?: (acao: string, pedido: unknown) => Promise<VeredictoDoContrato | null>;
@@ -671,7 +681,11 @@ export async function verificarAntesDeResponder(opts: {
     conferencias,
     limpo,
     nota: notaDaVerificacao(conferencias, envelope, defeitos, {
-      jaAvisouIdentificador: MARCA_DO_AVISO_DE_ID.test(String(opts.texto ?? "")),
+      // Os DOIS marcadores: o do guarda do chat e o desta camada. O segundo e o que da
+      // idempotencia ao job, que reentra na escrita no segmento 2 e sem ele ganharia duas notas.
+      jaAvisouIdentificador: MARCA_DO_AVISO_DE_ID.test(String(opts.texto ?? "")) ||
+        MARCA_DA_NOTA_DE_ID.test(String(opts.texto ?? "")),
+      superficie: opts.superficie ?? "chat",
     }),
     defeito: defeitos.length ? defeitos.join(" | ") : null,
   };
@@ -689,11 +703,38 @@ export async function verificarAntesDeResponder(opts: {
 // lida quando aparece.
 
 /**
- * Marca estavel do aviso nominal de identificador. Fecha `avisoDeCardInventado` (chat) e a nota
- * desta camada na MESMA frase final, de proposito: e por ela que se sabe que a acusacao ja foi
- * feita, sem depender de qual caminho a fez.
+ * Marca estavel do aviso nominal do CHAT (`avisoDeCardInventado`). Serve para saber que a
+ * acusacao ja foi feita naquele caminho, sem depender de casar a prosa inteira.
  */
 export const MARCA_DO_AVISO_DE_ID = /get_aprovacoes antes de aprovar/i;
+
+/**
+ * Marca da nota DESTA camada. Existe separada da de cima porque a nota do job nao pode terminar
+ * na frase do chat (ver `superficie`), e sem uma marca propria a nota do job perderia a
+ * idempotencia — o job reentra na escrita no segmento 2 e ganharia duas notas.
+ */
+export const MARCA_DA_NOTA_DE_ID = /Identificador nao confirmado:/;
+
+/**
+ * Onde a resposta esta saindo. Muda SO o fechamento da nota, nunca o veredito.
+ *
+ * `chat`  pode emitir card, tem `get_aprovacoes`, e o gestor aprova ali. "Confira antes de
+ *         aprovar" e a acao certa.
+ * `job`   e SOMENTE LEITURA por construcao (`propose_action` nao existe no tier profundo, e
+ *         `get_aprovacoes` nao esta na lista de nenhum especialista — conferido em 05/09/2026).
+ *         Mandar o gestor "conferir em get_aprovacoes antes de aprovar" ali seria apontar para
+ *         uma ferramenta que aquela superficie nao tem e sugerir que existe algo para aprovar
+ *         quando nao existe. Uma camada que existe para impedir afirmacao nao conferida nao
+ *         pode fechar a propria nota com uma.
+ */
+export type SuperficieDaResposta = "chat" | "job";
+
+function fechamentoDaNota(superficie: SuperficieDaResposta): string {
+  return superficie === "job"
+    ? `Este tier e somente leitura e nao emite card, entao nao ha nada a aprovar: trate o ` +
+      `identificador como NAO existente e nao o use para agir no chat.`
+    : `Confira em get_aprovacoes antes de aprovar.`;
+}
 
 export function notaDaVerificacao(
   conferencias: Conferencia[],
@@ -708,24 +749,25 @@ export function notaDaVerificacao(
      * redacoes que fez `cortarClaimEmitidoSemCard` perder duas vezes para a prosa do modelo.
      */
     jaAvisouIdentificador?: boolean;
+    superficie?: SuperficieDaResposta;
   },
 ): string {
   const blocos: string[] = [];
+  const superficie = opts?.superficie ?? "chat";
   if (envelope) blocos.push(envelope);
 
   const ids = conferencias.find((c) => c.nome === "identificadores");
   if (ids?.veredito === "reprovado" && !opts?.jaAvisouIdentificador) {
-    // Esta linha e para a superficie que NAO tem o guarda do chat — hoje, o traffic-agent-job.
     blocos.push(
       `**Identificador nao confirmado: ${ids.itens.join(", ")}.** Nenhuma ferramenta devolveu ` +
         `esses identificadores nesta rodada e eles nao constam em approval_requests desta empresa. ` +
-        `Confira em get_aprovacoes antes de aprovar.`,
+        fechamentoDaNota(superficie),
     );
   } else if (ids?.veredito === "nao_conferido") {
     blocos.push(
       `_Nao consegui conferir se ${ids.itens.length === 1 ? "o identificador" : "os identificadores"} ` +
         `${ids.itens.join(", ")} ${ids.itens.length === 1 ? "existe" : "existem"} de verdade ` +
-        `(${ids.motivo}). Trate como NAO confirmado e confira em get_aprovacoes antes de aprovar._`,
+        `(${ids.motivo}). Trate como NAO confirmado. ${fechamentoDaNota(superficie)}_`,
     );
   }
 
@@ -778,37 +820,39 @@ export function linhaDeVerificacao(r: ResultadoDaVerificacao): Record<string, un
 }
 
 // ============================================================================
-// GANCHO PARA A COLETA PROFUNDA (traffic-agent-job) — NAO APLICADO
+// A COLETA PROFUNDA (traffic-agent-job) — APLICADO EM 05/09/2026
 // ============================================================================
 //
-// `traffic-agent-job/index.ts` grava resposta de assistente em cinco pontos e NAO TEM guarda
-// de identificador fabricado nenhum: nem `approvalIdsInventados`, nem
-// `cortarClaimEmitidoSemCard`, nem `avisoDeCardInventado` aparecem no arquivo (conferido por
-// busca em 04/09/2026). Esse e o "nao em todo caminho" do relatorio: o chat esta coberto desde
-// 01/09, o job nunca esteve.
+// O gancho que este arquivo descrevia esta ligado. Ele mora em `entregarResposta`, no
+// traffic-agent-job, que passou a ser o UNICO ponto do job que grava mensagem de assistente.
+// O que segue e o que a aplicacao corrigiu na propria descricao — nao repita o que estava aqui.
 //
-// NAO liguei lá porque o arquivo esta sob mudanca de outro agente (relogio da coleta profunda)
-// e um segundo editor no mesmo arquivo custa mais do que a espera. O gancho e este, e ele nao
-// depende de nada do chat:
+// (1) "GRAVA EM CINCO PONTOS" ESTAVA ERRADO. Eram TRES: sintese fresca, sintese da retomada de
+//     segmento e a mensagem de degradacao do `catch`. A contagem de cinco veio de casar
+//     `role: "assistant"` no arquivo inteiro, o que somou duas montagens de PROMPT
+//     (`messages.push({ role: "assistant", ... })`, usadas para o modelo continuar de onde
+//     parou) as gravacoes de verdade. Tres continua sendo tres chances de divergir; a correcao
+//     e do numero, nao do diagnostico. A prova [8.1] conta com a subtracao explicita para nao
+//     herdar o mesmo erro.
 //
-//     import { verificarAntesDeResponder } from "../_shared/verificacao_pos_resposta.ts";
+// (2) O `throw` E OBRIGATORIO, MAS NAO PELO MOTIVO QUE ESTAVA ESCRITO AQUI. Este bloco dizia que
+//     sem ele "a conferencia absolve em silencio". Medido em 05/09: e o contrario. Com
+//     `return data ?? []`, o erro vira lista vazia, nenhum id consta como existente e TODOS os
+//     citados sao acusados de inexistentes — inclusive os reais. Falha de banco vira acusacao
+//     nominal falsa. Continua sendo dar por conferido o que nao foi conferido, entao o `throw`
+//     continua obrigatorio; o que muda e a direcao do estrago, e ela importa, porque falso
+//     positivo e o que ensina o gestor a ignorar a linha. Controle positivo em [8.2].
 //
-//     const ver = await verificarAntesDeResponder({
-//       texto: relatorio, companyId, toolResults, cardsDaRodada: [], turnoVaiFechar: true,
-//       buscarIds: async (ids) => {
-//         const { data, error } = await supa.from("approval_requests")
-//           .select("id").eq("company_id", companyId).in("id", ids);
-//         if (error) throw new Error(error.message);   // <- o throw e obrigatorio: sem ele o
-//         return data ?? [];                           //    erro volta como lista vazia e a
-//       },                                             //    conferencia absolve em silencio.
-//     });
-//     if (ver.nota) relatorio = `${relatorio}\n\n${ver.nota}`;
+// (3) CONTRATO DO PEDIDO FICA FORA DO JOB, e por estrutura. `propose_action` nao existe la e
+//     `get_aprovacoes` nao esta na lista de nenhum dos 9 especialistas: sem card emitido,
+//     `cardsDaRodada` e sempre vazio e a conferencia nunca rodaria. Ligar mesmo assim nao daria
+//     seguranca e daria uma coisa pior — conferencia que nunca reprova parece vigilancia viva.
+//     A prova [8.7] falha se `propose_action` voltar ao job, forcando reavaliar isto.
 //
-// Duas observacoes para quem aplicar:
-//   - `propose_action` nao existe no job, entao `cardsDaRodada` e sempre vazio e a conferencia
-//     de contrato nao roda. Nao passe `buscarCards`/`validarContrato`: sem card, elas nao tem
-//     o que conferir e passar mais superficie nao acrescenta nada.
-//   - a nota vai no FIM do relatorio de proposito. Anexar no fim nunca move o offset do bloco
-//     canonico (que esta sempre em posicao 0), entao `conferirIntegridade` continua valendo
-//     depois desta anexacao. No inicio, moveria — e a integridade passaria a reprovar todo
-//     turno verificado.
+// (4) A COBERTURA PRECISOU DE CAPTURA, nao so de ligacao. O job nunca guardou retorno de
+//     ferramenta (`chat_messages.tool_results` e nulo nas 80 respostas historicas): no ponto de
+//     escrita nao existe mais o objeto que declarou `restantes`. A captura ficou no unico lugar
+//     onde o retorno existe como objeto — a linha seguinte ao `runTool` no laco do subagente —
+//     e sobe em `tel`, que e o que atravessa o checkpoint do segmento 2.
+//
+// (5) A NOTA MUDA DE FECHO POR SUPERFICIE (`superficie: "job"`). Ver `SuperficieDaResposta`.

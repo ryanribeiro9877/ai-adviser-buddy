@@ -32,8 +32,11 @@ import {
   envelopesDosRetornos,
   escopoDaVerificacao,
   linhaDeVerificacao,
+  MARCA_DA_NOTA_DE_ID,
   MARCA_DO_AVISO_DE_ID,
   MARCA_DO_ENVELOPE,
+  notaDaVerificacao,
+  textoDoEnvelope,
   verificarAntesDeResponder,
   vereditoDe,
 } from "./verificacao_pos_resposta.ts";
@@ -612,6 +615,222 @@ console.log("\n[7] a fonte do modulo nao contem idioma de aprovacao-por-ausencia
   );
   ok(/v\.valido\s*===\s*true/.test(src), "o contrato deixou de ser lido por igualdade com true");
   console.log(`  OK  6 idiomas perigosos ausentes, 2 afirmacoes positivas presentes`);
+}
+
+// ============================================================================
+// [8] O GANCHO NO traffic-agent-job
+// ============================================================================
+console.log("\n[8] o gancho no traffic-agent-job\n");
+
+const JOB_BRUTO = await Deno.readTextFile(
+  new URL("../traffic-agent-job/index.ts", import.meta.url),
+);
+
+/**
+ * O JOB PRECISA SER LIDO SEM COMENTARIO, PELA TERCEIRA VEZ NESTE ARQUIVO.
+ *
+ * O bloco [7] ja tinha aprendido isto no modulo, e a primeira rodada desta secao caiu de novo:
+ * o comentario que EXPLICA por que existe um so ponto de gravacao contem a string
+ * `role: "assistant"`, e a contagem somou a documentacao ao codigo. Prova que le fonte tem de
+ * ler codigo; se ela le prosa, o incentivo que ela cria e apagar a prosa.
+ *
+ * Recorta comentario de bloco tambem — os deste job sao `/** ... *\/`, que o recorte de linha
+ * do bloco [7] nao pega. O `[^\r\n]` continua obrigatorio pelo motivo documentado la: `.` nao
+ * casa `\r`, e neste checkout (Windows) o arquivo e CRLF.
+ */
+const JOB = JOB_BRUTO
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .split(/\r?\n/)
+  .map((l) => l.replace(/\/\/[^\r\n]*$/, ""))
+  .join("\n");
+
+{
+  // CONTROLE POSITIVO DO RECORTE: frase que so existe em comentario do job.
+  const SO_EM_COMENTARIO = "fail-open com nome bonito";
+  ok(JOB_BRUTO.includes(SO_EM_COMENTARIO), `o job perdeu o comentario ancora ("${SO_EM_COMENTARIO}")`);
+  ok(!JOB.includes(SO_EM_COMENTARIO), "o recorte de comentarios do job virou no-op: as contagens abaixo nao valem");
+  ok(JOB.includes("async function entregarResposta"), "o recorte comeu o codigo junto com os comentarios");
+}
+
+// 8.1 UM PONTO DE GRAVACAO. O job tinha TRES inserts de `role: "assistant"`, e o modo de falha
+//     de copia divergente e o que produziu "havia verificacao no chat, mas nao em todo caminho".
+//     Esta prova nao confere que a verificacao existe: confere que nao ha ONDE ela faltar.
+{
+  const inserts = [...JOB.matchAll(/from\("chat_messages"\)\s*\.?\s*\n?\s*\.insert\(/g)].length;
+  // Uma insercao de assistente (dentro de `entregarResposta`) + uma do turno do usuario.
+  ok(inserts === 2, `o job tem ${inserts} inserts em chat_messages; esperado 2 (1 assistente + 1 usuario)`);
+
+  /**
+   * A SUBTRACAO NAO E FRESCURA — ela e o defeito de medicao que originou esta tarefa.
+   *
+   * `role: "assistant"` aparece no job em dois papeis completamente diferentes: gravacao de
+   * resposta para o gestor, e construcao de PROMPT (`messages.push({ role: "assistant", ... })`,
+   * usado para mandar o modelo continuar de onde parou). Contar os dois juntos foi o que
+   * produziu a afirmacao "o job grava resposta em cinco pontos", que estava errada: eram tres
+   * gravacoes e duas montagens de prompt. Uma prova que repetisse a mesma contagem herdaria o
+   * mesmo erro e ficaria vermelha para sempre no codigo certo.
+   */
+  const pushesDePrompt = [...JOB.matchAll(/messages\.push\(\{\s*role:\s*"assistant"/g)].length;
+  const totalAssistente = [...JOB.matchAll(/role:\s*"assistant"/g)].length;
+  const gravacoes = totalAssistente - pushesDePrompt;
+  ok(
+    gravacoes === 1,
+    `o job escreve resposta de assistente em ${gravacoes} lugares (${totalAssistente} ocorrencias ` +
+      `menos ${pushesDePrompt} montagens de prompt); tem de ser 1, dentro de entregarResposta`,
+  );
+  // E o insert de assistente esta DENTRO do afunilamento, nao apenas sozinho em algum lugar.
+  const corpo = JOB.slice(JOB.indexOf("async function entregarResposta"));
+  const fim = corpo.indexOf("\n}\n");
+  ok(
+    corpo.slice(0, fim).includes('role: "assistant"'),
+    "o unico insert de assistente saiu de dentro de entregarResposta",
+  );
+  ok(
+    corpo.slice(0, fim).includes("verificarAntesDeResponder"),
+    "entregarResposta grava sem chamar a verificacao",
+  );
+  console.log(`  OK  1 ponto de gravacao de resposta, e a conferencia esta dentro dele`);
+}
+
+// 8.2 O `throw` OBRIGATORIO em buscarIds — CONTROLE POSITIVO.
+//
+//     CORRECAO DE UMA AFIRMACAO MINHA. Ao ligar isto no chat eu escrevi que sem o `throw`
+//     "o erro volta como lista vazia, a conferencia le 'nenhum id existe' e ABSOLVE em
+//     silencio". Rodando o caso, nao e o que acontece — e o comentario do chat foi corrigido
+//     junto com esta prova.
+//
+//     O que de fato acontece com `return data ?? []` e o inverso: `achados` vira `[]`, nenhum
+//     id consta em `existentes`, e TODOS os citados sao acusados de inexistentes — inclusive os
+//     REAIS. Uma falha transitoria de banco vira acusacao nominal contra um card verdadeiro.
+//     Nao e absolvicao, e falso positivo; mas continua sendo o mesmo pecado de raiz — afirmar
+//     como conferido o que nao foi conferido — e continua treinando o gestor a ignorar a linha.
+//
+//     A absolvicao em silencio existiu de verdade, mas UM NIVEL ABAIXO: no `catch { return [] }`
+//     do antigo `approvalIdsInexistentes`, onde lista vazia significava "nada inventado". Esse
+//     esta fechado e tem prova propria no bloco [1].
+{
+  const REAL_MAS_INCONFERIVEL = REAL;
+  const trecho = `Segue o card ${REAL_MAS_INCONFERIVEL} para sua analise.`;
+
+  const comThrow = await conferirIdentificadores({
+    trecho, companyId: EMPRESA,
+    buscar: async () => { throw new Error("timeout na consulta"); },
+  });
+  const semThrow = await conferirIdentificadores({
+    trecho, companyId: EMPRESA,
+    buscar: buscarVazio, // exatamente o `return data ?? []` de quem esqueceu o throw
+  });
+
+  ok(
+    comThrow.veredito === "nao_conferido",
+    `com throw o veredito foi "${comThrow.veredito}", esperado nao_conferido`,
+  );
+  ok(
+    semThrow.veredito === "reprovado" && semThrow.itens.includes(REAL_MAS_INCONFERIVEL),
+    "sem throw a falha de banco deixou de virar acusacao nominal — a prova perdeu o contraste",
+  );
+  ok(
+    comThrow.veredito !== semThrow.veredito,
+    "com e sem throw dao o MESMO veredito: o throw parou de mudar alguma coisa",
+  );
+  console.log(
+    `  OK  throw: nao_conferido ("nao consegui conferir") | sem throw: ${semThrow.veredito} ` +
+      `acusando um id que a falha impediu de conferir`,
+  );
+}
+
+// 8.3 O `throw` esta LA, na fonte do job. O bloco 8.2 prova que ele importa; este prova que ele
+//     nao sumiu. Sem os dois juntos, um refactor que troque o throw por `?? []` passa verde.
+{
+  const i = JOB.indexOf("buscarIds:");
+  ok(i > 0, "o job perdeu buscarIds: o guarda de identificador saiu do afunilamento");
+  const bloco = JOB.slice(i, i + 700);
+  const posThrow = bloco.search(/if\s*\(error\)\s*throw new Error\(error\.message\)/);
+  const posReturn = bloco.search(/return\s+data\s*\?\?\s*\[\]/);
+  ok(
+    posThrow >= 0,
+    "o throw obrigatorio sumiu de buscarIds no job: erro de banco volta como lista e vira acusacao falsa",
+  );
+  // A ORDEM e o que vale, nao a presenca. `return data ?? []` DEPOIS do throw e correto — e o
+  // caminho feliz. ANTES do throw, ou sem ele, o erro nunca chega em quem deveria trata-lo.
+  ok(
+    posReturn > posThrow,
+    "em buscarIds o `return data ?? []` esta antes do throw: o erro sai como lista e nao como falha",
+  );
+  console.log(`  OK  o throw obrigatorio esta presente em buscarIds do job`);
+}
+
+// 8.4 IDA E VOLTA DO ENVELOPE. O job nao guarda o retorno inteiro da ferramenta: guarda so o
+//     envelope, porque ele viaja dentro do checkpoint do segmento 2. Na hora de conferir, o
+//     envelope e remontado no formato de retorno. Se essa volta perder um campo, o job declara
+//     cobertura errada — com numero, que e pior que nao declarar.
+{
+  const original = envelopesDosRetornos([
+    { tool: "get_detalhe_anuncios", retorno: { exibidos: 20, total_anuncios: 46, restantes: 26 } },
+    { tool: "get_criativos_conteudo", retorno: { omitidos: 3, aviso_corte: "3 pecas sem legenda" } },
+  ]);
+  ok(original.length === 2, "o par de teste deixou de ser reconhecido como corte");
+
+  const remontado = envelopesDosRetornos(
+    original.map((e) => ({
+      tool: e.ferramenta,
+      retorno: {
+        exibidos: e.exibidos, total: e.total, restantes: e.restantes,
+        omitidos: e.omitidos, aviso_corte: e.aviso_corte,
+      },
+    })),
+  );
+  ok(
+    JSON.stringify(remontado) === JSON.stringify(original),
+    `a ida e volta do envelope perdeu informacao:\n    antes: ${JSON.stringify(original)}\n    depois: ${JSON.stringify(remontado)}`,
+  );
+  ok(
+    textoDoEnvelope(remontado).includes("46") && textoDoEnvelope(remontado).includes("26"),
+    "o envelope remontado perdeu os numeros que justificam a linha",
+  );
+  console.log(`  OK  envelope sobrevive a ida e volta pelo checkpoint, com os numeros`);
+}
+
+// 8.5 A NOTA DO JOB NAO MANDA USAR FERRAMENTA QUE O JOB NAO TEM. O tier profundo e somente
+//     leitura: `propose_action` nao existe la e `get_aprovacoes` nao esta na lista de nenhum
+//     especialista. Fechar a nota com "confira em get_aprovacoes antes de aprovar" seria a
+//     propria camada anti-alucinacao emitindo uma instrucao impossivel de cumprir.
+{
+  const conf: Awaited<ReturnType<typeof conferirIdentificadores>> = {
+    nome: "identificadores", veredito: "reprovado", motivo: "teste", itens: [INVENTADO],
+  };
+  const noJob = notaDaVerificacao([conf], "", [], { superficie: "job" });
+  const noChat = notaDaVerificacao([conf], "", [], { superficie: "chat" });
+
+  ok(!noJob.includes("get_aprovacoes"), "a nota do job manda o gestor abrir get_aprovacoes, que o job nao tem");
+  ok(!/antes de aprovar/i.test(noJob), "a nota do job sugere que ha algo a aprovar num tier que nao emite card");
+  ok(noJob.includes(INVENTADO), "a nota do job parou de nomear o identificador");
+  ok(noChat.includes("get_aprovacoes"), "a nota do chat perdeu a acao que o chat de fato oferece");
+  console.log(`  OK  a nota muda de fechamento por superficie, e nomeia o id nas duas`);
+}
+
+// 8.6 IDEMPOTENCIA NO JOB. O job reentra na escrita pelo segmento 2, com o texto do checkpoint.
+//     Sem uma marca propria desta camada, a segunda passagem anexaria a nota de novo — e a marca
+//     do chat (`get_aprovacoes antes de aprovar`) nao serve, porque a nota do job nao a contem.
+{
+  const conf: Awaited<ReturnType<typeof conferirIdentificadores>> = {
+    nome: "identificadores", veredito: "reprovado", motivo: "teste", itens: [INVENTADO],
+  };
+  const primeira = notaDaVerificacao([conf], "", [], { superficie: "job" });
+  ok(MARCA_DA_NOTA_DE_ID.test(primeira), "a nota desta camada perdeu a propria marca: a idempotencia do job morre com ela");
+  ok(!MARCA_DO_AVISO_DE_ID.test(primeira), "a marca do chat casou na nota do job — as duas viraram a mesma coisa");
+  const segunda = notaDaVerificacao([conf], "", [], { superficie: "job", jaAvisouIdentificador: true });
+  ok(!segunda.includes(INVENTADO), "a segunda passagem escreveu a acusacao de novo");
+  console.log(`  OK  marca propria presente; segunda passagem nao repete a acusacao`);
+}
+
+// 8.7 O CONTRATO DO PEDIDO NAO FOI LIGADO NO JOB, e isso e uma decisao com motivo estrutural.
+//     Se um dia `propose_action` entrar no tier profundo, esta prova cai e obriga a revisitar.
+{
+  ok(!/["']propose_action["']/.test(JOB), "propose_action apareceu no job: o tier deixou de ser somente leitura e o contrato do pedido precisa ser reavaliado");
+  ok(!/["']get_aprovacoes["']/.test(JOB), "get_aprovacoes apareceu no job: a nota por superficie precisa ser reavaliada");
+  ok(!JOB.includes("validarContrato:"), "validarContrato foi ligado no job sem que haja card para conferir");
+  console.log(`  OK  job segue somente leitura; contrato do pedido fica fora, por estrutura`);
 }
 
 // ============================================================================

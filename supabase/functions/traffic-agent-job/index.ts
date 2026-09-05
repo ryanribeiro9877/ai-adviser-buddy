@@ -3694,10 +3694,16 @@ async function entregarResposta(args: {
         .select("id")
         .eq("company_id", args.companyId)
         .in("id", ids);
-      // O `throw` e OBRIGATORIO. Sem ele o erro volta como `data: null`, a conferencia le
-      // "nenhum id existe" ou "nada a conferir" e ABSOLVE EM SILENCIO. Esse formato exato
-      // apareceu cinco vezes no sistema nesta semana. Ha controle positivo para ele em
-      // `_prova_verificacao_pos_resposta.ts`: se este `throw` sumir, a prova fica vermelha.
+      // O `throw` e OBRIGATORIO, pelo motivo MEDIDO em 05/09/2026 (bloco [8.2] da prova, que e
+      // controle positivo: se este throw sumir, a prova fica vermelha).
+      //
+      // Sem ele — `return data ?? []` — o erro de banco vira lista vazia, nenhum id consta como
+      // existente, e TODOS os identificadores citados sao acusados de inexistentes, inclusive os
+      // reais. Nao e absolvicao silenciosa: e acusacao falsa. O pecado de raiz e o mesmo (dar
+      // por conferido o que nao foi conferido), mas a consequencia pratica e pior de um jeito
+      // especifico — o gestor que recebe uma acusacao errada aprende a pular a linha, e a linha
+      // e o produto inteiro desta camada. Com o throw, o caso vira `nao_conferido` e a nota diz
+      // exatamente o que houve: nao consegui conferir.
       if (error) throw new Error(error.message);
       return data ?? [];
     },
