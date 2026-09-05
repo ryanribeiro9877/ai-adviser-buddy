@@ -484,6 +484,11 @@ import {
   type NivelMeta,
   type Reconciliacao,
 } from "../_shared/pipeboard.ts";
+import {
+  decidirEscritaNoAlvo,
+  NIVEL_PARA_ESPELHO,
+  type EspelhoDoAlvo,
+} from "../_shared/nivel_do_alvo.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -733,6 +738,36 @@ async function escreverAd(
     erro: r.erro,
     ok: r.ok && !!r.id,
   };
+}
+
+/**
+ * Pergunta ao espelho local em QUAIS niveis este id aparece nesta empresa. E a fonte
+ * deterministica da conferencia de alvo: nao depende da Graph estar de pe.
+ *
+ * Erro de consulta NAO pode voltar como lista vazia. Vazio significa "nao esta em nenhum nivel", e
+ * com a lista vazia a decisao seguinte perde a unica evidencia que teria; pior, se um dia o vazio
+ * virasse recusa, erro de banco passaria a acusar card bom. E a mesma forma que apareceu cinco
+ * vezes no sistema esta semana, vista pelo lado do falso positivo — por isso a falha e devolvida
+ * como falha, nomeada.
+ */
+async function consultarEspelhoDoAlvo(
+  alvoExt: string,
+  companyId: string,
+): Promise<EspelhoDoAlvo> {
+  const niveis: NivelMeta[] = [];
+  for (const nivel of ["campanha", "conjunto", "anuncio"] as NivelMeta[]) {
+    const tabela = NIVEL_PARA_ESPELHO[nivel];
+    const { data, error } = await supa
+      .from(tabela)
+      .select("id")
+      .eq("external_id", alvoExt)
+      .eq("company_id", companyId)
+      .eq("provider", "meta_ads")
+      .limit(1);
+    if (error) return { consultado: false, erro: `${tabela}: ${error.message}` };
+    if ((data ?? []).length > 0) niveis.push(nivel);
+  }
+  return { consultado: true, niveis };
 }
 
 async function escreverUpdate(
@@ -4965,6 +5000,65 @@ Deno.serve(async (req) => {
     const antes: { status: number; body: any } = camposAlvo
       ? await g(`/${alvoExt}?fields=${camposAlvo}`)
       : { status: 0, body: null };
+
+    // v5.61: FALHA DE LEITURA NAO BLOQUEAVA A ESCRITA. O `antes` acima e por nivel; quando o id e
+    // de outro nivel a Graph derruba a consulta INTEIRA com #100 — e o POST seguia igual para o id
+    // informado, entao um `pausar_criativo` apontado a uma campanha PAUSAVA A CAMPANHA. O sinal ja
+    // existia e estava sendo jogado fora: era so o `antes` virar envelope de erro e ninguem olhar.
+    // As guardas que existem (token de Ads por empresa, emissor resolvendo no espelho da propria
+    // empresa) contem o dano ao perimetro da empresa certa, mas nao ao objeto certo dentro dela.
+    //
+    // Aqui e o ponto unico: depois do portao de EXECUTAVEIS e antes de montar `post`, valendo para
+    // as doze acoes executaveis de uma vez. Nao e remendo nos contratos das quatro acoes semeadas
+    // em 05/09 — o contrato de campos confere PRESENCA de `target_external_id` e passa igual com id
+    // de outro objeto, e `target_name` obrigatorio da legibilidade a quem aprova, de proposito, nao
+    // recusa mecanica. Esta recusa nao depende de ninguem ler o card.
+    //
+    // Recusa so com evidencia POSITIVA de que o alvo e outro objeto. Rede, token e limite de taxa
+    // nao dizem nada sobre o objeto: tratar indisponibilidade como alvo errado trocaria um risco
+    // por uma paralisia. Ver _shared/nivel_do_alvo.ts e a prova em _prova_nivel_do_alvo.ts.
+    const espelhoDoAlvo = await consultarEspelhoDoAlvo(alvoExt, r.company_id);
+    const decisaoDoAlvo = nivelAlvo
+      ? decidirEscritaNoAlvo({ nivelDaAcao: nivelAlvo, espelho: espelhoDoAlvo, leitura: antes })
+      : null;
+    if (decisaoDoAlvo && !decisaoDoAlvo.escrever) {
+      await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+        motivo: decisaoDoAlvo.recusa,
+        detalhe: decisaoDoAlvo.detalhe,
+        acao,
+        nivel_da_acao: nivelAlvo,
+        alvo: alvoNome,
+        alvo_external_id: alvoExt,
+        espelho_do_alvo: espelhoDoAlvo,
+        leitura_do_alvo: { status: antes.status, erro: (antes.body as any)?.error ?? null },
+        driver_escrita: driver,
+      });
+      resultados.push({
+        id: r.id,
+        acao,
+        alvo: alvoNome,
+        resultado: "bloqueado",
+        motivo: decisaoDoAlvo.recusa,
+        detalhe: decisaoDoAlvo.detalhe,
+        driver_escrita: driver,
+      });
+      continue;
+    }
+    // Escreveu sem que nenhuma das duas fontes confirmasse o nivel. Nao recusa (seria fechar por
+    // indisponibilidade), mas tambem nao passa calado: sem esta linha o caso viraria o silencio de
+    // antes, com codigo novo em cima.
+    if (decisaoDoAlvo && decisaoDoAlvo.confirmado_por === "ninguem") {
+      await audit(r.company_id, sistema, "meta_action_alvo_nao_confirmado", r.id, {
+        acao,
+        nivel_da_acao: nivelAlvo,
+        alvo: alvoNome,
+        alvo_external_id: alvoExt,
+        declaracao: decisaoDoAlvo.declaracao,
+        espelho_do_alvo: espelhoDoAlvo,
+        leitura_do_alvo: { status: antes.status, erro: (antes.body as any)?.error ?? null },
+        driver_escrita: driver,
+      });
+    }
 
     let post: Record<string, string> | null = null;
     if (acao === "pausar_criativo" || acao === "pausar_campanha" || acao === "pausar_conjunto") {
