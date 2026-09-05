@@ -19,7 +19,13 @@
 // modelo (supported_efforts: low|medium|high|xhigh, default high) e o raciocinio dele e
 // OBRIGATORIO — `enabled:false` / effort "none" e RECUSADO pelo modelo. Por isso o esforco
 // sai daqui e nao de constante de edge: quem escolhe o modelo e quem sabe o que ele aceita.
-// bodyOpenRouter sobrepoe qualquer `reasoning` que a edge tenha mandado no extra.
+// bodyOpenRouter sobrepoe qualquer `reasoning` que a edge tenha mandado no extra — mas desde
+// 05/09/2026 ele sobrepoe DECLARANDO: o pedido do chamador sai em `reasoning_pedido` ao lado do
+// `esforco_raciocinio` aplicado, com `reasoning_sobreposto: true`, e um `console.warn` no log da
+// edge. Ver `bodyOpenRouter`.
+//
+// EXCECAO A "esforco por modo": tipos que FUNDEM material ja raciocinado nao sobem para `xhigh`
+// nem em job deep (`TIPOS_DE_FUSAO`). Medido em 05/09, ver o bloco daquela lista.
 //
 // CORRECAO do cabecalho antigo (valia ate 02/09): "Sem hop extra de LLM no chat sincrono" nao
 // e mais verdade. O commit do Gestor/Roteador inverteu isso: o chat chama o AG-01 antes do
@@ -163,6 +169,12 @@ export function tetoDeSaida(desejado?: number): number {
  *
  * `sintese`, `subagente`, `chat_loop` e `visao` NAO entram: e neles que a qualidade que o
  * gestor quer aparece.
+ *
+ * NOTA DE 05/09/2026: `sintese` continua fora DESTA lista — ela nao e triagem, o produto dela e
+ * a prosa que chega ao gestor. Mas ela deixou de subir para `xhigh`, por `TIPOS_DE_FUSAO` logo
+ * abaixo. As duas coisas nao se contradizem: aqui se decide se a tarefa e VEREDITO CURTO PARA
+ * CODIGO (nao e), la se decide se ela precisa da banda mais cara (nao precisa, e a medicao
+ * mostrou que com ela a resposta nao sai).
  */
 const TIPOS_DE_TRIAGEM: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
   "planner",
@@ -181,8 +193,46 @@ const TIPOS_INTERATIVOS: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
   "chat_loop",
 ]);
 
+/**
+ * Tipos que FUNDEM material que ja foi raciocinado — e por isso nao sobem para `xhigh`.
+ *
+ * DECISAO DE 05/09/2026, TOMADA CONTRA MEDICAO, e o bloco de cima (`sintese ... NAO entra`)
+ * era a decisao anterior. Ele nao estava errado quando foi escrito: o custo de `xhigh` na
+ * sintese era resposta MAIS CURTA. Hoje o custo e resposta NENHUMA, treze vezes seguidas.
+ *
+ * O QUE A MEDICAO DIZ. Em `job-v4.21`, com a coleta finalmente fechando (dois especialistas
+ * saindo `voluntario`, 25.465 e 29.321 tokens de relatorio), a sintese foi CENSURADA em 330s
+ * nas duas corridas — `sintese.ms` 330.004 e 330.003, o teto ao milissegundo, com
+ * `chars_visiveis: 0`. E nao e tamanho de entrada: 12.101 e 14.329 tokens contra 8.604 do
+ * regime magro que CONCLUIA em ~116s. Entrada 1,4x-1,7x maior, tempo >2,8x maior, zero token
+ * visivel. O que resta e o raciocinio, e ele estava medido: 5.254 tokens de raciocinio para
+ * 980 chars visiveis, ~5,4x mais raciocinio que texto.
+ *
+ * POR QUE ISSO NAO E "BAIXAR O ESFORCO DOS ESPECIALISTAS", que continua fechado: `subagente`
+ * NAO esta nesta lista e continua em `xhigh`. A coleta e quem descobre; ela ja provou que
+ * fecha assim e nao se toca. Quem desce e o ESCRITOR, que recebe conclusoes ja raciocinadas
+ * uma vez e as funde. Raciocinar de novo, do zero, sobre raciocinio pronto e o gasto que a
+ * medicao pegou.
+ *
+ * A parede nao resolve e nao ha para onde apela-la: 330s ja e o maior teto POR CHAMADA
+ * observavel, porque a invocacao da plataforma morre em ~400s. Mais parede nao da mais tempo
+ * a chamada.
+ *
+ * `high` continua sendo raciocinio de verdade — e o `ESFORCO_PADRAO` da casa, o mesmo com que
+ * a sintese do tier standard escreve. O que se abre mao e da banda mais cara, para a resposta
+ * existir. Se `high` convergir, o tempo medido dele e o primeiro numero real que
+ * `OPENROUTER_TIMEOUT_MS` tera para apertar em vez de ficar pinado no teto da plataforma.
+ */
+const TIPOS_DE_FUSAO: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
+  "sintese",
+]);
+
 export function ehTarefaDeTriagem(tipo: TipoTarefaLlm): boolean {
   return TIPOS_DE_TRIAGEM.has(tipo);
+}
+
+export function ehTarefaDeFusao(tipo: TipoTarefaLlm): boolean {
+  return TIPOS_DE_FUSAO.has(tipo);
 }
 
 export function ehTarefaInterativa(tipo: TipoTarefaLlm): boolean {
@@ -201,6 +251,12 @@ export type RotaLlm = {
   modo: ModoRaciocinio;
   /** Esforco aplicado no body. `null` = roteador nao dita (modo legado). */
   esforco: EsforcoRaciocinio | null;
+  /**
+   * O que o CHAMADOR pediu em `reasoning`, quando o roteador sobrepos. Preenchido por
+   * `bodyOpenRouter` — nao sai de `resolverChamadaLlm`, porque so na hora de montar o body e
+   * que existe um pedido para comparar. `undefined` = nao houve sobreposicao.
+   */
+  reasoningPedido?: unknown;
   /** O primario e o padrao da casa? `false` denuncia excecao de capacidade. */
   padraoDaCasa: boolean;
   sessionId?: string | null;
@@ -235,6 +291,12 @@ export function modoRaciocinio(
   // O teto do turno tambem vence o tier: um `chat_loop` marcado `deep` continua tendo 118s de
   // parede, e `xhigh` la significaria uma unica ida consumindo metade do orcamento do turno.
   if (opts.tipo && ehTarefaInterativa(opts.tipo)) return "interativo";
+  // A fusao tambem vence o tier, e pelo mesmo motivo das duas de cima: o material chega
+  // raciocinado. Vem ANTES do `profundo` explicito de proposito — um chamador que pede
+  // `profundo: true` esta dizendo "o job e profundo", nao "raciocine de novo o que ja foi
+  // raciocinado". Se algum dia a sintese precisar subir, isso passa a ser decisao desta lista
+  // e nao efeito colateral de uma flag de tier.
+  if (opts.tipo && ehTarefaDeFusao(opts.tipo)) return "padrao";
   if (typeof opts.profundo === "boolean") return opts.profundo ? "profundo" : "padrao";
   return opts.tier === "deep" ? "profundo" : "padrao";
 }
@@ -458,10 +520,36 @@ export function bodyOpenRouter(
     model: rota.model,
     ...extra,
   };
-  // O esforco do roteador VENCE o `reasoning` que a edge mandou no extra: as constantes das
-  // edges pedem orcamento em tokens ou desligam o raciocinio, e o padrao da casa nao aceita
-  // nenhum dos dois (raciocinio obrigatorio, controle so por effort).
-  if (rota.esforco) body.reasoning = { effort: rota.esforco };
+  /**
+   * O esforco do roteador VENCE o `reasoning` que a edge mandou no extra: as constantes das
+   * edges pedem orcamento em tokens ou desligam o raciocinio, e o padrao da casa nao aceita
+   * nenhum dos dois (raciocinio obrigatorio, controle so por effort).
+   *
+   * MAS VENCE DECLARANDO, desde 05/09/2026. Antes esta linha engolia o pedido em silencio, e
+   * foi assim que `chamarSinteseParte` passou semanas pedindo `REASONING_OFF` e rodando
+   * `xhigh` sem que nada no codigo nem na telemetria dissesse isso — quem lia o job via
+   * "raciocinio desligado" e a conta de tempo nao fechava por um fator de 5x. Sobreposicao
+   * muda de intencao declarada e a mesma patologia do portao que diz que avaliou quando parou
+   * no meio: o registro fica coerente consigo mesmo e mente sobre o que aconteceu.
+   *
+   * A FORMA ESCOLHIDA E TELEMETRIA, NAO ERRO. Erro seria mais forte, e foi considerado: hoje
+   * ha chamadores pedindo `enabled:false` em edges que este trabalho nao pode alterar, e
+   * derrubar producao para provar um ponto trocaria uma mentira por uma queda. Fica o par
+   * pedido/aplicado em `diagnosticoRota` e um aviso no log — quem auditar ve a divergencia sem
+   * precisar ler este arquivo.
+   */
+  if (rota.esforco) {
+    const pedido = (extra as { reasoning?: unknown }).reasoning;
+    const aplicado = { effort: rota.esforco };
+    if (pedido !== undefined && JSON.stringify(pedido) !== JSON.stringify(aplicado)) {
+      rota.reasoningPedido = pedido;
+      console.warn(
+        `[llm_roteador] reasoning do chamador sobreposto: tipo=${rota.tipo} modo=${rota.modo} ` +
+          `pedido=${JSON.stringify(pedido)} aplicado=${JSON.stringify(aplicado)}`,
+      );
+    }
+    body.reasoning = aplicado;
+  }
   if (rota.fallbacks.length) body.models = rota.fallbacks;
   if (rota.provider) body.provider = rota.provider;
   const sid = String(rota.sessionId ?? "").trim();
@@ -482,5 +570,10 @@ export function diagnosticoRota(rota: RotaLlm): Record<string, unknown> {
     modo_raciocinio: rota.modo,
     esforco_raciocinio: rota.esforco,
     padrao_da_casa: rota.padraoDaCasa,
+    // O par pedido/aplicado. Fora quando nao houve divergencia, para nao poluir toda linha com
+    // `null` — a presenca do campo E o sinal de que alguem pediu uma coisa e recebeu outra.
+    ...(rota.reasoningPedido !== undefined
+      ? { reasoning_pedido: rota.reasoningPedido, reasoning_sobreposto: true }
+      : {}),
   };
 }

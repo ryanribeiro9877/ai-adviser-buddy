@@ -2197,18 +2197,26 @@ async function chamarLLM(messages: any[], opts: {
     sessionId: opts.sessionId ?? JOB_SESSION_ID,
     tier: JOB_TIER,
   });
+  const payload: any = bodyOpenRouter(rota, {
+    messages,
+    max_tokens: rota.esforco ? Math.max(opts.maxTokens, MIN_TOKENS_COM_RACIOCINIO) : opts.maxTokens,
+    // O roteador SOBREPOE este campo (modo padrao = high, profundo = xhigh; e a `sintese` nao
+    // sobe para xhigh nem em job deep, por `TIPOS_DE_FUSAO`). O que o chamador pede aqui vale
+    // so no modo legado: o padrao da casa raciocina sempre e nao aceita orcamento em tokens
+    // nem enabled:false. Desde 05/09 a sobreposicao aparece em `reasoning_pedido`.
+    ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
+  });
+  // O registro vem DEPOIS de montar o body de proposito: e `bodyOpenRouter` que descobre se o
+  // pedido do chamador foi sobreposto, e antes dele `rota.reasoningPedido` ainda nao existe.
+  // Empilhar primeiro, como era, gravava a rota sem a divergencia — que e exatamente o dado
+  // que faltou para ver que a sintese pedia REASONING_OFF e rodava xhigh.
   JOB_LLM_ROTAS.push({
     tipo: rota.tipo, model: rota.model, faixa: rota.faixa, motivo: rota.motivo,
     // Sem isto nao da para auditar se a pesquisa profunda pensou mais que a padrao.
     esforco: rota.esforco,
-  });
-  const payload: any = bodyOpenRouter(rota, {
-    messages,
-    max_tokens: rota.esforco ? Math.max(opts.maxTokens, MIN_TOKENS_COM_RACIOCINIO) : opts.maxTokens,
-    // O roteador SOBREPOE este campo (modo padrao = high, profundo = xhigh). O que o
-    // chamador pede aqui vale so no modo legado: o padrao da casa raciocina sempre e nao
-    // aceita orcamento em tokens nem enabled:false.
-    ...(opts.reasoning ? { reasoning: opts.reasoning } : {}),
+    ...(rota.reasoningPedido !== undefined
+      ? { reasoning_pedido: rota.reasoningPedido, reasoning_sobreposto: true }
+      : {}),
   });
   if (opts.tools?.length) { payload.tools = opts.tools; payload.tool_choice = "auto"; }
   const timeoutMs = opts.timeoutMs ?? OPENROUTER_TIMEOUT_MS;

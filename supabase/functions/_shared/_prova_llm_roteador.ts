@@ -5,6 +5,7 @@ import { acharModelo, atendeCapacidade, CATALOGO_ECONOMIA, CATALOGO_PREMIUM, CAT
 import {
   bodyOpenRouter,
   diagnosticoRota,
+  ehTarefaDeFusao,
   ehTarefaDeTriagem,
   ehTarefaInterativa,
   esforcoDoModo,
@@ -81,8 +82,18 @@ assert(visao.fallbacks[0] === "google/gemini-2.5-flash", `preferido antigo deve 
 // semanas afirmando isso. Com as faixas ainda sendo medidas, literal aqui e manutencao a cada
 // reajuste — o que se afirma e a REGRA, nao o valor de hoje.
 // ---------------------------------------------------------------------------
+// `fusao` e a terceira natureza (05/09/2026): tipos que fundem material ja raciocinado e por
+// isso NAO sobem para xhigh em job deep. Ela entra aqui pela mesma porta das outras duas —
+// perguntando o predicado — para que reajuste de banda nao vire manutencao de prova. O modo que
+// ela devolve e `padrao`, e quem afirma isso e o roteador, nao esta linha.
 const modoNatural = (tipo: TipoTarefaLlm): ModoRaciocinio | null =>
-  ehTarefaDeTriagem(tipo) ? "triagem" : ehTarefaInterativa(tipo) ? "interativo" : null;
+  ehTarefaDeTriagem(tipo)
+    ? "triagem"
+    : ehTarefaInterativa(tipo)
+    ? "interativo"
+    : ehTarefaDeFusao(tipo)
+    ? "padrao"
+    : null;
 
 for (const tipo of TIPOS) {
   const natural = modoNatural(tipo);
@@ -120,9 +131,36 @@ for (const tipo of TIPOS) {
 // continuando verde. O contrato so esta provado se os tres casos existirem de verdade.
 assert(TIPOS.some(ehTarefaDeTriagem), "nenhum tipo de triagem em TIPOS: 'natureza vence tier' nao foi exercido");
 assert(TIPOS.some(ehTarefaInterativa), "nenhum tipo interativo em TIPOS: 'natureza vence tier' nao foi exercido");
+assert(TIPOS.some(ehTarefaDeFusao), "nenhum tipo de fusao em TIPOS: 'fusao nao sobe para xhigh' nao foi exercido");
 assert(
   TIPOS.some((t) => modoNatural(t) === null),
   "nenhum tipo neutro em TIPOS: a promocao por tier deep nao foi exercida",
+);
+
+// A REGRA da decisao de 05/09, afirmada como regra e nao como valor: tier deep NAO promove quem
+// funde. Comparar deep com standard prova isso sem escrever "high" — se um dia a banda da casa
+// mudar, esta linha continua valendo; se alguem religar a promocao da sintese, ela cai.
+for (const tipo of TIPOS.filter(ehTarefaDeFusao)) {
+  const deep = resolverChamadaLlm({ tipo, tier: "deep" });
+  const std = resolverChamadaLlm({ tipo, tier: "standard" });
+  assert(
+    deep.esforco === std.esforco,
+    `${tipo}: tier deep promoveu quem funde (deep=${deep.esforco}, standard=${std.esforco})`,
+  );
+  assert(
+    deep.esforco !== esforcoDoModo("profundo"),
+    `${tipo}: esforco de fusao igualou o do modo profundo (${deep.esforco}) — a fusao voltou a subir`,
+  );
+  // E o que NAO muda: a fusao continua na rede premium. A decisao foi baixar o RACIOCINIO, nao
+  // rebaixar o modelo de quem escreve para o gestor.
+  assert(deep.faixa === "premium", `${tipo}: fusao deveria seguir premium, veio ${deep.faixa}`);
+}
+
+// E o subagente, que e o que NAO desce, continua subindo. Sem esta linha a mudanca de cima
+// poderia ter levado a coleta junto e a prova ficaria verde.
+assert(
+  resolverChamadaLlm({ tipo: "subagente", tier: "deep" }).esforco === esforcoDoModo("profundo"),
+  "subagente deep deixou de usar o esforco profundo: a coleta nao entra na decisao de fusao",
 );
 
 // O esforco entra no body como effort (unico controle que o padrao da casa aceita) e
@@ -166,6 +204,45 @@ assert(
   String(diag.motivo_rota).includes(`raciocinio ${esforcoDoModo(modoSinteseDeep)}`),
   `motivo declara o esforco: ${diag.motivo_rota}`,
 );
+
+// ---------------------------------------------------------------------------
+// 2b. A sobreposicao de `reasoning` tem de DECLARAR (05/09/2026).
+//
+// O roteador vencer o chamador esta certo; vencer em silencio nao. `chamarSinteseParte` pediu
+// `REASONING_OFF` por semanas e rodou `xhigh`, e nada no codigo nem na telemetria dizia isso —
+// quem lia o job via "raciocinio desligado" e a conta de tempo errava por 5x. Estas linhas
+// prendem o par pedido/aplicado.
+// ---------------------------------------------------------------------------
+{
+  const rota = resolverChamadaLlm({ tipo: "sintese", tier: "deep" });
+  const b = bodyOpenRouter(rota, { max_tokens: 8, reasoning: { enabled: false } });
+  // O aplicado continua sendo o do roteador: declarar nao e ceder.
+  assert(
+    JSON.stringify(b.reasoning) === JSON.stringify({ effort: rota.esforco }),
+    `sobreposicao deve continuar vencendo: ${JSON.stringify(b.reasoning)}`,
+  );
+  const d = diagnosticoRota(rota);
+  assert(d.reasoning_sobreposto === true, "sobreposicao silenciosa: falta reasoning_sobreposto na telemetria");
+  assert(
+    JSON.stringify(d.reasoning_pedido) === JSON.stringify({ enabled: false }),
+    `telemetria deve guardar o pedido do chamador: ${JSON.stringify(d.reasoning_pedido)}`,
+  );
+}
+{
+  // Sem divergencia, sem campo: a PRESENCA do par e que sinaliza. Se aparecesse sempre, viraria
+  // ruido e ninguem repararia no dia em que importa.
+  const rota = resolverChamadaLlm({ tipo: "sintese", tier: "deep" });
+  bodyOpenRouter(rota, { max_tokens: 8, reasoning: { effort: rota.esforco } });
+  const d = diagnosticoRota(rota);
+  assert(!("reasoning_sobreposto" in d), "pedido igual ao aplicado nao e sobreposicao");
+  assert(!("reasoning_pedido" in d), "pedido igual ao aplicado nao deveria virar campo");
+}
+{
+  // Chamador que nao pede nada tambem nao e sobreposicao — a maioria das edges esta aqui.
+  const rota = resolverChamadaLlm({ tipo: "subagente", tier: "deep" });
+  bodyOpenRouter(rota, { max_tokens: 8 });
+  assert(!("reasoning_sobreposto" in diagnosticoRota(rota)), "ausencia de pedido nao e sobreposicao");
+}
 
 // ---------------------------------------------------------------------------
 // 3. Modo legado continua respeitado (escape do gestor).
@@ -216,11 +293,17 @@ try {
 }
 assert(tetoDeSaida(900) === MAX_TOKENS_PISO_RACIOCINIO, "fora do legado, o piso volta a valer");
 
+// Os dois rotulos antigos (`esforco_padrao`/`esforco_profundo`) mentiam depois que as naturezas
+// nasceram: o primeiro lia um `chat_loop`, que e INTERATIVO, e o segundo uma `sintese` deep, que
+// desde 05/09 nao e mais profunda. Resumo que rotula errado e pior que resumo ausente — foi assim
+// que "raciocinio desligado" ficou escrito num caminho que rodava xhigh. Agora cada linha diz de
+// quem ela fala, e o subagente aparece ao lado justamente para mostrar que a coleta NAO desceu.
 console.log("ok llm_roteador", {
   padrao: MODELO_PADRAO,
   tipos_conferidos: TIPOS.length,
-  esforco_padrao: chat.esforco,
-  esforco_profundo: deepSint.esforco,
+  esforco_chat_loop: chat.esforco,
+  esforco_sintese_deep: deepSint.esforco,
+  esforco_subagente_deep: resolverChamadaLlm({ tipo: "subagente", tier: "deep" }).esforco,
   rede_chat: chat.fallbacks,
   piso_max_tokens: MAX_TOKENS_PISO_RACIOCINIO,
 });
