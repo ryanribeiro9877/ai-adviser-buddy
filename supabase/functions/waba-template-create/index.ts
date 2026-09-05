@@ -199,14 +199,47 @@ ${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"`
       // 05/09/2026: 1.500 nao era folga — era menos que o MINIMO de saida medido do padrao da
       // casa (1.248) e pouco mais da metade do p50 (2.609). O teto passa a vir do piso do
       // roteador, que e onde a medicao mora.
+      //
+      // ESTE TETO NAO TEM LASTRO DE TRAFEGO DESTA EDGE, e quem ler depois precisa saber.
+      // O piso foi medido em chat_messages, ou seja no CHAT e no JOB — nao aqui. waba_template_creations
+      // tem 2 linhas, ambas de 29/07/2026, as duas anteriores ao padrao unico: tokens_out de 24
+      // (aprovado) e 345 (reprovado). Nenhuma passou por raciocinio obrigatorio. Portanto o
+      // numero acima e uma TRANSPOSICAO de medicao alheia, defensavel porque o modelo e o mesmo
+      // e o piso e generoso, mas nao e observacao deste redator.
+      //
+      // O QUE CONFERIR NA PRIMEIRA CRIACAO REAL depois desta mudanca, em
+      // waba_template_creations.redator_meta.tokens: se `completion_tokens` chegar perto de 8.000,
+      // o teto voltou a ser a restricao e o piso precisa subir de novo; se `finish_reason` vier
+      // `length`, o JSON foi cortado e o 502 de "redator nao devolveu JSON valido" esta mentindo
+      // sobre a causa. Um template de UTILITY tem ~150 tokens de texto: qualquer completion muito
+      // acima disso e raciocinio, e e o raciocinio que dimensiona este numero.
       max_tokens: tetoDeSaida(), reasoning: { enabled: false },
       messages: [{ role: "system", content: sys }, { role: "user", content: `Objetivo do template: ${objetivo}` }],
     })),
   });
   const rj = await rl.json().catch(() => null);
+  const finishRedator = String(rj?.choices?.[0]?.finish_reason ?? "");
+  const raciocinioRedator = Number(rj?.usage?.completion_tokens_details?.reasoning_tokens ?? 0);
   const bruto = String(rj?.choices?.[0]?.message?.content ?? "").trim().replace(/^```json|```$/g, "").trim();
   let red: any = null; try { red = JSON.parse(bruto); } catch { /* */ }
-  if (!red?.body_text) return json({ error: "redator não devolveu JSON válido", bruto: bruto.slice(0, 300) }, 502);
+  // "Nao devolveu JSON valido" era a unica explicacao possivel para tres defeitos diferentes:
+  // redator ruim, HTTP de erro e TETO CORTADO NO MEIO. Os numeros abaixo separam o terceiro dos
+  // outros — sem eles, quem investigar a primeira falha real desta edge vai atras do prompt
+  // quando o problema e orcamento.
+  if (!red?.body_text) {
+    return json({
+      error: "redator não devolveu JSON válido",
+      http: rl.status,
+      finish_reason: finishRedator || null,
+      reasoning_tokens: raciocinioRedator,
+      completion_tokens: rj?.usage?.completion_tokens ?? null,
+      teto_pedido: tetoDeSaida(),
+      diagnostico: finishRedator === "length"
+        ? "finish_reason=length: o teto cortou a resposta antes do JSON fechar. NAO e defeito do prompt — o piso de max_tokens precisa subir."
+        : "a resposta chegou completa e nao era JSON utilizavel.",
+      bruto: bruto.slice(0, 300),
+    }, 502);
+  }
   const bodyText = String(red.body_text);
   const exemplos: string[] = Array.isArray(red.exemplos) ? red.exemplos.map(String) : [];
   const nVars = [...bodyText.matchAll(/\{\{\d+\}\}/g)].length;
@@ -241,7 +274,16 @@ ${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"`
     const { data: ins } = await supa.from("waba_template_creations").insert({
       company_id: comp.id, target_waba_id: alvo, template_name: nome, language, category: categoria,
       objetivo, components: componentes,
-      redator_meta: { model: rota.model, tokens: rj?.usage ?? null, faixa: rota.faixa },
+      // finish_reason e reasoning_tokens ficam gravados tambem no caminho de SUCESSO: e a unica
+      // forma de descobrir que este teto virou aperto ANTES de ele cortar uma criacao real.
+      redator_meta: {
+        model: rota.model,
+        tokens: rj?.usage ?? null,
+        faixa: rota.faixa,
+        finish_reason: finishRedator || null,
+        reasoning_tokens: raciocinioRedator,
+        teto_pedido: tetoDeSaida(),
+      },
       guardiao: { deterministico: errosA, compliance: compl, aprovado: !reprovado },
       status: reprovado ? "reprovado_guardiao" : "rascunho",
       dry_run: true, requested_by: actor,
