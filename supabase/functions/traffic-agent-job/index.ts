@@ -319,6 +319,12 @@ import {
   montarFerramentas,
   retornoComDoutrina,
 } from "../_shared/ferramentas.ts";
+import {
+  type EnvelopeDeCobertura,
+  envelopesDosRetornos,
+  linhaDeVerificacao,
+  verificarAntesDeResponder,
+} from "../_shared/verificacao_pos_resposta.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -399,7 +405,32 @@ const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? 
 // O que 480s CUSTA: o gestor espera ate 8 min por uma pesquisa profunda em vez de 6,5. E o preco
 // de manter `xhigh` e o relatorio cheio — com 390s so cabia a versao faminta, que devolvia
 // preambulo de 84 chars quando concluia e `sintese_vazia` quando nao concluia.
-const GLOBAL_WALL_MS = 480_000;     // 8 min desde created_at do job (parede de POLITICA, ver acima)
+/**
+ * 05/09/2026 — RODADA DE MEDICAO AUTORIZADA: SOLTAR COM FOLGA, MEDIR, APERTAR DE VOLTA.
+ *
+ * O gestor leu a conta do bloco de `SINT_RESERVA_MS` e autorizou a alavanca da parede, com uma
+ * sequencia explicita: soltar com folga DELIBERADA, medir quanto a sintese leva com coleta farta
+ * sem ser interrompida, e depois voltar os tres tetos para o MEDIDO MAIS MARGEM. A parede grande
+ * NAO e o estado final; e o instrumento para observar um numero que hoje e so um piso.
+ *
+ * OS TRES TETOS SOBEM JUNTOS, e nao e escolha estetica: `GLOBAL_WALL_MS` da o tempo total,
+ * `SINT_FASE_HARD_MS` limita a FASE de sintese e `OPENROUTER_TIMEOUT_MS` limita CADA chamada. Subir
+ * so a parede deixa a sintese capada em 160s; subir so os tetos da sintese deixa a parede cortar
+ * antes. Foi exatamente esse desacoplamento que fez `2ffb4d4` gastar 75s de pista da coleta
+ * comprando tempo que a sintese nao podia usar.
+ *
+ * POR QUE 900s E NAO 520s. O unico dado que existe sobre a sintese com coleta farta e que ela
+ * morreu em TODOS os tetos ja concedidos, de 19s a 200s. 200s nao e "quase o numero", e o maior
+ * teto que ela ja recebeu antes de ser morta. Dimensionar a folga como 200s + margem repetiria a
+ * rodada com medicao censurada de novo. 900s existe para a PRIMEIRA medicao voltar com um numero
+ * de verdade; ele volta para o medido + margem na rodada seguinte.
+ *
+ * ESTADO ESPERADO DEPOIS DA MEDICAO: parede ~= coleta medida + reinvocacao + sintese medida +
+ * margem. Se a medicao voltar censurada tambem em 330s por chamada, a conclusao muda de lugar: a
+ * sintese nao cabe em UMA chamada de plataforma (~400s por invocacao) e o caminho passa a ser
+ * `sintetizarSegmentada`/`SINT_MAX_PARTES`, nao mais parede.
+ */
+const GLOBAL_WALL_MS = 900_000;     // FOLGA DE MEDICAO (era 480s). Aperta para o medido + margem.
 // 270s, e a tentativa de subir para 370s esta MEDIDA e descartada — fica registrada para nao ser
 // refeita. A hipotese era boa: `prazo()` e o MINIMO entre invocacao e parede, entao 270s prende
 // `prazo()` em ~260s e o teto por chamada (`tetoDaChamada`, que reserva 195s) cai para ~65s, o
@@ -420,7 +451,14 @@ const GLOBAL_WALL_MS = 480_000;     // 8 min desde created_at do job (parede de 
 // A conta completa e o que falta para fechar estao no bloco de `SINT_RESERVA_MS`. Leia antes de
 // subir este numero: sem parede maior, subir aqui troca "resposta curta" por "erro", que e
 // exatamente o que o gestor pediu para nao acontecer.
-const JOB_LIMIT_MS = 270_000;       // teto por invocacao (ainda limitado pelo global)
+// 05/09/2026: SOBE PARA 350s, e agora a subida e utilizavel porque vem JUNTO da separacao das
+// fases (ver `separarSintese`). O registro acima diz que 370s "soltou DEMAIS" e a sintese estourou
+// — verdade, mas ali coleta e sintese dividiam a MESMA invocacao, entao a coleta se expandia sobre
+// o orcamento da escrita. Com a sintese em segmento proprio nao existe orcamento da escrita para
+// invadir nesta invocacao: a coleta pode ocupar a invocacao inteira menos o pedagio, porque o que
+// protege a sintese passou a ser a PAREDE (item (a)). 350s deixa ~50s de margem para o overhead da
+// plataforma nos ~400s por invocacao; nao encoste mais que isso.
+const JOB_LIMIT_MS = 350_000;       // teto por invocacao (ainda limitado pelo global)
 const RESERVA_FINAL_MS = 10_000;
 // 150s, nao 75s: a sintese `xhigh` com relatorio cheio na entrada leva 121,9s medidos. Com 75s
 // ela era cortada no meio e voltava `sintese_vazia` — o erro que quebrou o deep em producao.
@@ -649,7 +687,15 @@ const STANDARD_OPENROUTER_TIMEOUT_MS = 60_000;
 // `xhigh` em 121,9s. Com 75s TODA chamada do caminho profundo era cortada, e o corte tem
 // assinatura no banco — os especialistas voltavam `finish: erro_llm` com ~400 a 1.000 tokens
 // visiveis em vez dos ~4.000 a 7.700 que entregam quando terminam.
-const OPENROUTER_TIMEOUT_MS = 150_000;
+// 05/09/2026 — SOBE PARA 330s COMO FOLGA DE MEDICAO (ver `GLOBAL_WALL_MS`). Este e o teto POR
+// CHAMADA, e era ele que carimbava `openrouter_timeout_150000`. Fica abaixo dos ~400s por invocacao
+// da plataforma de proposito: nao existe teto por chamada observavel acima disso, porque o worker
+// morre antes. Se a sintese com coleta farta tambem for censurada em 330s, o problema deixa de ser
+// parede e passa a ser que a sintese nao cabe numa chamada so.
+// Vale para coleta e sintese: os dois usam `cap.openRouterTimeoutMs` no deep. Para a coleta o
+// numero e teto de aborto, nao alvo — o especialista devolve quando termina, e quem limita a pista
+// dele e a reserva (ver `tetoDaChamada`).
+const OPENROUTER_TIMEOUT_MS = 330_000;
 const LITE_DEVOLUCOES_MAX = 0;
 const STANDARD_DEVOLUCOES_MAX = 0;
 // deep usa DEVOLUCOES_MAX (0 em v4.0)
@@ -910,7 +956,10 @@ async function enriquecerEscopoComDatas(companyId: string, escopo: EscopoPedido)
 // v4.0: 90s — cabe no teto de 5 min com coleta magra.
 // 160s: precisa ser MAIOR que OPENROUTER_TIMEOUT_MS (150s), senao o teto duro da fase mata a
 // chamada de sintese antes de ela poder usar o proprio orcamento.
-const SINT_FASE_HARD_MS = 160_000;
+// 05/09/2026 — 345s, mantendo a MESMA invariante contra os 330s novos por chamada. A regra
+// "fase > chamada" e o que impede o teto da fase de virar o carrasco silencioso: se os dois forem
+// iguais, a chamada morre por conta da fase e a assinatura culpa o provider.
+const SINT_FASE_HARD_MS = 345_000;
 // Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
 const SINT_CHARS_SEGMENTAR = 70_000;
 const SINT_COOLDOWN_POS_429_MS = 6_000;
@@ -2371,6 +2420,8 @@ REGRAS: todo numero vem de ferramenta CHAMADA AGORA; distinga zero / nao existe 
 Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, terminando com 'LACUNAS:' (ou 'nenhuma').`;
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
+  // Cortes declarados pelas ferramentas deste especialista. Sobe no retorno para virar `tel.cortes`.
+  const cortes: EnvelopeDeCobertura[] = [];
   let tin = 0, tout = 0, reas = 0, relatorio = "", finish = "";
   // Guarda a falha em vez de deixa-la virar "relatorio". Ver relatorioCompleto no fim da funcao:
   // sem isto, um especialista que morreu no timeout era contabilizado como coleta bem-sucedida.
@@ -2463,6 +2514,20 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
         let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
         const result = await runTool(nomeTc, args, ctx);
         usadas.push(nomeTc);
+        /**
+         * CAPTURA DO CORTE — aqui e o unico lugar do job em que um retorno de ferramenta existe
+         * como OBJETO. Uma linha abaixo ele vira string dentro de `messages`, e a partir dali o
+         * `restantes: 12` que a ferramenta declarou so poderia ser recuperado por regex em prosa.
+         *
+         * Por isso a captura e aqui e nao perto da escrita: no ponto de escrita nao ha mais o que
+         * capturar. E por isso ela usa `envelopesDosRetornos`, e nao um teste proprio de
+         * `restantes > 0`: "o que conta como corte" precisa ter UMA definicao, a mesma que o chat
+         * usa. Um segundo teste aqui divergiria do primeiro na primeira ferramenta nova.
+         *
+         * Guardamos so o envelope, nunca o retorno inteiro: ele viaja em `tel` ate a escrita e,
+         * no tier profundo, dentro do checkpoint do segmento 2.
+         */
+        for (const env of envelopesDosRetornos([{ tool: nomeTc, retorno: result }])) cortes.push(env);
         // A doutrina de uso entra colada ao retorno, e so aqui: e o unico ponto do fluxo em
         // que a ferramenta comprovadamente rodou. Fora daqui ela seria contexto pago a toa.
         messages.push({ role: "tool", tool_call_id: tc.id,
@@ -2572,7 +2637,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   if (!houveRelatorioReal) partes = 0;
   if (!relatorio) relatorio = `(subagente ${nome}: sem relatorio - registre como lacuna do job)`;
   return {
-    nome, relatorio, completo: relatorioCompleto, partes, tools: usadas,
+    nome, relatorio, completo: relatorioCompleto, partes, tools: usadas, cortes,
     tokens_in: tin, tokens_out: tout, reasoning_tokens: reas, finish, erro: erroLlm,
     // Fatos de ORCAMENTO da coleta. Sao o que permite responder "qual recurso apertou" sem
     // reinterpretar strings: motivo de saida limpo, quantas iteracoes de 6 foram usadas, quanto do
@@ -3565,6 +3630,101 @@ async function pushProgresso(jobId: string, fase: string, detalhe: string) {
   await supa.from("chat_jobs").update({ progresso: arr }).eq("id", jobId);
 }
 
+// ============================================================================================
+// ENTREGA DA RESPOSTA — o unico ponto do job que escreve mensagem de assistente.
+// ============================================================================================
+//
+// POR QUE UM SO. Antes desta funcao havia TRES `insert` de `role: "assistant"` neste arquivo:
+// sintese do caminho fresco, sintese da retomada de segmento e mensagem de degradacao do
+// `catch`. Tres escritas e tres chances de a conferencia existir em duas delas. O modo de falha
+// nao e hipotetico: este mesmo repositorio ja tinha guarda de identificador no chat "mas nao em
+// todo caminho", e foi assim que 9 UUIDs inexistentes chegaram ao gestor sem sinal nenhum.
+// Copia que diverge nao avisa que divergiu — ela simplesmente deixa passar, e so no caminho que
+// alguem esqueceu.
+//
+// Nao ha parametro para PULAR a conferencia, e isso e deliberado. Um `conferir: false` seria um
+// fail-open com nome bonito: bastaria alguem passar `true` no caminho errado para o portao sumir
+// sem deixar rastro. O caminho de erro passa por aqui igual aos outros; o que ele passa de
+// diferente sao os DADOS (ver `cortes` na chamada de la), nunca a dispensa da conferencia.
+//
+// A nota vai no FIM. `fidelidadeDaColeta` ja rodou sobre o texto do modelo nos chamadores, e
+// deve continuar rodando sobre ELE: a nota nao e conteudo coletado, e mede-la como se fosse
+// contaminaria a unica metrica de aproveitamento de coleta que este projeto aceita.
+async function entregarResposta(args: {
+  convId: string;
+  companyId: string;
+  texto: string;
+  tel: any;
+  finishReason: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  /**
+   * Cortes declarados pelas ferramentas nesta execucao. Vem explicito, e nao lido de `tel` aqui
+   * dentro, porque o caminho de erro precisa passar `[]` por um motivo que so o chamador conhece.
+   */
+  cortes: EnvelopeDeCobertura[];
+  diagnosticoExtra?: Record<string, unknown>;
+}): Promise<void> {
+  const verif = await verificarAntesDeResponder({
+    texto: args.texto,
+    companyId: args.companyId,
+    superficie: "job",
+    // O job nao continua turno depois de escrever: quando chega aqui, acabou. Segmento 2 nao e
+    // excecao — ele reentra por `processarJob`, e a escrita dele tambem e final.
+    turnoVaiFechar: true,
+    // Reconstroi o formato que `envelopesDosRetornos` le. Guardamos o envelope (compacto) em vez
+    // do retorno inteiro porque ele viaja dentro do checkpoint; a volta e estavel e esta provada
+    // em `_prova_verificacao_pos_resposta.ts` ("ida e volta do envelope").
+    toolResults: args.cortes.map((e) => ({
+      tool: e.ferramenta,
+      retorno: {
+        exibidos: e.exibidos, total: e.total, restantes: e.restantes,
+        omitidos: e.omitidos, aviso_corte: e.aviso_corte,
+      },
+    })),
+    // CONTRATO DO PEDIDO NAO ENTRA AQUI, e isso e uma conclusao, nao um esquecimento. O tier
+    // profundo e somente leitura por construcao: `propose_action` nao existe neste arquivo e
+    // `get_aprovacoes` nao esta na lista de ferramenta de nenhum dos 9 especialistas. Sem card
+    // emitido, `cardsDaRodada` seria sempre vazio e a conferencia de contrato nunca rodaria.
+    // Passar `validarContrato` mesmo assim nao daria seguranca nenhuma e daria uma coisa pior:
+    // uma conferencia que nunca reprova parece vigilancia funcionando.
+    buscarIds: async (ids) => {
+      const { data, error } = await supa
+        .from("approval_requests")
+        .select("id")
+        .eq("company_id", args.companyId)
+        .in("id", ids);
+      // O `throw` e OBRIGATORIO. Sem ele o erro volta como `data: null`, a conferencia le
+      // "nenhum id existe" ou "nada a conferir" e ABSOLVE EM SILENCIO. Esse formato exato
+      // apareceu cinco vezes no sistema nesta semana. Ha controle positivo para ele em
+      // `_prova_verificacao_pos_resposta.ts`: se este `throw` sumir, a prova fica vermelha.
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    },
+  });
+
+  const texto = verif.nota
+    ? `${args.texto.trim()}\n\n${verif.nota}`
+    : args.texto;
+  args.tel.verificacao = linhaDeVerificacao(verif);
+
+  await supa.from("chat_messages").insert({
+    conversation_id: args.convId,
+    company_id: args.companyId,
+    role: "assistant",
+    content: texto,
+    model: JOB_MODELO_ROTEADO,
+    ...(args.tokensIn !== undefined ? { tokens_in: args.tokensIn } : {}),
+    ...(args.tokensOut !== undefined ? { tokens_out: args.tokensOut } : {}),
+    diagnostico: {
+      ...args.tel,
+      ...(args.diagnosticoExtra ?? {}),
+      finish_reason: verif.nota ? `${args.finishReason}+verificacao_pos_resposta` : args.finishReason,
+      origem: "traffic-agent-job",
+    },
+  });
+}
+
 // v2: helpers de lote, checkpoint e reinvocacao ------------------------------
 async function executarLote(
   lote: { nome: string; foco: string }[], pergunta: string,
@@ -3591,7 +3751,17 @@ async function executarLote(
         reasoning_tokens: number; finish: string; partes: number; erro: string | null;
         motivo_saida: string | null; iteracoes: number; iteracoes_teto: number;
         tools_teto: number; tetos_chamada: unknown; prazo_ms_no_fim: number;
+        cortes: EnvelopeDeCobertura[];
       }>;
+      /**
+       * Os cortes sobem para `tel`, e nao para `saida`, porque `saida` e reescrita a cada
+       * devolucao (`relatorios[i] = novo`) — um corte declarado na rodada 1 sumiria quando a
+       * rodada 2 substituisse o relatorio, e a resposta final omitiria um corte que existiu.
+       * Em `tel` eles se acumulam, e `tel` e o que atravessa o checkpoint do segmento 2.
+       */
+      if (Array.isArray(t.cortes) && t.cortes.length) {
+        (tel.cortes ??= []).push(...t.cortes);
+      }
       tel.subagentes.push({
         nome: res.value.nome, relatorio_completo: res.value.completo,
         // O erro do especialista precisa aparecer na telemetria: sem ele, uma coleta que morreu
@@ -3669,8 +3839,27 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * sintese do segmento 2 (parede de 79s virou 32s). Por isso o gate exige a reserva da
    * sintese MAIS esse custo — segmentar com 79s de parede era trocar 79s por 32s.
    */
+  /**
+   * 05/09/2026 — A SINTESE DO DEEP PASSA A TER SEGMENTO PROPRIO, DE PLANO E NAO POR EMERGENCIA.
+   *
+   * O bloco logo abaixo registra esta alavanca como "testada e descartada". A parte estrutural dela
+   * FUNCIONOU (coleta completa, `sintese_em_segmento_proprio`); o que a derrubou foi a sintese
+   * estourar "qualquer teto que ESTA PAREDE comporte" — parede de 480s. Esse motivo caiu com a
+   * rodada de medicao: a parede agora comporta.
+   *
+   * E ela entra JUNTO da parede maior, nao como alternativa, porque a medicao mostrou que cada fase
+   * cabe sozinha numa invocacao e as duas juntas nao cabem em nenhuma conta. A parede maior e o que
+   * torna a separacao suficiente; a separacao e o que torna a parede utilizavel — sem ela a coleta
+   * se expande sobre o orcamento da escrita e reproduz 03/09.
+   *
+   * O guarda de parede continua inteiro: segmentar sem parede para a sintese e trocar 79s por 32s,
+   * que e o caso 831103bd citado acima. No segmento 2 `separarSintese` e falso (segmento ==
+   * MAX_SEGMENTOS), entao o segmento 2 ESCREVE em vez de segmentar de novo.
+   */
+  const separarSintese = () => cap.permitirCheckpoint && cap.tier === "deep" && segmento < MAX_SEGMENTOS;
   const valeSegmentar = () =>
-    prazo() < CHECKPOINT_MIN_MS && prazoDeParede() >= CHECKPOINT_MIN_MS + CUSTO_REINVOCACAO_MS;
+    (separarSintese() || prazo() < CHECKPOINT_MIN_MS)
+    && prazoDeParede() >= CHECKPOINT_MIN_MS + CUSTO_REINVOCACAO_MS;
   /**
    * ALAVANCA TESTADA E DESCARTADA (04/09/2026): DAR A SINTESE UM SEGMENTO SO DELA.
    *
@@ -3726,7 +3915,36 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * trocar aritmetica por palpite — exatamente o que custou tres jobs falhados antes.
    */
   const podeReinvocar = cap.permitirCheckpoint && segmento < MAX_SEGMENTOS;
-  const reservaColetaMs = SINT_RESERVA_MS + (podeReinvocar ? CUSTO_REINVOCACAO_MS : 0);
+  /**
+   * ITEM (a), AUTORIZADO EM 05/09/2026: A RESERVA DA SINTESE SAI DA INVOCACAO E VAI PARA A PAREDE.
+   *
+   * (a) era "descontar a reserva da parede e nao da invocacao". Ela ficou fora enquanto coleta e
+   * sintese dividiam a mesma invocacao, porque ali reservar na parede era o mesmo que nao reservar:
+   * a sintese ia rodar logo depois, na mesma invocacao, e precisava do espaco AQUI.
+   *
+   * Com `separarSintese`, a sintese NAO roda nesta invocacao — ela roda no segmento seguinte, com
+   * relogio de plataforma zerado. Entao manter `SINT_RESERVA_MS` presa a `prazo()` reservava espaco
+   * numa invocacao onde ninguem ia escrever: 150s de pista de coleta jogados fora por aritmetica,
+   * que e o mesmo erro que o item (b) corrigiu para o pedagio de reinvocacao.
+   *
+   * O QUE PROTEGE A SINTESE AGORA e `prazoColeta`, que subtrai `SINT_RESERVA_MS` da PAREDE. A conta
+   * e um minimo entre dois limites, e cada um responde por uma coisa diferente:
+   *
+   *   prazo()                          — quanto desta invocacao ainda existe
+   *   prazoDeParede() - SINT_RESERVA_MS — quanto sobra do job DEPOIS de garantir a escrita
+   *
+   * Enquanto a parede e folgada quem aperta e a invocacao, e a coleta usa a invocacao inteira menos
+   * o pedagio. Quando a parede aperta, ela volta a mandar e a coleta para antes de comer a escrita.
+   * Sem esse `min`, parede grande viraria coleta infinita — exatamente a noite de 03/09.
+   *
+   * O pedagio de reinvocacao CONTINUA na invocacao (item (b) intacto): ele e gasto aqui, para
+   * gravar checkpoint e reinvocar, nao na parede do segmento seguinte.
+   */
+  const separando = separarSintese();
+  const reservaColetaMs = (separando ? 0 : SINT_RESERVA_MS) + (podeReinvocar ? CUSTO_REINVOCACAO_MS : 0);
+  const prazoColeta: () => number = separando
+    ? () => Math.min(prazo(), prazoDeParede() - SINT_RESERVA_MS)
+    : prazo;
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
   /**
@@ -3750,11 +3968,40 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    *   (tamanho da entrada medido ANTES da chamada, que sobrevive ao timeout — `sintese.tokens_in`
    *   vem do `usage` da resposta e por isso grava 0 exatamente nas sinteses que morrem).
    */
-  tel.versao = "job-v4.20";
+  /**
+   * v4.21 (05/09/2026) = RODADA DE MEDICAO COM PAREDE SOLTA E SINTESE EM SEGMENTO PROPRIO.
+   *
+   * Corte de versao obrigatorio, e por um motivo mais forte que campo novo: o REGIME mudou. Nesta
+   * versao a parede e 900s (era 480s), o teto por chamada e 330s (era 150s) e a sintese do deep
+   * roda em segmento proprio. Somar duracao de sintese de v4.20 com v4.21 misturaria medicao
+   * censurada em 150s com medicao livre — que e exatamente o erro que fez a cauda mentir duas
+   * vezes. Toda consulta sobre "quanto a sintese leva" tem de filtrar `versao = 'job-v4.21'`.
+   *
+   * Os numeros desta versao sao FOLGA DE MEDICAO e nao estado final: eles voltam para o medido mais
+   * margem na rodada seguinte. Enquanto `versao = 'job-v4.21'` aparecer no banco com parede de
+   * 900s, o aperto ainda nao foi feito.
+   */
+  tel.versao = "job-v4.21";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
     devolucoes_max: cap.devolucoesMax, parede_ms: GLOBAL_WALL_MS,
+  };
+  /**
+   * O ORCAMENTO VIGENTE GRAVADO NA PROPRIA LINHA.
+   *
+   * A medicao de 04/09 teve de descobrir por arqueologia de commit qual parede valia em cada job,
+   * e foi assim que a cauda foi lida na unidade errada. Com estes campos a linha diz sozinha em que
+   * regime ela rodou, e `sintese.ms` passa a ser comparavel sem consultar o git.
+   */
+  tel.orcamento = {
+    parede_ms: GLOBAL_WALL_MS,
+    invocacao_ms: JOB_LIMIT_MS,
+    teto_chamada_ms: OPENROUTER_TIMEOUT_MS,
+    sintese_fase_hard_ms: SINT_FASE_HARD_MS,
+    sintese_reserva_ms: SINT_RESERVA_MS,
+    separar_sintese: separando,
+    sintese_em_segmento_proprio: segmento > 1 && !!retomada?.direto_para_sintese,
   };
   tel.faixa_sintese = JOB_FAIXA_SINTESE;
   tel.llm_rotas = JOB_LLM_ROTAS;
@@ -3796,7 +4043,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           retomada.devolver.map((d: any) => ({ nome: String(d.nome),
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${String(d.motivo)}\nCorrija exatamente isso.` })),
-          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel, reservaColetaMs,
+          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -3817,7 +4064,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver2.map((d) => d.nome).join(", ")}`);
           const refeitos2 = await executarLote(
             devolver2.map((d) => ({ nome: d.nome, foco: `DEVOLUCAO DA COORDENACAO (rodada ${rodada}): ${d.motivo}. Corrija exatamente isso.` })),
-            pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel, reservaColetaMs,
+            pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs,
           );
           for (const novo of refeitos2) {
             const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -3854,11 +4101,14 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       tel.janela_sintese = janelaLivre(tel.sintese?.tokens_in ?? 0, CONTEXTO_MODELO_TOKENS);
       tel.ms_total = Date.now() - t0;
       const finishSint0 = tel.sintese?.finish_reason ?? "stop";
-      await supa.from("chat_messages").insert({
-        conversation_id: convId, company_id: companyId, role: "assistant", content: texto0, model: JOB_MODELO_ROTEADO,
-        tokens_in: tel.subagentes.reduce((a: number, s2: any) => a + (s2.tokens_in ?? 0), 0) + (tel.sintese?.tokens_in ?? 0),
-        tokens_out: tel.subagentes.reduce((a: number, s2: any) => a + (s2.tokens_out ?? 0), 0) + (tel.sintese?.tokens_out ?? 0),
-        diagnostico: { ...tel, finish_reason: finishSint0, origem: "traffic-agent-job" },
+      await entregarResposta({
+        convId, companyId, texto: texto0, tel, finishReason: finishSint0,
+        tokensIn: tel.subagentes.reduce((a: number, s2: any) => a + (s2.tokens_in ?? 0), 0) + (tel.sintese?.tokens_in ?? 0),
+        tokensOut: tel.subagentes.reduce((a: number, s2: any) => a + (s2.tokens_out ?? 0), 0) + (tel.sintese?.tokens_out ?? 0),
+        // Inclui os cortes do segmento 1: `tel` veio do checkpoint (`tel_parcial`), entao o corte
+        // declarado antes da reinvocacao continua aqui. Sem isso, o job que segmentou perderia
+        // exatamente o envelope que a coleta longa — a que mais corta — produziu.
+        cortes: Array.isArray(tel.cortes) ? tel.cortes : [],
       });
       await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
       await supa.from("chat_jobs").update({ status: "done", finished_at: new Date().toISOString(), diagnostico: tel, checkpoint: null }).eq("id", jobId);
@@ -3884,7 +4134,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
     // FASE 2 - subagentes em paralelo
     await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
-    let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel, reservaColetaMs);
+    let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs);
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
     /**
      * PAREDE NO FIM DA COLETA — o numero que faltava para responder "qual recurso apertou".
@@ -3909,6 +4159,14 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       pode_reinvocar: podeReinvocar,
       chamada_minima_ms: CHAMADA_MINIMA_MS,
       ms_desde_created: Date.now() - createdMs,
+      // Item (a): a pista real da coleta e `prazoColeta()`, nao `prazo()`. Com a sintese reservada
+      // na PAREDE os dois divergem, e gravar so `prazo()` faria a auditoria ler pista que nao foi
+      // a usada. `quem_aperta_coleta` diz qual dos dois limites mordeu de fato.
+      prazo_coleta_ms: prazoColeta(),
+      separando_sintese: separando,
+      quem_aperta_coleta: separando && (prazoDeParede() - SINT_RESERVA_MS) < prazo()
+        ? "parede_menos_reserva"
+        : "por_invocacao",
     };
 
     // FASE 2.5 - VALIDACAO + DEVOLUCAO (v4.0: deep/standard = 0 por padrao)
@@ -3933,7 +4191,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           devolver.map((d) => ({ nome: d.nome,
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${d.motivo}\nCorrija exatamente isso; o que ja estava certo nao precisa ser repetido do zero.` })),
-          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazo, tel, reservaColetaMs,
+          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -4009,11 +4267,11 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
     tel.ms_total = Date.now() - t0;
     const finishSint = tel.sintese?.finish_reason ?? "stop";
-    await supa.from("chat_messages").insert({
-      conversation_id: convId, company_id: companyId, role: "assistant", content: texto, model: JOB_MODELO_ROTEADO,
-      tokens_in: (tel.planner?.tokens_in ?? 0) + tel.subagentes.reduce((a: number, s: any) => a + (s.tokens_in ?? 0), 0) + (tel.sintese?.tokens_in ?? 0),
-      tokens_out: (tel.planner?.tokens_out ?? 0) + tel.subagentes.reduce((a: number, s: any) => a + (s.tokens_out ?? 0), 0) + (tel.sintese?.tokens_out ?? 0),
-      diagnostico: { ...tel, finish_reason: finishSint, origem: "traffic-agent-job" },
+    await entregarResposta({
+      convId, companyId, texto, tel, finishReason: finishSint,
+      tokensIn: (tel.planner?.tokens_in ?? 0) + tel.subagentes.reduce((a: number, s: any) => a + (s.tokens_in ?? 0), 0) + (tel.sintese?.tokens_in ?? 0),
+      tokensOut: (tel.planner?.tokens_out ?? 0) + tel.subagentes.reduce((a: number, s: any) => a + (s.tokens_out ?? 0), 0) + (tel.sintese?.tokens_out ?? 0),
+      cortes: Array.isArray(tel.cortes) ? tel.cortes : [],
     });
     await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
     await supa.from("chat_jobs").update({ status: "done", finished_at: new Date().toISOString(), diagnostico: tel }).eq("id", jobId);
@@ -4021,12 +4279,23 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     const erro = String((e as any)?.message ?? e).slice(0, 500);
     tel.ms_total = Date.now() - t0;
     // Degradar com aviso, nunca em silencio: o gestor recebe uma mensagem, nao um vacuo.
-    await supa.from("chat_messages").insert({
-      conversation_id: convId, company_id: companyId, role: "assistant",
-      content: ehRateLimitErro(erro)
+    await entregarResposta({
+      convId, companyId, tel, finishReason: "erro_job",
+      texto: ehRateLimitErro(erro)
         ? "O modelo ficou sobrecarregado nesta rodada (limite temporário). A coleta já feita foi preservada — reenvie a pergunta; em geral a segunda tentativa conclui."
         : "O processamento em segundo plano falhou antes de concluir. Tente de novo; se repetir, o problema esta registrado para o suporte tecnico.",
-      model: JOB_MODELO_ROTEADO, diagnostico: { ...tel, erro, origem: "traffic-agent-job", finish_reason: "erro_job" },
+      /**
+       * `[]` DE PROPOSITO, e nao por esquecimento. Esta mensagem nao apresenta leitura nenhuma —
+       * ela diz que a leitura nao saiu. Anexar "Cobertura desta leitura: get_detalhe_anuncios
+       * mostrou 20 de 46" embaixo de "o processamento falhou" descreveria a cobertura de um
+       * relatorio que o gestor nunca recebeu. O envelope existe para qualificar numero entregue;
+       * sem numero entregue ele vira ruido, e ruido e o que ensina a nao ler a linha.
+       *
+       * A conferencia CONTINUA rodando (o texto passa pelo guarda de identificador como
+       * qualquer outro). O que muda e o dado, nao o portao.
+       */
+      cortes: [],
+      diagnosticoExtra: { erro },
     }).then(() => {}, () => {});
     await supa.from("chat_jobs").update({ status: "error", erro, finished_at: new Date().toISOString(), diagnostico: tel }).eq("id", jobId);
   }
