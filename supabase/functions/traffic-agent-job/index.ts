@@ -485,7 +485,29 @@ const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? 
  * O CUSTO DE NAO DECIDIR: a coleta agora e paga inteira (259-294s, ~27k tokens) e perdida inteira
  * no timeout da sintese. O job fecha em `sintese_vazia` depois de fazer o trabalho caro.
  */
-// APERTO DE VOLTA (05/09/2026), conforme a sequencia: soltou, mediu, apertou. 900s -> 750s.
+/**
+ * SEGUNDO APERTO (05/09/2026): 750s -> 600s, e agora TODOS os termos sao medidos.
+ *
+ * O aperto de baixo foi feito com o termo da sintese sendo TETO, porque a medicao vinha
+ * censurada. Com a fusao no piso a sintese passou a FECHAR (3 de 3, maximo 60,8s), entao a conta
+ * deixou de ter estimativa dentro:
+ *
+ *   coleta MEDIDA 294s (maior de 5 coletas fartas) + pedagio 45s + fase de sintese 180s
+ *   + RESERVA_FINAL 10s = 529s, mais 71s de margem = 600s
+ *
+ * Os jobs que fecharam levaram 338s, 344s e 349s de ponta a ponta — sobra folga de sobra sobre a
+ * parede, e a folga esta AQUI e nao nos tetos por chamada de proposito: parede larga nao alonga
+ * chamada nenhuma (cada uma tem teto proprio), ela so evita que uma coleta mais lenta que a media
+ * mate a escrita que ja se sabe que cabe.
+ *
+ * O PEDAGIO DE 45s ESTA SUPERDIMENSIONADO E FICA ASSIM, com o numero registrado para quem quiser
+ * mexer depois: medido em 1s nas cinco reinvocacoes desta rodada (a fase `sintese` abre 1s depois
+ * de `relatorios prontos`). Os 45s vem de um caso unico, o job 1403d076, onde a reinvocacao levou
+ * 47s. Um caso de 47s contra cinco de 1s nao autoriza baixar a reserva: ela protege contra o
+ * caso lento, nao contra a media, e 44s de parede e barato demais para valer o risco de repetir
+ * 831103bd. Se alguem quiser esses 44s, meca a distribuicao primeiro.
+ */
+// PRIMEIRO APERTO (05/09/2026), conforme a sequencia: soltou, mediu, apertou. 900s -> 750s.
 // A conta, com os termos medidos identificados como medidos:
 //   coleta MEDIDA 295s (maior das duas) + pedagio 45s + fase de sintese 345s + RESERVA_FINAL 10s
 //   = 695s, mais 55s de margem = 750s.
@@ -494,7 +516,7 @@ const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? 
 // que se sabe que cabe. Ela nao volta para 480s porque 480s nao cobre nem a coleta que hoje FECHA
 // (295s + 45s de pedagio ja deixariam a sintese com 130s, abaixo do gate de segmentacao), e nao
 // fica em 900s porque os 150s extras nao chegam a nenhuma chamada.
-const GLOBAL_WALL_MS = 750_000;     // dimensionada pela medicao de 05/09 (ver bloco acima)
+const GLOBAL_WALL_MS = 600_000;     // dimensionada pela medicao de 05/09 (ver bloco acima)
 // 270s, e a tentativa de subir para 370s esta MEDIDA e descartada — fica registrada para nao ser
 // refeita. A hipotese era boa: `prazo()` e o MINIMO entre invocacao e parede, entao 270s prende
 // `prazo()` em ~260s e o teto por chamada (`tetoDaChamada`, que reserva 195s) cai para ~65s, o
@@ -1030,10 +1052,41 @@ async function enriquecerEscopoComDatas(companyId: string, escopo: EscopoPedido)
 // 05/09/2026 — 345s, mantendo a MESMA invariante contra os 330s novos por chamada. A regra
 // "fase > chamada" e o que impede o teto da fase de virar o carrasco silencioso: se os dois forem
 // iguais, a chamada morre por conta da fase e a assinatura culpa o provider.
-// FICA EM 345s no aperto de volta, por ser DERIVADO: ele existe para nao morder antes de
-// `OPENROUTER_TIMEOUT_MS`, que esta pinado em 330s pela medicao censurada. Baixar este numero sem
-// baixar aquele reintroduziria exatamente o defeito que a linha acima descreve.
-const SINT_FASE_HARD_MS = 345_000;
+// 05/09/2026, SEGUNDO APERTO — AGORA COM MEDICAO: 345s -> 180s. Continua sendo DERIVADO, mas de
+// `SINT_TIMEOUT_MS` (150s) e nao mais de `OPENROUTER_TIMEOUT_MS`. A invariante "fase > chamada"
+// esta preservada com 30s de folga, que e onde cabe o cooldown de 429
+// (`SINT_COOLDOWN_POS_429_MS`) sem a fase virar o carrasco.
+const SINT_FASE_HARD_MS = 180_000;
+
+/**
+ * TETO POR CHAMADA DA SINTESE — separado do teto da COLETA, e a separacao e o achado.
+ *
+ * Os dois compartilhavam `OPENROUTER_TIMEOUT_MS`, e foi isso que embaralhou o diagnostico por
+ * semanas: um numero servindo duas cargas com necessidades opostas. A coleta quer teto ALTO
+ * (chamada longa, com ferramentas, que devolve quando termina); a sintese quer teto JUSTO, porque
+ * teto largo nela nao acelera nada e so atrasa a descoberta de que ela travou.
+ *
+ * MEDIDO EM 05/09/2026, com a fusao no piso (`ESFORCO_FUSAO`), tres jobs deep, 3 de 3 fechando:
+ *
+ *   job        coleta   entrada     sintese   raciocinio   visivel      fidelidade
+ *   898f0071    282s    13.025 tok   60,8s      147 tok    10.732 ch      67,6%
+ *   1978e24e    290s    13.851 tok   58,0s      109 tok     9.839 ch      59,2%
+ *   47f1ed4e    283s    12.398 tok   53,2s      132 tok     8.405 ch      60,7%
+ *
+ * Maximo observado: 60,8s. 150s e ~2,5x isso, e a folga e DELIBERADA pelo mesmo argumento de
+ * assimetria que este arquivo ja usa em `MAX_TOKENS_PISO_RACIOCINIO`: teto nao e reserva. Teto
+ * que nao e atingido custa ZERO; teto 1s curto custa a coleta inteira ja paga — 290s e ~28k
+ * tokens de relatorio — mais o job. Errar para cima aqui nao tem preco; errar para baixo tem o
+ * preco maximo do sistema.
+ *
+ * POR QUE `OPENROUTER_TIMEOUT_MS` NAO DESCEU JUNTO, e e a resposta a "aperte os tres": ele deixou
+ * de ser o teto da sintese e agora e so o da COLETA, e para a coleta NAO HA MEDIDO. Os quatro
+ * especialistas sairam `voluntario`, ou seja nenhuma chamada de coleta foi cortada — o que se
+ * sabe e que 330s BASTA, nao de quanto ela precisa. Apertar um teto que hoje nao morde, sem
+ * numero, seria trocar o unico regime em que a coleta fecha por um palpite. O aperto pedido foi
+ * feito onde a medicao existe.
+ */
+const SINT_TIMEOUT_MS = 150_000;
 // Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
 const SINT_CHARS_SEGMENTAR = 70_000;
 const SINT_COOLDOWN_POS_429_MS = 6_000;
@@ -4033,6 +4086,10 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * O pedagio de reinvocacao CONTINUA na invocacao (item (b) intacto): ele e gasto aqui, para
    * gravar checkpoint e reinvocar, nao na parede do segmento seguinte.
    */
+  // O teto da sintese e o MEDIDO dela (`SINT_TIMEOUT_MS`) so onde ele foi medido: o deep. Lite e
+  // standard seguem no teto proprio, que e apertado de proposito por causa da promessa de tempo
+  // desses tiers — e nao ha medicao de fusao neles para justificar mexer.
+  const sintTimeoutMs = cap.tier === "deep" ? SINT_TIMEOUT_MS : cap.openRouterTimeoutMs;
   const separando = separarSintese();
   const reservaColetaMs = (separando ? 0 : SINT_RESERVA_MS) + (podeReinvocar ? CUSTO_REINVOCACAO_MS : 0);
   const prazoColeta: () => number = separando
@@ -4074,7 +4131,17 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * margem na rodada seguinte. Enquanto `versao = 'job-v4.21'` aparecer no banco com parede de
    * 900s, o aperto ainda nao foi feito.
    */
-  tel.versao = "job-v4.21";
+  /**
+   * v4.22 (05/09/2026) = FUSAO NO PISO E TETOS APERTADOS PELO MEDIDO.
+   *
+   * Terceiro corte do dia, e cada um separa um REGIME e nao um conjunto de campos. v4.21 mediu a
+   * sintese em `xhigh` (censurada em 330s, 0 de 2); entre v4.21 e v4.22 ela rodou em `high`
+   * (1 de 3); v4.22 e `low` com parede 600s, teto de sintese 150s e fase 180s (3 de 3). Somar
+   * `sintese.ms` das tres faixas produziria uma "duracao media da sintese" que nao descreve
+   * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
+   * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
+   */
+  tel.versao = "job-v4.22";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -4090,7 +4157,11 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   tel.orcamento = {
     parede_ms: GLOBAL_WALL_MS,
     invocacao_ms: JOB_LIMIT_MS,
+    // Os dois tetos por chamada, separados: `teto_chamada_ms` e da COLETA e nao tem medido;
+    // `sintese_teto_chamada_ms` e o medido da sintese. Gravar um so faria a auditoria futura
+    // atribuir a carga errada ao numero errado, que foi o defeito de semanas.
     teto_chamada_ms: OPENROUTER_TIMEOUT_MS,
+    sintese_teto_chamada_ms: sintTimeoutMs,
     sintese_fase_hard_ms: SINT_FASE_HARD_MS,
     sintese_reserva_ms: SINT_RESERVA_MS,
     separar_sintese: separando,
@@ -4183,7 +4254,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         // Na retomada o plano vem do checkpoint, entao o gatilho de relevancia e o mesmo.
         estilo: estilo0, memoria: memoriaDaSintese(mem0, pergunta, escopo, tel, plano),
         prazo, tel, segmento, rodada,
-        timeoutMs: cap.openRouterTimeoutMs,
+        timeoutMs: sintTimeoutMs,
         jaRetentouSintese: !!retomada.sintese_retry,
         escopo,
       });
@@ -4336,7 +4407,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     const texto = await sintetizarComResgate({
       jobId, convId, companyId, mcpKey, companyName, pergunta, plano, relatorios,
       estilo, memoria, prazo, tel, segmento, rodada,
-      timeoutMs: cap.openRouterTimeoutMs,
+      timeoutMs: sintTimeoutMs,
       jaRetentouSintese: false,
       escopo,
     });
