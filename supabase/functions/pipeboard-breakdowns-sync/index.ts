@@ -1,4 +1,4 @@
-// Recortes diarios de midia (idade, genero, plataforma) pelo Pipeboard.
+// Recortes diarios de midia (idade, genero, plataforma, posicionamento) pelo Pipeboard.
 //
 // POR QUE ESTA EDGE EXISTE. metric_breakdown_daily era alimentada pela Windsor e parou em
 // 13/08/2026, quando a Windsor foi encerrada. Ninguem percebeu por 23 dias porque o vigia de
@@ -17,6 +17,15 @@
 //     rankings sao problema do pipeboard-metrics-sync (dono de ad_metric_snapshots) e nao desta
 //     edge, que so escreve em metric_breakdown_daily.
 //
+// POSICIONAMENTO ENTROU DEPOIS, E O MOTIVO DA DEMORA E DIDATICO. A primeira versao declarou que
+// o conector nao entregava posicionamento. A declaracao saiu da ENUMERACAO de valores do schema
+// do argumento `breakdown` — e nunca de uma chamada. Testado o valor em 05/09/2026 (requests
+// 10677 e 10679), `breakdown="publisher_platform,platform_position"` responde 200 e devolve
+// metrics.platform_position = feed / facebook_reels / facebook_stories / instagram_stories /
+// instagram_reels / instagram_explore_grid_home, no mesmo formato segmented_metrics que os
+// outros tres ja usavam. Ler a promessa em vez de medir o fato e o defeito que este repositorio
+// inteiro persegue; ele foi cometido aqui, contra esta edge, e fica escrito para nao voltar.
+//
 // UM DIA POR CHAMADA, DE PROPOSITO. O `limit` do conector corta SEGMENTOS, e segmento aqui e
 // (anuncio x dia x valor do recorte). Numa janela de tres dias, uma conta com 358 anuncios e
 // sete faixas de idade passa de 7.500 segmentos e o corte chegaria calado — perda de dado com
@@ -33,16 +42,92 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const FONTE = "pipeboard:meta";
 const LIMITE_SEGMENTOS = 1000;
 
+const PLATAFORMA_ROTULO: Record<string, string> = {
+  facebook: "Facebook",
+  instagram: "Instagram",
+  messenger: "Messenger",
+  audience_network: "Audience Network",
+  whatsapp: "WhatsApp",
+  threads: "Threads",
+};
+
+const POSICAO_ROTULO: Record<string, string> = {
+  feed: "Feed",
+  facebook_stories: "Stories",
+  instagram_stories: "Stories",
+  story: "Stories",
+  facebook_reels: "Reels",
+  instagram_reels: "Reels",
+  facebook_reels_overlay: "Reels (sobreposição)",
+  instagram_reels_overlay: "Reels (sobreposição)",
+  instagram_explore: "Explorar",
+  instagram_explore_grid_home: "Explorar",
+  instagram_search: "Busca",
+  instagram_profile_feed: "Feed do perfil",
+  facebook_profile_feed: "Feed do perfil",
+  profile_feed: "Feed do perfil",
+  video_feeds: "Feed de vídeo",
+  instream_video: "Vídeo in-stream",
+  right_hand_column: "Coluna da direita",
+  marketplace: "Marketplace",
+  search: "Busca",
+  biz_disco_feed: "Feed de descoberta",
+  facebook_groups_feed: "Feed de grupos",
+  messenger_inbox: "Caixa de entrada",
+  an_classic: "Banner",
+  rewarded_video: "Vídeo premiado",
+  others: "Outros",
+};
+
 /**
- * Recortes coletados. `chave` e o nome do argumento do conector E o nome do campo que ele
- * devolve dentro de metrics; `tipo` e o valor gravado em metric_breakdown_daily.tipo_recorte,
- * que tem CHECK em ('idade','genero','plataforma','posicionamento').
+ * Posicionamento grava a PLATAFORMA junto com a posicao, e por escrito.
+ *
+ * `feed` volta identico para Facebook e para Instagram. Gravar so a posicao faria os dois
+ * cairem no mesmo valor_recorte, e todo leitor somaria duas perguntas diferentes num numero so
+ * — a mesma familia de defeito do balde "outros recortes" que a nota de cobertura acabou de
+ * perder. A chave unica da tabela ja e (anuncio, dia, tipo, valor), entao juntar plataforma e
+ * posicao dentro de valor_recorte separa as linhas sem precisar de coluna nova, e continua
+ * casavel por prefixo (`like 'Instagram%'`) e por sufixo (`like '%Stories'`).
+ *
+ * O rotulo e em portugues porque `instagram_explore_grid_home` nao se le num relatorio. Valor
+ * que este mapa nao conhece SAI CRU, jamais traduzido no chute: nome estranho no relatorio
+ * avisa que falta rotulo; nome inventado mentiria com cara de certo. Funcionou na primeira
+ * rodada real: `facebook_profile_feed` faltava aqui e apareceu cru no relatorio em vez de
+ * sumir — foi assim que o rotulo abaixo entrou.
+ *
+ * CUIDADO AO MUDAR UM ROTULO DEPOIS. O rotulo E parte da chave unica (anuncio, dia, tipo,
+ * valor), entao trocar o texto nao renomeia a linha antiga: cria uma nova ao lado dela, e as
+ * duas passam a somar no mesmo relatorio. Quem mudar rotulo tem de apagar as linhas do texto
+ * antigo na mesma leva.
  */
-const RECORTES = [
-  { chave: "age", tipo: "idade" },
-  { chave: "gender", tipo: "genero" },
-  { chave: "publisher_platform", tipo: "plataforma" },
-] as const;
+function posicionamento(seg: any): string {
+  const posicao = String(seg?.platform_position ?? "").trim().toLowerCase();
+  if (!posicao) return "";
+  const plataforma = String(seg?.publisher_platform ?? "").trim().toLowerCase();
+  // Sem plataforma o valor volta a fundir Facebook com Instagram. Declarar a falta mantem a
+  // linha separada e avisa quem le que o dado chegou incompleto.
+  const p = PLATAFORMA_ROTULO[plataforma] ?? (plataforma || "plataforma não informada");
+  return `${p} · ${POSICAO_ROTULO[posicao] ?? posicao}`;
+}
+
+/**
+ * Recortes coletados. `arg` e o que vai no argumento `breakdown` do conector; `tipo` e o valor
+ * gravado em metric_breakdown_daily.tipo_recorte, que tem CHECK em
+ * ('idade','genero','plataforma','posicionamento'); `valor` le o valor_recorte do segmento.
+ *
+ * Posicionamento pede DOIS campos no mesmo breakdown porque a posicao sozinha nao identifica
+ * onde o anuncio apareceu — ver posicionamento() logo acima.
+ */
+type Recorte = { arg: string; tipo: string; valor: (seg: any) => string };
+
+const campo = (nome: string) => (seg: any) => String(seg?.[nome] ?? "");
+
+const RECORTES: Recorte[] = [
+  { arg: "age", tipo: "idade", valor: campo("age") },
+  { arg: "gender", tipo: "genero", valor: campo("gender") },
+  { arg: "publisher_platform", tipo: "plataforma", valor: campo("publisher_platform") },
+  { arg: "publisher_platform,platform_position", tipo: "posicionamento", valor: posicionamento },
+];
 
 function json(value: unknown, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -108,10 +193,10 @@ function segmentos(value: any, profundidade = 0): any[] {
  * exatamente porque "nao veio" e "ninguem foi alcancado" sao fatos diferentes — a mesma
  * distincao que 20260804140430 ja tinha gravado para o recorte da Windsor.
  */
-function mapear(seg: any, companyId: string, tipo: string, chave: string, contaPadrao: string) {
+function mapear(seg: any, companyId: string, recorte: Recorte, contaPadrao: string) {
   const adId = String(seg?.ad_id ?? "").trim();
   const dia = isoDate(seg?.date_start ?? seg?.date ?? seg?.period);
-  const valor = String(seg?.[chave] ?? "").trim();
+  const valor = recorte.valor(seg).trim();
   if (!adId || !dia || !valor) return null;
   return {
     company_id: companyId,
@@ -119,7 +204,7 @@ function mapear(seg: any, companyId: string, tipo: string, chave: string, contaP
     campaign_external_id: String(seg?.campaign_id ?? "").trim() || null,
     account_id: String(seg?.account_id ?? contaPadrao).replace(/^act_/, ""),
     snapshot_date: dia,
-    tipo_recorte: tipo,
+    tipo_recorte: recorte.tipo,
     valor_recorte: valor,
     spend: numero(seg?.spend),
     impressions: inteiro(seg?.impressions),
@@ -143,6 +228,12 @@ function mapear(seg: any, companyId: string, tipo: string, chave: string, contaP
  * ESCRITA. Leitura nao devolve nem um nem outro, entao o ok dele e sempre falso aqui. O veredito
  * de leitura e o do HTTP mais a ausencia de erro no corpo, igual ao que pipeboard-metrics-sync
  * ja faz com o proprio callTool.
+ *
+ * AVISO PARA QUEM UM DIA FOR DIRETO NA GRAPH. Desde 06/08/2026 os recortes `impression_device`,
+ * `frequency_value` e hora-por-fuso-do-publico exigem adesao POR CONTA, e conta sem adesao
+ * recebe HTTP 200 com array VAZIO, sem erro nenhum. Nada aqui usa esses tres hoje, mas quem
+ * usar precisa tratar sucesso vazio como SUSPEITA e nunca como zero — e o defeito da casa em
+ * estado puro: ausencia de dado com aparencia de dado.
  */
 async function ler(args: Record<string, unknown>, token: string) {
   const r = await pipeboardCall("get_insights", args, token);
@@ -213,6 +304,10 @@ Deno.serve(async (req) => {
   const relatorio: any[] = [];
   let gravadas = 0;
   let tetoAtingido = 0;
+  // Prazo medido, nao estimado: a quarta chamada por dia so e barata enquanto o relatorio
+  // mostrar quanto ela custou. Se um dia encostar no timeout_ms da tarefa, o numero aparece
+  // aqui antes de a coleta comecar a cortar dia calada.
+  const comecou = Date.now();
 
   for (const integracao of ativas) {
     const conta = String(integracao.external_id).replace(/^act_/, "");
@@ -221,6 +316,7 @@ Deno.serve(async (req) => {
     const linhas = new Map<string, any>();
     let erroConta: string | null = null;
     let chamadas = 0;
+    const contaComecou = Date.now();
 
     for (const dia of janela) {
       if (erroConta) break;
@@ -229,7 +325,7 @@ Deno.serve(async (req) => {
           ler({
             object_id: `act_${conta}`,
             level: "ad",
-            breakdown: r.chave,
+            breakdown: r.arg,
             time_range: { since: dia, until: dia },
             time_breakdown: "day",
             limit: LIMITE_SEGMENTOS,
@@ -240,7 +336,7 @@ Deno.serve(async (req) => {
 
       for (const { recorte, resposta } of respostas) {
         if (!resposta.ok) {
-          // A primeira negativa de permissao encerra a conta: as outras 3N chamadas trariam
+          // A primeira negativa de permissao encerra a conta: as outras 4N chamadas trariam
           // a mesma frase e so consumiriam o prazo das contas que funcionam.
           if (semPermissao(resposta.erro)) {
             erroConta = resposta.erro;
@@ -252,7 +348,7 @@ Deno.serve(async (req) => {
         const segs = segmentos(resposta.body);
         if (segs.length >= LIMITE_SEGMENTOS) tetoAtingido += 1;
         for (const seg of segs) {
-          const linha = mapear(seg, companyId, recorte.tipo, recorte.chave, conta);
+          const linha = mapear(seg, companyId, recorte, conta);
           if (!linha) continue;
           linhas.set(
             `${linha.ad_external_id}:${linha.snapshot_date}:${linha.tipo_recorte}:${linha.valor_recorte}`,
@@ -282,6 +378,7 @@ Deno.serve(async (req) => {
       account_id: conta,
       company_id: companyId,
       chamadas,
+      ms: Date.now() - contaComecou,
       segmentos_por_recorte: porTipo,
       linhas_unicas: lote.length,
       gravadas: gravadasConta,
@@ -297,11 +394,12 @@ Deno.serve(async (req) => {
     ok: comErro.length === 0,
     fonte: FONTE,
     destino: "metric_breakdown_daily",
-    recortes: RECORTES.map((r) => `${r.chave} -> ${r.tipo}`),
+    recortes: RECORTES.map((r) => `${r.arg} -> ${r.tipo}`),
     window: { date_from: dataDe, date_to: dataAte, dias: janela.length },
     contas: ativas.length,
     contas_com_erro: comErro.length,
     total_gravadas: gravadas,
+    ms_total: Date.now() - comecou,
     teto_de_segmentos_atingido: tetoAtingido,
     aviso_teto: tetoAtingido > 0
       ? `Em ${tetoAtingido} chamada(s) o conector devolveu o maximo de ${LIMITE_SEGMENTOS} segmentos: pode haver recorte faltando nesse dia.`
