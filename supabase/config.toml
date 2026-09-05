@@ -59,6 +59,14 @@ verify_jwt = false
 [functions.pipeboard-read]
 verify_jwt = false
 
+# 05/09/2026 - coleta dos recortes (idade/genero/plataforma) que a Windsor deixou de trazer em
+# 13/08. Cron autentica por x-mcp-key dentro da edge, igual as outras duas do Pipeboard. Sem
+# esta linha o deploy nasce com verify_jwt=true e o gateway devolve
+# UNAUTHORIZED_NO_AUTH_HEADER antes de a edge ver a chave — foi o que aconteceu na primeira
+# publicacao desta funcao.
+[functions.pipeboard-breakdowns-sync]
+verify_jwt = false
+
 # Sonda de identidade (somente leitura). Sem esta linha o deploy nasce com verify_jwt=true
 # e o gateway rejeita a x-mcp-key antes de a edge validar — a propria edge autentica por
 # mcp_key_valida, como as demais.

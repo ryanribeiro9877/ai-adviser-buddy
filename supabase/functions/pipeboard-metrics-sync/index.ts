@@ -404,6 +404,73 @@ function buildBulkArgs(
   return args;
 }
 
+/**
+ * Passe dos tres rankings de qualidade da Meta, por lote.
+ *
+ * POR QUE UM PASSE SEPARADO E NAO MAIS UM CAMPO NA CHAMADA PRINCIPAL. FIELDS acima lista
+ * quality_ranking, engagement_rate_ranking e conversion_rate_ranking desde a Fase B, e mesmo
+ * assim `pipeboard:meta` gravou 1.066 linhas entre 31/07 e 05/09/2026 com ranking NULO em todas
+ * — as 9 unicas leituras que o sistema tem sao da Windsor e pararam em 30/07. A causa esta no
+ * schema do conector, enumerado em 05/09/2026: `get_insights` NAO tem a propriedade `fields`.
+ * O buildArgs so envia o que o schema aceita, entao a lista era descartada em silencio e o
+ * conjunto fixo de metricas do get_insights nao traz ranking. Quem aceita `fields` e
+ * `bulk_get_insights`, e ele devolve os tres (medido: request 10634, os tres campos presentes
+ * em todos os anuncios da conta 1622612945584817).
+ *
+ * "UNKNOWN" E RESPOSTA, NAO FALHA. A Meta devolve UNKNOWN quando o anuncio nao tem volume para
+ * ser classificado. Gravar UNKNOWN e gravar o que a Meta disse; deixar NULO seria afirmar que
+ * ninguem perguntou. A nota de cobertura ja distingue os dois casos e explica ao gestor que aí
+ * falta volume no anuncio, nao falta coleta nossa — mas ela so pode dizer isso se a coluna
+ * chegar preenchida.
+ *
+ * MELHOR ESFORCO, SEMPRE. Este passe nunca derruba a coleta: se o lote falhar, as metricas do
+ * dia sobem do mesmo jeito e o relatorio diz por que o ranking nao veio.
+ */
+async function lerRankings(
+  accountId: string,
+  dateFrom: string,
+  dateTo: string,
+  token: string,
+): Promise<{ ok: boolean; erro: string | null; mapa: Map<string, Record<string, string | null>> }> {
+  const mapa = new Map<string, Record<string, string | null>>();
+  const response = await callTool("bulk_get_insights", {
+    account_ids: [accountId.replace(/^act_/, "")],
+    level: "ad",
+    since: dateFrom,
+    until: dateTo,
+    time_breakdown: "day",
+    compact: true,
+    fields: [
+      "ad_id",
+      "date_start",
+      "quality_ranking",
+      "engagement_rate_ranking",
+      "conversion_rate_ranking",
+    ],
+  }, token);
+  if (!response.ok) {
+    return { ok: false, erro: response.erro ?? `pipeboard_bulk_${response.status}`, mapa };
+  }
+  for (const bruto of collectRows(response.body)) {
+    const linha = bruto?.metrics && typeof bruto.metrics === "object"
+      ? { ...bruto, ...bruto.metrics }
+      : bruto;
+    const adId = String(linha?.ad_id ?? "").trim();
+    const dia = isoDate(linha?.date_start ?? linha?.period ?? linha?.date);
+    if (!adId || !dia) continue;
+    const q = rank(linha?.quality_ranking);
+    const e = rank(linha?.engagement_rate_ranking);
+    const c = rank(linha?.conversion_rate_ranking);
+    if (q === null && e === null && c === null) continue;
+    mapa.set(`${adId}:${dia}`, {
+      quality_ranking: q,
+      engagement_rate_ranking: e,
+      conversion_rate_ranking: c,
+    });
+  }
+  return { ok: true, erro: null, mapa };
+}
+
 function probeResult(name: string, response: any, schema: ToolDef | null) {
   const body = response?.body;
   const rows = collectRows(body);
@@ -591,6 +658,23 @@ Deno.serve(async (req) => {
       collectMore = !!after;
     }
 
+    // Conta que ja falhou (tipicamente sem permissao no login que roteia o pedido) devolveria a
+    // mesma recusa no lote; nao se gasta mais uma chamada com ela.
+    let rankingsAplicados = 0;
+    let rankingErro: string | null = accountError ? "conta_ja_com_erro_na_coleta" : null;
+    if (!accountError && rowsByKey.size) {
+      const rankings = await lerRankings(accountId, dateFrom, dateTo, token);
+      rankingErro = rankings.erro;
+      for (const [chave, valores] of rankings.mapa) {
+        const linha = rowsByKey.get(chave);
+        if (!linha) continue;
+        linha.quality_ranking = valores.quality_ranking;
+        linha.engagement_rate_ranking = valores.engagement_rate_ranking;
+        linha.conversion_rate_ranking = valores.conversion_rate_ranking;
+        rankingsAplicados += 1;
+      }
+    }
+
     const rows = [...rowsByKey.values()];
     let upserted = 0;
     let upsertedProd = 0;
@@ -621,6 +705,8 @@ Deno.serve(async (req) => {
       pages,
       pipeboard_rows: collected,
       unique_rows: rows.length,
+      rankings_aplicados: rankingsAplicados,
+      rankings_erro: rankingErro,
       upserted,
       upserted_producao: upsertedProd,
       error: accountError,
