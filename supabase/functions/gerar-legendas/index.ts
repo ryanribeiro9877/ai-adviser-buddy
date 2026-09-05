@@ -11,7 +11,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import { bodyOpenRouter, resolverChamadaLlm } from "../_shared/llm_roteador.ts";
+import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { inferirMeioDeProduto, inferirMeioDrive, parseMeioDriveArg, type MeioDrive } from "../_shared/pedido_drive_criativos.ts";
 
@@ -298,7 +298,11 @@ ${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.sl
   // v4: NAO passar reasoning.enabled=false — Gemini 3.7 / alguns endpoints devolvem HTTP 400
   // "Reasoning is mandatory for this endpoint and cannot be disabled".
   const extraBody: Record<string, unknown> = {
-    max_tokens: 4000,
+    // 05/09/2026: 4.000 cobria o raciocinio no p90 (4.217) e nada mais — e aqui o teto tem de
+    // pagar raciocinio MAIS N legendas em prosa. Diferente do compliance, estourar aqui nao da
+    // 502 limpo: da `redator_nao_devolveu_n_variantes`, que parece redator ruim e nao teto
+    // curto. O piso do roteador resolve os dois.
+    max_tokens: tetoDeSaida(),
     messages: [
       { role: "system", content: sys },
       { role: "user", content: userMsg },

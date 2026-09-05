@@ -8,9 +8,11 @@ import {
   ehTarefaDeTriagem,
   ehTarefaInterativa,
   esforcoDoModo,
+  MAX_TOKENS_PISO_RACIOCINIO,
   MODELO_PADRAO,
   type ModoRaciocinio,
   resolverChamadaLlm,
+  tetoDeSaida,
   type TipoTarefaLlm,
 } from "./llm_roteador.ts";
 
@@ -185,10 +187,40 @@ try {
 const voltou = resolverChamadaLlm({ tipo: "chat_loop" });
 assert(!voltou.legado && voltou.model === MODELO_PADRAO, "sem o segredo, volta ao padrao da casa");
 
+// ---------------------------------------------------------------------------
+// 4. Piso de max_tokens: o teto tem de caber o raciocinio antes da resposta.
+//
+// Os numeros abaixo sao os tetos que as edges pequenas carregavam em 05/09 e que a leitura de
+// chat_messages reprovou (minimo 1.248 / p50 2.609 / p90 4.217 de saida no esforco `high`).
+// A prova existe para que nenhum deles volte por descuido.
+// ---------------------------------------------------------------------------
+for (const tetoAntigo of [900, 1_200, 1_500, 2_000, 4_000]) {
+  assert(
+    tetoDeSaida(tetoAntigo) === MAX_TOKENS_PISO_RACIOCINIO,
+    `teto ${tetoAntigo} tem de subir ao piso, veio ${tetoDeSaida(tetoAntigo)}`,
+  );
+}
+assert(tetoDeSaida() === MAX_TOKENS_PISO_RACIOCINIO, "sem argumento, o teto e o piso");
+assert(tetoDeSaida(32_000) === 32_000, "teto maior que o piso e respeitado");
+assert(
+  MAX_TOKENS_PISO_RACIOCINIO > 4_217,
+  "o piso tem de passar do p90 de saida medido, senao nao sobra canal para a resposta",
+);
+// No modo legado o raciocinio volta a ser das constantes das edges: la um teto baixo e
+// escolha do gestor, e o piso nao pode sobrescrever.
+Deno.env.set("LLM_ROTEADOR", "legado");
+try {
+  assert(tetoDeSaida(900) === 900, "legado preserva o teto da edge");
+} finally {
+  Deno.env.delete("LLM_ROTEADOR");
+}
+assert(tetoDeSaida(900) === MAX_TOKENS_PISO_RACIOCINIO, "fora do legado, o piso volta a valer");
+
 console.log("ok llm_roteador", {
   padrao: MODELO_PADRAO,
   tipos_conferidos: TIPOS.length,
   esforco_padrao: chat.esforco,
   esforco_profundo: deepSint.esforco,
   rede_chat: chat.fallbacks,
+  piso_max_tokens: MAX_TOKENS_PISO_RACIOCINIO,
 });

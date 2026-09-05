@@ -18,7 +18,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import { bodyOpenRouter, resolverChamadaLlm } from "../_shared/llm_roteador.ts";
+import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -196,7 +196,10 @@ ${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"`
       // 03/09/2026: teto subiu de 900 porque max_tokens cobre raciocinio + texto e o padrao
       // da casa raciocina sempre (o reasoning abaixo so vale no modo legado — o roteador
       // sobrepoe com effort). Sem folga, o redator devolveria JSON vazio e a edge daria 502.
-      max_tokens: 1500, reasoning: { enabled: false },
+      // 05/09/2026: 1.500 nao era folga — era menos que o MINIMO de saida medido do padrao da
+      // casa (1.248) e pouco mais da metade do p50 (2.609). O teto passa a vir do piso do
+      // roteador, que e onde a medicao mora.
+      max_tokens: tetoDeSaida(), reasoning: { enabled: false },
       messages: [{ role: "system", content: sys }, { role: "user", content: `Objetivo do template: ${objetivo}` }],
     })),
   });

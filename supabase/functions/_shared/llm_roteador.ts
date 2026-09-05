@@ -119,6 +119,42 @@ export const ESFORCO_PADRAO: EsforcoRaciocinio = "high";
 export const ESFORCO_PROFUNDO: EsforcoRaciocinio = "xhigh";
 
 /**
+ * Piso de `max_tokens` para quem chama o padrao da casa. MEDIDO, nao estimado.
+ *
+ * `max_tokens` conta raciocinio + texto visivel, e o raciocinio do Grok 4.6 e obrigatorio.
+ * Leitura de chat_messages.tokens_out em 05/09/2026, so respostas do padrao da casa, agrupadas
+ * pelo esforco que diagnosticoRota() gravou:
+ *
+ *   esforco | n  | minimo | p50   | p90/max
+ *   high    |  6 | 1.248  | 2.609 | 4.217
+ *   low     |  4 | 1.126  | 2.339 | 2.793
+ *
+ * Ou seja: o teto tem de passar de 4.217 SO PARA O RACIOCINIO CABER, antes de sobrar canal
+ * para a resposta. Os tetos que as edges pequenas herdaram foram escritos para modelos com o
+ * raciocinio desligado e ficaram abaixo do proprio p50: 2.000 no compliance e 1.500 nos dois
+ * redatores WABA. Nesses dois casos o modelo raciocina, estoura, devolve `content` vazio e a
+ * edge le isso como "o modelo nao respondeu".
+ *
+ * 8.000 e ~2x o p90 observado. Nao e gasto: `max_tokens` e TETO, nao reserva — token nao
+ * emitido nao e cobrado. O custo de errar para baixo e resposta vazia; para cima, zero.
+ */
+export const MAX_TOKENS_PISO_RACIOCINIO = 8_000;
+
+/**
+ * Teto de saida que respeita o piso do raciocinio.
+ *
+ * Existe para que o proximo chamador nao precise redescobrir a medicao acima: quem quer um
+ * teto proprio passa o seu, e o piso protege quando esse numero foi escrito para um modelo
+ * que nao raciocinava. No modo legado o piso nao se aplica — la o raciocinio volta a ser das
+ * constantes das edges e um teto baixo e uma escolha, nao um acidente.
+ */
+export function tetoDeSaida(desejado?: number): number {
+  if (roteadorLegado()) return desejado ?? MAX_TOKENS_PISO_RACIOCINIO;
+  const n = Number(desejado ?? 0);
+  return Number.isFinite(n) && n > MAX_TOKENS_PISO_RACIOCINIO ? n : MAX_TOKENS_PISO_RACIOCINIO;
+}
+
+/**
  * Tipos cujo produto e um VEREDITO CURTO E ESTRUTURADO consumido por codigo — nunca prosa
  * que chega ao gestor. Sao os dois blocos que, antes do padrao unico, rodavam com o
  * raciocinio explicitamente DESLIGADO (`REASONING_OFF` no traffic-agent-job): o padrao unico
