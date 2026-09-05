@@ -736,6 +736,10 @@ import {
   cortarClaimEmitidoSemCard,
   situacaoDoCard,
 } from "../_shared/aprovacoes.ts";
+import {
+  linhaDeVerificacao,
+  verificarAntesDeResponder,
+} from "../_shared/verificacao_pos_resposta.ts";
 import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import {
   conferirOrcamentoReais,
@@ -7535,6 +7539,76 @@ Deno.serve(async (req) => {
     reply = anexarRelatorioUpload(String(reply ?? ""), relUpload);
   }
 
+  // ==========================================================================================
+  // VERIFICACAO POS-RESPOSTA — o ponto unico de conferencia antes da resposta sair.
+  // ==========================================================================================
+  //
+  // ESTA E A ULTIMA MUTACAO DE `reply` NO ARQUIVO, e e por isso que ela esta aqui e nao antes:
+  // logo abaixo, `reply` alimenta a persistencia em chat_messages E o corpo HTTP, na MESMA
+  // variavel. Conferir aqui cobre os dois de uma vez. Colocada acima, qualquer emenda seguinte
+  // (relatorio de upload, sanitizacao de claim) entraria DEPOIS da conferencia e sairia sem ser
+  // conferida — que e literalmente o defeito "havia verificacao no chat, mas nao em todo
+  // caminho".
+  //
+  // A nota vai no FIM de proposito. O bloco canonico da composicao hibrida esta sempre em
+  // posicao 0, entao anexar no fim nunca move `inicio_do_gerado` e `conferirIntegridade`
+  // continua valendo depois desta anexacao. No inicio, moveria — e a integridade passaria a
+  // reprovar todo turno verificado.
+  //
+  // `verificarAntesDeResponder` NAO bloqueia nem reescreve: ela declara. Uma camada nova com
+  // poder de veto sobre todo turno seria um modo de falha novo do tamanho do produto.
+  const verif = await verificarAntesDeResponder({
+    texto: String(reply ?? ""),
+    companyId: company.id,
+    toolResults,
+    cardsDaRodada: actionCards,
+    cardsDoTurno: turnCheckpoint?.cards ?? null,
+    // Segmento intermediario nao paga o envelope de cobertura: os restantes ainda podem ser
+    // lidos no proximo bloco, e cobrar agora produziria envelope que a rodada seguinte desmente.
+    // Identificador fabricado NAO tem essa folga — stub de progresso chega ao gestor igual.
+    turnoVaiFechar: !continuarTurno,
+    buscarIds: async (ids) => {
+      const { data, error } = await supa
+        .from("approval_requests")
+        .select("id")
+        .eq("company_id", company.id)
+        .in("id", ids);
+      // O `throw` e OBRIGATORIO. Sem ele o erro volta como lista vazia, a conferencia le
+      // "nenhum id existe" ou "nada a conferir" e absolve em silencio — o quinto fail-open
+      // desta semana tinha exatamente esta forma.
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    },
+    buscarCards: async (ids) => {
+      const { data, error } = await supa
+        .from("approval_requests")
+        .select("id,action,payload")
+        .eq("company_id", company.id)
+        .in("id", ids);
+      if (error) throw new Error(error.message);
+      return (data ?? []).map((r) => ({
+        id: String(r.id),
+        action: String(r.action ?? ""),
+        payload: r.payload,
+      }));
+    },
+    validarContrato: async (acao, pedido) => {
+      const { data, error } = await supa.rpc("validar_pedido_contra_contrato", {
+        p_acao: acao,
+        p_pedido: pedido ?? {},
+      });
+      if (error) throw new Error(error.message);
+      // `data` nulo sem erro cai em nao_conferido dentro do modulo. NAO devolva `{}` aqui:
+      // objeto vazio tem `valido: undefined`, e o modulo teria de adivinhar se foi resposta
+      // vazia ou vocabulario novo. Nulo e a informacao verdadeira.
+      return data ?? null;
+    },
+  });
+  if (verif.nota) {
+    reply = `${String(reply ?? "").trim()}\n\n${verif.nota}`;
+    finishReason = String(finishReason || "stop") + "+verificacao_pos_resposta";
+  }
+
   // Turno completo: garante checkpoint limpo.
   if (!continuarTurno && convId) {
     await supa.from("chat_conversations").update({ turn_checkpoint: null }).eq("id", convId);
@@ -7574,7 +7648,12 @@ Deno.serve(async (req) => {
     ferramentas_totais: chavesDaSuperficie(catFerr, "chat").length,
     registro_ferramentas_degradado: catFerr.degradado,
     continuar_turno: continuarTurno, segmento_turno: segmentoAtual,
-    retomada: ehRetomada, pedido_ato: pedidoAtoCards };
+    retomada: ehRetomada, pedido_ato: pedidoAtoCards,
+    // Sem esta linha, "quanto dos tres modos a verificacao pega?" so poderia ser respondido
+    // remedindo a base por fora, com outra carga — que foi o que atrasou o diagnostico de
+    // 03/09. As contagens vem SEPARADAS (conferidas / reprovadas / nao_conferidas): somar
+    // `nao_conferida` a `conferida` num total unico e como o numerador desta camada morreria.
+    verificacao: linhaDeVerificacao(verif) };
 
   const lastAsstHist = [...history].reverse().find((m: { role?: string }) => m.role === "assistant");
   const lastAsstText = String((lastAsstHist as { content?: string } | undefined)?.content ?? "").trim();

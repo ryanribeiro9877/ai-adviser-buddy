@@ -410,10 +410,109 @@ export function approvalIdsInventados(
 }
 
 /**
- * Veredito final: dos candidatos, quais NAO existem em approval_requests desta empresa.
- * Consulta por id (chave primaria) e filtra por empresa — card de outra empresa nao serve
- * de alibi. Se a consulta falhar, devolve lista VAZIA: sem leitura nao ha acusacao, porque
- * marcar card real como inventado quebra a operacao tanto quanto o contrario.
+ * Veredito de TRES estados sobre os candidatos, e nao de dois.
+ *
+ * O DEFEITO QUE ISTO CONSERTA (medido 04/09/2026). `approvalIdsInexistentes` respondia UMA
+ * lista — os inventados — e nada mais. Quando a consulta falhava, ela devolvia so os
+ * malformados, e os candidatos que ninguem conseguiu conferir simplesmente DESAPARECIAM da
+ * resposta. Nao havia acusacao (correto) e tambem nao havia sinal (errado): o chamador nao
+ * tinha como distinguir "conferi e sao reais" de "nao consegui conferir". O turno saia igual
+ * nos dois casos, e no segundo o gestor lia uma tabela de cards sem saber que ninguem
+ * verificou se aqueles cards existem.
+ *
+ * Essa e exatamente a familia de defeito que esta semana produziu cinco fail-opens diferentes
+ * (compliance aprovando por omissao, verdicto desconhecido tratado como aprovacao, erro de RPC
+ * tratado como liberacao). Aqui ela aparece na forma mais dificil de ver, porque o codigo
+ * ANTIGO ESTAVA CERTO na parte visivel: nao acusar sem leitura e a decisao correta — a versao
+ * de 01/09/2026 que tratava "nao veio de tool nesta rodada" como prova de inexistencia acusou
+ * dois cards reais do CONJ.3 em 20 minutos. O erro nao era acusar de menos; era CALAR.
+ *
+ * Por isso a separacao e em tres:
+ *
+ *   inventados      conferido contra o banco: NAO existe. Veredito, pode acusar.
+ *   nao_conferidos  a consulta nao respondeu. SEM veredito — tem de ser declarado ao gestor,
+ *                   nunca absolvido em silencio.
+ *   (o resto)       conferido e existe. Sai da lista, e ai o silencio e correto.
+ *
+ * `motivo` carrega a falha da consulta para a telemetria. Ele NAO e opcional quando
+ * `nao_conferidos` tem itens: um estado sem veredito e sem motivo e um beco para o plantao.
+ */
+export type VereditoDeIds = {
+  /** Conferidos contra o banco e ausentes: invencao. */
+  inventados: string[];
+  /** Nao foi possivel conferir. Ausencia de veredito, NAO absolvicao. */
+  nao_conferidos: string[];
+  /** Por que a conferencia nao aconteceu. Null so quando `nao_conferidos` esta vazio. */
+  motivo: string | null;
+};
+
+export async function conferirApprovalIds(
+  candidatos: string[],
+  ctx: {
+    companyId: string;
+    buscar: (ids: string[]) => Promise<Array<{ id?: unknown }> | null>;
+  },
+): Promise<VereditoDeIds> {
+  const ids = [...new Set(candidatos.map((c) => String(c ?? "").toLowerCase()).filter(Boolean))];
+  if (!ids.length) return { inventados: [], nao_conferidos: [], motivo: null };
+
+  // Sem empresa resolvida a consulta nao tem recorte (card de outra empresa nao serve de
+  // alibi), entao nada pode ser conferido. Isto NAO e "esta tudo certo": e nao_conferido.
+  if (!ctx.companyId) {
+    return {
+      inventados: [],
+      nao_conferidos: ids,
+      motivo: "empresa nao resolvida no turno: a consulta a approval_requests nao tem recorte",
+    };
+  }
+
+  // Id fora do hexadecimal nao precisa (nem pode) ir ao banco: a coluna e uuid e a consulta
+  // estouraria, caindo no catch abaixo e absolvendo justamente o caso mais obvio de invencao.
+  // Ele e CONFERIDO aqui, por formato — nao existe uuid nao-hexadecimal em approval_requests.
+  const consultaveis = ids.filter((id) => RE_UUID_VALIDO.test(id));
+  const malformados = ids.filter((id) => !RE_UUID_VALIDO.test(id));
+  if (!consultaveis.length) return { inventados: malformados, nao_conferidos: [], motivo: null };
+
+  let achados: Array<{ id?: unknown }> | null = null;
+  try {
+    achados = await ctx.buscar(consultaveis);
+  } catch (e) {
+    return {
+      inventados: malformados,
+      nao_conferidos: consultaveis,
+      motivo: `consulta a approval_requests falhou: ${String((e as Error)?.message ?? e).slice(0, 200)}`,
+    };
+  }
+  if (achados == null) {
+    return {
+      inventados: malformados,
+      nao_conferidos: consultaveis,
+      // Resposta vazia sem erro e o formato do episodio de 03/09/2026 no gerar-legendas:
+      // verificador que nao respondeu liberava a publicacao. Aqui ele nao libera nada.
+      motivo: "consulta a approval_requests devolveu resposta vazia sem erro",
+    };
+  }
+  const existentes = new Set(
+    achados.map((r) => String(r?.id ?? "").toLowerCase()).filter(Boolean),
+  );
+  return {
+    inventados: [...malformados, ...consultaveis.filter((id) => !existentes.has(id))],
+    nao_conferidos: [],
+    motivo: null,
+  };
+}
+
+/**
+ * Dos candidatos, quais NAO existem em approval_requests desta empresa.
+ *
+ * ATENCAO — esta funcao DESCARTA `nao_conferidos` de proposito, e por isso ela e insuficiente
+ * como unico portao. O descarte preserva a protecao contra falso positivo (nao acusar sem
+ * leitura) mas reintroduz o silencio: quem chama daqui nao fica sabendo que a conferencia nao
+ * aconteceu. Ela continua existindo porque o comportamento de nao-acusar e correto e ja esta
+ * provado, e mudar o tipo de retorno mexeria em todo chamador de uma vez.
+ *
+ * Quem precisa DECIDIR sobre a resposta usa `conferirApprovalIds` e trata os tres estados.
+ * Quem so precisa da lista de acusaveis pode continuar aqui.
  */
 export async function approvalIdsInexistentes(
   candidatos: string[],
@@ -422,26 +521,7 @@ export async function approvalIdsInexistentes(
     buscar: (ids: string[]) => Promise<Array<{ id?: unknown }> | null>;
   },
 ): Promise<string[]> {
-  const ids = [...new Set(candidatos.map((c) => String(c ?? "").toLowerCase()).filter(Boolean))];
-  if (!ids.length || !ctx.companyId) return [];
-
-  // Id fora do hexadecimal nao precisa (nem pode) ir ao banco: a coluna e uuid e a consulta
-  // estouraria, caindo no catch abaixo e absolvendo justamente o caso mais obvio de invencao.
-  const consultaveis = ids.filter((id) => RE_UUID_VALIDO.test(id));
-  const malformados = ids.filter((id) => !RE_UUID_VALIDO.test(id));
-  if (!consultaveis.length) return malformados;
-
-  let achados: Array<{ id?: unknown }> | null = null;
-  try {
-    achados = await ctx.buscar(consultaveis);
-  } catch {
-    return malformados;
-  }
-  if (achados == null) return malformados;
-  const existentes = new Set(
-    achados.map((r) => String(r?.id ?? "").toLowerCase()).filter(Boolean),
-  );
-  return [...malformados, ...consultaveis.filter((id) => !existentes.has(id))];
+  return (await conferirApprovalIds(candidatos, ctx)).inventados;
 }
 
 /**
