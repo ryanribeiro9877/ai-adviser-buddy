@@ -429,8 +429,72 @@ const DRIVE_CRIATIVOS_FOLDER_ID = (Deno.env.get("DRIVE_CRIATIVOS_FOLDER_ID") ?? 
  * margem. Se a medicao voltar censurada tambem em 330s por chamada, a conclusao muda de lugar: a
  * sintese nao cabe em UMA chamada de plataforma (~400s por invocacao) e o caminho passa a ser
  * `sintetizarSegmentada`/`SINT_MAX_PARTES`, nao mais parede.
+ *
+ * ============================================================================================
+ * 05/09/2026 — A MEDICAO FOI FEITA. A COLETA FECHOU; A SINTESE VOLTOU CENSURADA EM 330s.
+ * ============================================================================================
+ *
+ * Tres jobs em `job-v4.21` (dois deep, um standard por classificacao). O que a rodada respondeu:
+ *
+ * 1. A COLETA ESTA RESOLVIDA, e por conteudo conferivel, nao por configuracao bonita:
+ *
+ *      job       coleta   tokens dos especialistas   finish        saida
+ *      f6db7801   294s            25.465             length|stop   voluntario|voluntario
+ *      f9930a00   259s            29.321             stop|stop     voluntario|voluntario
+ *
+ *    ZERO `openrouter_timeout` na coleta, ZERO chamadas recusadas por orcamento (`recusadas: 0`),
+ *    tetos por chamada entre 59,6s e 294,2s. `saida: voluntario` nos quatro especialistas e o
+ *    numero que importa: eles pararam porque TERMINARAM, nao porque o orcamento cortou. A coleta
+ *    deixou de ser limitada por tempo. Foi `JOB_LIMIT_MS` 350s + separacao + item (a) que pagaram.
+ *
+ * 2. A SINTESE FOI CENSURADA DE NOVO, AGORA EM 330s. `sintese.ms` = 330.004 e 330.003 — o teto
+ *    concedido ao milissegundo, com `chars_visiveis: 0`. Timeout genuino, nada produzido.
+ *
+ * 3. E O ACHADO QUE MUDA A RECOMENDACAO: NAO E TAMANHO DE ENTRADA. As entradas foram 12.101 e
+ *    14.329 tokens, contra 8.604 do regime magro que CONCLUIA em ~116s. A entrada cresceu 1,4x a
+ *    1,7x e o tempo passou de ~116s para >330s (>2,8x) sem UM token visivel. Nao e proporcional a
+ *    entrada, e a ALAVANCA 2 NAO FECHARIA a diferenca: `8fdb9b7`/`c33b2a3` ja levaram a memoria de
+ *    61.153 para 20.362 chars (83 -> 30 fatos) e a entrada de 21.205 para ~8.600 tokens. O que
+ *    sobraria para encolher e uma fracao de um fator de 1,5x contra um deficit de 2,8x.
+ *
+ * O QUE CONSOME O TEMPO E O RACIOCINIO DA SINTESE, E ELE ESTA LIGADO SEM QUE ESTE ARQUIVO SAIBA.
+ * `chamarSinteseParte` pede `reasoning: REASONING_OFF`, mas `bodyOpenRouter` em
+ * `_shared/llm_roteador.ts` sobrepoe: `if (rota.esforco) body.reasoning = { effort: rota.esforco }`
+ * — e o esforco e escolhido POR MODO, entao no deep a SINTESE tambem roda `xhigh`. O roteador
+ * documenta isso de proposito e lista `sintese` como tipo que NAO e rebaixado. A medicao do regime
+ * magro mostra o custo: 5.254 tokens de raciocinio para 980 chars visiveis, ~5,4x mais raciocinio
+ * que texto. Com relatorio de verdade na entrada o raciocinio tem material e nao converge em 330s.
+ *
+ * POR QUE ISSO ENCERRA A ALAVANCA DA PAREDE. 330s ja e o maximo observavel numa chamada: a
+ * invocacao da plataforma morre em ~400s, entao nao existe teto por chamada acima disso para
+ * conceder. Dar mais parede nao da mais tempo A CHAMADA. A parede saiu de alavanca e virou
+ * consequencia — ela agora e dimensionada, nao esticada.
+ *
+ * AS ALAVANCAS QUE SOBRARAM SAO DECISAO DO GESTOR, E A PRIMEIRA NAO E A QUE ESTA FECHADA:
+ *   1. O ESFORCO DA SINTESE (`xhigh` -> `high`) na faixa premium do roteador. NAO e "baixar o
+ *      esforco dos subagentes", que continua fechado: a coleta fica intacta em `xhigh` e ja se
+ *      provou que ela FECHA assim. E rebaixar o escritor, que hoje gasta 5,4x mais raciocinio que
+ *      texto. E uma linha em `llm_roteador.ts`, e e troca de qualidade declarada — por isso nao
+ *      foi exercida aqui.
+ *   2. SINTESE INCREMENTAL, para que nenhuma chamada precise caber. `sintetizarSegmentada` existe
+ *      mas e INALCANCAVEL no deep: o gate pede `relatorios.length >= 4` e o deep roda 2
+ *      especialistas. Corrigir o gate faz a sintese acumular progresso em vez de perder tudo no
+ *      timeout — mas cada parte paga raciocinio de novo, e a fusao ainda raciocina sobre o todo,
+ *      entao o ganho nao esta medido e nao deve ser prometido.
+ *
+ * O CUSTO DE NAO DECIDIR: a coleta agora e paga inteira (259-294s, ~27k tokens) e perdida inteira
+ * no timeout da sintese. O job fecha em `sintese_vazia` depois de fazer o trabalho caro.
  */
-const GLOBAL_WALL_MS = 900_000;     // FOLGA DE MEDICAO (era 480s). Aperta para o medido + margem.
+// APERTO DE VOLTA (05/09/2026), conforme a sequencia: soltou, mediu, apertou. 900s -> 750s.
+// A conta, com os termos medidos identificados como medidos:
+//   coleta MEDIDA 295s (maior das duas) + pedagio 45s + fase de sintese 345s + RESERVA_FINAL 10s
+//   = 695s, mais 55s de margem = 750s.
+// O termo da sintese e TETO, nao medicao — a medicao voltou censurada. Ou seja: esta parede e
+// dimensionada para hospedar a MAIOR sintese que a plataforma consegue hospedar, nao uma sintese
+// que se sabe que cabe. Ela nao volta para 480s porque 480s nao cobre nem a coleta que hoje FECHA
+// (295s + 45s de pedagio ja deixariam a sintese com 130s, abaixo do gate de segmentacao), e nao
+// fica em 900s porque os 150s extras nao chegam a nenhuma chamada.
+const GLOBAL_WALL_MS = 750_000;     // dimensionada pela medicao de 05/09 (ver bloco acima)
 // 270s, e a tentativa de subir para 370s esta MEDIDA e descartada — fica registrada para nao ser
 // refeita. A hipotese era boa: `prazo()` e o MINIMO entre invocacao e parede, entao 270s prende
 // `prazo()` em ~260s e o teto por chamada (`tetoDaChamada`, que reserva 195s) cai para ~65s, o
@@ -695,6 +759,13 @@ const STANDARD_OPENROUTER_TIMEOUT_MS = 60_000;
 // Vale para coleta e sintese: os dois usam `cap.openRouterTimeoutMs` no deep. Para a coleta o
 // numero e teto de aborto, nao alvo — o especialista devolve quando termina, e quem limita a pista
 // dele e a reserva (ver `tetoDaChamada`).
+// APERTO DE VOLTA (05/09/2026): ESTE FICA EM 330s, e a razao e que a medicao NAO fechou. A sequencia
+// pedia "volte para o medido mais margem"; nao ha medido para a sintese — ela foi censurada
+// EXATAMENTE aqui, em 330.004ms e 330.003ms. Apertar para um numero abaixo do teto em que a
+// medicao morreu seria escolher um valor que JA SE SABE insuficiente. E nao ha para onde subir:
+// ~400s por invocacao e o limite da plataforma, entao 330s e o maior teto por chamada observavel.
+// Para a COLETA este numero deixou de importar como teto: os quatro especialistas sairam
+// `voluntario`, com teto maximo concedido de 294,2s e nenhuma chamada recusada.
 const OPENROUTER_TIMEOUT_MS = 330_000;
 const LITE_DEVOLUCOES_MAX = 0;
 const STANDARD_DEVOLUCOES_MAX = 0;
@@ -959,6 +1030,9 @@ async function enriquecerEscopoComDatas(companyId: string, escopo: EscopoPedido)
 // 05/09/2026 — 345s, mantendo a MESMA invariante contra os 330s novos por chamada. A regra
 // "fase > chamada" e o que impede o teto da fase de virar o carrasco silencioso: se os dois forem
 // iguais, a chamada morre por conta da fase e a assinatura culpa o provider.
+// FICA EM 345s no aperto de volta, por ser DERIVADO: ele existe para nao morder antes de
+// `OPENROUTER_TIMEOUT_MS`, que esta pinado em 330s pela medicao censurada. Baixar este numero sem
+// baixar aquele reintroduziria exatamente o defeito que a linha acima descreve.
 const SINT_FASE_HARD_MS = 345_000;
 // Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
 const SINT_CHARS_SEGMENTAR = 70_000;
@@ -3809,9 +3883,14 @@ async function gravarCheckpointEReinvocar(
     checkpoint: cp, segmento: cp.segmento,
     status: "running",
   }).eq("id", jobId);
+  // O rotulo tem de dizer o motivo CERTO. Desde a separacao das fases (05/09) o caminho normal do
+  // deep e segmentar DE PLANO, com a coleta pronta e o relogio de plataforma zerando para a
+  // escrita — nao "prazo esgotando". A mensagem antiga aparecia no `progresso` de todo job deep
+  // bem-sucedido dizendo que algo tinha acabado o tempo, o que manda a auditoria procurar aperto
+  // de orcamento onde nao houve.
   const rotulo = cp.sintese_retry
     ? `retomando sintese apos rate-limit (segmento ${cp.segmento} de ${MAX_SEGMENTOS})`
-    : `prazo do worker esgotando: continuando no segmento ${cp.segmento} de ${MAX_SEGMENTOS} (nada sera re-pensado)`;
+    : `coleta concluida: escrevendo a resposta no segmento ${cp.segmento} de ${MAX_SEGMENTOS}, com relogio novo (nada sera re-pensado)`;
   await pushProgresso(jobId, "segmento", rotulo);
   // Reinvoca a PROPRIA edge. fire-and-forget: se o POST falhar, o watchdog adota o orfao.
   await fetch(`${SUPABASE_URL}/functions/v1/traffic-agent-job`, {
