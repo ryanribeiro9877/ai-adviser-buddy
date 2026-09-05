@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { useApp } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -133,6 +134,12 @@ function Anuncios() {
             <Skeleton key={i} className="h-[260px] rounded-xl" />
           ))}
         </div>
+      ) : adsQ.isError ? (
+        <FalhaDeCarga
+          oQue="os anúncios desta empresa"
+          erro={adsQ.error}
+          onTentarDeNovo={() => adsQ.refetch()}
+        />
       ) : ads.length === 0 ? (
         <Card className="p-10 text-center">
           <ImageIcon className="h-8 w-8 mx-auto text-muted-foreground/60" />

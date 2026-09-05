@@ -40,6 +40,12 @@ verify_jwt = false
 [functions.meta-health]
 verify_jwt = false
 
+# Espelho diario + backfill da copia (modo copia_criativos). Cron autentica por x-mcp-key
+# dentro da edge. Sem esta linha o deploy nasce com verify_jwt=true e o gateway recusa
+# o agendador antes de a edge validar mcp_key_valida.
+[functions.meta-campaign-status]
+verify_jwt = false
+
 # ditado do chat (Bearer do usuario) E chamada interna da drive-audio-transcribe (x-mcp-key,
 # sem Authorization). Precisa continuar com o gateway aberto - a propria edge autentica.
 [functions.transcribe-audio]

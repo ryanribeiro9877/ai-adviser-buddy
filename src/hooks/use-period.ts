@@ -142,5 +142,10 @@ export function usePeriodCampaigns(
     data: rows,
     isLoading: metaQ.isLoading || snapsQ.isLoading,
     isError: metaQ.isError || snapsQ.isError,
+    error: metaQ.error ?? snapsQ.error,
+    refetch: () => {
+      void metaQ.refetch();
+      void snapsQ.refetch();
+    },
   };
 }

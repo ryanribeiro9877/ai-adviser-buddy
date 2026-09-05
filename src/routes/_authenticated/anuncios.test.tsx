@@ -18,6 +18,7 @@ let busca: FilterSearch = {};
 let anuncios: AdRow[] = [];
 let campanhas: CampaignRow[] = [];
 let carregando = false;
+let falhou = false;
 let modoRecebido = "";
 let tiposRecebidos: TipoConta[] = [];
 
@@ -32,7 +33,7 @@ vi.mock("@/hooks/use-filters", () => ({
 }));
 
 vi.mock("@/hooks/use-breakdown", () => ({
-  useAds: () => ({ data: anuncios, isLoading: carregando }),
+  useAds: () => ({ data: anuncios, isLoading: carregando, isError: falhou, error: falhou ? new Error("consulta falhou") : null, refetch: () => {} }),
   useCampaignBreakdown: () => ({ data: campanhas, isLoading: false }),
 }));
 
@@ -119,6 +120,7 @@ beforeEach(() => {
   anuncios = [];
   campanhas = [];
   carregando = false;
+  falhou = false;
   modoRecebido = "";
   tiposRecebidos = [];
 });
@@ -167,6 +169,13 @@ describe("lista", () => {
     const { container } = render(<Anuncios />);
     expect(screen.queryByText("Nenhum anúncio para esta empresa")).not.toBeInTheDocument();
     expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0);
+  });
+
+  it("falha de consulta se identifica como falha, nao como lista vazia", () => {
+    falhou = true;
+    render(<Anuncios />);
+    expect(screen.getByText(/não foi possível carregar os anúncios desta empresa/i)).toBeInTheDocument();
+    expect(screen.queryByText("Nenhum anúncio para esta empresa")).not.toBeInTheDocument();
   });
 });
 

@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { useApp } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -145,6 +146,12 @@ function Conjuntos() {
             <Skeleton key={i} className="h-[220px] rounded-xl" />
           ))}
         </div>
+      ) : adSetsQ.isError ? (
+        <FalhaDeCarga
+          oQue="os conjuntos desta empresa"
+          erro={adSetsQ.error}
+          onTentarDeNovo={() => adSetsQ.refetch()}
+        />
       ) : adSets.length === 0 ? (
         <Card className="p-10 text-center">
           <Target className="h-8 w-8 mx-auto text-muted-foreground/60" />

@@ -146,10 +146,41 @@ export function mapPipeboardAdset(
   };
 }
 
-// Extrai conteudo e destino do criativo (object_story_spec cobre video/link/foto).
+/** Junta textos distintos na ordem em que aparecem. Variantes iguais nao duplicam. */
+function textosDoCriativo(valores: unknown[]): string | null {
+  const vistos = new Set<string>();
+  const out: string[] = [];
+  const add = (v: unknown) => {
+    const s = text(v);
+    if (!s || vistos.has(s)) return;
+    vistos.add(s);
+    out.push(s);
+  };
+  for (const valor of valores) {
+    if (Array.isArray(valor)) {
+      for (const item of valor) {
+        if (typeof item === "string") add(item);
+        else if (item && typeof item === "object") {
+          add((item as { text?: unknown; message?: unknown }).text ??
+            (item as { message?: unknown }).message);
+        }
+      }
+    } else {
+      add(valor);
+    }
+  }
+  return out.length ? out.join("\n---\n") : null;
+}
+
+// Extrai conteudo e destino do criativo.
+// object_story_spec cobre video/link/foto avulsos. asset_feed_spec.bodies cobre o
+// Criativo Dinamico / Advantage+, que e o formato da maioria das pecas digitadas
+// no Gerenciador: a midia sobe pelo sistema e a legenda nunca voltava porque este
+// extrator so lia `creative.body` e `video_data.message`.
 export function extractCreativeFields(creative: any) {
   const spec = parseJson(creative?.object_story_spec) ?? {};
   const data = spec.video_data ?? spec.link_data ?? spec.photo_data ?? spec.template_data ?? {};
+  const afs = parseJson(creative?.asset_feed_spec) ?? {};
   const cta = data?.call_to_action ?? creative?.call_to_action ?? null;
   const destino =
     text(cta?.value?.link) ||
@@ -161,8 +192,21 @@ export function extractCreativeFields(creative: any) {
     object_type: text(creative?.object_type) || null,
     call_to_action_type: text(cta?.type) || null,
     destination_url: destino,
-    body: text(creative?.body) || text(data?.message) || null,
-    title: text(creative?.title) || text(data?.title) || text(data?.name) || null,
+    body: textosDoCriativo([
+      creative?.body,
+      data?.message,
+      spec?.video_data?.message,
+      spec?.link_data?.message,
+      spec?.photo_data?.message,
+      spec?.template_data?.message,
+      afs?.bodies,
+    ]),
+    title: textosDoCriativo([
+      creative?.title,
+      data?.title,
+      data?.name,
+      afs?.titles,
+    ]),
     image_url: text(data?.image_url) || text(creative?.image_url) || null,
     thumbnail_url: text(creative?.thumbnail_url) || null,
   };

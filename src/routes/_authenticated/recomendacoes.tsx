@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useApp, logAudit } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -61,11 +62,12 @@ function Recomendacoes() {
     queryKey: ["reco", selectedCompany?.id],
     enabled: !!selectedCompany,
     queryFn: async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("ai_recommendations")
         .select("*")
         .eq("company_id", selectedCompany!.id)
         .order("created_at", { ascending: false });
+      if (error) throw error;
       return (data ?? []) as RecoRow[];
     },
   });
@@ -157,6 +159,13 @@ function Recomendacoes() {
         ))}
       </div>
 
+      {q.isError ? (
+        <FalhaDeCarga
+          oQue="as recomendações desta empresa"
+          erro={q.error}
+          onTentarDeNovo={() => void q.refetch()}
+        />
+      ) : (
       <div className="grid md:grid-cols-2 gap-3">
         {items.map((r) => {
           const evLines = evidencePreview(r.evidence_json ?? undefined);
@@ -238,6 +247,7 @@ function Recomendacoes() {
           </Card>
         )}
       </div>
+      )}
     </div>
   );
 }

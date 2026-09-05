@@ -3461,7 +3461,12 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
         `${ehCreditoVisao ? promptVideoCredito : vis.introVideo} Devolve UM objeto JSON para o video inteiro. Campos: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : vis.produtos}); confianca ("alta"|"media"|"baixa"); quadro_que_sustenta (o numero do quadro, de 1 a ${imagens.length}, que sustenta a conclusao); texto_visivel (transcreva o texto legivel somando os quadros, sem repetir); menciona_taxa_prazo_ou_valor (true/false) e qual_valor (o trecho, ou vazio); quadros_divergem (true/false) e o_que_diverge (uma frase, ou vazio); riscos_compliance (promessa enganosa, urgencia falsa, ausencia de identificacao — so o que estiver VISIVEL); aproveitavel: "sim" se alinhado ao universo da marca e sem risco visivel, "nao" se produto claramente fora do universo ou risco claro, "incerto" se os quadros nao permitem afirmar; motivo (uma frase). LIMITE REAL: voce ve ${imagens.length} quadros, NAO o video - nao ha audio. "indeterminado" e "incerto" sao legitimos. Responda APENAS JSON: {"produto_detectado":"...","confianca":"...","quadro_que_sustenta":1,"texto_visivel":"...","menciona_taxa_prazo_ou_valor":false,"qual_valor":"","quadros_divergem":false,"o_que_diverge":"","riscos_compliance":"","aproveitavel":"sim|nao|incerto","motivo":"..."}` +
         `\nArquivo: ${arq.nome} (pasta: ${arq.caminho})` }];
       for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
-      const r = await chamarLLM([{ role: "user", content }], { maxTokens: 1500, reasoning: REASONING_OFF, tipo: "visao" });
+      const r = await chamarLLM([{ role: "user", content }], {
+        maxTokens: 1500,
+        reasoning: REASONING_OFF,
+        tipo: "visao",
+        timeoutMs: Math.min(OPENROUTER_TIMEOUT_MS, Math.max(1_000, prazo())),
+      });
       if (r.erro) continue;
       const it = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? "")) ?? {};
       const aprov = ["sim", "nao", "incerto"].includes(String(it?.aproveitavel)) ? String(it.aproveitavel) : "incerto";
@@ -3483,7 +3488,7 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
         aproveitavel: aprov,
         motivo: `${String(it?.motivo ?? "sem motivo")}${extras ? ` [${extras}]` : ""}`.slice(0, 400),
         aprovado_pelo_gestor: false,
-        modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
+        modelo: modeloEfetivoDaResposta(r.parsed, MODEL_SUB), analisado_em: new Date().toISOString(),
       }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
       if (eUp) { falhasGravacao++; continue; }
       analisados++;
@@ -3514,7 +3519,12 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
         `${ehCreditoVisao ? promptImgCredito : vis.introImg} Estas imagens sao os slides de UM carrossel (serie ${serie}), na ORDEM. Leia o CONJUNTO: hook no 1o, prova no meio, preco/CTA no ultimo. Um slide so com preco e aproveitavel=sim se o conjunto e oferta de plano ocular/oculos da cooperativa. Para CADA slide, na ordem, devolva um item JSON. Criterios: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : vis.produtos}); texto_visivel; riscos_compliance (so o VISIVEL); aproveitavel: "sim"|"nao"|"incerto"; motivo. Responda APENAS JSON: {"itens":[{"nome":"...","produto_detectado":"...","texto_visivel":"...","riscos_compliance":"...","aproveitavel":"sim|nao|incerto","motivo":"..."}]}` +
         `\nSlides nesta ordem: ${imagens.map((x) => x.arq.nome).join(" | ")}` }];
       for (const im of imagens) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
-      const r = await chamarLLM([{ role: "user", content }], { maxTokens: 2500, reasoning: REASONING_OFF, tipo: "visao" });
+      const r = await chamarLLM([{ role: "user", content }], {
+        maxTokens: 2500,
+        reasoning: REASONING_OFF,
+        tipo: "visao",
+        timeoutMs: Math.min(OPENROUTER_TIMEOUT_MS, Math.max(1_000, prazo())),
+      });
       if (r.erro) continue;
       const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
       const itens = Array.isArray(bruto?.itens) ? bruto.itens : [];
@@ -3533,7 +3543,7 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
           aproveitavel: aprov,
           motivo: `carrossel ${serie} (${imagens.length} slides em conjunto). ${String(it?.motivo ?? "sem motivo")}`.slice(0, 400),
           aprovado_pelo_gestor: false,
-          modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
+          modelo: modeloEfetivoDaResposta(r.parsed, MODEL_SUB), analisado_em: new Date().toISOString(),
         }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
         if (eUp) { falhasGravacao++; continue; }
         analisados++;
@@ -3562,7 +3572,12 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
       const content: any[] = [{ type: "text", text:
         `${ehCreditoVisao ? promptImgCredito : vis.introImg} Para CADA imagem, na ordem, devolva um item JSON. Criterios: produto_detectado (${ehCreditoVisao ? "consignado CLT, educacao financeira, seguranca, imovel, consorcio, financiamento, abertura de conta, indeterminado" : vis.produtos}); texto_visivel; riscos_compliance (so o VISIVEL); aproveitavel: "sim"|"nao"|"incerto"; motivo. Voce ve UM FRAME — na duvida, "incerto". Responda APENAS JSON: {"itens":[{"nome":"...","produto_detectado":"...","texto_visivel":"...","riscos_compliance":"...","aproveitavel":"sim|nao|incerto","motivo":"..."}]}` + `\nArquivos nesta ordem: ${grupo.map((x) => `${x.arq.nome} (pasta: ${x.arq.caminho})`).join(" | ")}` }];
       for (const im of grupo) content.push({ type: "image_url", image_url: { url: `data:${im.mime};base64,${im.b64}` } });
-      const r = await chamarLLM([{ role: "user", content }], { maxTokens: 2500, reasoning: REASONING_OFF, tipo: "visao" });
+      const r = await chamarLLM([{ role: "user", content }], {
+        maxTokens: 2500,
+        reasoning: REASONING_OFF,
+        tipo: "visao",
+        timeoutMs: Math.min(OPENROUTER_TIMEOUT_MS, Math.max(1_000, prazo())),
+      });
       if (r.erro) continue;
       const bruto = extrairJSON(String(r.parsed?.choices?.[0]?.message?.content ?? ""));
       const itens = Array.isArray(bruto?.itens) ? bruto.itens : [];
@@ -3580,7 +3595,7 @@ async function rodarAnaliseVisual(foco: string, ctx: { companyId: string; mcpKey
           riscos_compliance: String(it?.riscos_compliance ?? "").slice(0, 400),
           aproveitavel: aprov, motivo: String(it?.motivo ?? "sem motivo").slice(0, 400),
           aprovado_pelo_gestor: false,
-          modelo: MODEL_SUB, analisado_em: new Date().toISOString(),
+          modelo: modeloEfetivoDaResposta(r.parsed, MODEL_SUB), analisado_em: new Date().toISOString(),
         }, { onConflict: "drive_file_id,drive_modified_time,base_da_analise" });
         if (eUp) { falhasGravacao++; continue; }
         analisados++;

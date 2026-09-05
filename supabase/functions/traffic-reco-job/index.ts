@@ -20,6 +20,14 @@ const REDATOR_TIMEOUT_MS = 45_000;
 /** Parede do lote. Abaixo dos 120s da tarefa para sobrar margem de escrita no banco. */
 const LOTE_PAREDE_MS = 100_000;
 
+/**
+ * Teto do SELECT. 40 em serie nao cabem: 45s de teto por ida × 40 = 30 min contra
+ * parede de 100s. O fetch pede so o que a parede comporta; o que ficar pendente
+ * segue `pending` para a proxima corrida, declarado em nao_alcancados_na_parede
+ * se mesmo assim o relogio morder.
+ */
+const LOTE_MAX = Math.max(1, Math.floor(LOTE_PAREDE_MS / REDATOR_TIMEOUT_MS));
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_KEY = (Deno.env.get("OPENROUTER_API_KEY") ?? "").trim();
@@ -294,7 +302,7 @@ Deno.serve(async (req) => {
     .eq("status", "pending")
     .eq("needs_llm", true)
     .order("created_at", { ascending: true })
-    .limit(40);
+    .limit(LOTE_MAX);
 
   if (error) return json({ error: error.message }, 500);
 
@@ -335,6 +343,7 @@ Deno.serve(async (req) => {
     redator_apagao: apagao,
     redator_falhas: falhas,
     nao_alcancados_na_parede: naoAlcancados,
+    lote_max: LOTE_MAX,
     duracao_ms: Date.now() - t0,
     detalhes: results,
   };

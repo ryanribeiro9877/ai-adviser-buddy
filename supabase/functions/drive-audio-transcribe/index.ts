@@ -130,11 +130,11 @@ async function driveMeta(fileId: string) {
   return parsed;
 }
 
-async function driveDownload(fileId: string): Promise<Uint8Array> {
+async function driveDownload(fileId: string, signal?: AbortSignal): Promise<Uint8Array> {
   const token = await driveToken();
   const response = await fetch(
     `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
-    { headers: { authorization: `Bearer ${token}` } },
+    { headers: { authorization: `Bearer ${token}` }, signal },
   );
   if (!response.ok) throw new Error(`Drive download ${response.status}`);
   return new Uint8Array(await response.arrayBuffer());
@@ -188,7 +188,13 @@ function extrairAudio(input: Uint8Array): { out: Uint8Array | null; codec: strin
   return { out, codec, erro: null, duracaoSeg };
 }
 
-async function transcrever(key: string, bytes: Uint8Array, mime: string, nomeArquivo: string) {
+async function transcrever(
+  key: string,
+  bytes: Uint8Array,
+  mime: string,
+  nomeArquivo: string,
+  signal?: AbortSignal,
+) {
   const form = new FormData();
   // BlobPart exige Uint8Array<ArrayBuffer>; a lib do Deno 2.9 tipa o retorno como
   // Uint8Array<ArrayBufferLike>, que inclui SharedArrayBuffer. Aqui os bytes vem
@@ -200,6 +206,7 @@ async function transcrever(key: string, bytes: Uint8Array, mime: string, nomeArq
     method: "POST",
     headers: { "x-mcp-key": key },
     body: form,
+    signal,
   });
   const raw = await resp.text();
   let parsed: any = null;
@@ -222,12 +229,28 @@ type ResultadoPeca = {
   erro?: string;
 };
 
-// Processa uma linha. Retorna o resultado e se foi um erro transitorio (que NAO marca a linha).
-async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPeca; transitorio: boolean }> {
+// Processa uma linha. `restanteMs` e o que sobra da parede da corrida — a guarda
+// ANTES do item nao impede um video pesado de sozinho estourar o cron. O abort
+// corta download e transcribe-audio quando o relogio da corrida acaba; nao e
+// teto novo, e o mesmo ORCAMENTO_MS aplicado durante o item.
+async function processarPeca(
+  row: any,
+  key: string,
+  restanteMs: number,
+): Promise<{ res: ResultadoPeca; transitorio: boolean }> {
   const fileId = String(row.drive_file_id);
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), Math.max(1_000, restanteMs));
+  const abortou = () => ac.signal.aborted;
+  try {
   let meta: any;
   try { meta = await driveMeta(fileId); }
-  catch (e) { return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: `drive_meta: ${String(e)}` }, transitorio: true }; }
+  catch (e) {
+    if (abortou()) {
+      return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: "parede_durante_o_item" }, transitorio: true };
+    }
+    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: `drive_meta: ${String(e)}` }, transitorio: true };
+  }
   const sizeVideo = Number(meta.size ?? 0);
 
   // Guarda ANTES de baixar: o objetivo e nao gastar banda nem morrer com o arquivo na mao.
@@ -238,8 +261,13 @@ async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPec
   }
 
   let bytes: Uint8Array;
-  try { bytes = await driveDownload(fileId); }
-  catch (e) { return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, erro: `drive_download: ${String(e)}` }, transitorio: true }; }
+  try { bytes = await driveDownload(fileId, ac.signal); }
+  catch (e) {
+    if (abortou()) {
+      return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, erro: "parede_durante_o_item" }, transitorio: true };
+    }
+    return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, erro: `drive_download: ${String(e)}` }, transitorio: true };
+  }
 
   const mimeVideo = String(meta.mimeType ?? row.mime ?? "video/mp4");
   const ehVideo = mimeVideo.toLowerCase().startsWith("video") || mimeVideo.toLowerCase().includes("mp4");
@@ -279,8 +307,19 @@ async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPec
     return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, transcricao_fonte: fonte }, transitorio: false };
   }
 
-  const t = await transcrever(key, payload, payloadMime, nomeArquivo);
+  let t: Awaited<ReturnType<typeof transcrever>>;
+  try {
+    t = await transcrever(key, payload, payloadMime, nomeArquivo, ac.signal);
+  } catch (e) {
+    if (abortou()) {
+      return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, metodo, erro: "parede_durante_o_item" }, transitorio: true };
+    }
+    throw e;
+  }
   if (!t.ok) {
+    if (abortou()) {
+      return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, metodo, erro: "parede_durante_o_item" }, transitorio: true };
+    }
     // Erro do transcriber: nao marca a linha, deixa para a proxima corrida.
     return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, metodo, erro: `transcribe-audio ${t.status}: ${JSON.stringify(t.parsed ?? t.raw).slice(0, 220)}` }, transitorio: true };
   }
@@ -316,6 +355,9 @@ async function processarPeca(row: any, key: string): Promise<{ res: ResultadoPec
   if (writeError) return { res: { peca: row.nome, drive_file_id: fileId, transcrito: false, erro: `gravacao: ${writeError.message}` }, transitorio: true };
 
   return { res: { peca: row.nome, drive_file_id: fileId, transcrito: true, metodo, caracteres: text.length, tamanho_video: sizeVideo, tamanho_audio: audioLen, duracao_seg: duracaoSeg, transcricao_fonte: fonte, usage }, transitorio: false };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 Deno.serve(async (req) => {
@@ -361,9 +403,10 @@ Deno.serve(async (req) => {
   const resultados: ResultadoPeca[] = [];
   let transcritos = 0;
   for (const row of rows) {
-    if (Date.now() - inicio > ORCAMENTO_MS) break;
+    const restante = ORCAMENTO_MS - (Date.now() - inicio);
+    if (restante < 5_000) break;
     try {
-      const { res } = await processarPeca(row, key);
+      const { res } = await processarPeca(row, key, restante);
       resultados.push(res);
       if (res.transcrito) transcritos++;
     } catch (e) {

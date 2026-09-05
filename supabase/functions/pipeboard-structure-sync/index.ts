@@ -338,7 +338,13 @@ Deno.serve(async (req) => {
       const rejected: string[] = [];
       const mapped = unique.flatMap((row) => {
         try {
-          return [mapPipeboardAd(row, companyId, accountId, maps.campaigns)];
+          const ad = mapPipeboardAd(row, companyId, accountId, maps.campaigns) as Record<string, unknown>;
+          // COALESCE da releitura: body/title nulos nao entram no upsert. Sem isto a
+          // corrida do Pipeboard (que muitas vezes volta sem get_creative_details) apaga
+          // a copia que a Graph gravou em ads.body — e o portao volta a ficar cego.
+          if (!ad.body) delete ad.body;
+          if (!ad.title) delete ad.title;
+          return [ad];
         } catch {
           rejected.push(String(row?.id ?? "?"));
           return [];

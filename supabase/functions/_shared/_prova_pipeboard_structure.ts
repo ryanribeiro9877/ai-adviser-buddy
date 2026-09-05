@@ -143,4 +143,30 @@ assert(ad.image_url === "https://cdn/img.jpg", "image_url do criativo");
 assert(ad.thumbnail_url === "https://cdn/thumb.jpg", "thumbnail do criativo");
 assert(ad.preview_url === "https://fb.me/preview", "preview do anuncio");
 
+const dinamico = mapPipeboardAd(
+  {
+    id: "ad-dyn",
+    name: "Dinamico",
+    campaign_id: "cmp-1",
+    adset_id: "set-1",
+    effective_status: "ACTIVE",
+    creative: {
+      id: "creative-dyn",
+      object_type: "SHARE",
+      object_story_spec: { page_id: "105656372312257" },
+      asset_feed_spec: {
+        bodies: [{ text: "Legenda digitada no Gerenciador" }, { text: "Legenda digitada no Gerenciador" }],
+        titles: [{ text: "Titulo do feed" }],
+        link_urls: [{ website_url: "https://wa.me/5571993451315" }],
+        call_to_action_types: ["CONTACT_US"],
+      },
+    },
+  },
+  "company-1",
+  "1622612945584817",
+  new Map([["cmp-1", "campaign-uuid"]]),
+);
+assert(dinamico.body === "Legenda digitada no Gerenciador", "body sai de asset_feed_spec.bodies");
+assert(dinamico.title === "Titulo do feed", "title sai de asset_feed_spec.titles");
+
 console.log("ok: _prova_pipeboard_structure");

@@ -18,6 +18,8 @@ let isAdmin = true;
 let linhas: Record<string, unknown>[] = [];
 /** Erro da consulta de envios: prova que falha ≠ "nenhum dado importado". */
 let erroDosEnvios: unknown = null;
+/** Erro da contagem geral (fora do período): prova o ramo vazio && totalGeral.isError. */
+let erroDoTotal: unknown = null;
 const lerMock = vi.fn();
 const enviarMock = vi.fn();
 const exportarMock = vi.fn();
@@ -61,7 +63,19 @@ vi.mock("@/integrations/supabase/client", () => {
       erroDosEnvios ? { data: null, error: erroDosEnvios } : { data: linhas, error: null },
     );
   chain.eq = () => chain;
-  chain.select = () => chain;
+  chain.select = (_cols?: unknown, opts?: { head?: boolean }) => {
+    if (opts?.head) {
+      return {
+        eq: () =>
+          Promise.resolve(
+            erroDoTotal
+              ? { data: null, count: null, error: erroDoTotal }
+              : { data: null, count: 0, error: null },
+          ),
+      };
+    }
+    return chain;
+  };
   return { supabase: { from: () => chain } };
 });
 
@@ -97,6 +111,7 @@ beforeEach(() => {
   isAdmin = true;
   linhas = [];
   erroDosEnvios = null;
+  erroDoTotal = null;
   lerMock.mockReset().mockResolvedValue({ rows: [{ message_id: "m1" }], meta: META });
   enviarMock.mockReset().mockResolvedValue({ gravadas: 1 });
   exportarMock.mockReset();
@@ -122,6 +137,16 @@ describe("falha de consulta nao e 'nada importado'", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/nenhum dado da infobip importado/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /tentar de novo/i })).toBeInTheDocument();
+  });
+
+  it("periodo vazio com contagem geral falha NAO afirma 'nada importado'", async () => {
+    linhas = [];
+    erroDoTotal = { message: 'permission denied for table "infobip_dispatches"' };
+    montar();
+    expect(
+      await screen.findByText(/não foi possível verificar se existe dado fora deste intervalo/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/nenhum dado da infobip importado/i)).not.toBeInTheDocument();
   });
 
   it("empresa genuinamente sem importacao mostra o vazio, e NAO acusa falha", async () => {

@@ -1,4 +1,13 @@
-// supabase/functions/meta-campaign-status/index.ts (v19)
+// supabase/functions/meta-campaign-status/index.ts (v20)
+// v20 (05/09/2026) - COPIA DO CRIATIVO VOLTA PARA ads.body. Esta edge JA lia
+//   object_story_spec e asset_feed_spec por criativo (GET /{id}?fields=..., um por
+//   objeto) e usava so para destino_url e molde. A legenda digitada no Gerenciador
+//   nunca era gravada: 52 dos 97 ACTIVE ficavam sem texto, e o portao nao tinha o
+//   que avaliar. Agora o mesmo GET pede body+title, extractCreativeFields junta
+//   message/bodies, e o espelho grava ads.body + legenda_coletada_em. SOMENTE
+//   leitura na Meta — nada e pausado, emitido ou alterado na conta de ads.
+//   modo: "copia_criativos" preenche so quem ainda nao tem body (backfill), sem
+//   repetir a corrida inteira de status/OS.
 // v19 (27/08/2026) - Cota Ads Management (80004): a corrida diaria fazia 1 GET por
 //   objeto por campo (url_tags, status, spec...) em TODAS as contas connected,
 //   inclusive Read-Only nao_operacional. Isso esgotava act_COHAPM e act_Legal
@@ -150,6 +159,7 @@ import {
   redactAllMetaTokens,
   tokenAdsPorCompanyId,
 } from "../_shared/meta_company_tokens.ts";
+import { extractCreativeFields } from "../_shared/pipeboard_structure.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -596,6 +606,109 @@ function destinoDoCriativo(
     return { lido: true, situacao: "ambigua", url: null, candidatas: candidatos };
   }
   return { lido: true, situacao: "ausente", url: null, candidatas: null };
+}
+
+function copiaDoCriativo(
+  campos: Map<string, Map<string, unknown>>,
+  respondidos: Map<string, Set<string>>,
+  creativeId: string,
+): { lido: boolean; body: string | null; title: string | null } {
+  const lido =
+    (respondidos.get("object_story_spec")?.has(creativeId) ?? false) ||
+    (respondidos.get("asset_feed_spec")?.has(creativeId) ?? false) ||
+    (respondidos.get("body")?.has(creativeId) ?? false) ||
+    (respondidos.get("title")?.has(creativeId) ?? false);
+  if (!lido) return { lido: false, body: null, title: null };
+  const fields = extractCreativeFields({
+    body: campos.get("body")?.get(creativeId),
+    title: campos.get("title")?.get(creativeId),
+    object_story_spec: campos.get("object_story_spec")?.get(creativeId),
+    asset_feed_spec: campos.get("asset_feed_spec")?.get(creativeId),
+  });
+  return { lido: true, body: fields.body, title: fields.title };
+}
+
+/**
+ * Backfill da copia: um GET Graph por criativo dos ACTIVE que ainda nao tem ads.body.
+ * Nao pausa, nao emite card, nao altera anuncio na Meta. Escreve so no espelho.
+ */
+async function coletarCopiaDosCriativos(): Promise<Response> {
+  const { data: ads, error } = await supa
+    .from("ads")
+    .select("id, company_id, account_id, external_id, creative_id, body, title")
+    .eq("status", "ACTIVE")
+    .not("creative_id", "is", null);
+  if (error) return json({ ok: false, error: error.message }, 500);
+
+  const todos = ads ?? [];
+  const semCopia = todos.filter((a: { body?: string | null }) => !String(a.body ?? "").trim());
+  const porCriativo = new Map<string, typeof semCopia>();
+  for (const a of semCopia) {
+    const cid = String(a.creative_id ?? "").trim();
+    if (!cid) continue;
+    const arr = porCriativo.get(cid) ?? [];
+    arr.push(a);
+    porCriativo.set(cid, arr);
+  }
+  const ids = [...porCriativo.keys()];
+  const tokenDe = (creativeId: string) => {
+    const linha = (porCriativo.get(creativeId) ?? [])[0];
+    return resolverTokenConta(linha?.company_id, linha?.account_id)?.token ?? null;
+  };
+  const campos = ["body", "title", "object_story_spec", "asset_feed_spec"];
+  const lidos = ids.length
+    ? await lerCamposPorIdsMultiToken(ids, tokenDe, "criativo", campos)
+    : new Map<string, ResultadoCampo>();
+  const valores = new Map<string, Map<string, unknown>>();
+  const respondidos = new Map<string, Set<string>>();
+  for (const c of campos) {
+    valores.set(c, lidos.get(c)?.valores ?? new Map());
+    respondidos.set(c, lidos.get(c)?.respondidos ?? new Set());
+  }
+
+  const agora = new Date().toISOString();
+  let gravados = 0;
+  let lidosSemTexto = 0;
+  let semResposta = 0;
+  const erros: string[] = [];
+  for (const [cid, linhas] of porCriativo) {
+    const copia = copiaDoCriativo(valores, respondidos, cid);
+    if (!copia.lido) {
+      semResposta += linhas.length;
+      continue;
+    }
+    for (const loc of linhas) {
+      const patch: Record<string, unknown> = { legenda_coletada_em: agora };
+      if (copia.body) {
+        patch.body = copia.body;
+        patch.legenda_fonte = "graph:meta";
+      }
+      if (copia.title) patch.title = copia.title;
+      const { error: eUp } = await supa.from("ads").update(patch).eq("id", loc.id);
+      if (eUp) erros.push(`${loc.external_id}: ${eUp.message}`);
+      else if (copia.body) gravados++;
+      else lidosSemTexto++;
+    }
+  }
+
+  const abortado = [...lidos.values()].some((r) =>
+    r.diagnostico.erros.some((e) => /80004|rate-limit/i.test(e)),
+  );
+  return json({
+    ok: erros.length === 0 && !abortado,
+    modo: "copia_criativos",
+    somente_leitura_na_meta: true,
+    active_com_creative_id: todos.length,
+    ja_tinham_copia: todos.length - semCopia.length,
+    sem_copia_antes: semCopia.length,
+    criativos_unicos: ids.length,
+    passaram_a_ter_texto: gravados,
+    lidos_sem_texto: lidosSemTexto,
+    sem_resposta_graph: semResposta,
+    abortado_por_cota: abortado,
+    erros,
+    sonda: [...lidos.values()].map((x) => x.diagnostico),
+  });
 }
 
 // v14: coleta pontual do estado de UM conjunto. Le is_dynamic_creative (e, quando precisa criar a
@@ -1132,6 +1245,7 @@ Deno.serve(async (req) => {
   if (conjuntoAlvo) return await coletarEstadoDeUmConjunto(conjuntoAlvo, corpo);
   const modo = corpo && typeof corpo === "object" ? String(corpo.modo ?? "").trim() : "";
   if (modo === "meta_dicas") return await coletarMetaDicasAoVivo(corpo);
+  if (modo === "copia_criativos") return await coletarCopiaDosCriativos();
 
   const { data: integs } = await supa
     .from("integrations")
@@ -1429,6 +1543,7 @@ Deno.serve(async (req) => {
   );
 
   const camposCriativo = new Map<string, Map<string, unknown>>();
+  const criRespondidos = new Map<string, Set<string>>();
   let storySpec: ResultadoCampo | null = null;
   let assetFeedSpec: ResultadoCampo | null = null;
   const criativoCampos = [
@@ -1437,11 +1552,14 @@ Deno.serve(async (req) => {
     "template_url_spec",
     "asset_feed_spec",
     "link_destination_display_url",
+    "body",
+    "title",
   ];
   const criLidos = await lerCamposPorIdsMultiToken(creativeIds, tokenDeCreative, "criativo", criativoCampos);
   for (const campo of criativoCampos) {
     const lido = criLidos.get(campo) ?? resultadoVazio("criativo", campo, creativeIds.length);
     camposCriativo.set(campo, lido.valores);
+    criRespondidos.set(campo, lido.respondidos);
     if (campo === "object_story_spec") storySpec = lido;
     if (campo === "asset_feed_spec") assetFeedSpec = lido;
     diagnosticoCampos.push(lido.diagnostico);
@@ -1581,6 +1699,9 @@ Deno.serve(async (req) => {
   const destinosPorSituacao = { unica: 0, ambigua: 0, ausente: 0 };
   let anunciosSemCampoUrlTags = 0;
   let anunciosSemCampoDestino = 0;
+  let copiasGravadas = 0;
+  let copiasLidasSemTexto = 0;
+  let anunciosSemCampoCopia = 0;
   const errosEscritaAds: string[] = [];
   const agoraAds = new Date().toISOString();
 
@@ -1669,6 +1790,7 @@ Deno.serve(async (req) => {
     if (graphAd?.status) patch.status = graphAd.status;
     let tentouUrlTags = false;
     let tentouDestino = false;
+    let tentouCopia = false;
 
     // O campo no anuncio tem precedencia se a Graph realmente o devolveu. Caso contrario tenta
     // o criativo, onde meta-actions ja grava url_tags ao criar o adcreative.
@@ -1703,6 +1825,23 @@ Deno.serve(async (req) => {
       anunciosSemCampoDestino++;
     }
 
+    if (creativeId) {
+      const copia = copiaDoCriativo(camposCriativo, criRespondidos, creativeId);
+      if (copia.lido) {
+        if (copia.body) {
+          patch.body = copia.body;
+          patch.legenda_fonte = "graph:meta";
+        }
+        if (copia.title) patch.title = copia.title;
+        patch.legenda_coletada_em = agoraAds;
+        tentouCopia = true;
+      } else {
+        anunciosSemCampoCopia++;
+      }
+    } else {
+      anunciosSemCampoCopia++;
+    }
+
     if (Object.keys(patch).length === 0) continue;
     const { error } = await supa.from("ads").update(patch).eq("id", loc.id);
     if (error) {
@@ -1713,6 +1852,10 @@ Deno.serve(async (req) => {
         destinosGravados++;
         const situacao = patch.destino_url_situacao as "unica" | "ambigua" | "ausente";
         destinosPorSituacao[situacao]++;
+      }
+      if (tentouCopia) {
+        if (patch.body) copiasGravadas++;
+        else copiasLidasSemTexto++;
       }
     }
   }
@@ -2089,6 +2232,9 @@ Deno.serve(async (req) => {
       destinos_por_situacao: destinosPorSituacao,
       anuncios_sem_campo_url_tags: anunciosSemCampoUrlTags,
       anuncios_sem_campo_destino: anunciosSemCampoDestino,
+      copias_gravadas: copiasGravadas,
+      copias_lidas_sem_texto: copiasLidasSemTexto,
+      anuncios_sem_campo_copia: anunciosSemCampoCopia,
       erros_escrita: errosEscritaAds,
       sonda: diagnosticoCampos,
       nota: "com_chave=0 significa que a Graph nao devolveu o campo e a respectiva marca de coleta nao foi gravada. Destino: uma URL inequívoca = unica; mais de uma = ambigua com candidatas cruas e destino_url NULL; nenhuma em spec retornado = ausente. template_url_spec e link_destination_display_url sao apenas sondados ate a forma real ser provada.",

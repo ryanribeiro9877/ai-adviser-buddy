@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useApp, logAudit } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -146,6 +147,12 @@ function Campanhas() {
 
       {campaignsQ.isLoading ? (
         <Skeleton className="h-64 rounded-xl" />
+      ) : campaignsQ.isError ? (
+        <FalhaDeCarga
+          oQue="as campanhas desta empresa"
+          erro={campaignsQ.error}
+          onTentarDeNovo={() => campaignsQ.refetch()}
+        />
       ) : (
         <Card className="p-0 overflow-hidden">
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">

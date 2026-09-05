@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { useApp } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -139,6 +140,12 @@ function Funil() {
 
       {campaignsQ.isLoading ? (
         <Skeleton className="h-64 rounded-xl" />
+      ) : campaignsQ.isError ? (
+        <FalhaDeCarga
+          oQue="o funil desta empresa"
+          erro={campaignsQ.error}
+          onTentarDeNovo={() => campaignsQ.refetch()}
+        />
       ) : !hasData ? (
         <Card className="p-6 text-sm text-muted-foreground">
           Sem dados de entrega para esta empresa no período selecionado.
