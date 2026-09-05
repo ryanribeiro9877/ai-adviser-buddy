@@ -84,15 +84,16 @@ assert(visao.fallbacks[0] === "google/gemini-2.5-flash", `preferido antigo deve 
 // ---------------------------------------------------------------------------
 // `fusao` e a terceira natureza (05/09/2026): tipos que fundem material ja raciocinado e por
 // isso NAO sobem para xhigh em job deep. Ela entra aqui pela mesma porta das outras duas —
-// perguntando o predicado — para que reajuste de banda nao vire manutencao de prova. O modo que
-// ela devolve e `padrao`, e quem afirma isso e o roteador, nao esta linha.
+// perguntando o predicado — para que reajuste de banda nao vire manutencao de prova. Qual esforco
+// o modo `fusao` vale e assunto do roteador, nao desta linha: ela so afirma que a natureza existe
+// e vence o tier. Ja mudou uma vez (high -> low, quando `high` convergiu 1 em 3) sem tocar aqui.
 const modoNatural = (tipo: TipoTarefaLlm): ModoRaciocinio | null =>
   ehTarefaDeTriagem(tipo)
     ? "triagem"
     : ehTarefaInterativa(tipo)
     ? "interativo"
     : ehTarefaDeFusao(tipo)
-    ? "padrao"
+    ? "fusao"
     : null;
 
 for (const tipo of TIPOS) {

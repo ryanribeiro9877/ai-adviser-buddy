@@ -77,7 +77,7 @@ export type EsforcoRaciocinio = "low" | "medium" | "high" | "xhigh";
 
 /** Profundidade que o traffic-agent-job ja classificava antes desta mudanca. */
 export type TierProfundidade = "lite" | "standard" | "deep";
-export type ModoRaciocinio = "triagem" | "interativo" | "padrao" | "profundo";
+export type ModoRaciocinio = "triagem" | "interativo" | "fusao" | "padrao" | "profundo";
 
 /**
  * Faixa de esforco por NATUREZA DA TAREFA, nao por agente nem por ponto de chamada.
@@ -121,6 +121,18 @@ export const ESFORCO_TRIAGEM: EsforcoRaciocinio = "low";
  * que chega ao fim. Em `high` a qualidade media era zero, porque nao havia resposta.
  */
 export const ESFORCO_INTERATIVO: EsforcoRaciocinio = "low";
+/**
+ * `fusao` e o MAIS BAIXO QUE ESTE MODELO ACEITA, e o numero e escolhido por isso e nada mais.
+ *
+ * Quem funde pede `REASONING_OFF` desde sempre (`chamarSinteseParte` no traffic-agent-job). O
+ * modelo RECUSA desligar — `enabled:false` e effort "none" nao passam, e `low` e o piso dos
+ * `supported_efforts`. Entao este valor nao e uma opiniao sobre quanto o escritor deve pensar:
+ * e a traducao mais fiel possivel de um pedido que o provedor nao atende literalmente.
+ *
+ * `low` e o mesmo piso de `triagem` e `interativo`, e por coincidencia nenhuma: os tres sao
+ * casos em que o raciocinio caro nao compra o produto. Ver `TIPOS_DE_FUSAO`.
+ */
+export const ESFORCO_FUSAO: EsforcoRaciocinio = "low";
 export const ESFORCO_PADRAO: EsforcoRaciocinio = "high";
 export const ESFORCO_PROFUNDO: EsforcoRaciocinio = "xhigh";
 
@@ -218,10 +230,28 @@ const TIPOS_INTERATIVOS: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
  * observavel, porque a invocacao da plataforma morre em ~400s. Mais parede nao da mais tempo
  * a chamada.
  *
- * `high` continua sendo raciocinio de verdade — e o `ESFORCO_PADRAO` da casa, o mesmo com que
- * a sintese do tier standard escreve. O que se abre mao e da banda mais cara, para a resposta
- * existir. Se `high` convergir, o tempo medido dele e o primeiro numero real que
- * `OPENROUTER_TIMEOUT_MS` tera para apertar em vez de ficar pinado no teto da plataforma.
+ * PRIMEIRA TENTATIVA: `high`. MEDIDA E INSUFICIENTE — 1 convergencia em 3.
+ *
+ *   job        coleta   entrada da sintese   sintese    resultado
+ *   187a007b   26.683       12.345 tok       225,6s     `stop`, 11.603 chars, fidelidade 64,8%
+ *   6c5bc61f   29.873       12.886 tok       330,0s     censurada, `sintese_vazia`
+ *   32c59ac3   25.236       11.556 tok       330,0s     censurada, `sintese_vazia`
+ *
+ * A convergencia unica veio com 9.620 tokens de raciocinio, e ela PROVOU que o job fecha
+ * inteiro — foi a primeira resposta completa com coleta de verdade. Mas duas de tres morreram
+ * no mesmo teto, com entrada praticamente igual (11,6k a 12,9k tokens). Entrada igual e
+ * desfecho oposto significa que `high` fica EM CIMA do limite, e ai o que decide e a variancia
+ * do modelo, nao o orcamento. Um so desses jobs teria bastado para declarar vitoria falsa.
+ *
+ * ENTAO O ESFORCO DA FUSAO VAI PARA O PISO (`ESFORCO_FUSAO` = `low`), que e honrar de verdade o
+ * `REASONING_OFF` que o chamador sempre pediu: os especialistas ja raciocinaram — com 25k a 30k
+ * tokens de relatorio e saida `voluntario` —, e o escritor funde e escreve. Raciocinar de novo,
+ * do zero, sobre raciocinio pronto e o gasto que a medicao pegou duas vezes.
+ *
+ * Se `low` convergir com folga, o tempo medido dele e o primeiro numero real que
+ * `OPENROUTER_TIMEOUT_MS` tera para apertar em vez de ficar pinado no teto da plataforma. Se NAO
+ * convergir, o proximo passo nao e mexer em esforco de novo: e o gate de `sintetizarSegmentada`,
+ * hoje inalcancavel no deep porque pede 4 relatorios e o deep roda 2.
  */
 const TIPOS_DE_FUSAO: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
   "sintese",
@@ -296,7 +326,7 @@ export function modoRaciocinio(
   // `profundo: true` esta dizendo "o job e profundo", nao "raciocine de novo o que ja foi
   // raciocinado". Se algum dia a sintese precisar subir, isso passa a ser decisao desta lista
   // e nao efeito colateral de uma flag de tier.
-  if (opts.tipo && ehTarefaDeFusao(opts.tipo)) return "padrao";
+  if (opts.tipo && ehTarefaDeFusao(opts.tipo)) return "fusao";
   if (typeof opts.profundo === "boolean") return opts.profundo ? "profundo" : "padrao";
   return opts.tier === "deep" ? "profundo" : "padrao";
 }
@@ -304,6 +334,7 @@ export function modoRaciocinio(
 export function esforcoDoModo(modo: ModoRaciocinio): EsforcoRaciocinio {
   if (modo === "triagem") return ESFORCO_TRIAGEM;
   if (modo === "interativo") return ESFORCO_INTERATIVO;
+  if (modo === "fusao") return ESFORCO_FUSAO;
   return modo === "profundo" ? ESFORCO_PROFUNDO : ESFORCO_PADRAO;
 }
 
