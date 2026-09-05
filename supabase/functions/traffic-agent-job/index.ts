@@ -412,6 +412,14 @@ const GLOBAL_WALL_MS = 480_000;     // 8 min desde created_at do job (parede de 
 //
 // Com 270s o job 83a4adce fechou em 160s, `finish: stop`, sem segmentar, com 1.207 chars que
 // declaram explicitamente o que nao foi coletado. E degradado, mas conclui e nao mente.
+//
+// 04/09/2026, AUTORIZACAO DE SUBIR ESTE TETO — EXAMINADA E NAO EXERCIDA. O gestor liberou mexer
+// aqui "ate a coleta funcionar". A medicao diz que subir SO isto nao faz o job fechar: a noite de
+// 03/09 e o experimento, com a parede em 390s a coleta veio farta (27k tokens, `stop|stop`) e a
+// sintese morreu. Dar pista para um lado mata o outro porque os dois disputam a MESMA parede.
+// A conta completa e o que falta para fechar estao no bloco de `SINT_RESERVA_MS`. Leia antes de
+// subir este numero: sem parede maior, subir aqui troca "resposta curta" por "erro", que e
+// exatamente o que o gestor pediu para nao acontecer.
 const JOB_LIMIT_MS = 270_000;       // teto por invocacao (ainda limitado pelo global)
 const RESERVA_FINAL_MS = 10_000;
 // 150s, nao 75s: a sintese `xhigh` com relatorio cheio na entrada leva 121,9s medidos. Com 75s
@@ -461,6 +469,70 @@ const RESERVA_FINAL_MS = 10_000;
  * Com ela, a proxima amostra responde se a sintese escala com a coleta — a pergunta de que (a)
  * depende. NAO baixe esta reserva por causa dos 116,4s: os 33,6s de folga sao a margem que separa
  * conclusao de `sintese_vazia`, e o registro deste arquivo mostra o que custou aperta-la duas vezes.
+ */
+/**
+ * 04/09/2026 — O EXPERIMENTO NATURAL QUE FECHA A PERGUNTA: COLETA E SINTESE NAO CABEM JUNTAS.
+ *
+ * O bloco acima diz que (a) fica fora porque "o unico dado do regime de (a) sao duas mortes". A
+ * auditoria da linha do tempo achou MUITO mais que duas, e o conjunto e um experimento controlado
+ * que ninguem montou de proposito. Registrado aqui para nao ser refeito.
+ *
+ * O EXPERIMENTO. Em 03/09 as 22:22 UTC o commit `0297353` subiu a parede de 300s para 390s. Os
+ * tres jobs seguintes coletaram FARTO e morreram na sintese:
+ *
+ *   job       coleta ate a sintese   tokens de saida dos especialistas   finish        sintese
+ *   e56b8bb1        248s                      27.092                     stop|stop    morreu
+ *   9a7b8f7b        193s                      11.743                     tool_calls   morreu
+ *   0a02b08a        276s                      27.898                     stop|stop    morreu
+ *
+ * Ou seja: com tempo, o `xhigh` COLETA BEM — dois especialistas fechando em `stop` com 27k tokens
+ * de relatorio. A coleta nunca foi o problema difícil. A sintese e.
+ *
+ * A SINTESE NUNCA FECHOU COM COLETA DE VERDADE, EM NENHUM ORCAMENTO JA TENTADO. Onze execucoes
+ * deep morreram em `openrouter_timeout_<n>`, e a duracao REAL (de `finished_at` menos o ultimo
+ * evento de progresso da fase `sintese`) bate com o teto concedido em 10 das 11 — 19/20, 32/32,
+ * 49/50, 75/75, 103/103, 118/119, 118/119, 150/150, 150/150, 200/200. Sao timeouts genuinos, nao
+ * abortos precoces com rotulo enganoso. A leitura: a sintese com relatorio farto e CENSURADA A
+ * DIREITA em 200s. Sabe-se que ela precisa de MAIS de 200s; nao se sabe de quanto, porque nunca
+ * recebeu mais que isso.
+ *
+ * POR QUE `2ffb4d4` (reserva 75s -> 150s) LEVOU A COLETA A ZERO SEM SALVAR A SINTESE. A reserva
+ * comprou tempo que a sintese NAO PODE USAR: a fase e limitada por `SINT_FASE_HARD_MS` (160s) e
+ * cada chamada por `OPENROUTER_TIMEOUT_MS` (150s). Subir a reserva de 75s para 150s custou 75s de
+ * pista da coleta e deu a sintese, no maximo, 160s — abaixo dos >200s que ela precisa. Pagou-se o
+ * preco inteiro por nenhum ganho possivel, e foi essa reserva de 195s que criou o piso de 20s.
+ * QUALQUER subida de reserva daqui em diante e inutil sem subir os dois tetos junto.
+ *
+ * A ARITMETICA DO JOB INTEIRO, com os numeros medidos acima:
+ *
+ *   coleta farta 250s + reinvocacao 45s + sintese >200s + RESERVA_FINAL 10s  =  >505s
+ *
+ * contra `GLOBAL_WALL_MS` de 480s. NAO CABE — e o deficit e um limite inferior, porque a sintese
+ * so tem cota minima conhecida. Na MESMA invocacao e pior: 250s + >200s = >450s contra os ~400s
+ * de parede da plataforma. Cada fase cabe sozinha numa invocacao; as duas juntas nao cabem em
+ * nenhuma das duas contas.
+ *
+ * CONSEQUENCIA PRATICA, e e o que impede a proxima tentativa de repetir esta: SUBIR
+ * `JOB_LIMIT_MS` SOZINHO REPRODUZ 03/09 — coleta farta, sintese morta. Nao e previsao, e o que
+ * aconteceu quando a parede foi para 390s e a coleta ganhou pista. Separar coleta e sintese em
+ * invocacoes distintas e NECESSARIO (cada uma cabe sozinha) e INSUFICIENTE na parede de 480s:
+ * depois de 250s de coleta e 45s de reinvocacao, sobram ~175s para a sintese, abaixo dos 200s em
+ * que ela ja falhou.
+ *
+ * AS DUAS ALAVANCAS QUE RESTAM SAO DO GESTOR, NAO DAQUI:
+ *   1. A PAREDE. Para o job fechar inteiro ela precisa de >=510s, e provavelmente mais, porque
+ *      >200s e piso e nao estimativa. `GLOBAL_WALL_MS` esta declarado neste arquivo como parede de
+ *      POLITICA (promessa de 8 min), nao teto tecnico — subir e decisao de produto. Sobe junto com
+ *      `SINT_FASE_HARD_MS` e `OPENROUTER_TIMEOUT_MS`, ou a sintese continua capada em 160s.
+ *   2. O TAMANHO DA ENTRADA DA SINTESE. Medido no regime magro: ~94% da entrada e instrucao
+ *      permanente (~63.750 chars de memoria institucional + estilo, ~19k tokens) contra ~1.200
+ *      tokens de coleta fresca. Encolher instrucao encolhe o trabalho da sintese SEM tirar
+ *      profundidade da coleta nem esforco de raciocinio — as duas coisas que estao fechadas.
+ *
+ * O QUE NAO FOI MEDIDO, e e o unico numero que falta para dimensionar a parede: quanto a sintese
+ * leva com entrada farta quando NAO e interrompida. Precisa de um teto acima de 200s para ser
+ * observado. `tel.sintese.ms` e `tel.sintese_entrada` (v4.20) gravam exatamente esse par e
+ * sobrevivem ao erro; falta a corrida com orcamento que permita a resposta.
  */
 const SINT_RESERVA_MS = 150_000;    // reserva minima para escrever a resposta (medida, nao arbitrada)
 // Segmentos: no maximo 2 — o 2o so para resgate de sintese (429/timeout), nao maratona.
