@@ -1,4 +1,8 @@
-// supabase/functions/traffic-chat/index.ts (v28.97)
+// supabase/functions/traffic-chat/index.ts (v28.98)
+// v28.98 (09/09/2026) - CARD AD_CONJ.NOVO.01 CAIA NO CONJ.01. O parser so via CONJ.N;
+//   CONJ.NOVO.01 nao tinha numero, o fallback 1 (slate/"conjunto 1 nao recebe") casava
+//   JUR_WA_CONJ.01_9108-8073 e o conjunto novo saia do pool. Identidade CONJ.NOVO.N
+//   resolve o destino; recusa se o card ainda apontar para CONJ.N. Sem mudanca de prompt.
 // v28.97 (02/09/2026) - "6 VIDEOS DO DRIVE DO JURIDICO" MORREU EM RECORTE, E O AGENTE PEDIU
 //   A PASTA AO GESTOR. O modelo mandou formatos=[Reels,Videos] num pedido de "qualquer
 //   pasta". O Juridico e "COHAPM Juridico · Exports Finais" e nao tem essas subpastas:
@@ -761,12 +765,15 @@ import { preferidoWhatsAppParaAds, resolverWhatsAppCtwa, toolGetWhatsAppDaPagina
 import { pipeboardListTools, pipeboardToken } from "../_shared/pipeboard.ts";
 import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto } from "../_shared/lote_criativo.ts";
 import {
+  casarConjuntosPorPedido,
   classificarLinhaProdutoCohapm,
+  conjuntoNomeCasaComIdentidade,
   conjuntoNomeCasaComNumero,
   conjuntoVivoParaDestino,
   desempateDeAlvoDoCard,
   desempateDeConjunto,
   escolherConjuntosDaMesmaLinha,
+  escolherConjuntosPorIdentidadeELinha,
   escolherConjuntosPorNumeroELinha,
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
@@ -776,18 +783,20 @@ import {
   extrairLinksWaMePorConjunto,
   extrairNomesCriativoDaFala,
   extrairSlateDaFala,
+  identidadeConjuntoDeSinais,
   nomeCompostoForaDeEscopoTrafego,
   numeroConjuntoDaFala,
   numeroConjuntoDeSinais,
-  numeroConjuntoDoNome,
   pareceNomeDePecaNaoMolde,
   pareceApprovalIdEmVezDeDrive,
   pecaChaveDoSlate,
   recusarConjuntoErrado,
   recusarCruzamentoLinhaProduto,
   recusaAlvoNaoOperacional,
+  rotuloIdentidadeConjunto,
   statusObjetoOperacional,
   temSlateNoTexto,
+  type IdentidadeConjunto,
   type PecaSlate,
 } from "../_shared/memoria_conjunto.ts";
 import {
@@ -2150,8 +2159,14 @@ function recusaConjuntoNumero(
   destNome: string | null | undefined,
   pecaSinais: Array<string | null | undefined>,
   nPedido?: number | null,
+  identPedido?: IdentidadeConjunto | null,
 ): { erro: string; detalhe: string } | null {
-  const r = recusarConjuntoErrado({ destNome, pecaSinais, pedidoNumero: nPedido ?? null });
+  const r = recusarConjuntoErrado({
+    destNome,
+    pecaSinais,
+    pedidoNumero: nPedido ?? null,
+    pedidoIdentidade: identPedido ?? null,
+  });
   if (r.ok) return null;
   return { erro: ERRO_CONJUNTO_ERRADO, detalhe: r.detalhe };
 }
@@ -3466,14 +3481,24 @@ async function t_propose_criacao(
       nomeAlvo,
       nomePedidoBruto,
     ]);
-    const nConjuntoPedido =
+    const identPedido = identidadeConjuntoDeSinais(
+      conjuntoDestinoParam,
+      nomePedidoBruto,
+      nomeAlvo,
+      ...pecaSinaisEarly,
+      falaConv.ultimoUser,
+    );
+    const nConjuntoPedido = identPedido?.n ??
       numeroConjuntoDeSinais(...pecaSinaisEarly, nomeAlvo, nomePedidoBruto) ??
       numeroConjuntoDaFala(falaConv.ultimoUser) ??
       numeroConjuntoDaFala(conjuntoDestinoParam) ??
       numeroConjuntoDaFala(falaConv.blob);
+    const rotuloPedido = identPedido
+      ? rotuloIdentidadeConjunto(identPedido)
+      : (nConjuntoPedido != null ? `CONJ.${nConjuntoPedido}` : "");
     const linksConversa = extrairLinksWaMePorConjunto(falaConv.blob);
-    // CONJ.N + linha: nunca o conjunto mais novo da mesma linha (CONJ.1 ↛ CONJ.4).
-    if (!conjuntoDestinoParam && nConjuntoPedido) {
+    // CONJ.NOVO.01 ≠ CONJ.01. Serie no criativo/fala ganha do numero 1 (incidente 09/09/2026).
+    if (!conjuntoDestinoParam && (identPedido || nConjuntoPedido)) {
       const { data: setsAliasRaw } = await supa
         .from("ad_sets")
         .select("external_id,name,campaign_id,created_at,destination_type,status")
@@ -3485,12 +3510,19 @@ async function t_propose_criacao(
         .eq("company_id", companyId);
       const campNome = (cid: unknown) =>
         String((campsAlias ?? []).find((c: any) => c.id === cid)?.name ?? "");
-      const pool = escolherConjuntosPorNumeroELinha(
-        setsAlias ?? [],
-        nConjuntoPedido,
-        pecaSinaisEarly,
-        (s: any) => campNome(s.campaign_id),
-      );
+      const pool = identPedido
+        ? escolherConjuntosPorIdentidadeELinha(
+          setsAlias ?? [],
+          identPedido,
+          pecaSinaisEarly,
+          (s: any) => campNome(s.campaign_id),
+        )
+        : escolherConjuntosPorNumeroELinha(
+          setsAlias ?? [],
+          nConjuntoPedido!,
+          pecaSinaisEarly,
+          (s: any) => campNome(s.campaign_id),
+        );
       if (pool.length === 1 && pool[0]?.external_id) {
         conjuntoDestino = String(pool[0].external_id);
       } else if (pool.length === 0) {
@@ -3500,16 +3532,16 @@ async function t_propose_criacao(
         return {
           erro: "conjunto_destino_nao_encontrado",
           detalhe:
-            `Nenhum conjunto CONJ.${nConjuntoPedido} da mesma linha da peca. ` +
+            `Nenhum conjunto ${rotuloPedido} da mesma linha da peca. ` +
             `NAO use o mais novo da linha (ex. CONJ.4 no lugar de CONJ.1). ` +
-            `NAO peca ID numerico da Meta — CONJ.${nConjuntoPedido} no nome basta.`,
+            `CONJ.NOVO.N nao e CONJ.N. NAO peca ID numerico da Meta — ${rotuloPedido} no nome basta.`,
           candidatos: mesmaLinha.slice(0, 12).map((s: any) => s.name),
         };
       } else if (pool.length > 1) {
         return {
           erro: "conjunto_destino_ambiguo",
           detalhe: desempateDeConjunto(
-            `Ha ${pool.length} conjuntos CONJ.${nConjuntoPedido} da mesma linha.`,
+            `Ha ${pool.length} conjuntos ${rotuloPedido} da mesma linha.`,
             pool,
           ),
           candidatos: pool.slice(0, 8).map((s: any) => ({
@@ -3541,8 +3573,10 @@ async function t_propose_criacao(
           pecaSinais: pecaSinaisEarly,
         });
         if (!cruzLast.ok) return false;
-        if (nConjuntoPedido) {
-          const nomeLast = String(r?.payload?.nome_novo ?? "");
+        const nomeLast = String(r?.payload?.nome_novo ?? "");
+        if (identPedido) {
+          if (!conjuntoNomeCasaComIdentidade(nomeLast, identPedido)) return false;
+        } else if (nConjuntoPedido) {
           if (!conjuntoNomeCasaComNumero(nomeLast, nConjuntoPedido)) return false;
         }
         return true;
@@ -3609,7 +3643,7 @@ async function t_propose_criacao(
       ehSentinelaSemMolde(nomeAlvo)
     );
     if (!semMolde && !nomeAlvo) return { erro: "target_name deve ser o nome do ANUNCIO MOLDE a replicar (ou 'sem_molde' + drive_file_id / meta_video_id / child_attachments / meta_image_hash para peca nova sem herdar molde)" };
-    if (!conjuntoDestino && !nConjuntoPedido) {
+    if (!conjuntoDestino && !nConjuntoPedido && !identPedido) {
       return {
         erro:
           "params.conjunto_destino (nome) ou params.conjunto_destino_external_id obrigatorio — conjunto que recebe o anuncio. CONJ.N no nome basta; nao peca ID da Meta.",
@@ -3668,75 +3702,59 @@ async function t_propose_criacao(
     let dest = conjuntoDestino
       ? ((sets ?? []).find((x) => x.external_id === conjuntoDestino) ?? null)
       : null;
-    if (!dest && conjuntoDestino) {
-      const compactNome = (s: string) =>
-        deacc(String(s ?? "")).toLowerCase().replace(/[/\\_\s.-]+/g, "");
-      const pedidoC = compactNome(conjuntoDestino);
-      const nNomePedido = numeroConjuntoDoNome(conjuntoDestino) ?? nConjuntoPedido;
-      const byName = (sets ?? []).filter((x) => {
-        const nome = String(x.name ?? "");
-        if (compactNome(nome) === pedidoC) return true;
-        if (nNomePedido != null) return conjuntoNomeCasaComNumero(nome, nNomePedido);
-        return pedidoC.length >= 12 && compactNome(nome).includes(pedidoC);
-      });
-      const alinhadosNome = escolherConjuntosDaMesmaLinha(byName, pecaSinaisEarly, (s: any) => {
-        const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
-        return camp?.name ?? null;
-      });
-      const poolNome = nNomePedido
-        ? escolherConjuntosPorNumeroELinha(alinhadosNome, nNomePedido, pecaSinaisEarly, (s: any) => {
+    const campanhaDeSet = (s: any) => {
+      const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
+      return camp?.name ?? null;
+    };
+    const casados = casarConjuntosPorPedido(
+      sets ?? [],
+      conjuntoDestino || nomePedidoBruto,
+      identPedido,
+    );
+    const alinhadosNome = escolherConjuntosDaMesmaLinha(casados, pecaSinaisEarly, campanhaDeSet);
+    const inCampNome = campHintRow ? alinhadosNome.filter((s) => s.campaign_id === campHintRow.id) : [];
+    const poolNome = inCampNome.length ? inCampNome : alinhadosNome;
+    // Serie (CONJ.NOVO.01) corrige destino mesmo se o id/nome caiu no CONJ.01.
+    if (identPedido?.serie && poolNome.length === 1) dest = poolNome[0];
+    else if (!dest && poolNome.length === 1) dest = poolNome[0];
+    else if (!dest && poolNome.length > 1) {
+      return {
+        erro: "conjunto_destino_ambiguo",
+        detalhe: desempateDeConjunto(
+          `Ha ${poolNome.length} conjuntos para '${conjuntoDestino || rotuloPedido}'.`,
+          poolNome,
+        ),
+        candidatos: poolNome.slice(0, 8).map((s: any) => {
           const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
-          return camp?.name ?? null;
-        })
-        : alinhadosNome;
-      if (poolNome.length === 1) dest = poolNome[0];
-      else if (poolNome.length > 1) {
-        const inCamp = campHintRow ? poolNome.filter((s) => s.campaign_id === campHintRow.id) : [];
-        if (inCamp.length === 1) dest = inCamp[0];
-        else {
           return {
-            erro: "conjunto_destino_ambiguo",
-            detalhe: desempateDeConjunto(
-              `Ha ${poolNome.length} conjuntos para '${conjuntoDestino}'.`,
-              poolNome,
-            ),
-            candidatos: poolNome.slice(0, 8).map((s: any) => {
-              const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
-              return {
-                nome: s.name,
-                external_id: s.external_id,
-                campanha: camp?.name ?? null,
-                destination_type: s.destination_type ?? null,
-              };
-            }),
+            nome: s.name,
+            external_id: s.external_id,
+            campanha: camp?.name ?? null,
+            destination_type: s.destination_type ?? null,
           };
-        }
-      }
+        }),
+      };
     }
-    if (!dest && nConjuntoPedido) {
-      const poolNum = escolherConjuntosPorNumeroELinha(sets ?? [], nConjuntoPedido, pecaSinaisEarly, (s: any) => {
-        const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
-        return camp?.name ?? null;
-      });
+    if (!dest && (identPedido || nConjuntoPedido)) {
+      const poolNum = identPedido
+        ? escolherConjuntosPorIdentidadeELinha(sets ?? [], identPedido, pecaSinaisEarly, campanhaDeSet)
+        : escolherConjuntosPorNumeroELinha(sets ?? [], nConjuntoPedido!, pecaSinaisEarly, campanhaDeSet);
       const inCamp = campHintRow ? poolNum.filter((s) => s.campaign_id === campHintRow.id) : poolNum;
       const pool = inCamp.length ? inCamp : poolNum;
       if (pool.length === 1) dest = pool[0];
       else if (pool.length === 0) {
-        const mesmaLinha = escolherConjuntosDaMesmaLinha(sets ?? [], pecaSinaisEarly, (s: any) => {
-          const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
-          return camp?.name ?? null;
-        });
+        const mesmaLinha = escolherConjuntosDaMesmaLinha(sets ?? [], pecaSinaisEarly, campanhaDeSet);
         return {
           erro: "conjunto_destino_nao_encontrado",
           detalhe:
-            `Nenhum conjunto CONJ.${nConjuntoPedido} da mesma linha da peca. ` +
-            `NAO use o mais novo da linha. NAO peca ID numerico da Meta.`,
+            `Nenhum conjunto ${rotuloPedido} da mesma linha da peca. ` +
+            `NAO use o mais novo da linha. CONJ.NOVO.N nao e CONJ.N. NAO peca ID numerico da Meta.`,
           candidatos: mesmaLinha.slice(0, 12).map((s: any) => s.name),
         };
       } else {
         return {
           erro: "conjunto_destino_ambiguo",
-          detalhe: desempateDeConjunto(`Ha ${pool.length} conjuntos CONJ.${nConjuntoPedido}.`, pool),
+          detalhe: desempateDeConjunto(`Ha ${pool.length} conjuntos ${rotuloPedido}.`, pool),
           candidatos: pool.slice(0, 8).map((s: any) => {
             const camp = (campsAll ?? []).find((c) => c.id === s.campaign_id);
             return { nome: s.name, external_id: s.external_id, campanha: camp?.name ?? null };
@@ -3746,7 +3764,7 @@ async function t_propose_criacao(
     }
     if (!dest) {
       return {
-        erro: `conjunto de destino '${conjuntoDestino || `CONJ.${nConjuntoPedido}`}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro. Nao peca ID Graph ao gestor.`,
+        erro: `conjunto de destino '${conjuntoDestino || rotuloPedido}' nao encontrado. Se ainda nao existe, proponha criar_conjunto_a_partir_de primeiro. Nao peca ID Graph ao gestor.`,
       };
     }
 
@@ -3844,6 +3862,7 @@ async function t_propose_criacao(
       dest.name,
       [...pecaSinaisEarly, nomeNovo, pecaMem.pecaChave],
       nConjuntoPedido,
+      identPedido,
     );
     if (cruzNum) return cruzNum;
 

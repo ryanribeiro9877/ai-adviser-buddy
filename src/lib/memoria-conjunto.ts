@@ -37,6 +37,98 @@ export function conjuntoNomeCasaComNumero(name: string, n: number): boolean {
   return numeroConjuntoDoNome(name) === n;
 }
 
+/**
+ * CONJ.NOVO.01 nao e CONJ.01. O parser de numero so ve CONJ.N; a identidade guarda o
+ * qualificativo entre CONJ e o numero (serie). "novo01" na fala e a mesma chave.
+ *
+ * Medido 09/09/2026: o card AD_CONJ.NOVO.01_* nascia em JUR_WA_CONJ.01_9108-8073
+ * porque o fallback por numero 1 casava o conjunto velho e o NOVO.01 (sem CONJ.N
+ * parseavel) saia do pool.
+ */
+export type IdentidadeConjunto = { n: number; serie: string | null };
+
+function compactNomeConjunto(s: string): string {
+  return deacc(String(s ?? ""))
+    .toLowerCase()
+    .replace(/[/\\_\s.-]+/g, "");
+}
+
+export function rotuloIdentidadeConjunto(id: IdentidadeConjunto | null): string {
+  if (!id) return "um conjunto sem CONJ.N no nome";
+  const pad = String(id.n).padStart(2, "0");
+  return id.serie ? `CONJ.${id.serie.toUpperCase()}.${pad}` : `CONJ.${id.n}`;
+}
+
+function identidadesIguais(a: IdentidadeConjunto | null, b: IdentidadeConjunto | null): boolean {
+  if (!a || !b) return false;
+  return a.n === b.n && (a.serie ?? null) === (b.serie ?? null);
+}
+
+function coletarIdentidades(s: string): IdentidadeConjunto[] {
+  const t = deacc(String(s ?? "").toLowerCase());
+  const out: IdentidadeConjunto[] = [];
+  const push = (n: number, serie: string | null) => {
+    if (n >= 1 && n <= 99) out.push({ n, serie });
+  };
+  const reSerie =
+    /(?:^|[^a-z0-9])conj(?:unto)?[\s._-]+([a-z]{2,12})[\s._-]*0*([1-9]\d?)(?=[^0-9]|$)/g;
+  const reNovo = /(?:^|[^a-z0-9])novo[\s._-]*0*([1-9]\d?)(?=[^0-9]|$)/g;
+  const reN = /(?:^|[^a-z0-9])conj(?:unto)?\.?\s*0*([1-9]\d?)(?=[^0-9]|$)/g;
+  const reCj = /(?:^|[^a-z0-9])cj[_\s.]*0*([1-9]\d?)(?=[^0-9]|$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = reSerie.exec(t))) push(Number(m[2]), String(m[1] ?? "").toLowerCase());
+  while ((m = reNovo.exec(t))) push(Number(m[1]), "novo");
+  while ((m = reN.exec(t))) push(Number(m[1]), null);
+  while ((m = reCj.exec(t))) push(Number(m[1]), null);
+  return out;
+}
+
+export function identidadeConjuntoDoNome(s: string): IdentidadeConjunto | null {
+  const ids = coletarIdentidades(s);
+  if (!ids.length) return null;
+  const uniq = (arr: IdentidadeConjunto[]) => {
+    const map = new Map<string, IdentidadeConjunto>();
+    for (const i of arr) map.set(`${i.serie ?? ""}:${i.n}`, i);
+    return [...map.values()];
+  };
+  const comSerie = ids.filter((i) => i.serie);
+  if (comSerie.length) {
+    const u = uniq(comSerie);
+    return u.length === 1 ? u[0] : null;
+  }
+  const u = uniq(ids);
+  return u.length === 1 ? u[0] : null;
+}
+
+/** Serie (CONJ.NOVO.01) ganha de CONJ.01 no mesmo sinal; Ns diferentes → null. */
+export function identidadeConjuntoDeSinais(
+  ...sinais: Array<string | null | undefined>
+): IdentidadeConjunto | null {
+  const ids: IdentidadeConjunto[] = [];
+  for (const s of sinais) {
+    if (s == null || !String(s).trim()) continue;
+    const id = identidadeConjuntoDoNome(String(s));
+    if (id) ids.push(id);
+  }
+  if (!ids.length) return null;
+  const comSerie = ids.filter((i) => i.serie);
+  if (comSerie.length) {
+    const keys = new Set(comSerie.map((i) => `${i.serie}:${i.n}`));
+    if (keys.size === 1) return comSerie[0];
+    return null;
+  }
+  const ns = new Set(ids.map((i) => i.n));
+  if (ns.size === 1) return { n: [...ns][0], serie: null };
+  return null;
+}
+
+export function conjuntoNomeCasaComIdentidade(name: string, ident: IdentidadeConjunto): boolean {
+  const id = identidadeConjuntoDoNome(name);
+  if (!id) return false;
+  if (ident.serie == null) return id.serie == null && id.n === ident.n;
+  return id.serie === ident.serie && id.n === ident.n;
+}
+
 const RE_WAME = "https?:\\/\\/(?:wa\\.me|api\\.whatsapp\\.com\\/send)[^\\s)\\]\"'<>|]+";
 
 /** Mapa conjunto → wa.me extraido da conversa (ex.: "no 02 o link: http://wa.me/…"). */
@@ -510,6 +602,7 @@ export function escolherConjuntosDaMesmaLinha<T extends { name?: string | null }
 
 /**
  * Auto-pick: CONJ.N da mesma linha. Pool vazio = nao ha candidato (nunca o mais novo da linha).
+ * CONJ.NOVO.N nao entra no pool de CONJ.N.
  */
 export function escolherConjuntosPorNumeroELinha<T extends { name?: string | null }>(
   hits: T[],
@@ -519,6 +612,47 @@ export function escolherConjuntosPorNumeroELinha<T extends { name?: string | nul
 ): T[] {
   const byNum = hits.filter((h) => conjuntoNomeCasaComNumero(String(h.name ?? ""), n));
   return escolherConjuntosDaMesmaLinha(byNum, pecaSinais, campanhaDe);
+}
+
+export function escolherConjuntosPorIdentidadeELinha<T extends { name?: string | null }>(
+  hits: T[],
+  ident: IdentidadeConjunto,
+  pecaSinais: Array<string | null | undefined>,
+  campanhaDe: (row: T) => string | null | undefined,
+): T[] {
+  const byIdent = hits.filter((h) => conjuntoNomeCasaComIdentidade(String(h.name ?? ""), ident));
+  return escolherConjuntosDaMesmaLinha(byIdent, pecaSinais, campanhaDe);
+}
+
+/**
+ * Resolve o conjunto pedido sem deixar CONJ.NOVO.01 cair em CONJ.01.
+ * Serie no pedido (nome do criativo, "novo01", CONJ.NOVO.01) ganha do id/numero 1.
+ */
+export function casarConjuntosPorPedido<
+  T extends { name?: string | null; external_id?: string | null },
+>(sets: T[], pedido: string, ident: IdentidadeConjunto | null): T[] {
+  const pedidoTrim = String(pedido ?? "").trim();
+  if (ident?.serie) {
+    const byIdent = sets.filter((s) => conjuntoNomeCasaComIdentidade(String(s.name ?? ""), ident));
+    if (byIdent.length) return byIdent;
+  }
+  if (/^\d{10,}$/.test(pedidoTrim)) {
+    const byId = sets.filter((s) => String(s.external_id ?? "") === pedidoTrim);
+    if (byId.length) return byId;
+  }
+  if (pedidoTrim) {
+    const pedidoC = compactNomeConjunto(pedidoTrim);
+    const exact = sets.filter((s) => compactNomeConjunto(String(s.name ?? "")) === pedidoC);
+    if (exact.length) return exact;
+    if (pedidoC.length >= 8) {
+      const incl = sets.filter((s) => compactNomeConjunto(String(s.name ?? "")).includes(pedidoC));
+      if (incl.length) return incl;
+    }
+  }
+  if (ident) {
+    return sets.filter((s) => conjuntoNomeCasaComIdentidade(String(s.name ?? ""), ident));
+  }
+  return [];
 }
 
 export const ERRO_CONJUNTO_ERRADO = "conjunto_numero_errado";
@@ -539,25 +673,36 @@ export type RecusaConjuntoErrado =
  */
 export function recusarConjuntoErrado(opts: {
   pedidoNumero?: number | null;
+  pedidoIdentidade?: IdentidadeConjunto | null;
   destNome?: string | null;
   pecaSinais?: Array<string | null | undefined>;
 }): RecusaConjuntoErrado {
-  const nPedido = opts.pedidoNumero ?? numeroConjuntoDeSinais(...(opts.pecaSinais ?? []));
-  const nDest = numeroConjuntoDoNome(String(opts.destNome ?? ""));
-  if (nPedido == null) return { ok: true, pedido: null, dest: nDest };
-  if (nDest === nPedido) return { ok: true, pedido: nPedido, dest: nDest };
+  const identSinais = identidadeConjuntoDeSinais(...(opts.pecaSinais ?? []));
+  const identNumero =
+    opts.pedidoNumero != null && opts.pedidoNumero >= 1
+      ? { n: opts.pedidoNumero, serie: null as string | null }
+      : null;
+  const identPedido = opts.pedidoIdentidade ?? identSinais ?? identNumero;
+  const identDest = identidadeConjuntoDoNome(String(opts.destNome ?? ""));
+  if (identPedido == null) return { ok: true, pedido: null, dest: identDest?.n ?? null };
+  if (identidadesIguais(identPedido, identDest)) {
+    return { ok: true, pedido: identPedido.n, dest: identDest?.n ?? null };
+  }
   const destTxt = String(opts.destNome ?? "").trim() || "(sem nome)";
-  const pad = String(nPedido).padStart(2, "0");
-  const destRotulo = nDest != null ? `CONJ.${nDest}` : "um conjunto sem CONJ.N no nome";
+  const pedidoRotulo = rotuloIdentidadeConjunto(identPedido);
+  const destRotulo = rotuloIdentidadeConjunto(identDest);
+  const pad = String(identPedido.n).padStart(2, "0");
   return {
     ok: false,
     erro: ERRO_CONJUNTO_ERRADO,
-    pedido: nPedido,
-    dest: nDest,
+    pedido: identPedido.n,
+    dest: identDest?.n ?? null,
     detalhe:
-      `ERRO GRAVE (nao e aviso): o pedido e CONJ.${nPedido} mas o destino resolvido e ${destRotulo} (${destTxt}). ` +
-      `Esperado o conjunto CONJ.${nPedido} (CONJ.${pad}) da mesma linha de produto — nunca o mais novo da linha. ` +
-      `O card NAO pode ser emitido nem aplicado. Nao peca o ID numerico da Meta ao gestor: CONJ.${nPedido} no nome basta (get_estrutura_conjuntos).`,
+      `ERRO GRAVE (nao e aviso): o pedido e ${pedidoRotulo} mas o destino resolvido e ${destRotulo} (${destTxt}). ` +
+      (identPedido.serie
+        ? `${pedidoRotulo} nao e CONJ.${identPedido.n} — o card NAO pode ser emitido nem aplicado. `
+        : `Esperado o conjunto ${pedidoRotulo} (CONJ.${pad}) da mesma linha de produto — nunca o mais novo da linha. O card NAO pode ser emitido nem aplicado. `) +
+      `Nao peca o ID numerico da Meta ao gestor: ${pedidoRotulo} no nome basta (get_estrutura_conjuntos).`,
   };
 }
 

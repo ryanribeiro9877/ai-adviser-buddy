@@ -174,6 +174,24 @@ const pick1vazio = escolherConjuntosPorNumeroELinha(
 );
 assert(pick1vazio.length === 0, "pool CONJ.1 vazio nao cai em CONJ.4");
 
+const setNovo01 = "JUR_WA_CONJ.NOVO.01_9305-8759";
+const setConj01 = "JUR_WA_CONJ.01_9108-8073";
+const criativoNovo = "AD_CONJ.NOVO.01_Emprestimo_sobre_Emprestimo_02";
+assert(numeroConjuntoDaFala(setNovo01) == null, "CONJ.NOVO.01 nao parseia como CONJ.N");
+assert(!conjuntoNomeCasaComNumero(setNovo01, 1), "CONJ.NOVO.01 nao casa com numero 1");
+const recusaNovoNoVelho = recusarConjuntoErrado({
+  pedidoNumero: 1,
+  destNome: setConj01,
+  pecaSinais: [criativoNovo],
+});
+assert(!recusaNovoNoVelho.ok && recusaNovoNoVelho.erro === ERRO_CONJUNTO_ERRADO, "criativo NOVO.01 recusa dest CONJ.01");
+const okNovo = recusarConjuntoErrado({
+  pedidoNumero: 1,
+  destNome: setNovo01,
+  pecaSinais: [criativoNovo],
+});
+assert(okNovo.ok, "criativo NOVO.01 no conjunto NOVO.01 passa");
+
 const chat = Deno.readTextFileSync(new URL("../traffic-chat/index.ts", import.meta.url));
 const meta = Deno.readTextFileSync(new URL("../meta-actions/index.ts", import.meta.url));
 const job = Deno.readTextFileSync(new URL("../traffic-agent-job/index.ts", import.meta.url));
@@ -188,6 +206,8 @@ assert(chat.includes("cruzamento_linha_produto") || chat.includes("ERRO_CRUZAMEN
 assert(/ERRO GRAVE/.test(chat), "prompt do chat trata como erro grave");
 assert(chat.includes("recusarConjuntoErrado") || chat.includes("ERRO_CONJUNTO_ERRADO"), "chat recusa CONJ.N errado");
 assert(chat.includes("escolherConjuntosPorNumeroELinha"), "auto-pick por numero+linha");
+assert(chat.includes("casarConjuntosPorPedido"), "destino casa CONJ.NOVO.N sem cair em CONJ.N");
+assert(chat.includes("identidadeConjuntoDeSinais"), "emissao le identidade CONJ.NOVO.N");
 assert(/PROIBIDO pedir ao gestor o ID numerico da Meta/.test(chat), "nao pede ID Graph");
 assert(meta.includes("recusarConjuntoErrado"), "apply recusa CONJ.N errado");
 assert(job.includes("recusarConjuntoErrado"), "job recusa CONJ.N errado");

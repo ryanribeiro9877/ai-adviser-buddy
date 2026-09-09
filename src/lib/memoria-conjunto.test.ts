@@ -3,9 +3,11 @@ import {
   ERRO_CONJUNTO_ERRADO,
   ERRO_CRUZAMENTO_LINHA_PRODUTO,
   ERRO_VOZ_LINHA_ERRADA,
+  casarConjuntosPorPedido,
   classificarLinhaProdutoCohapm,
   conjuntoNomeCasaComNumero,
   escolherConjuntosDaMesmaLinha,
+  escolherConjuntosPorIdentidadeELinha,
   escolherConjuntosPorNumeroELinha,
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
@@ -16,11 +18,14 @@ import {
   extrairNomesCriativoDaFala,
   extrairSlateDaFala,
   filtrarOperacionais,
+  identidadeConjuntoDeSinais,
+  identidadeConjuntoDoNome,
   nomeCompostoForaDeEscopoTrafego,
   nomeCriativoDoConjunto,
   numeroAnuncioDaChave,
   numeroConjuntoDaFala,
   numeroConjuntoDeSinais,
+  numeroConjuntoDoNome,
   pecaChaveDoSlate,
   pecasDoConjunto,
   pareceNomeDePecaNaoMolde,
@@ -73,6 +78,72 @@ describe("conjuntoNomeCasaComNumero", () => {
     expect(conjuntoNomeCasaComNumero("CONJ.1_LAF_8CRIATIVOS_JUNJUL26", 1)).toBe(true);
     expect(conjuntoNomeCasaComNumero("CONJ.01_LAF_x", 1)).toBe(true);
     expect(conjuntoNomeCasaComNumero("CONJ.4_LAF_10CRIATIVOS_AGO26", 1)).toBe(false);
+  });
+});
+
+describe("CONJ.NOVO.01 nao e CONJ.01 (incidente 09/09/2026)", () => {
+  const setVelho = "JUR_WA_CONJ.01_9108-8073";
+  const setNovo = "JUR_WA_CONJ.NOVO.01_9305-8759";
+  const setNovo2 = "JUR_WA_CONJ.NOVO.02_9331-6245";
+  const criativo = "AD_CONJ.NOVO.01_Emprestimo_sobre_Emprestimo_02";
+  const campJur = "COHAPM_JURIDICO_CONV_WA_2026-08";
+  const sets = [
+    { name: setVelho, external_id: "120249788959090182", campaign: campJur },
+    { name: setNovo, external_id: "120249964710740182", campaign: campJur },
+    { name: setNovo2, external_id: "120249964713700182", campaign: campJur },
+  ];
+
+  it("identidade le CONJ.NOVO.01, novo01 e o nome do criativo", () => {
+    expect(identidadeConjuntoDoNome(setNovo)).toEqual({ n: 1, serie: "novo" });
+    expect(identidadeConjuntoDoNome(criativo)).toEqual({ n: 1, serie: "novo" });
+    expect(identidadeConjuntoDoNome("CONJ.NOVO.01")).toEqual({ n: 1, serie: "novo" });
+    expect(identidadeConjuntoDoNome("novo01")).toEqual({ n: 1, serie: "novo" });
+    expect(identidadeConjuntoDoNome(setVelho)).toEqual({ n: 1, serie: null });
+    expect(numeroConjuntoDoNome(setNovo)).toBe(null);
+    expect(conjuntoNomeCasaComNumero(setNovo, 1)).toBe(false);
+  });
+
+  it("fala 'novo01, conjunto 1 nao recebe' prefere a serie", () => {
+    expect(
+      identidadeConjuntoDoNome(
+        "reemita no conjunto correto novo01, o conjunto 1 nao recebera nenhum criativo novo",
+      ),
+    ).toEqual({ n: 1, serie: "novo" });
+    expect(
+      identidadeConjuntoDeSinais(criativo, "CONJ.1", "JUR_WA_CONJ.01_9108-8073"),
+    ).toEqual({ n: 1, serie: "novo" });
+  });
+
+  it("casa o conjunto NOVO.01 e nao o CONJ.01", () => {
+    const ident = identidadeConjuntoDoNome(criativo);
+    const casados = casarConjuntosPorPedido(sets, "CONJ.NOVO.01", ident);
+    expect(casados.map((s) => s.name)).toEqual([setNovo]);
+    const peloIdErrado = casarConjuntosPorPedido(sets, "120249788959090182", ident);
+    expect(casados.map((s) => s.name)).toEqual([setNovo]);
+    expect(peloIdErrado.map((s) => s.name)).toEqual([setNovo]);
+    const pickN = escolherConjuntosPorNumeroELinha(sets, 1, [criativo], (h) => h.campaign);
+    expect(pickN.map((h) => h.name)).toEqual([setVelho]);
+    const pickI = escolherConjuntosPorIdentidadeELinha(sets, ident!, [criativo], (h) => h.campaign);
+    expect(pickI.map((h) => h.name)).toEqual([setNovo]);
+  });
+
+  it("recusa card NOVO.01 no CONJ.01 e aceita no NOVO.01", () => {
+    const ruim = recusarConjuntoErrado({
+      pedidoNumero: 1,
+      destNome: setVelho,
+      pecaSinais: [criativo],
+    });
+    expect(ruim.ok).toBe(false);
+    if (!ruim.ok) {
+      expect(ruim.erro).toBe(ERRO_CONJUNTO_ERRADO);
+      expect(ruim.detalhe).toMatch(/CONJ\.NOVO\.01/);
+    }
+    const ok = recusarConjuntoErrado({
+      pedidoNumero: 1,
+      destNome: setNovo,
+      pecaSinais: [criativo],
+    });
+    expect(ok.ok).toBe(true);
   });
 });
 

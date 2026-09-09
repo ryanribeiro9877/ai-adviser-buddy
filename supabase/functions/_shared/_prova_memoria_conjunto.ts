@@ -1,5 +1,6 @@
 // deno run supabase/functions/_shared/_prova_memoria_conjunto.ts
 import {
+  casarConjuntosPorPedido,
   conjuntoVivoParaDestino,
   desempateDeAlvoDoCard,
   escolherNomeCriativoTravado,
@@ -9,6 +10,8 @@ import {
   extrairNomesCriativoDaFala,
   extrairSlateDaFala,
   filtrarOperacionais,
+  identidadeConjuntoDeSinais,
+  identidadeConjuntoDoNome,
   nomeCompostoForaDeEscopoTrafego,
   pareceApprovalIdEmVezDeDrive,
   pecasDoConjunto,
@@ -192,6 +195,24 @@ assert(
   assert(pool.length === 1 && pool[0].name === "vivo", "filtra so operacionais");
   const recusa = recusaAlvoNaoOperacional("anuncio", "DELETED");
   assert(recusa.erro === "alvo_nao_operacional", "recusa alvo morto");
+}
+
+{
+  const setVelho = "JUR_WA_CONJ.01_9108-8073";
+  const setNovo = "JUR_WA_CONJ.NOVO.01_9305-8759";
+  const criativo = "AD_CONJ.NOVO.01_Emprestimo_sobre_Emprestimo_02";
+  assert(identidadeConjuntoDoNome(setNovo)?.serie === "novo", "NOVO.01 tem serie");
+  assert(identidadeConjuntoDoNome(setVelho)?.serie == null, "CONJ.01 sem serie");
+  assert(identidadeConjuntoDeSinais(criativo, "CONJ.1")?.serie === "novo", "serie ganha do CONJ.1");
+  const casados = casarConjuntosPorPedido(
+    [
+      { name: setVelho, external_id: "1" },
+      { name: setNovo, external_id: "2" },
+    ],
+    "CONJ.NOVO.01",
+    identidadeConjuntoDoNome(criativo),
+  );
+  assert(casados.length === 1 && casados[0].name === setNovo, "casa NOVO.01 nao CONJ.01");
 }
 
 console.log("ok: _prova_memoria_conjunto");
