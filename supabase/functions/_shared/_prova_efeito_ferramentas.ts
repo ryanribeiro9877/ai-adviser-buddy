@@ -42,6 +42,10 @@ const MIGRATIONS = [
     "supabase/migrations/20260910120000_alterar_geo_do_conjunto_publicado.sql",
     RAIZ,
   ),
+  new URL(
+    "supabase/migrations/20260910180000_seguidores_instagram_ads.sql",
+    RAIZ,
+  ),
 ];
 
 // Os 9 setores de public.agents. Setor fora desta lista nao e erro de digitacao inofensivo: a
@@ -168,11 +172,11 @@ for (const chave of Object.keys(DONO_DA_ESCRITA)) {
   );
 }
 
-// 6) O total. 57 e o numero vigente em 03/09/2026; ferramenta nova faz este teste falhar de
-//    proposito, para que a classificacao dela seja uma decisao e nao um esquecimento.
+// 6) O total. 57 em 03/09/2026; 58 com alterar_geo; 59 com get_seguidores_instagram_ads.
+// Ferramenta nova faz este teste falhar de proposito.
 ok(
-  doSnapshot.length === 58,
-  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 58 — classifique a nova e atualize este numero`,
+  doSnapshot.length === 59,
+  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 59 — classifique a nova e atualize este numero`,
 );
 
 // ===== Tabela viva (opcional) =====

@@ -247,6 +247,7 @@ import {
   scopeArgsToCompany,
   truncatePipeboardPayload,
 } from "../_shared/pipeboard_read.ts";
+import { tSeguidoresInstagramAds } from "../_shared/seguidores_instagram_ads.ts";
 import {
   modeloEfetivoDaResposta,
   modeloOpenRouterPadrao,
@@ -1862,6 +1863,16 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
       case "avaliar_pacing": return await t_rpc("avaliar_pacing", { p_company_id: ctx.companyId, p_meta_leads_dia: args?.meta_leads_dia == null ? null : Number(args.meta_leads_dia) });
       case "validar_pedido_contra_contrato": return await t_rpc("validar_pedido_contra_contrato", { p_acao: String(args?.acao ?? ""), p_pedido: args?.pedido ?? {} });
       case "get_funnel": return await t_funnel(ctx.companyId, args?.date_from, args?.date_to);
+      case "get_seguidores_instagram_ads":
+        return await tSeguidoresInstagramAds({
+          supa,
+          companyId: ctx.companyId,
+          token: await pipeboardTokenFromDb(),
+          dateFrom: String(args?.date_from ?? ""),
+          dateTo: String(args?.date_to ?? ""),
+          nameLike: args?.name_like ? String(args.name_like) : undefined,
+          campaignId: args?.campaign_id ? String(args.campaign_id) : undefined,
+        });
       case "get_ads_ranking": return await t_ads_ranking(ctx.companyId, {
         days: Number(args?.days ?? 30),
         ordenar_por: String(args?.ordenar_por ?? "gasto"),
@@ -1993,9 +2004,9 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
 // especialista nao atende fora do proprio dominio, recusa e registra em LACUNAS).
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
-    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "origem_drive_dos_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, origem_drive_dos_anuncios: 2, get_ads_ranking: 4, get_estrutura_conjuntos: 2, casar_criativo_performance: 6, computar_perfil_vencedor: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 14,
-    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, entrega, custo vs teto vigente, detalhe por anuncio e serie diaria, origem Drive das pecas no ar, diagnostico de custo e fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir o banco; leitura ao vivo so se faltar numero critico. Relatorio denso.",
+    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "origem_drive_dos_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "get_seguidores_instagram_ads", "listar_ferramentas_pipeboard", "ler_pipeboard"],
+    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, origem_drive_dos_anuncios: 2, get_ads_ranking: 4, get_estrutura_conjuntos: 2, casar_criativo_performance: 6, computar_perfil_vencedor: 1, get_seguidores_instagram_ads: 2, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 15,
+    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, entrega, custo vs teto vigente, detalhe por anuncio e serie diaria, origem Drive das pecas no ar, seguidores de Instagram atribuidos a anuncio (get_seguidores_instagram_ads, nao o funil), diagnostico de custo e fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir o banco; leitura ao vivo so se faltar numero critico. Relatorio denso.",
   },
   criativos: {
     tools: ["get_criativos_conteudo", "get_ads_ranking", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard"],

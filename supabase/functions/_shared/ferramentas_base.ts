@@ -217,7 +217,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_conhecimento: {
     descricao:
-      "BASE DE CONHECIMENTO TECNICA da casa: politica da Meta, compliance financeiro no Brasil, atlas de metricas, criacao e edicao de campanha/conjunto/anuncio, otimizacao e diagnostico, Marketing API e biblioteca de criativo. Use SEMPRE que a pergunta for conceitual, de politica, de metodo ou de definicao de metrica, e ao propor ou auditar criativo. Os temas validos estao no seu contexto; para anuncio financeiro e categoria especial o tema e 'compliance'.",
+      "BASE DE CONHECIMENTO TECNICA da casa. Pedido de METODO (criar, editar, diagnosticar, reportar, escalar): comece por tema='gestor_trafego_meta'. Politica da Meta, compliance financeiro no Brasil, atlas de metricas, criacao, otimizacao, Marketing API e biblioteca de criativo. Use SEMPRE em pergunta conceitual, de politica, de metodo ou de definicao de metrica, e ao propor ou auditar criativo. Temas no seu contexto; anuncio financeiro / categoria especial = 'compliance'.",
     parametros: {"type":"object","properties":{"tema":{"type":"string","description":"o tema exato, conforme a lista no seu contexto"},"secao":{"type":"string","description":"opcional: titulo (ou parte) de uma secao especifica do tema"}},"required":["tema"]},
     superficies: ["chat","job"],
     efeito: "leitura",
@@ -278,6 +278,14 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
     superficies: ["chat"],
     efeito: "leitura",
     setor: "Ativo criativo e copy",
+  },
+  get_seguidores_instagram_ads: {
+    descricao:
+      "Seguidores de Instagram ATRIBUIDOS pela Meta aos anuncios (campo instagram_profile_follow). Use quando o gestor perguntar seguidores ganhos por campanha, post turbinado/impulsionado ou anuncio. Passe date_from/date_to e name_like (ex. Post do Instagram). NAO esta no funil nem no ranking. Clique no perfil NAO e follow. NAO e o saldo do @.",
+    parametros: {"type":"object","properties":{"date_from":{"type":"string","description":"YYYY-MM-DD"},"date_to":{"type":"string","description":"YYYY-MM-DD"},"name_like":{"type":"string","description":"Trecho do nome (ex. Post do Instagram)."},"campaign_id":{"type":"string","description":"ID Meta da campanha quando o recorte e uma so."}},"required":["date_from","date_to"]},
+    superficies: ["chat","job"],
+    efeito: "leitura",
+    setor: "Desempenho e estrutura de midia",
   },
   get_legendas_da_conversa: {
     descricao:
@@ -369,7 +377,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   ler_pipeboard: {
     descricao:
-      "Leitura AO VIVO do Pipeboard na conta Meta desta empresa. Use quando faltar dado que o banco nao cobre: config fresca do dia, breakdown, activities, pages, pixels, audiences, insight pontual.",
+      "Leitura AO VIVO do Pipeboard na conta Meta desta empresa. Use quando faltar dado que o banco nao cobre: config fresca do dia, breakdown, activities, pages, pixels, audiences, insight pontual. Seguidores atribuidos a anuncio: get_seguidores_instagram_ads (nao get_insights no id da conta).",
     parametros: {"type":"object","properties":{"ferramenta":{"type":"string","description":"Nome exato da tool Pipeboard de leitura (ex.: get_campaign_details)."},"argumentos":{"type":"object","description":"Argumentos da tool (account_id e injetado se a empresa tiver uma unica conta)."}},"required":["ferramenta"]},
     superficies: ["chat","job"],
     efeito: "leitura",

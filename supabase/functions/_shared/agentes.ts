@@ -47,7 +47,7 @@ const FALLBACK_AGENTES: AgenteRegistro[] = [
   {
     codigo: "AG-02", nome: "Analista", setor: "Desempenho e estrutura de midia",
     papel: "Numeros de midia e a configuracao que os produz.",
-    delegar_quando: "Metrica, custo, CTR, serie diaria, ranking, teto, pacing, escala, pausa por custo, CBO/ABO, orcamento, lance, targeting.",
+    delegar_quando: "Metrica, custo, CTR, serie diaria, ranking, teto, pacing, escala, pausa por custo, CBO/ABO, orcamento, lance, targeting, seguidores de Instagram atribuidos a anuncio.",
     nao_delegar_quando: "Conteudo da peca, template de WhatsApp, alerta pendente, emissao de card.",
     exemplos: [], roteavel: true, ordem: 2,
   },

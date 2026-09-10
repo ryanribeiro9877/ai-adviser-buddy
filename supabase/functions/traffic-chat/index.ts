@@ -840,6 +840,7 @@ import {
   scopeArgsToCompany,
   truncatePipeboardPayload,
 } from "../_shared/pipeboard_read.ts";
+import { tSeguidoresInstagramAds } from "../_shared/seguidores_instagram_ads.ts";
 import {
   modeloEfetivoDaResposta,
   modeloOpenRouterPadrao,
@@ -928,6 +929,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   alterar_geo_do_conjunto: 8,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
+  get_seguidores_instagram_ads: 2,
   buscar_geolocalizacao: 6,
   propose_action: 10,
   get_acervo_para_anuncio: 3,
@@ -5197,6 +5199,7 @@ const ORDEM_TOOLS = [
   "validar_pedido_contra_contrato",
   "get_funnel",
   "get_ads_ranking",
+  "get_seguidores_instagram_ads",
   "get_campaign_detail",
   "get_detalhe_anuncios",
   "origem_drive_dos_anuncios",
@@ -5358,6 +5361,10 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeWhatsapp && nome === "get_waba_status") return 1;
   // v28.32: dicas/recomendacoes da Meta — so get_meta_dicas (+ fila interna). Nao gastar o
   // lote em Pipeboard/catalogo; foi o padrao que estourava 150s em pergunta simples.
+  const pedeSeguidoresIg =
+    /seguidor|turbinag|turbinad|impulsion|instagram_profile_follow/.test(p);
+  if (pedeSeguidoresIg && nome === "get_seguidores_instagram_ads") return 0;
+  if (pedeSeguidoresIg && (nome === "listar_ferramentas_pipeboard" || nome === "ler_pipeboard")) return 99;
   const pedeMetaDica = /dica.*meta|recomendac.*(meta|facebook|anuncio|impulsionar|boost)|meta emitiu|meta.*recomend|impulsionar.*(anuncio|eles|campanha)|opportunity score|recomendacao da meta/.test(p);
   if (pedeMetaDica && (nome === "get_meta_dicas" || nome === "get_recommendations")) return 0;
   if (pedeMetaDica && (nome === "listar_ferramentas_pipeboard" || nome === "ler_pipeboard")) return 99;
@@ -5625,6 +5632,16 @@ async function runTool(name: string, args: any, ctx: any) {
       case "avaliar_pacing": return await t_rpc("avaliar_pacing", { p_company_id: ctx.companyId, p_meta_leads_dia: args?.meta_leads_dia == null ? null : Number(args.meta_leads_dia) });
       case "validar_pedido_contra_contrato": return await t_rpc("validar_pedido_contra_contrato", { p_acao: String(args?.acao ?? ""), p_pedido: args?.pedido ?? {} });
       case "get_funnel": return await t_funnel(ctx.companyId, args?.date_from, args?.date_to);
+      case "get_seguidores_instagram_ads":
+        return await tSeguidoresInstagramAds({
+          supa,
+          companyId: ctx.companyId,
+          token: await pipeboardTokenFromDb(),
+          dateFrom: String(args?.date_from ?? ""),
+          dateTo: String(args?.date_to ?? ""),
+          nameLike: args?.name_like ? String(args.name_like) : undefined,
+          campaignId: args?.campaign_id ? String(args.campaign_id) : undefined,
+        });
       case "get_ads_ranking": return await t_ads_ranking(
         ctx.companyId,
         Number(args?.days ?? 30),
@@ -5966,7 +5983,7 @@ PLATAFORMAS: padrao facebook+instagram; Threads proibido; video no Facebook excl
 Se a legenda do molde reprovar em compliance, a criacao e recusada automaticamente: relate o veredito e sugira ajuste de texto, sem tentar contornar.
 
 == BASE DE CONHECIMENTO CONSULTAVEL ==
-Voce tem uma base tecnica propria (get_conhecimento). Consulte-a sempre que a pergunta for conceitual, de politica da Meta, de definicao de metrica ou de metodo de diagnostico, e ao propor ou auditar criativo. Nao responda de memoria sobre politica ou metrica quando existe tema para consultar, e nao diga "nao disponivel" para assunto coberto abaixo. Para anuncio financeiro / categoria especial o tema EXATO e compliance (secoes "Categoria especial" e "Politica de produtos e servicos financeiros"); em paralelo, audite o ESTADO desta conta.
+Voce tem uma base tecnica propria (get_conhecimento). Pedido de METODO (criar, editar, diagnosticar, reportar, escalar): comece por tema=gestor_trafego_meta. Consulte-a sempre que a pergunta for conceitual, de politica da Meta, de definicao de metrica ou de metodo de diagnostico, e ao propor ou auditar criativo. Nao responda de memoria sobre politica ou metrica quando existe tema para consultar, e nao diga "nao disponivel" para assunto coberto abaixo. Para anuncio financeiro / categoria especial o tema EXATO e compliance (secoes "Categoria especial" e "Politica de produtos e servicos financeiros"); em paralelo, audite o ESTADO desta conta.
 Temas disponiveis:
 ${indiceConhecimento}
 
