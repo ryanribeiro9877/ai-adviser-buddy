@@ -25,6 +25,8 @@ export type AgenteRegistro = {
   exemplos: string[];
   roteavel: boolean;
   ordem: number;
+  /** Fatos de escopo: o que NENHUM agente alcanca. Distinto de nao_delegar_quando. */
+  limites?: string[];
 };
 
 export type UnidadeAgente = {
@@ -77,6 +79,10 @@ const FALLBACK_AGENTES: AgenteRegistro[] = [
     papel: "Unico agente que provoca escrita, sempre via card de aprovacao.",
     delegar_quando: "Verbo de ato: criar, suba, lance, duplique, escale, pause, ative, altere, emita, replique, renomeie, vincule. Estado de card.",
     nao_delegar_quando: "Pergunta de julgamento que so parece ato; 'crie as legendas' (o ato e escrever copy).",
+    limites: [
+      "EXCLUIR OBJETO PUBLICADO NAO EXISTE EM NIVEL NENHUM — use pausar_*.",
+      "COMENTARIO DO POST NAO E ATO DE ANUNCIO (10/09/2026): interruptor no Instagram/Business Suite; pausar boost nao fecha comentario.",
+    ],
     exemplos: [], roteavel: true, ordem: 6,
   },
   {
@@ -118,7 +124,7 @@ export async function carregarCatalogoAgentes(
   try {
     const [ag, un] = await Promise.all([
       supa.from("agents")
-        .select("codigo,nome,setor,papel,delegar_quando,nao_delegar_quando,exemplos,roteavel,ordem")
+        .select("codigo,nome,setor,papel,delegar_quando,nao_delegar_quando,exemplos,roteavel,ordem,limites")
         .eq("vigente", true).order("ordem"),
       supa.from("agent_unidades").select("agent_codigo,tipo,chave").eq("vigente", true),
     ]);
@@ -126,7 +132,11 @@ export async function carregarCatalogoAgentes(
     const unidades = (un?.data ?? []) as UnidadeAgente[];
     if (!agentes.length || !unidades.length) return catalogoFallback();
     return {
-      agentes: agentes.map((a) => ({ ...a, exemplos: Array.isArray(a.exemplos) ? a.exemplos : [] })),
+      agentes: agentes.map((a) => ({
+        ...a,
+        exemplos: Array.isArray(a.exemplos) ? a.exemplos : [],
+        limites: Array.isArray(a.limites) ? a.limites : [],
+      })),
       unidades,
       degradado: false,
     };
@@ -155,6 +165,9 @@ export function montarPromptDelegacao(cat: CatalogoAgentes): string {
       `DELEGUE QUANDO: ${a.delegar_quando}`,
     ];
     if (a.nao_delegar_quando) partes.push(`NAO DELEGUE: ${a.nao_delegar_quando}`);
+    if (a.limites?.length) {
+      partes.push(`LIMITE DE ESCOPO (ninguem neste sistema): ${a.limites.join(" ")}`);
+    }
     if (a.exemplos.length) {
       partes.push(`EXEMPLOS: ${a.exemplos.map((e) => `"${e}"`).join(" | ")}`);
     }
@@ -311,7 +324,8 @@ export function blocoIdentidadeAgentes(cat: CatalogoAgentes, refs: string[]): st
   if (!escolhidos.length) return "";
   const linhas = escolhidos.map((a) => {
     const fronteira = a.nao_delegar_quando ? ` FORA DO SEU SETOR: ${a.nao_delegar_quando}` : "";
-    return `- ${a.codigo} ${a.nome} (${a.setor}): ${a.papel}${fronteira}`;
+    const limites = a.limites?.length ? ` NINGUEM FAZ: ${a.limites.join(" ")}` : "";
+    return `- ${a.codigo} ${a.nome} (${a.setor}): ${a.papel}${fronteira}${limites}`;
   });
   return `## AGENTES DESTE TURNO
 O Roteador delegou este pedido aos agentes abaixo. Voce atua como eles, com as ferramentas deles na mesa.

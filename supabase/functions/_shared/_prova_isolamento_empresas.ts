@@ -175,6 +175,11 @@ assert(
   "pedido de legendas nao pode ser tratado como pedido de card",
 );
 assert(
+  chat.includes("pedidoComentarioDoPostSemEmissao") && chat.includes("soComentarioTurno") &&
+    chat.includes("comentario_do_post_nao_e_ato"),
+  "pedido de desativar comentario nao pode ser tratado como pedido de card",
+);
+assert(
   chat.includes("pergunta_nao_e_ato") &&
     chat.includes("ehPerguntaDeLeitura") &&
     chat.includes("PERGUNTA") &&

@@ -11,6 +11,7 @@ import {
   ehPedidoDetalhamentoCampanha,
   ehPedidoOrigemDriveDosAnuncios,
   pedidoSoLegendasSemEmissao,
+  pedidoComentarioDoPostSemEmissao,
   replyLeituraIncompleta,
   objetivoDoFio,
 } from "./intencao-turno";
@@ -240,6 +241,30 @@ describe("deveForcarEmissao", () => {
 
   it("pedido de legenda tem verbo de ato mas nao e emissao de card", () => {
     expect(deveForcarEmissao({ ...base, pedido: "crie as legendas para cada video" })).toBe(false);
+  });
+
+  it("desativar comentario do post nao forca propose_action", () => {
+    const pedido = "desative os comentarios de todos esses posts que estão sendo turbinados";
+    expect(pedidoComentarioDoPostSemEmissao(pedido)).toBe(true);
+    expect(deveForcarEmissao({ ...base, pedido })).toBe(false);
+    expect(
+      deveForcarEmissao({
+        ...base,
+        pedido: "altere os comentarios dos posts impulsionados",
+      }),
+    ).toBe(false);
+  });
+
+  it("comentario + pause continua sendo emissao", () => {
+    expect(
+      pedidoComentarioDoPostSemEmissao("desative os comentarios e pause as 14 turbinagens"),
+    ).toBe(false);
+    expect(
+      deveForcarEmissao({
+        ...base,
+        pedido: "desative os comentarios e pause as 14 turbinagens",
+      }),
+    ).toBe(true);
   });
 
   it("pergunta de leitura nunca forca emissao", () => {

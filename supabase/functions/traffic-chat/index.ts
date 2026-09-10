@@ -810,7 +810,7 @@ import {
   idInstagramDeParams,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
-import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
+import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, pedidoComentarioDoPostSemEmissao, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
 import { tDetalheAnuncios, casarCampanhas, escolherCampanhaUnica, janelaDetalhe, somarSnaps, totaisDe, custosDaContaPorBase, NOTA_OVERVIEW } from "../_shared/leitura_desempenho.ts";
 import { baseDoObjetivo } from "../_shared/metrica_canonica.ts";
 import { tOrigemDriveDosAnuncios, tCasarCriativoPerformance } from "../_shared/origem_drive_anuncios.ts";
@@ -1020,6 +1020,10 @@ const MSG_NUDGE_EMITIR_DE_FATO =
   "Para desligar anuncio publicado a acao e pausar_criativo (target_name = nome do anuncio); " +
   "excluir nao existe. Se algum item nao puder virar card, emita os que podem e diga em UMA " +
   "linha, sem tabela, qual ficou de fora e por que.";
+const AVISO_COMENTARIO_DO_POST =
+  "Desativar comentario e interruptor do post no Instagram/Business Suite, nao card de anuncio. " +
+  "Pipeboard nao tem essa escrita. Pausar campanha/conjunto/anuncio NAO fecha comentario. " +
+  "NAO emita card e NAO retome propose_action. Se o pedido for parar a entrega, peca pausar_campanha explicitamente.";
 const MSG_NUDGE_LEGENDAS =
   "[CORRECAO DO SISTEMA — nao e o gestor] gerar_legendas NAO esta 'indisponivel' como desculpa para parar. " +
   "Chame gerar_legendas de novo (produto=imovel, meio=la_felicita, drive_file_id de cada peca do SLATE). " +
@@ -5371,6 +5375,7 @@ function prioridadeTool(nome: string, pedido: string): number {
   // v28.31: pedido de emitir cards — propose_action primeiro; nao gastar o teto em re-auditoria.
   const pedeEmitir = /\bemite|\bemita|\bemiss[aã]o|\bcards?\b.*\baprov|\baprova.*\bcard|criar_anuncio|propose_action/.test(p);
   if (pedeEmitir && !perguntaLeitura && nome === "propose_action") return 0;
+  if (pedidoComentarioDoPostSemEmissao(pedido) && nome === "propose_action") return 99;
   if (pedeUtm && nome === "panorama_utm_anuncios") return 0;
   if (pedeCustoLlm && nome === "custo_llm_periodo") return 0;
   if (pedeSaudeIntegracao && nome === "saude_das_integracoes") return 0;
@@ -5674,6 +5679,12 @@ async function runTool(name: string, args: any, ctx: any) {
           };
         }
         const at = String(args?.action_type ?? "");
+        if (
+          pedidoComentarioDoPostSemEmissao(String(ctx.pedido ?? "")) ||
+          /comentari|comment_enabled|disable_comments/.test(at)
+        ) {
+          return { erro: "comentario_do_post_nao_e_ato", aviso: AVISO_COMENTARIO_DO_POST };
+        }
         if (ACOES_CRIACAO.includes(at)) {
           return await t_propose_criacao(
             ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey, ctx.complianceCache,
@@ -6191,6 +6202,7 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
       "4. Com os ids que voltarem, cumpra o pedido original ate o fim (selecao + gerar_legendas por peca). " +
       "PROIBIDO entregar tabela de '(nao disponivel)' / '(nao realizado)'."
     : lote && ehPedidoDeAto(cp.objetivo) && !pedidoSoLegendasSemEmissao(cp.objetivo)
+      && !pedidoComentarioDoPostSemEmissao(cp.objetivo)
     ? "INSTRUCOES OBRIGATORIAS (LOTE + EMISSAO):\n" +
       "1. NAO cumprimente. NAO peca o gestor para repetir. NAO invente approval_id.\n" +
       "2. Se ja ha peca+legenda e NENHUM card neste pedido, chame propose_action AGORA " +
@@ -6221,6 +6233,11 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
       "2. Chame AGORA o que faltou: get_detalhe_anuncios (campaign_id Meta OU name_like; date_from/date_to da janela; pagine se restantes>0) e get_campaign_detail da mesma campanha. Duas campanhas = duas chamadas.\n" +
       "3. Escreva SOMENTE os blocos que faltavam (anuncios + serie diaria). Nao reescreva o que ja foi entregue.\n" +
       "4. PROIBIDO 'nao retornado nesta rodada' se voce ainda nao chamou get_detalhe_anuncios nesta continuacao."
+    : pedidoComentarioDoPostSemEmissao(cp.objetivo)
+    ? "INSTRUCOES OBRIGATORIAS (COMENTARIO DO POST):\n" +
+      "1. NAO cumprimente. NAO chame propose_action. NAO invente card nem approval_id.\n" +
+      "2. Desativar comentario e interruptor do post no Instagram/Business Suite. Pausar boost nao fecha comentario.\n" +
+      "3. Se o gestor quiser parar a ENTREGA, peca que diga explicitamente para emitir pausar_campanha."
     : "INSTRUCOES OBRIGATORIAS:\n" +
       "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir ou focar.\n" +
       "2. Retome do ponto em que parou. Se o objetivo era criar campanha/conjunto/anuncio (ou emitir card), " +
@@ -6283,6 +6300,7 @@ async function sanitizarClaimEmitSemCard(
   toolResults: { tool?: string; retorno?: any; erro?: string }[],
   opts?: {
     perguntaLeitura?: boolean;
+    soComentario?: boolean;
     cardsDoTurno?: Array<{ approval_id?: unknown }> | null;
     companyId?: string;
   },
@@ -6360,10 +6378,13 @@ async function sanitizarClaimEmitSemCard(
     motivo = `propose_action recusou: ${errosPropose[0]}`;
   }
 
-  const aviso =
-    `**Nenhum pedido de aprovação foi emitido nesta rodada.** ${motivo}. ` +
-    `Afirmar "card emitido" sem o identificador devolvido pela ferramenta é fabricar um ato — ` +
-    `não há card na fila. O sistema retoma propose_action no próximo bloco — não peça de novo.`;
+  const aviso = opts?.soComentario
+    ? `**Nenhum pedido de aprovação foi emitido nesta rodada.** Desativar comentário não é ato de anúncio — ` +
+      `não há card. O interruptor fica no Instagram/Business Suite. Pausar boost não fecha comentário. ` +
+      `O sistema NÃO retoma propose_action.`
+    : `**Nenhum pedido de aprovação foi emitido nesta rodada.** ${motivo}. ` +
+      `Afirmar "card emitido" sem o identificador devolvido pela ferramenta é fabricar um ato — ` +
+      `não há card na fila. O sistema retoma propose_action no próximo bloco — não peça de novo.`;
 
   // Remove a secao "## Card emitido…" (ate o proximo ## ou fim) e o claim solto.
   let limpo = cortarClaimEmitidoSemCard(raw)
@@ -6868,7 +6889,9 @@ Deno.serve(async (req) => {
     tipo: "chat_loop",
     pergunta: msgText,
     temImagem: imgAtts.length > 0,
-    pedidoAto: !ehPerguntaDeLeitura(objetivoOriginal) && (
+    pedidoAto: !ehPerguntaDeLeitura(objetivoOriginal) &&
+      !pedidoSoLegendasSemEmissao(objetivoOriginal) &&
+      !pedidoComentarioDoPostSemEmissao(objetivoOriginal) && (
       ehPedidoDeAto(objetivoOriginal) || pedidoLoteCriativo(objetivoOriginal)
     ),
     sessionId: convId,
@@ -6926,7 +6949,9 @@ Deno.serve(async (req) => {
   }
   function precisaProposeAto(): boolean {
     return ehPedidoDeAto(objetivoOriginal) && !pedidoUploadTurno && actionCards.length === 0 &&
-      !toolsIncluemPropose(toolsUsed);
+      !toolsIncluemPropose(toolsUsed) &&
+      !pedidoSoLegendasSemEmissao(objetivoOriginal) &&
+      !pedidoComentarioDoPostSemEmissao(objetivoOriginal);
   }
 
   // v20: fallback de cache. Nao esta confirmado que o OpenRouter aceita cache_control para
@@ -7447,6 +7472,7 @@ Deno.serve(async (req) => {
   // v28.40: HARD — claim de "card emitido" sem actionCards e mentira; reescreve.
   const claimSan = await sanitizarClaimEmitSemCard(String(reply ?? ""), actionCards, toolResults, {
     perguntaLeitura: ehPerguntaDeLeitura(objetivoOriginal),
+    soComentario: pedidoComentarioDoPostSemEmissao(objetivoOriginal),
     cardsDoTurno: turnCheckpoint?.cards ?? null,
     companyId: company.id,
   });
@@ -7473,7 +7499,8 @@ Deno.serve(async (req) => {
   // "selecione 6 videos e crie legendas" tem verbo de ato sobre a COPY, nao sobre card. Sem
   // esta excecao o turno passaria a exigir propose_action e emitiria anuncio nao pedido.
   const soLegendasTurno = pedidoSoLegendasSemEmissao(objetivoOriginal);
-  const pedidoAto = !perguntaLeituraTurno && (
+  const soComentarioTurno = pedidoComentarioDoPostSemEmissao(objetivoOriginal);
+  const pedidoAto = !perguntaLeituraTurno && !soComentarioTurno && (
     (!soLegendasTurno && (
       ehPedidoDeAto(objetivoOriginal) ||
       (turnCheckpoint?.pedido_ato === true) ||
@@ -7528,7 +7555,7 @@ Deno.serve(async (req) => {
     if (r && typeof r === "object" && (r as any).erro) {
       const e = String((r as any).erro);
       if (/conjunto molde ['"]?sem_molde/i.test(e)) return false;
-      return /peca_nova_sem_molde|compliance_bloqueou|pedido_incompleto|verificacao_do_pedido|molde_|legenda_|destino_|pergunta_nao_e_ato|orcamento_parece_centavos|orcamento_diferente_do_contrato/i.test(e);
+      return /peca_nova_sem_molde|compliance_bloqueou|pedido_incompleto|verificacao_do_pedido|molde_|legenda_|destino_|pergunta_nao_e_ato|comentario_do_post_nao_e_ato|orcamento_parece_centavos|orcamento_diferente_do_contrato/i.test(e);
     }
     return false;
   });

@@ -48,6 +48,7 @@ export function deveForcarEmissao(t: {
   if (t.jaInsistiu || t.semTempo) return false;
   if (t.chamouPropose || t.cardsEmitidos > 0) return false;
   if (pedidoSoLegendasSemEmissao(t.pedido)) return false;
+  if (pedidoComentarioDoPostSemEmissao(t.pedido)) return false;
   return ehPedidoDeAto(t.pedido);
 }
 
@@ -66,6 +67,29 @@ export function pedidoSoLegendasSemEmissao(pedido: string): boolean {
     return false;
   }
   return RE_ATO_DE_LEGENDA.test(p);
+}
+
+/**
+ * Desativar comentario do post (Instagram/Business Suite) nao e ato de anuncio.
+ * Sem esta excecao, "altere os comentarios" casa `altere` e o turno exige propose_action
+ * — e o modelo tenta pausar campanha ou inventa card (10/09/2026, 14 turbinagens).
+ * Pause/card no mesmo pedido continua sendo emissao.
+ */
+export function pedidoComentarioDoPostSemEmissao(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  if (!/comentari/.test(p)) return false;
+  if (
+    !/(desativ|deslig|desabilit|fech\w+\s+coment|permitir comentari|alter\w*.{0,60}comentari|comentari.{0,40}(off|deslig|desativ|fech))/.test(
+      p,
+    )
+  ) {
+    return false;
+  }
+  if (/\b(cards?|aprovacao|aprovacoes|emit\w*|pause|pausar|suba|subir|or[cç]amento|renome)/.test(p)) {
+    return false;
+  }
+  return true;
 }
 
 /** "emita os cards dos 2 primeiros conjuntos" — nao e anuncio avulso. */

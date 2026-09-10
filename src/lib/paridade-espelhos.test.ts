@@ -89,6 +89,9 @@ const FALAS = [
   // Pedidos que separam intenção de ato (intencao-turno).
   "cria as legendas do conjunto 2, nao emite card ainda",
   "so as legendas, sem emitir nada",
+  "desative os comentarios de todos esses posts que estão sendo turbinados",
+  "altere os comentarios dos posts impulsionados",
+  "desative os comentarios e pause as 14 turbinagens",
   "emita os cards do conjunto 2",
   "sobe os videos para a biblioteca da meta",
   "suba os restantes para a biblioteca",

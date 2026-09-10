@@ -3,7 +3,7 @@
 // propose_action, e nenhum card existiu.
 // Roda com: deno run supabase/functions/_shared/_prova_forcar_emissao.ts
 
-import { deveForcarEmissao, pedidoSoLegendasSemEmissao } from "./intencao_turno.ts";
+import { deveForcarEmissao, pedidoComentarioDoPostSemEmissao, pedidoSoLegendasSemEmissao } from "./intencao_turno.ts";
 
 function ok(cond: boolean, msg: string) {
   if (!cond) {
@@ -161,6 +161,45 @@ function ok(cond: boolean, msg: string) {
       cardsEmitidos: 0,
     }),
     "legendas + emita cards deixou de forcar propose_action",
+  );
+}
+
+// 11) 10/09/2026: "desative os comentarios das 14 turbinagens". Sem isto o guarda
+//     retoma propose_action e o modelo inventa card ou pausa campanha.
+{
+  ok(
+    pedidoComentarioDoPostSemEmissao(
+      "desative os comentarios de todos esses posts que estão sendo turbinados",
+    ),
+    "desative comentarios nao foi reconhecido",
+  );
+  ok(
+    !deveForcarEmissao({
+      pedido: "desative os comentarios de todos esses posts que estão sendo turbinados",
+      chamouPropose: false,
+      cardsEmitidos: 0,
+    }),
+    "desative comentarios virou pressao por card",
+  );
+  ok(
+    !deveForcarEmissao({
+      pedido: "altere os comentarios dos posts impulsionados",
+      chamouPropose: false,
+      cardsEmitidos: 0,
+    }),
+    "altere os comentarios virou pressao por card",
+  );
+  ok(
+    !pedidoComentarioDoPostSemEmissao("desative os comentarios e pause as 14 turbinagens"),
+    "comentario + pause foi tratado como so comentario",
+  );
+  ok(
+    deveForcarEmissao({
+      pedido: "desative os comentarios e pause as 14 turbinagens",
+      chamouPropose: false,
+      cardsEmitidos: 0,
+    }),
+    "comentario + pause deixou de forcar propose_action",
   );
 }
 
