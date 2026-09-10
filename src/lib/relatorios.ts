@@ -456,6 +456,75 @@ export function periodoDaJanela(
   return { inicio: addDaysYmd(fim, -(n - 1)), fim };
 }
 
+/** Janela imediatamente anterior, mesma duração, sem sobrepor o período pedido. */
+export function janelaAnteriorDoPeriodo(periodo: {
+  inicio: string;
+  fim: string;
+}): { inicio: string; fim: string } {
+  const ini = String(periodo.inicio ?? "").slice(0, 10);
+  const fim = String(periodo.fim ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ini) || !/^\d{4}-\d{2}-\d{2}$/.test(fim)) {
+    return { inicio: ini, fim };
+  }
+  const a = Date.UTC(Number(ini.slice(0, 4)), Number(ini.slice(5, 7)) - 1, Number(ini.slice(8, 10)));
+  const b = Date.UTC(Number(fim.slice(0, 4)), Number(fim.slice(5, 7)) - 1, Number(fim.slice(8, 10)));
+  const dias = Math.max(1, Math.round((b - a) / 864e5) + 1);
+  const prevFim = addDaysYmd(ini, -1);
+  return { inicio: addDaysYmd(prevFim, -(dias - 1)), fim: prevFim };
+}
+
+export function filtrarConjuntosDoRecorte(
+  raw: unknown,
+  nomes: string[],
+  ids: string[],
+): Record<string, unknown> {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const lista = Array.isArray(o.conjuntos) ? (o.conjuntos as Record<string, unknown>[]) : [];
+  const chaves = [...nomes, ...ids]
+    .map((x) => String(x ?? "").trim().toLowerCase())
+    .filter((x) => x.length >= 4);
+  const filtrados = lista.filter((item) => {
+    const campanha = String(item.campanha ?? item.campaign_name ?? "").toLowerCase();
+    if (!campanha) return false;
+    return chaves.some((k) => campanha.includes(k) || k.includes(campanha));
+  });
+  return {
+    ...o,
+    conjuntos: filtrados,
+    recorte: "campanhas_do_relatorio",
+    exibidos: filtrados.length,
+    total_antes_do_filtro: lista.length,
+    nota_recorte: filtrados.length
+      ? `Conjuntos das campanhas do recorte (${filtrados.length} de ${lista.length} na amostra).`
+      : lista.length
+        ? "A amostra estrutural tem conjuntos, mas nenhum desta(s) campanha(s) — nao misturar outras linhas da conta."
+        : "Nenhum conjunto na amostra estrutural.",
+  };
+}
+
+export function recortarAlertasDoRecorte(
+  raw: unknown,
+  nomes: string[],
+  ids: string[],
+): Record<string, unknown> {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const lista = Array.isArray(o.alertas_ativos)
+    ? (o.alertas_ativos as Record<string, unknown>[])
+    : [];
+  const chaves = [...nomes, ...ids]
+    .map((x) => String(x ?? "").trim().toLowerCase())
+    .filter((x) => x.length >= 6);
+  const doRecorte = lista.filter((a) => {
+    const blob = `${a.title ?? ""} ${a.description ?? ""} ${a.alvo ?? ""}`.toLowerCase();
+    return chaves.some((k) => blob.includes(k));
+  });
+  return {
+    alertas_do_recorte: doRecorte,
+    outros_da_conta: lista.length - doRecorte.length,
+    nota: "Zero no recorte significa nenhum alerta nestas campanhas, nao 'nao coletado'.",
+  };
+}
+
 export type AchadoRelatorio = {
   tipo: TipoAchado;
   nivel: "conta" | "campanha" | "conjunto" | "anuncio";

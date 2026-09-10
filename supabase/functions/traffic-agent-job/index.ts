@@ -264,11 +264,14 @@ import {
   campanhaEstaAtiva,
   especialistasPorSecoes,
   extrairJsonRelatorio,
+  filtrarConjuntosDoRecorte,
   flattenCampanhasPipeboard,
   hojeYmdBrasilia,
   humanizarMarkdownRelatorio,
+  janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   periodoDaJanela,
+  recortarAlertasDoRecorte,
   titulosDasSecoes,
   type CampanhaAoVivoBruta,
   type CampanhaRelatorio,
@@ -4510,6 +4513,11 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 
 // ============================================================================
 // RELATORIO AUTONOMO — modo ao lado de drive_watch: sem planner, sem chat_messages.
+// 10/09/2026: a primeira rodada (6c6ca3a5) perdeu desempenho_campanhas por timeout
+// OpenRouter porque 7 especialistas com reasoning alto rodaram em paralelo e a
+// parede de 300s + reserva de 80s matou a leitura pesada. Ranking veio do
+// especialista criativos. A colheita deterministica abaixo le as mesmas tools
+// ANTES do LLM; especialista incompleto nao apaga numero ja coletado.
 // ============================================================================
 
 function emBackground(p: Promise<unknown>) {
@@ -4548,7 +4556,13 @@ async function resolverCampanhasDoRelatorio(row: {
   company_id: string;
   recorte_campanhas: string;
   campaign_ids: string[] | null;
-}): Promise<{ ids: string[]; nomes: string[]; fonte: "ao_vivo" | "espelho"; cobertura: string }> {
+}): Promise<{
+  ids: string[];
+  nomes: string[];
+  fonte: "ao_vivo" | "espelho";
+  cobertura: string;
+  campanhas: CampanhaRelatorio[];
+}> {
   const { data: espelhoRows } = await supa
     .from("campaigns")
     .select("external_id,name,status,objective,category,spend,last_synced_at")
@@ -4590,6 +4604,308 @@ async function resolverCampanhasDoRelatorio(row: {
     nomes: escolhidas.map((c) => c.nome),
     fonte,
     cobertura,
+    campanhas: escolhidas,
+  };
+}
+
+const RELATORIO_RESERVA_SINTESE_MS = 55_000;
+const RELATORIO_MIN_ONDA2_MS = 70_000;
+const RELATORIO_MAX_CAMPANHAS = 4;
+const RELATORIO_TETO_JSON = 6000;
+const RELATORIO_TETO_COLHEITA = 40_000;
+
+type PecaColheita = { nome: string; ok: boolean; dado: unknown };
+
+function jsonCurtoRelatorio(v: unknown, teto = RELATORIO_TETO_JSON): string {
+  try {
+    const s = JSON.stringify(v);
+    if (!s) return "null";
+    if (s.length <= teto) return s;
+    return `${s.slice(0, teto)}…[cortado ${s.length - teto} chars; o restante EXISTE, nao e zero]`;
+  } catch {
+    return String(v).slice(0, teto);
+  }
+}
+
+function ferramentaColheitaFalhou(v: unknown): boolean {
+  if (v == null) return true;
+  if (typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  if (o.erro != null && String(o.erro).trim()) return true;
+  if (o.ok === false) return true;
+  return false;
+}
+
+function prioridadePecaColheita(nome: string): number {
+  if (nome.startsWith("get_campaign_detail")) return 0;
+  if (nome.startsWith("get_detalhe_anuncios")) return 1;
+  if (nome.startsWith("get_ads_ranking")) return 2;
+  if (nome.includes("estrutura") || nome.includes("conjunto")) return 3;
+  if (nome.includes("ao_vivo") || nome.includes("pipeboard") || nome.includes("conta_meta")) return 4;
+  if (nome.includes("teto") || nome.includes("pacing")) return 5;
+  if (nome.includes("alerta") || nome.includes("waba") || nome.includes("recomend")) return 6;
+  if (nome.includes("fadiga") || nome.includes("criativo")) return 7;
+  return 8;
+}
+
+function montarTextoColheita(pecas: PecaColheita[]): string {
+  const ord = [...pecas].sort((a, b) => prioridadePecaColheita(a.nome) - prioridadePecaColheita(b.nome));
+  let usados = 0;
+  const linhas: string[] = [];
+  for (const p of ord) {
+    const chunk = `${p.nome} [${p.ok ? "ok" : "falhou"}]: ${jsonCurtoRelatorio(p.dado)}`;
+    if (usados + chunk.length > RELATORIO_TETO_COLHEITA) {
+      linhas.push(`${p.nome}: omitido do texto por teto (${p.ok ? "ok" : "falhou"}).`);
+      continue;
+    }
+    linhas.push(chunk);
+    usados += chunk.length;
+  }
+  return linhas.join("\n\n");
+}
+
+function nomesDoRanking(raw: unknown): string[] {
+  if (!raw || typeof raw !== "object") return [];
+  const ranking = (raw as { ranking?: unknown }).ranking;
+  if (!Array.isArray(ranking)) return [];
+  return ranking
+    .map((r) => String((r as { criativo?: unknown; nome?: unknown }).criativo ?? (r as { nome?: unknown }).nome ?? "").trim())
+    .filter(Boolean);
+}
+
+function idsAdDoDetalhe(raw: unknown): string[] {
+  if (!raw || typeof raw !== "object") return [];
+  const anuncios = (raw as { anuncios?: unknown }).anuncios;
+  if (!Array.isArray(anuncios)) return [];
+  return anuncios
+    .map((a) => String((a as { ad_id?: unknown }).ad_id ?? "").trim())
+    .filter(Boolean);
+}
+
+function listaDePipeboard(v: unknown, profundidade = 0): unknown[] {
+  if (profundidade > 4 || v == null) return [];
+  if (Array.isArray(v)) return v;
+  if (typeof v !== "object") return [];
+  const o = v as Record<string, unknown>;
+  for (const k of ["data", "resultado", "campaigns", "adsets", "ads", "ad_sets", "results", "items"]) {
+    if (o[k] != null) {
+      const inner = listaDePipeboard(o[k], profundidade + 1);
+      if (inner.length) return inner;
+    }
+  }
+  return [];
+}
+
+function compactarObjetoMeta(item: unknown): Record<string, unknown> {
+  const o = item && typeof item === "object" ? (item as Record<string, unknown>) : {};
+  const keys = [
+    "id", "campaign_id", "adset_id", "ad_id", "name", "nome", "status", "effective_status",
+    "configured_status", "daily_budget", "lifetime_budget", "budget_remaining", "optimization_goal",
+    "destination_type", "learning_stage_info", "bid_strategy", "special_ad_categories", "objective",
+    "account_id", "account_status", "balance", "amount_spent", "spend_cap", "disable_reason",
+  ];
+  const out: Record<string, unknown> = {};
+  for (const k of keys) if (o[k] != null) out[k] = o[k];
+  return out;
+}
+
+function compactarRetornoPipeboard(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const o = raw as Record<string, unknown>;
+  if (ferramentaColheitaFalhou(o)) return { erro: o.erro ?? o.status ?? "falha_pipeboard" };
+  const lista = listaDePipeboard(o);
+  if (lista.length) {
+    return { ferramenta: o.ferramenta ?? null, n: lista.length, objetos: lista.slice(0, 30).map(compactarObjetoMeta) };
+  }
+  const r = o.resultado;
+  if (r && typeof r === "object" && !Array.isArray(r)) {
+    return { ferramenta: o.ferramenta ?? null, objeto: compactarObjetoMeta(r) };
+  }
+  return { ferramenta: o.ferramenta ?? null, amostra: jsonCurtoRelatorio(o.resultado, 2000) };
+}
+
+async function colherBaseRelatorio(args: {
+  companyId: string;
+  mcpKey: string;
+  pedido: string;
+  periodo: { inicio: string; fim: string };
+  ids: string[];
+  nomes: string[];
+  secoes: string[];
+  campanhas: CampanhaRelatorio[];
+}): Promise<{
+  texto: string;
+  cobertura: string;
+  ok: number;
+  total: number;
+  falhas: string[];
+  temDesempenho: boolean;
+  temEstrutura: boolean;
+  temWaba: boolean;
+  ms: number;
+}> {
+  const t0 = Date.now();
+  const ctx = { companyId: args.companyId, mcpKey: args.mcpKey, pedido: args.pedido };
+  const ids = args.ids.slice(0, RELATORIO_MAX_CAMPANHAS);
+  const nomes = args.nomes.slice(0, RELATORIO_MAX_CAMPANHAS);
+  const pecas: PecaColheita[] = [];
+  const marcar = (nome: string, dado: unknown) => {
+    pecas.push({ nome, ok: !ferramentaColheitaFalhou(dado), dado });
+  };
+
+  const { data: campRows } = await supa
+    .from("campaigns")
+    .select("external_id,name,status,objective,special_ad_categories,spend,external_account_id")
+    .eq("company_id", args.companyId)
+    .in("external_id", ids);
+  marcar("campanhas_espelho", {
+    linhas: campRows ?? [],
+    status_ao_vivo: args.campanhas.map((c) => ({
+      id: c.external_id, nome: c.nome, status: c.status, fonte: c.fonte, objective: c.objective,
+    })),
+    nota: "external_account_id e a conta Meta desta campanha. status_ao_vivo veio da lista Pipeboard da rodada, quando houver.",
+  });
+  const contaPorCampanha = new Map<string, string>();
+  for (const c of campRows ?? []) {
+    const id = String(c.external_id ?? "").trim();
+    const acc = String(c.external_account_id ?? "").trim();
+    if (id && acc) contaPorCampanha.set(id, acc);
+  }
+
+  const meio = inferirMeioDrive(`${args.pedido} ${nomes.join(" ")}`);
+  const [
+    overview, tetoConv, tetoForm, pacing, alerts, recos, dicas, estrutura, waba, saude,
+  ] = await Promise.all([
+    runTool("get_overview", {}, ctx),
+    runTool("teto_vigente", { metric: "custo_por_conversa" }, ctx),
+    runTool("teto_vigente", { metric: "custo_por_formulario" }, ctx),
+    runTool("avaliar_pacing", {}, ctx),
+    runTool("get_alerts", {}, ctx),
+    runTool("get_recommendations", {}, ctx),
+    runTool("get_meta_dicas", { dias: 14 }, ctx),
+    runTool("get_estrutura_conjuntos", {}, ctx),
+    runTool("get_waba_status", meio ? { meio } : {}, ctx),
+    runTool("saude_das_integracoes", { dias_tolerancia: 3 }, ctx),
+  ]);
+  marcar("get_overview", {
+    ...(overview && typeof overview === "object" ? overview as Record<string, unknown> : { valor: overview }),
+    nota_janela: "Overview e conta inteira dos ultimos 7 dias, NAO a janela fechada do relatorio.",
+  });
+  marcar("teto_vigente_conversa", tetoConv);
+  marcar("teto_vigente_formulario", tetoForm);
+  marcar("avaliar_pacing", pacing);
+  marcar("alertas_do_recorte", ferramentaColheitaFalhou(alerts) ? alerts : recortarAlertasDoRecorte(alerts, nomes, ids));
+  marcar("get_recommendations", recos);
+  marcar("get_meta_dicas", dicas);
+  const estruturaRecorte = filtrarConjuntosDoRecorte(estrutura, nomes, ids);
+  marcar("estrutura_conjuntos_recorte", ferramentaColheitaFalhou(estrutura) ? estrutura : estruturaRecorte);
+  marcar("get_waba_status", waba);
+  marcar("saude_das_integracoes", saude);
+
+  const porCampanha = await Promise.all(ids.map(async (id) => {
+    const [det, rank, ads] = await Promise.all([
+      runTool("get_campaign_detail", { campaign_id: id, date_from: args.periodo.inicio, date_to: args.periodo.fim }, ctx),
+      runTool("get_ads_ranking", {
+        campaign_id: id, date_from: args.periodo.inicio, date_to: args.periodo.fim,
+        somente_ativas: true, ordenar_por: "gasto",
+      }, ctx),
+      runTool("get_detalhe_anuncios", {
+        campaign_id: id, date_from: args.periodo.inicio, date_to: args.periodo.fim,
+        pagina: 1, incluir_serie_diaria: true,
+      }, ctx),
+    ]);
+    return { id, det, rank, ads };
+  }));
+  for (const p of porCampanha) {
+    marcar(`get_campaign_detail:${p.id}`, p.det);
+    marcar(`get_ads_ranking:${p.id}`, p.rank);
+    marcar(`get_detalhe_anuncios:${p.id}`, p.ads);
+  }
+
+  if (args.secoes.includes("comparativo")) {
+    const ant = janelaAnteriorDoPeriodo(args.periodo);
+    const comps = await Promise.all(ids.map((id) =>
+      runTool("get_campaign_detail", { campaign_id: id, date_from: ant.inicio, date_to: ant.fim }, ctx)
+    ));
+    for (let i = 0; i < ids.length; i++) {
+      marcar(`comparativo_janela_anterior:${ids[i]}`, { janela: ant, dado: comps[i] });
+    }
+  }
+
+  const buscas = new Set<string>();
+  for (const p of porCampanha) {
+    for (const n of nomesDoRanking(p.rank)) buscas.add(n);
+  }
+  for (const nomeCamp of nomes) {
+    for (const bit of nomeCamp.split(/[_\s-]+/).filter((b) => b.length >= 5).slice(0, 2)) buscas.add(bit);
+  }
+  const buscasLista = [...buscas].slice(0, 8);
+  if (buscasLista.length) {
+    const copies = await Promise.all(buscasLista.map((busca) =>
+      runTool("get_criativos_conteudo", { busca_nome: busca, somente_ativas: false, pagina: 1 }, ctx)
+    ));
+    for (let i = 0; i < buscasLista.length; i++) {
+      marcar(`get_criativos_conteudo:${buscasLista[i]}`, copies[i]);
+    }
+  }
+
+  const idsAd: string[] = [];
+  for (const p of porCampanha) {
+    for (const id of idsAdDoDetalhe(p.ads)) {
+      if (!idsAd.includes(id)) idsAd.push(id);
+    }
+  }
+  const fadigaIds = idsAd.slice(0, 3);
+  if (fadigaIds.length) {
+    const fads = await Promise.all(fadigaIds.map((id) => runTool("avaliar_fadiga", { ad_external_id: id }, ctx)));
+    for (let i = 0; i < fadigaIds.length; i++) marcar(`avaliar_fadiga:${fadigaIds[i]}`, fads[i]);
+  }
+
+  const contas = [...new Set([...contaPorCampanha.values()].filter(Boolean))];
+  if (contas.length) {
+    const contasLive = await Promise.all(contas.slice(0, 2).map((acc) =>
+      runTool("ler_pipeboard", { ferramenta: "get_ad_accounts", argumentos: { account_id: acc } }, ctx)
+    ));
+    for (let i = 0; i < Math.min(contas.length, 2); i++) {
+      marcar(`conta_meta_ao_vivo:${contas[i]}`, compactarRetornoPipeboard(contasLive[i]));
+    }
+  }
+  const liveCamp = await Promise.all(ids.map(async (id) => {
+    const acc = contaPorCampanha.get(id);
+    const base: Record<string, unknown> = acc ? { account_id: acc, campaign_id: id } : { campaign_id: id };
+    const [details, adsets, ads] = await Promise.all([
+      runTool("ler_pipeboard", { ferramenta: "get_campaign_details", argumentos: { ...base } }, ctx),
+      runTool("ler_pipeboard", { ferramenta: "get_adsets", argumentos: { ...base } }, ctx),
+      runTool("ler_pipeboard", { ferramenta: "get_ads", argumentos: { ...base } }, ctx),
+    ]);
+    return { id, details, adsets, ads };
+  }));
+  for (const p of liveCamp) {
+    marcar(`ao_vivo_campanha:${p.id}`, compactarRetornoPipeboard(p.details));
+    marcar(`ao_vivo_conjuntos:${p.id}`, compactarRetornoPipeboard(p.adsets));
+    marcar(`ao_vivo_anuncios:${p.id}`, compactarRetornoPipeboard(p.ads));
+  }
+
+  const falhas = pecas.filter((p) => !p.ok).map((p) => p.nome);
+  const ok = pecas.filter((p) => p.ok).length;
+  const temDesempenho = ids.every((id) =>
+    pecas.some((p) => p.nome === `get_campaign_detail:${id}` && p.ok) &&
+    pecas.some((p) => p.nome === `get_detalhe_anuncios:${id}` && p.ok)
+  );
+  const pecaEstrutura = pecas.find((p) => p.nome === "estrutura_conjuntos_recorte");
+  const pecaWaba = pecas.find((p) => p.nome === "get_waba_status");
+  const cobertura = `Colheita deterministica: ${ok}/${pecas.length} leituras ok em ${Date.now() - t0}ms. Falhas: ${falhas.join(", ") || "nenhuma"}.`;
+  console.warn(`[relatorio_colheita] ${cobertura}`);
+  return {
+    texto: montarTextoColheita(pecas),
+    cobertura,
+    ok,
+    total: pecas.length,
+    falhas,
+    temDesempenho,
+    temEstrutura: !!pecaEstrutura?.ok,
+    temWaba: !!pecaWaba?.ok,
+    ms: Date.now() - t0,
   };
 }
 
@@ -4597,6 +4913,7 @@ async function sintetizarRelatorioAutonomo(args: {
   companyName: string;
   pergunta: string;
   relatorios: { nome: string; relatorio: string; completo: boolean }[];
+  baseColetada: string;
   prazo: () => number;
 }): Promise<string> {
   const blocos = args.relatorios
@@ -4606,7 +4923,7 @@ async function sintetizarRelatorioAutonomo(args: {
 
 LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: nome de ferramenta/especialista (desempenho_campanhas, estrutura_conta, get_ads_ranking), codigo interno (openrouter_timeout), chave JSON (amostra_pequena=true, budget_remaining=0, effective_status). Traduza: "a leitura de desempenho desta campanha falhou por tempo esgotado"; "amostra pequena"; "orcamento restante da campanha zerado"; "status real". ID numerico da Meta so entre parenteses no fim do nome, se precisar.
 
-NUMEROS: so o que estiver nos RELATORIOS INTERNOS. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real, nao o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados.
+NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio.
 
 corpo_md: markdown com titulos HUMANOS (Resumo executivo, Status e entrega, Investimento e pacing, Custo versus teto, Funil de midia, Por campanha, Conjuntos, Ranking de criativos, Fadiga, Diagnostico de custo, Escala, Alertas, Recomendacoes, Compliance, Comparativo, WhatsApp, Cobertura). NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de pecas em TABELA markdown (Peca | Gasto | Impressoes | Resultado | Custo). Nao despeje o relatorio interno: sintetize.
 
@@ -4616,7 +4933,10 @@ Responda APENAS um JSON valido, sem cerca markdown, com:
   const r = await chamarLLM(
     [
       { role: "system", content: sys },
-      { role: "user", content: `${args.pergunta}\n\n=== RELATORIOS INTERNOS ===\n${blocos}` },
+      {
+        role: "user",
+        content: `${args.pergunta}\n\n=== BASE COLETADA (fonte dos numeros) ===\n${args.baseColetada}\n\n=== RELATORIOS INTERNOS ===\n${blocos || "(nenhum especialista extra; use so a base coletada)"}`,
+      },
     ],
     { maxTokens: 6000, reasoning: REASONING_OFF, timeoutMs, tipo: "sintese", faixaForcada: "economia" },
   );
@@ -4630,8 +4950,9 @@ async function processarRelatorio(relatorioId: string, mcpKey: string): Promise<
   if (!row?.id) return;
   const companyId = String(row.company_id);
   const t0 = Date.now();
-  const prazo = () => 300_000 - (Date.now() - t0);
-  const tel: Record<string, unknown> = { versao: "relatorio-v1", subagentes: [] };
+  const prazo = () => JOB_LIMIT_MS - (Date.now() - t0);
+  const tel: Record<string, unknown> = { versao: "relatorio-v2", subagentes: [] };
+  console.warn(`[relatorio] start id=${relatorioId} company=${companyId}`);
   try {
     const { data: companyRow } = await supa.from("companies").select("name").eq("id", companyId).maybeSingle();
     const companyName = String(companyRow?.name ?? "").trim();
@@ -4674,32 +4995,88 @@ Secoes obrigatorias (use estes titulos humanos no markdown): ${titulosDasSecoes(
 ${resolvidas.cobertura}
 Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contrato fora. Nao misture bases de resultado. Nao execute acao. Escreva para o gestor, nao para o log da ferramenta.`;
 
-    const lote: { nome: string; foco: string }[] = especialistasPorSecoes(secoes)
-      .filter((n) => SUBAGENTES[n] && n !== "analise_visual_drive" && n !== "criativos_drive")
-      .map((nome) => ({
-        nome,
-        foco: `Cubra a parte da sua missao para o relatorio. ${pergunta}`,
-      }));
-    if (!lote.length) {
-      lote.push({ nome: "desempenho_campanhas", foco: pergunta });
+    const colheita = await colherBaseRelatorio({
+      companyId,
+      mcpKey,
+      pedido: pergunta,
+      periodo,
+      ids: resolvidas.ids,
+      nomes: resolvidas.nomes,
+      secoes,
+      campanhas: resolvidas.campanhas,
+    });
+    tel.colheita = {
+      ok: colheita.ok,
+      total: colheita.total,
+      falhas: colheita.falhas,
+      ms: colheita.ms,
+      temDesempenho: colheita.temDesempenho,
+      temEstrutura: colheita.temEstrutura,
+      temWaba: colheita.temWaba,
+    };
+
+    const focoExtra = `Cubra a parte da sua missao para o relatorio. A BASE abaixo ja foi lida nesta rodada: so chame ferramenta se faltar um dado ESPECIFICO da sua missao que nao esteja nela.\n${colheita.texto.slice(0, 8000)}\n\n${pergunta}`;
+    let lote: { nome: string; foco: string }[] = especialistasPorSecoes(secoes)
+      .filter((n) => SUBAGENTES[n] && n !== "analise_visual_drive" && n !== "criativos_drive" && n !== "conhecimento")
+      .map((nome) => ({ nome, foco: focoExtra }));
+    if (!empresaEhCredito(companyId)) {
+      lote = lote.filter((p) => p.nome !== "compliance");
+    }
+    if (colheita.temDesempenho) lote = lote.filter((p) => p.nome !== "desempenho_campanhas");
+    if (colheita.temEstrutura) lote = lote.filter((p) => p.nome !== "estrutura_conta");
+    if (colheita.temWaba) lote = lote.filter((p) => p.nome !== "whatsapp_waba");
+    if (!lote.length && !colheita.temDesempenho) {
+      lote.push({ nome: "desempenho_campanhas", foco: focoExtra });
     }
 
-    const relatorios = await executarLote(
-      lote,
-      pergunta,
-      { companyId, companyName, mcpKey, pedido: pergunta },
-      prazo,
-      tel,
-      80_000,
-    );
-    const texto = await sintetizarRelatorioAutonomo({
-      companyName,
-      pergunta,
-      relatorios,
-      prazo,
-    });
-    const extraido = extrairJsonRelatorio(texto);
-    const cobertura = [resolvidas.cobertura, extraido.cobertura].filter(Boolean).join(" ");
+    const ctxLote = { companyId, companyName, mcpKey, pedido: pergunta };
+    const onda1 = lote.filter((p) => p.nome === "desempenho_campanhas" || p.nome === "estrutura_conta");
+    const onda2 = lote.filter((p) => p.nome !== "desempenho_campanhas" && p.nome !== "estrutura_conta");
+    let relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
+    if (onda1.length) {
+      relatorios = relatorios.concat(await executarLote(
+        onda1, pergunta, ctxLote, prazo, tel, RELATORIO_RESERVA_SINTESE_MS,
+      ));
+    }
+    if (onda2.length && prazo() > RELATORIO_MIN_ONDA2_MS) {
+      relatorios = relatorios.concat(await executarLote(
+        onda2, pergunta, ctxLote, prazo, tel, RELATORIO_RESERVA_SINTESE_MS,
+      ));
+    } else if (onda2.length) {
+      for (const p of onda2) {
+        relatorios.push({
+          nome: p.nome,
+          relatorio: "(nao rodou: tempo insuficiente apos a colheita)",
+          completo: false,
+          erro: "sem_prazo",
+        });
+        (tel.subagentes as unknown[]).push({ nome: p.nome, erro: "sem_prazo", relatorio_completo: false });
+      }
+    }
+    console.warn(`[relatorio] especialistas ${JSON.stringify((tel.subagentes as { nome?: string; erro?: string; relatorio_completo?: boolean }[]).map((s) => ({
+      nome: s.nome, completo: s.relatorio_completo, erro: s.erro ?? null,
+    })))} prazo_ms=${prazo()}`);
+
+    let extraido: ReturnType<typeof extrairJsonRelatorio>;
+    try {
+      const texto = await sintetizarRelatorioAutonomo({
+        companyName,
+        pergunta,
+        relatorios,
+        baseColetada: colheita.texto,
+        prazo,
+      });
+      extraido = extrairJsonRelatorio(texto);
+    } catch (e) {
+      const motivo = String((e as Error)?.message ?? e).slice(0, 400);
+      console.warn(`[relatorio] sintese falhou: ${motivo}`);
+      extraido = {
+        corpo_md: `A narrativa nao fechou a tempo. A coleta da janela ${periodo.inicio} a ${periodo.fim} esta descrita na cobertura — gere de novo se quiser o texto corrido.`,
+        achados: [],
+        cobertura: `Escrita falhou (${motivo}). ${colheita.cobertura}`,
+      };
+    }
+    const cobertura = [resolvidas.cobertura, colheita.cobertura, extraido.cobertura].filter(Boolean).join(" ");
     await supa.from("relatorio_gerados").update({
       status: "done",
       fonte_campanhas: resolvidas.fonte,
@@ -4712,8 +5089,10 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
       erro: null,
       finalizado_em: new Date().toISOString(),
     }).eq("id", relatorioId);
+    console.warn(`[relatorio] done id=${relatorioId} ms=${Date.now() - t0} colheita=${colheita.ok}/${colheita.total}`);
   } catch (e) {
     const erro = String((e as Error)?.message ?? e).slice(0, 800);
+    console.warn(`[relatorio] error id=${relatorioId} ${erro}`);
     await supa.from("relatorio_gerados").update({
       status: "error",
       erro,

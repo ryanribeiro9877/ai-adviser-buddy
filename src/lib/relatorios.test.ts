@@ -6,9 +6,12 @@ import {
   extrairJsonRelatorio,
   flattenCampanhasPipeboard,
   humanizarMarkdownRelatorio,
+  filtrarConjuntosDoRecorte,
+  janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   normalizarAchados,
   periodoDaJanela,
+  recortarAlertasDoRecorte,
   presetDiarioOperacional,
   proximaExecucaoRelatorio,
   titulosDasSecoes,
@@ -165,6 +168,55 @@ describe("mergeCampanhasRelatorio", () => {
     const soEspelho = r.campanhas.find((c) => c.external_id === "222");
     expect(soEspelho?.fonte).toBe("espelho");
     expect(soEspelho?.nome).toBe("Só espelho");
+  });
+});
+
+describe("janelaAnteriorDoPeriodo", () => {
+  it("desloca 1 dia sem sobrepor", () => {
+    expect(janelaAnteriorDoPeriodo({ inicio: "2026-09-09", fim: "2026-09-09" })).toEqual({
+      inicio: "2026-09-08",
+      fim: "2026-09-08",
+    });
+  });
+
+  it("desloca 7 dias fechados", () => {
+    expect(janelaAnteriorDoPeriodo({ inicio: "2026-09-03", fim: "2026-09-09" })).toEqual({
+      inicio: "2026-08-27",
+      fim: "2026-09-02",
+    });
+  });
+});
+
+describe("filtrarConjuntosDoRecorte / recortarAlertasDoRecorte", () => {
+  it("isola conjuntos da campanha do contrato e nao mistura outras linhas", () => {
+    const r = filtrarConjuntosDoRecorte(
+      {
+        conjuntos: [
+          { conjunto: "JUR A", campanha: "COHAPM_JURIDICO_CONV_WA_2026-08" },
+          { conjunto: "VISTTA 1", campanha: "VISTTA_SALT" },
+        ],
+      },
+      ["COHAPM_JURIDICO_CONV_WA_2026-08"],
+      ["120249788950400182"],
+    );
+    expect(r.exibidos).toBe(1);
+    expect(r.total_antes_do_filtro).toBe(2);
+    expect((r.conjuntos as { conjunto: string }[])[0].conjunto).toBe("JUR A");
+  });
+
+  it("zero no recorte de alerta nao e 'nao coletado'", () => {
+    const r = recortarAlertasDoRecorte(
+      {
+        alertas_ativos: [
+          { title: "Saldo baixo", description: "conta 999" },
+          { title: "Gasto", description: "COHAPM_JURIDICO_CONV_WA_2026-08 estourou" },
+        ],
+      },
+      ["COHAPM_JURIDICO_CONV_WA_2026-08"],
+      ["120249788950400182"],
+    );
+    expect((r.alertas_do_recorte as unknown[]).length).toBe(1);
+    expect(r.outros_da_conta).toBe(1);
   });
 });
 
