@@ -37,9 +37,16 @@ const uniqueById = (rows: any[], fallbackField: string) =>
     ).values(),
   );
 
+const PRAZO_MS = 115_000;
+
+function isFalhaDeRede(err: unknown): boolean {
+  const s = String((err as Error)?.message ?? err);
+  return /pipeboard_rede|http2|connection error|SendRequest|UND_ERR/i.test(s);
+}
+
 async function call(name: string, args: Record<string, unknown>, token: string) {
   delete args.access_token;
-  const response = await pipeboardCall(name, args, token);
+  const response = await pipeboardCall(name, args, token, { timeoutMs: 15_000 });
   const readOk =
     response.status >= 200 &&
     response.status < 300 &&
@@ -52,13 +59,24 @@ async function call(name: string, args: Record<string, unknown>, token: string) 
   return response.body;
 }
 
+async function callRetry(name: string, args: Record<string, unknown>, token: string) {
+  try {
+    return await call(name, args, token);
+  } catch (error) {
+    if (!isFalhaDeRede(error)) throw error;
+    await new Promise((r) => setTimeout(r, 700));
+    return await call(name, args, token);
+  }
+}
+
 async function listAll(
   name: string,
   schema: ToolDef | null,
   accountId: string,
   token: string,
-  options: { campaignId?: string; adsetId?: string } = {},
+  options: { campaignId?: string; adsetId?: string; deadline?: number } = {},
 ) {
+  const { deadline, ...listOpts } = options;
   const rows: any[] = [];
   let after: string | undefined;
   const seen = new Set<string>();
@@ -66,12 +84,13 @@ async function listAll(
   const supportsCursor =
     Object.hasOwn(properties, "after") || Object.hasOwn(properties, "cursor");
   for (let page = 0; page < 50; page++) {
+    if (deadline && Date.now() > deadline) break;
     const args = buildStructureArgs(schema?.inputSchema ?? null, accountId, {
-      ...options,
+      ...listOpts,
       after,
       limit: 100,
     });
-    const result = collectStructureRows(await call(name, args, token));
+    const result = collectStructureRows(await callRetry(name, args, token));
     rows.push(...result.rows);
     if (!result.after || !supportsCursor || seen.has(result.after)) break;
     seen.add(result.after);
@@ -86,10 +105,15 @@ async function enrich(
   detailSchema: ToolDef | null,
   idField: "campaign_id" | "adset_id" | "ad_id",
   token: string,
+  deadline?: number,
 ) {
   if (!detailSchema) return rows;
   const output: any[] = [];
   for (let start = 0; start < rows.length; start += 5) {
+    if (deadline && Date.now() > deadline) {
+      output.push(...rows.slice(start));
+      break;
+    }
     const batch = rows.slice(start, start + 5);
     const details = await Promise.all(
       batch.map(async (row) => {
@@ -99,7 +123,7 @@ async function enrich(
           const properties = detailSchema.inputSchema?.properties ?? {};
           const args: Record<string, unknown> = {};
           if (Object.hasOwn(properties, idField)) args[idField] = id;
-          const detail = firstStructureObject(await call(detailName, args, token));
+          const detail = firstStructureObject(await callRetry(detailName, args, token));
           return detail ? { ...row, ...detail, id: detail.id ?? id } : row;
         } catch (error) {
           return { ...row, _detail_error: String((error as Error).message ?? error) };
@@ -112,10 +136,19 @@ async function enrich(
 }
 
 // Anexa o criativo completo (legenda, CTA, destino/WhatsApp) a cada anuncio.
-async function enrichCreatives(rows: any[], creativeSchema: ToolDef | null, token: string) {
+async function enrichCreatives(
+  rows: any[],
+  creativeSchema: ToolDef | null,
+  token: string,
+  deadline?: number,
+) {
   if (!creativeSchema) return rows;
   const output: any[] = [];
   for (let start = 0; start < rows.length; start += 5) {
+    if (deadline && Date.now() > deadline) {
+      output.push(...rows.slice(start));
+      break;
+    }
     const batch = rows.slice(start, start + 5);
     const details = await Promise.all(
       batch.map(async (row) => {
@@ -125,7 +158,7 @@ async function enrichCreatives(rows: any[], creativeSchema: ToolDef | null, toke
           const properties = creativeSchema.inputSchema?.properties ?? {};
           const args: Record<string, unknown> = {};
           if (Object.hasOwn(properties, "creative_id")) args.creative_id = creativeId;
-          const creative = firstStructureObject(await call("get_creative_details", args, token));
+          const creative = firstStructureObject(await callRetry("get_creative_details", args, token));
           return creative ? { ...row, creative: { id: creativeId, ...creative } } : row;
         } catch {
           return row;
@@ -267,18 +300,27 @@ Deno.serve(async (req) => {
   );
 
   const reports: any[] = [];
+  const comecou = Date.now();
+  const prazoAte = comecou + PRAZO_MS;
+  let truncado = false;
   for (const integration of active) {
     const companyId = String(integration.company_id);
     const accountId = String(integration.external_id).replace(/^act_/, "");
+    if (Date.now() > prazoAte) {
+      truncado = true;
+      reports.push({ company_id: companyId, account_id: accountId, level, pulado_por_prazo: true });
+      continue;
+    }
     try {
       if (level === "campaigns") {
-        const listedRows = await listAll("get_campaigns", tool(tools, "get_campaigns"), accountId, token);
+        const listedRows = await listAll("get_campaigns", tool(tools, "get_campaigns"), accountId, token, { deadline: prazoAte });
         const rows = await enrich(
           listedRows,
           "get_campaign_details",
           tool(tools, "get_campaign_details"),
           "campaign_id",
           token,
+          prazoAte,
         );
         const unique = uniqueById(rows, "campaign_id");
         const mapped = unique.map((row) => mapPipeboardCampaign(row, companyId, accountId));
@@ -292,13 +334,14 @@ Deno.serve(async (req) => {
 
       const maps = await mapsForCompany(supa, companyId);
       if (level === "adsets") {
-        const listedRows = await listAll("get_adsets", tool(tools, "get_adsets"), accountId, token);
+        const listedRows = await listAll("get_adsets", tool(tools, "get_adsets"), accountId, token, { deadline: prazoAte });
         const rows = await enrich(
           listedRows,
           "get_adset_details",
           tool(tools, "get_adset_details"),
           "adset_id",
           token,
+          prazoAte,
         );
         const unique = uniqueById(rows, "adset_id");
         const rejected: string[] = [];
@@ -320,20 +363,32 @@ Deno.serve(async (req) => {
 
       const listedRows: any[] = [];
       for (const campaignExternalId of maps.campaigns.keys()) {
+        if (Date.now() > prazoAte) {
+          truncado = true;
+          break;
+        }
         listedRows.push(
           ...(await listAll("get_ads", tool(tools, "get_ads"), accountId, token, {
             campaignId: campaignExternalId,
+            deadline: prazoAte,
           })),
         );
       }
-      const detailed = await enrich(
-        listedRows,
-        "get_ad_details",
-        tool(tools, "get_ad_details"),
-        "ad_id",
-        token,
-      );
-      const rows = await enrichCreatives(detailed, tool(tools, "get_creative_details"), token);
+      const restam = prazoAte - Date.now();
+      const detailed = restam > 20_000
+        ? await enrich(
+          listedRows,
+          "get_ad_details",
+          tool(tools, "get_ad_details"),
+          "ad_id",
+          token,
+          prazoAte,
+        )
+        : listedRows;
+      if (restam <= 20_000) truncado = true;
+      const rows = restam > 12_000
+        ? await enrichCreatives(detailed, tool(tools, "get_creative_details"), token, prazoAte)
+        : detailed;
       const unique = uniqueById(rows, "ad_id");
       const rejected: string[] = [];
       const mapped = unique.flatMap((row) => {
@@ -356,18 +411,23 @@ Deno.serve(async (req) => {
       if (error) throw error;
       reports.push({ company_id: companyId, account_id: accountId, level, found: rows.length, unique: unique.length, upserted: mapped.length, rejected });
     } catch (error) {
+      const msg = String((error as Error).message ?? error);
       reports.push({
         company_id: companyId,
         account_id: accountId,
         level,
-        error: String((error as Error).message ?? error),
+        error: msg,
+        transiente: isFalhaDeRede(error),
       });
     }
   }
+  const errosDuros = reports.filter((r) => r.error && !r.transiente);
   return json({
-    ok: reports.every((report) => !report.error),
+    ok: errosDuros.length === 0,
     source: "pipeboard:meta",
     level,
+    truncado,
+    ms: Date.now() - comecou,
     reports,
   });
 });

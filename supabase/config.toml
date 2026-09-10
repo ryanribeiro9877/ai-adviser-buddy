@@ -91,6 +91,11 @@ verify_jwt = false
 [functions.compliance-check]
 verify_jwt = false
 
+# Cron waba-sync-daily chama com Bearer; a propria edge autentica via mcp_key_valida.
+# Sem esta linha o deploy aplica o default verify_jwt=true e o agendador passa a levar 401.
+[functions.waba-sync]
+verify_jwt = false
+
 [functions.waba-template-create]
 verify_jwt = false
 

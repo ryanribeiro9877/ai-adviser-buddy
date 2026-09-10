@@ -127,6 +127,7 @@ export async function pipeboardCall(
   tool: string,
   args: Record<string, unknown>,
   token: string,
+  opts?: { timeoutMs?: number },
 ): Promise<PipeboardResposta> {
   if (!token) {
     return {
@@ -154,6 +155,7 @@ export async function pipeboardCall(
         method: "tools/call",
         params: { name: tool, arguments: safe },
       }),
+      signal: opts?.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined,
     });
     raw = await r.text();
   } catch (e) {

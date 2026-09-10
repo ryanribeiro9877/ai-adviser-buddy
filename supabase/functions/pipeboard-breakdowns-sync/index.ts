@@ -236,7 +236,7 @@ function mapear(seg: any, companyId: string, recorte: Recorte, contaPadrao: stri
  * estado puro: ausencia de dado com aparencia de dado.
  */
 async function ler(args: Record<string, unknown>, token: string) {
-  const r = await pipeboardCall("get_insights", args, token);
+  const r = await pipeboardCall("get_insights", args, token, { timeoutMs: 20_000 });
   const erroCorpo = r.erro ?? (r.body as { error?: unknown } | null)?.error;
   const ok = r.status >= 200 && r.status < 300 && !erroCorpo;
   return { ok, status: r.status, body: r.body, erro: ok ? null : String(erroCorpo ?? `http_${r.status}`) };
@@ -308,8 +308,19 @@ Deno.serve(async (req) => {
   // mostrar quanto ela custou. Se um dia encostar no timeout_ms da tarefa, o numero aparece
   // aqui antes de a coleta comecar a cortar dia calada.
   const comecou = Date.now();
+  const PRAZO_MS = 115_000;
+  let truncado = false;
 
   for (const integracao of ativas) {
+    if (Date.now() - comecou > PRAZO_MS) {
+      truncado = true;
+      relatorio.push({
+        account_id: String(integracao.external_id).replace(/^act_/, ""),
+        company_id: String(integracao.company_id),
+        pulado_por_prazo: true,
+      });
+      continue;
+    }
     const conta = String(integracao.external_id).replace(/^act_/, "");
     const companyId = String(integracao.company_id);
     const porTipo: Record<string, number> = {};
@@ -320,6 +331,11 @@ Deno.serve(async (req) => {
 
     for (const dia of janela) {
       if (erroConta) break;
+      if (Date.now() - comecou > PRAZO_MS) {
+        truncado = true;
+        erroConta = erroConta ?? "prazo_da_rodada";
+        break;
+      }
       const respostas = await Promise.all(
         RECORTES.map((r) =>
           ler({
@@ -386,12 +402,13 @@ Deno.serve(async (req) => {
     });
   }
 
-  // A rodada so e `ok` quando TODA conta com permissao fechou sem erro. Conta negada continua
-  // sendo erro visivel: ela e o motivo de 13 das 19 contas nao terem metrica hoje, e um ok:true
-  // aqui repetiria o silencio que esta entrega desfaz.
-  const comErro = relatorio.filter((r) => r.error);
+  // Conta negada continua visivel. Corte por prazo nao e falha: o dado do dia ja
+  // foi gravado nas contas que caberam, e a conferencia via pg_net deixa de marcar
+  // timeout depois de 150s de silencio.
+  const comErro = relatorio.filter((r) => r.error && r.error !== "prazo_da_rodada");
   return json({
     ok: comErro.length === 0,
+    truncado,
     fonte: FONTE,
     destino: "metric_breakdown_daily",
     recortes: RECORTES.map((r) => `${r.arg} -> ${r.tipo}`),

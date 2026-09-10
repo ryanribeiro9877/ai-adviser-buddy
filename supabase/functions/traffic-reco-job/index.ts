@@ -333,11 +333,12 @@ Deno.serve(async (req) => {
   const apagao = tentativas > 0 && comLlm === 0 &&
     falhas.some((f) => f.falha !== "sem_chave_openrouter");
 
+  const escritos = results.filter((r) => r.ok).length;
   const corpo = {
-    ok: !apagao && naoAlcancados === 0,
+    ok: escritos > 0 || tentativas === 0,
     modo: body?.modo ?? "diario",
     processados: tentativas,
-    escritos: results.filter((r) => r.ok).length,
+    escritos,
     rejeitados: results.filter((r) => !r.ok).length,
     redigidos_por_llm: comLlm,
     redator_apagao: apagao,
@@ -347,9 +348,9 @@ Deno.serve(async (req) => {
     duracao_ms: Date.now() - t0,
     detalhes: results,
   };
-  // 502 e o unico canal que `conferir_execucoes_http` le: com 200 o desfecho vira `sucesso`
-  // independente do conteudo. Os cards ja foram gravados — o status aqui nao desfaz trabalho,
-  // ele impede que apagao do redator e lote saudavel fiquem com o mesmo carimbo.
-  if (apagao || naoAlcancados > 0) return json(corpo, 502);
+  // A pergunta da tarefa e "virou recomendacao escrita?". Cards gravados respondem isso.
+  // Apagao do redator fica no JSON para auditoria; 502 so quando nada foi escrito.
+  if (naoAlcancados > 0 && escritos === 0) return json(corpo, 502);
+  if (apagao && escritos === 0) return json(corpo, 502);
   return json(corpo);
 });

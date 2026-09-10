@@ -380,15 +380,26 @@ Deno.serve(async (req) => {
   const endTs = Math.floor(today.getTime() / 1000);
 
   const empresas: any[] = [];
+  const comecou = Date.now();
+  const PRAZO_MS = 105_000;
+  let truncado = false;
   for (const emp of alvos) {
+    if (Date.now() - comecou > PRAZO_MS) {
+      truncado = true;
+      empresas.push({ ok: true, company_id: emp.company_id, pulado_por_prazo: true });
+      continue;
+    }
     // cada iteracao usa SOMENTE emp.token — isolado por company_id
     const resultado = await syncEmpresa(supa, emp, startTs, endTs, today);
     empresas.push(resultado);
   }
 
-  const ok = empresas.every((e) => e.ok === true);
+  const ok = empresas.filter((e) => e.pulado_por_prazo).length === empresas.length
+    ? false
+    : empresas.filter((e) => !e.pulado_por_prazo).every((e) => e.ok === true);
   return json({
     ok,
+    truncado,
     versao: VERSAO,
     window_days: ANALYTICS_DAYS,
     empresas,
