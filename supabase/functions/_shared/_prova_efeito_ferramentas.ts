@@ -33,10 +33,16 @@ function ok(cond: boolean, msg: string) {
 }
 
 const RAIZ = new URL("../../../", import.meta.url);
-const MIGRATION = new URL(
-  "supabase/migrations/20260903213000_efeito_e_setor_da_ferramenta_limites_do_agente_e_suite_v3.sql",
-  RAIZ,
-);
+const MIGRATIONS = [
+  new URL(
+    "supabase/migrations/20260903213000_efeito_e_setor_da_ferramenta_limites_do_agente_e_suite_v3.sql",
+    RAIZ,
+  ),
+  new URL(
+    "supabase/migrations/20260910120000_alterar_geo_do_conjunto_publicado.sql",
+    RAIZ,
+  ),
+];
 
 // Os 9 setores de public.agents. Setor fora desta lista nao e erro de digitacao inofensivo: a
 // regra "ferramenta de escrita do dono de X" casa setor por IGUALDADE, entao um setor com grafia
@@ -63,6 +69,7 @@ const DONO_DA_ESCRITA: Record<string, string> = {
   gerar_legendas: "AG-03",
   registrar_veredito_peca_em_revisao: "AG-04",
   alterar_categoria_especial: "AG-06",
+  alterar_geo_do_conjunto: "AG-06",
   propose_action: "AG-06",
   renomear_campanha: "AG-06",
   upload_midia: "AG-06",
@@ -89,8 +96,13 @@ function classificacaoDaMigration(sql: string): Map<string, { efeito: string; se
   return mapa;
 }
 
-const sql = await Deno.readTextFile(MIGRATION);
-const daMigration = classificacaoDaMigration(sql);
+const daMigration = new Map<string, { efeito: string; setor: string }>();
+for (const arq of MIGRATIONS) {
+  const sql = await Deno.readTextFile(arq);
+  for (const [chave, val] of classificacaoDaMigration(sql)) {
+    daMigration.set(chave, val);
+  }
+}
 const doSnapshot = Object.entries(FERRAMENTAS_BASE);
 
 // 1) Toda ferramenta do snapshot tem efeito preenchido e valido.
@@ -159,8 +171,8 @@ for (const chave of Object.keys(DONO_DA_ESCRITA)) {
 // 6) O total. 57 e o numero vigente em 03/09/2026; ferramenta nova faz este teste falhar de
 //    proposito, para que a classificacao dela seja uma decisao e nao um esquecimento.
 ok(
-  doSnapshot.length === 57,
-  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 57 — classifique a nova e atualize este numero`,
+  doSnapshot.length === 58,
+  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 58 — classifique a nova e atualize este numero`,
 );
 
 // ===== Tabela viva (opcional) =====

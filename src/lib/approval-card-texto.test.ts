@@ -18,6 +18,11 @@ describe("tituloDoCardAprovacao", () => {
       "Card de vincular Instagram",
     );
   });
+  it("alterar geo do conjunto", () => {
+    expect(tituloDoCardAprovacao("alterar_geo_do_conjunto")).toBe(
+      "Card de alterar geo do conjunto",
+    );
+  });
   it("nao despeja o ensaio do summary como titulo", () => {
     const ensaio =
       'Criar anuncio "X" com PECA NOVA do acervo — compliance atencao, nasce ACTIVE\nCompliance (atencao): LGL-03';

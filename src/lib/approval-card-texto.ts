@@ -19,6 +19,8 @@ const TITULO_POR_ACAO: Record<string, string> = {
   renomear_conjunto: "Card de renomear conjunto",
   renomear_criativo: "Card de renomear criativo",
   alterar_categoria_especial_campanha: "Card de alterar categoria especial",
+  ajustar_posicionamentos_do_conjunto: "Card de ajustar posicionamentos",
+  alterar_geo_do_conjunto: "Card de alterar geo do conjunto",
   vincular_instagram_dos_anuncios: "Card de vincular Instagram",
   registrar_veredito_peca: "Card de veredito de compliance",
 };
@@ -89,6 +91,7 @@ export function previaDoCardAprovacao(
     acao === "pausar_conjunto" ||
     acao === "ativar_conjunto" ||
     acao === "ajustar_posicionamentos_do_conjunto" ||
+    acao === "alterar_geo_do_conjunto" ||
     acao === "renomear_conjunto"
   ) {
     return { conjunto: campo(payload, "target_name") ?? conjunto ?? undefined };

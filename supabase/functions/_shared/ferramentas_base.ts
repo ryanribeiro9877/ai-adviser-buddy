@@ -55,6 +55,14 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
     efeito: "escrita",
     setor: "Atos na conta Meta",
   },
+  alterar_geo_do_conjunto: {
+    descricao:
+      "Emite CARD DE APROVACAO para trocar a GEO de UM conjunto JA PUBLICADO (ACTIVE ou PAUSED), sem criar conjunto novo e sem recorte global. POST targeting.geo_locations no objeto vivo — o mesmo caminho de ajustar_posicionamentos. Passe cidades/geo_locations com keys Meta (buscar_geolocalizacao tipo=city). NAO diga que geo nao se edita em conjunto publicado nem que so da para duplicar.",
+    parametros: {"type":"object","properties":{"conjunto":{"type":"string","description":"Nome atual do conjunto."},"alvo_external_id":{"type":"string","description":"Id Meta do conjunto quando o nome nao for unico."},"cidades":{"type":"array","description":"Keys Meta de cidade (ou {key,name}). Vira geo_locations.cities. Nao misturar com bairros."},"geo_locations":{"type":"object","description":"Objeto Meta geo_locations (cities/neighborhoods/regions/...). Keys via buscar_geolocalizacao."},"bairros":{"type":"array","description":"Atalho de keys Meta para neighborhoods. Nao misturar com cidades/geo_locations."},"justificativa":{"type":"string"},"reversa":{"type":"string"},"metrica_sucesso":{"type":"string"}},"required":["conjunto"]},
+    superficies: ["chat"],
+    efeito: "escrita",
+    setor: "Atos na conta Meta",
+  },
   auditar_compliance_financeira: {
     descricao:
       "Auditoria de categoria especial e regras financeiras de UMA campanha e seus anuncios (name_like). Use quando o gestor perguntar se os anuncios respeitam financas, categoria especial ou regras da Meta. NAO diga que o campo nao existe: esta tool e get_campaign_detail leem.",
@@ -89,7 +97,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   buscar_geolocalizacao: {
     descricao:
-      "Resolve NOMES de bairro, cidade ou regiao para KEYS da Meta (Graph /search type=adgeolocation). Chame ANTES de criar_conjunto com geo fino. Lote maximo de 40 nomes por chamada. Default tipo=neighborhood, country_code=BR. NAO cria conjunto e NUNCA diga que falta campo de bairros.",
+      "Resolve NOMES de bairro, cidade ou regiao para KEYS da Meta (Graph /search type=adgeolocation). Chame ANTES de criar_conjunto ou alterar_geo_do_conjunto. Para cidades da RMS use tipo=city (nao neighborhood). Lote maximo de 40 nomes por chamada. Default tipo=neighborhood, country_code=BR. NAO cria conjunto e NUNCA diga que falta campo de bairros ou de cidades.",
     parametros: {"type":"object","properties":{"nomes":{"type":"array","items":{"type":"string"},"description":"Lista de nomes (ate 40 por chamada)."},"tipo":{"type":"string","description":"neighborhood|city|region|zip (default neighborhood)."},"country_code":{"type":"string","description":"Default BR."},"cidade_contexto":{"type":"string","description":"Opcional: filtra ambiguidade (ex. Salvador)."}},"required":["nomes"]},
     superficies: ["chat"],
     efeito: "leitura",
@@ -241,7 +249,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_estrutura_conjuntos: {
     descricao:
-      "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha estao ACTIVE), estrategia de lance, orcamento, segmentacao, gasto e destination_type (WEBSITE vs WHATSAPP). PAGINADO de 20: use a pagina seguinte enquanto restantes for maior que zero.",
+      "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha estao ACTIVE), estrategia de lance, orcamento, segmentacao (paises, cidades, regioes, bairros_qtd), gasto e destination_type (WEBSITE vs WHATSAPP). PAGINADO de 20: use a pagina seguinte enquanto restantes for maior que zero. Cidades do targeting VEM NESTA TOOL — nao diga que filtragem por cidade nao e visivel.",
     parametros: {"type":"object","properties":{"pagina":{"type":"number","description":"Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero."}}},
     superficies: ["chat","job"], omitidos: {"job":["pagina"]},
     efeito: "leitura",
@@ -410,7 +418,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   propose_action: {
     descricao:
       "Cria PEDIDO DE APROVACAO (ActionCard) para todo ato na conta Meta. NAO executa: o card fica PENDENTE, so um administrador aprova, e expira em 24h. SO use quando o gestor pedir o ato com verbo explicito (emitir, criar, subir, pausar, ativar, escalar, duplicar, renomear, alterar, vincular). PERGUNTA sem verbo de ato — inclusive 'antes da aprovacao' e 'o anuncio esta com o mesmo link' — se responde com get_aprovacoes, get_estrutura_conjuntos ou get_criativos_conteudo, NAO com esta tool. Exige justificativa, metrica_sucesso e reversa. target_name e o nome ATUAL do objeto; quando o nome nao for unico, mande params.alvo_external_id com o id da Meta. EXCLUIR nao existe em nenhum nivel: para tirar do ar use pausar_*. Sem approval_id no retorno, o card NAO existe.",
-    parametros: {"type":"object","properties":{"action_type":{"type":"string","enum":["pausar_criativo","ativar_criativo","escalar_criativo","pausar_campanha","ativar_campanha","pausar_conjunto","ativar_conjunto","alterar_orcamento","renomear_campanha","renomear_conjunto","renomear_criativo","alterar_categoria_especial_campanha","ajustar_posicionamentos_do_conjunto","vincular_instagram_dos_anuncios","criar_campanha","criar_conjunto_a_partir_de","criar_anuncio_a_partir_de","escalar_duplicar"]},"target_name":{"type":"string"},"justificativa":{"type":"string"},"mecanismo":{"type":"string"},"metrica_sucesso":{"type":"string"},"janela_leitura":{"type":"string"},"reversa":{"type":"string"},"risco":{"type":"string"},"params":{"type":"object","description":"Campos da acao. alvo_external_id: id da Meta do objeto alvo, quando o nome nao for unico. Nome livre em nome / nome_novo / novo_nome. GEO: params.bairros ou params.geo_locations, com as keys de buscar_geolocalizacao."}},"required":["action_type","target_name","justificativa","metrica_sucesso","reversa"]},
+    parametros: {"type":"object","properties":{"action_type":{"type":"string","enum":["pausar_criativo","ativar_criativo","escalar_criativo","pausar_campanha","ativar_campanha","pausar_conjunto","ativar_conjunto","alterar_orcamento","renomear_campanha","renomear_conjunto","renomear_criativo","alterar_categoria_especial_campanha","ajustar_posicionamentos_do_conjunto","alterar_geo_do_conjunto","vincular_instagram_dos_anuncios","criar_campanha","criar_conjunto_a_partir_de","criar_anuncio_a_partir_de","escalar_duplicar"]},"target_name":{"type":"string"},"justificativa":{"type":"string"},"mecanismo":{"type":"string"},"metrica_sucesso":{"type":"string"},"janela_leitura":{"type":"string"},"reversa":{"type":"string"},"risco":{"type":"string"},"params":{"type":"object","description":"Campos da acao. alvo_external_id: id da Meta do objeto alvo, quando o nome nao for unico. Nome livre em nome / nome_novo / novo_nome. GEO no criar_conjunto E no alterar_geo_do_conjunto: params.cidades, params.bairros ou params.geo_locations, com as keys de buscar_geolocalizacao."}},"required":["action_type","target_name","justificativa","metrica_sucesso","reversa"]},
     superficies: ["chat"],
     efeito: "escrita",
     setor: "Atos na conta Meta",

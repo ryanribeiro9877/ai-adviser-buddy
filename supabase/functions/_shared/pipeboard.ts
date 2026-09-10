@@ -535,6 +535,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
     case "escalar_duplicar":
     case "alterar_orcamento":
     case "ajustar_posicionamentos_do_conjunto":
+    case "alterar_geo_do_conjunto":
     case "pausar_conjunto":
     case "ativar_conjunto":
     case "renomear_conjunto":

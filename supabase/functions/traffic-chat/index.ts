@@ -1,4 +1,9 @@
-// supabase/functions/traffic-chat/index.ts (v28.98)
+// supabase/functions/traffic-chat/index.ts (v28.99)
+// v28.99 (10/09/2026) - GEO DE CONJUNTO PUBLICADO. O gestor pediu cidades RMS nos
+//   CONJ.1-4 VISTTA e o chat recusou ("nao ha ferramenta") e emitiu conjuntos novos.
+//   Graph/Pipeboard ja aceitam update_adset(targeting). Entram alterar_geo_do_conjunto
+//   (tool + action_type), get_estrutura passa a expor cidades, e buscar_geolocalizacao
+//   serve tambem a edicao. Duplicar conjunto so se a Graph recusar o PATCH.
 // v28.98 (09/09/2026) - CARD AD_CONJ.NOVO.01 CAIA NO CONJ.01. O parser so via CONJ.N;
 //   CONJ.NOVO.01 nao tinha numero, o fallback 1 (slate/"conjunto 1 nao recebe") casava
 //   JUR_WA_CONJ.01_9108-8073 e o conjunto novo saia do pool. Identidade CONJ.NOVO.N
@@ -873,6 +878,7 @@ import {
 import {
   buscarGeolocalizacoesMeta,
   normalizarGeoDoPedido,
+  paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
 import {
   aplicarGateGeoCriarConjunto,
@@ -919,6 +925,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   get_campaign_detail: 4,
   get_ads_ranking: 4,
   vincular_instagram_dos_anuncios: 2,
+  alterar_geo_do_conjunto: 8,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
   buscar_geolocalizacao: 6,
@@ -944,7 +951,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.97";
+const VERSAO = "chat-v28.99";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -2251,6 +2258,65 @@ async function gateLinhaProdutoDasTools(
 /** Renomear e a mesma escrita nos tres niveis: o campo `name` do objeto que ja existe. */
 const RENOMEACOES = ["renomear_campanha", "renomear_conjunto", "renomear_criativo"];
 
+async function validarGeoDeAlteracao(
+  companyId: string,
+  params: Record<string, unknown>,
+  sinaisMeio: Array<string | null | undefined>,
+): Promise<
+  | { ok: true; geo: Record<string, unknown>; resumo: string; params: Record<string, unknown> }
+  | { ok: false; erro: string; detalhe?: string }
+> {
+  const paramsGeo = paramsGeoComAliasCidades(params);
+  const geoNorm = normalizarGeoDoPedido(paramsGeo);
+  if (geoNorm.erro) return { ok: false, erro: geoNorm.erro, detalhe: geoNorm.detalhe };
+  if (!geoNorm.geo) {
+    return {
+      ok: false,
+      erro: "geo_obrigatorio",
+      detalhe:
+        "Informe params.geo_locations (cities/neighborhoods com key Meta) ou params.cidades (keys). Resolva nomes com buscar_geolocalizacao tipo=city. Nao invente key.",
+    };
+  }
+  const tokGeo = tokenAdsPorCompanyId(companyId);
+  const gateGeo = await aplicarGateGeoCriarConjunto({
+    companyId,
+    params: paramsGeo,
+    sinaisMeio,
+    geoNorm,
+    supa,
+    tokenAds: tokGeo?.token ?? null,
+  });
+  if (gateGeo.erro) {
+    return { ok: false, erro: gateGeo.erro, detalhe: gateGeo.detalhe };
+  }
+  const geoEfetivo = gateGeo.geo;
+  if (!geoEfetivo) {
+    return { ok: false, erro: "geo_obrigatorio", detalhe: "Gate de geo nao devolveu geo_locations." };
+  }
+  const { data: seg } = await supa.rpc("checar_segmentacao", {
+    p_company_id: companyId,
+    p_targeting: { geo_locations: geoEfetivo },
+  });
+  if (seg && typeof seg === "object" && (seg as any).aplica === true && (seg as any).permitido === false) {
+    return {
+      ok: false,
+      erro: "segmentacao_recusada_pelo_gate",
+      detalhe: String((seg as any).mensagem_para_o_gestor ?? (seg as any).motivo ?? "checar_segmentacao recusou o geo."),
+    };
+  }
+  return {
+    ok: true,
+    geo: geoEfetivo,
+    resumo: String(gateGeo.resumo ?? geoNorm.resumo ?? ""),
+    params: {
+      ...params,
+      geo_locations: geoEfetivo,
+      geo_resumo: gateGeo.resumo ?? geoNorm.resumo,
+      geo_contagem: gateGeo.contagem ?? geoNorm.contagem,
+    },
+  };
+}
+
 async function t_propose_action(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[]) {
   const action = String(args?.action_type ?? "");
   const targetLike = String(args?.target_name ?? "").trim();
@@ -2270,6 +2336,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     "renomear_criativo",
     "alterar_categoria_especial_campanha",
     "ajustar_posicionamentos_do_conjunto",
+    "alterar_geo_do_conjunto",
     "vincular_instagram_dos_anuncios",
   ];
   if (!VALID.includes(action)) return { erro: `action_type invalido; use: ${VALID.join(", ")}` };
@@ -2307,6 +2374,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   const isAdset =
     action === "alterar_orcamento" ||
     action === "ajustar_posicionamentos_do_conjunto" ||
+    action === "alterar_geo_do_conjunto" ||
     action === "pausar_conjunto" ||
     action === "ativar_conjunto" ||
     action === "renomear_conjunto";
@@ -2327,7 +2395,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   } else if (isAdset) {
     const { data: adsets } = await supa
       .from("ad_sets")
-      .select("id,name,external_id,status")
+      .select("id,name,external_id,status,campaign_id")
       .eq("company_id", companyId)
       .eq("provider", "meta_ads");
     bruto = adsets ?? [];
@@ -2365,6 +2433,23 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
       if (exact.length === 1) alvo = exact[0];
       else return desempateDeAlvoDoCard(matches);
     }
+  }
+
+  if (action === "alterar_geo_do_conjunto") {
+    let campanhaNome = "";
+    const campId = String((alvo as AlvoRow).campaign_id ?? "").trim();
+    if (campId) {
+      const { data: camp } = await supa.from("campaigns").select("name").eq("id", campId).maybeSingle();
+      campanhaNome = String(camp?.name ?? "");
+    }
+    const geoOk = await validarGeoDeAlteracao(companyId, params as Record<string, unknown>, [
+      alvo.name,
+      campanhaNome,
+    ]);
+    if (!geoOk.ok) return { erro: geoOk.erro, detalhe: geoOk.detalhe };
+    Object.assign(params, geoOk.params);
+    params.campanha_nome = campanhaNome || null;
+    params.geo_resumo = geoOk.resumo;
   }
 
   // ESP-24: guarda do unico conjunto entregando — se pausar este zera entrega, nao emite card.
@@ -2425,6 +2510,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   const entityType = action === "alterar_orcamento"
     ? "budget"
     : (action === "ajustar_posicionamentos_do_conjunto" ||
+        action === "alterar_geo_do_conjunto" ||
         action === "pausar_conjunto" ||
         action === "ativar_conjunto" ||
         action === "renomear_conjunto")
@@ -2451,6 +2537,8 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     })(),
     ajustar_posicionamentos_do_conjunto:
       `Ajustar posicionamentos de "${alvo.name}" para ${String(params?.formato_midia).toUpperCase()}: excluir Facebook Coluna da direita quando incompatível, preservar Instagram/Threads e demais posicionamentos compatíveis`,
+    alterar_geo_do_conjunto:
+      `Alterar geo de "${alvo.name}" para ${String(params?.geo_resumo ?? "recorte informado")} (mesmo conjunto; nao cria objeto novo)`,
     vincular_instagram_dos_anuncios: (() => {
       const n = Array.isArray(params?.anuncios) ? (params.anuncios as unknown[]).length : 0;
       const h = String(params?.instagram_destino_handle ?? "@cohapm");
@@ -2570,6 +2658,45 @@ async function t_alterar_categoria_especial(
     params: {
       special_ad_categories: cats,
       categorias_atuais: catsAntes,
+    },
+  }, cards);
+}
+
+/** Tool dedicada: edita geo de conjunto publicado (nao duplica). */
+async function t_alterar_geo_do_conjunto(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+) {
+  const conjunto = String(args?.conjunto ?? args?.target_name ?? "").trim();
+  if (!conjunto) return { erro: "conjunto obrigatorio (nome atual do conjunto)" };
+  const params: Record<string, unknown> = {
+    ...(args?.params && typeof args.params === "object" ? args.params : {}),
+    alvo_external_id: args?.alvo_external_id ?? args?.target_external_id ?? args?.external_id,
+    geo_locations: args?.geo_locations,
+    bairros: args?.bairros,
+    cidades: args?.cidades ?? args?.cities,
+  };
+  const geoOk = await validarGeoDeAlteracao(companyId, params, [conjunto]);
+  if (!geoOk.ok) return { erro: geoOk.erro, detalhe: geoOk.detalhe };
+  return await t_propose_action(companyId, convId, requestedBy, {
+    action_type: "alterar_geo_do_conjunto",
+    target_name: conjunto,
+    justificativa: String(args?.justificativa ?? "").trim() ||
+      `Trocar geo do conjunto publicado "${conjunto}" para ${geoOk.resumo} sem criar conjunto novo nem somar orcamento.`,
+    reversa: String(args?.reversa ?? "").trim() ||
+      "Restaurar o targeting.geo_locations anterior (gravado no audit_log e no card) com a mesma acao alterar_geo_do_conjunto.",
+    metrica_sucesso: String(args?.metrica_sucesso ?? "").trim() ||
+      `A Graph devolver geo_locations igual a ${geoOk.resumo} na reconciliacao; idade, plataformas e WhatsApp permanecem.`,
+    risco:
+      "A Meta pode recusar o PATCH em Advantage+ ou categoria especial. Nesse caso o card falha e o caminho e conjunto novo + pausa do antigo — nao invente sucesso.",
+    mecanismo:
+      "Graph POST /{adset_id} targeting (ou Pipeboard update_adset): troca so geo_locations no targeting atual do conjunto.",
+    params: {
+      ...geoOk.params,
+      alvo_external_id: params.alvo_external_id,
     },
   }, cards);
 }
@@ -5081,6 +5208,7 @@ const ORDEM_TOOLS = [
   "get_funil_credito",
   "renomear_campanha",
   "alterar_categoria_especial",
+  "alterar_geo_do_conjunto",
   "get_instagram_dos_anuncios",
   "vincular_instagram_dos_anuncios",
   "propose_action",
@@ -5538,6 +5666,7 @@ async function runTool(name: string, args: any, ctx: any) {
       }
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_categoria_especial": return await t_alterar_categoria_especial(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "alterar_geo_do_conjunto": return await t_alterar_geo_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "get_instagram_dos_anuncios":
         return await t_ler_instagram_anuncios(ctx.companyId, args);
       case "vincular_instagram_dos_anuncios":
@@ -6115,7 +6244,16 @@ function resumirToolsParaCheckpoint(toolsUsed: any[], toolResults: { tool: strin
 }
 
 function toolsIncluemPropose(tools: { tool?: string }[]): boolean {
-  return tools.some((t) => String(t.tool ?? "") === "propose_action");
+  return tools.some((t) => {
+    const nome = String(t.tool ?? "");
+    return (
+      nome === "propose_action" ||
+      nome === "alterar_geo_do_conjunto" ||
+      nome === "renomear_campanha" ||
+      nome === "alterar_categoria_especial" ||
+      nome === "vincular_instagram_dos_anuncios"
+    );
+  });
 }
 
 /**

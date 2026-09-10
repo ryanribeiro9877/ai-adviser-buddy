@@ -18,6 +18,8 @@ function ok(cond: boolean, msg: string) {
   ok(nivelDaAcao("renomear_campanha") === "campanha", "renomear_campanha fora do nivel campanha");
   ok(nivelDaAcao("renomear_conjunto") === "conjunto", "renomear_conjunto fora do nivel conjunto");
   ok(nivelDaAcao("renomear_criativo") === "anuncio", "renomear_criativo fora do nivel anuncio");
+  ok(nivelDaAcao("alterar_geo_do_conjunto") === "conjunto", "alterar_geo_do_conjunto fora do nivel conjunto");
+  ok(nivelDaAcao("ajustar_posicionamentos_do_conjunto") === "conjunto", "posicionamentos fora do nivel conjunto");
 }
 
 // 2) A conferencia pos-escrita precisa ler `name` nos tres niveis — sem isso o espelho grava o

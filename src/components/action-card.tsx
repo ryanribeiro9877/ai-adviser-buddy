@@ -86,6 +86,7 @@ const ACTION_META: Record<string, { icon: typeof Pause }> = {
   criar_anuncio_a_partir_de: { icon: Plus },
   alterar_categoria_especial_campanha: { icon: Pencil },
   ajustar_posicionamentos_do_conjunto: { icon: Pencil },
+  alterar_geo_do_conjunto: { icon: Pencil },
   vincular_instagram_dos_anuncios: { icon: Pencil },
 };
 

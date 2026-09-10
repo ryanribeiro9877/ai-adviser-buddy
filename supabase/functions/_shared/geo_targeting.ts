@@ -235,6 +235,28 @@ export function aplicarGeoNoTargeting(
   return { ...targeting, geo_locations: geo };
 }
 
+/**
+ * Alias de pedido: params.cidades / params.cities vira geo_locations.cities.
+ * Nao converte se ja veio geo_locations ou bairros (evita misturar recortes).
+ */
+export function paramsGeoComAliasCidades(
+  params: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  if (!params || typeof params !== "object") return {};
+  const out: Record<string, unknown> = { ...params };
+  const cidades = out.cidades ?? out.cities;
+  if (cidades == null) return out;
+  if (out.geo_locations != null || out.bairros != null || out.neighborhoods != null) {
+    return out;
+  }
+  if (!Array.isArray(cidades) || cidades.length === 0) return out;
+  out.geo_locations = {
+    cities: cidades,
+    location_types: ["home", "recent"],
+  };
+  return out;
+}
+
 export type ResultadoBuscaGeo = {
   query: string;
   tipo_pedido: string;
@@ -633,7 +655,7 @@ export async function buscarGeolocalizacoesMeta(opts: {
       (exigirSsa ? ", filtro estrito Salvador+Bahia" : "") +
       `). ` +
       `Max ${MAX_BUSCA_POR_CHAMADA}/chamada, concorrencia ${CONCORRENCIA_BUSCA}. ` +
-      `Para criar_conjunto: params.bairros = bairros_keys OU params.geo_locations = geo_locations_sugerido. ` +
+      `Para criar_conjunto ou alterar_geo_do_conjunto: params.bairros = bairros_keys OU params.geo_locations = geo_locations_sugerido (cities quando tipo=city). ` +
       `Ambiguos: revise escolhido vs encontrados antes de emitir o card.` +
       (rejeitados_fora_salvador_ba.length
         ? ` Rejeitados fora Salvador–BA: ${rejeitados_fora_salvador_ba.length}.`

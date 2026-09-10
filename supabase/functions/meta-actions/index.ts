@@ -1,4 +1,10 @@
-// supabase/functions/meta-actions/index.ts (v5.61)
+// supabase/functions/meta-actions/index.ts (v5.62)
+// v5.62 (10/09/2026) - ALTERAR GEO DO CONJUNTO PUBLICADO. O gestor pediu recorte RMS
+//   (8 cidades BA) nos CONJ.1-4 VISTTA e o chat disse que geo nao se edita no objeto
+//   vivo — so existia geo em criar_conjunto, entao nasciam conjuntos novos a +R$ 30/dia.
+//   A Meta aceita POST /{adset_id} targeting (o mesmo update_adset dos posicionamentos).
+//   Entra alterar_geo_do_conjunto: le o targeting atual, troca so geo_locations, preserva
+//   idade/plataformas/WhatsApp. Se a Graph recusar, o card FALHA; duplicar fica de reserva.
 // v5.61 (01/09/2026) - APPLY RECUSAVA OCULOS VISTTA COMO SE FOSSE PECAS DE JURIDICO. A
 //   guarda lia a legenda ("WhatsApp oficial do Juridico") junto com o nome
 //   AD_CONJ.2_APENAS_OCULOS_3 e mandava reemitir em campanha JURIDICO. Identidade da peca
@@ -449,6 +455,7 @@ import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import {
   aplicarGeoNoTargeting,
   normalizarGeoDoPedido,
+  paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
 import { aplicarGateGeoCriarConjunto } from "../_shared/geo_preset_juridico.ts";
 import {
@@ -508,6 +515,7 @@ const EXECUTAVEIS = [
   "renomear_criativo",
   "alterar_categoria_especial_campanha",
   "ajustar_posicionamentos_do_conjunto",
+  "alterar_geo_do_conjunto",
 ];
 /** Renomear e a mesma escrita nos tres niveis: o campo `name` do objeto que ja existe. */
 const RENOMEACOES = ["renomear_campanha", "renomear_conjunto", "renomear_criativo"];
@@ -807,6 +815,7 @@ async function escreverUpdate(
   if (
     acao === "alterar_orcamento" ||
     acao === "ajustar_posicionamentos_do_conjunto" ||
+    acao === "alterar_geo_do_conjunto" ||
     acao === "pausar_conjunto" ||
     acao === "ativar_conjunto" ||
     acao === "renomear_conjunto"
@@ -838,6 +847,13 @@ async function escreverUpdate(
       args.special_ad_categories = JSON.parse(post.special_ad_categories);
     } catch {
       args.special_ad_categories = post.special_ad_categories;
+    }
+  }
+  if (post.targeting != null && typeof post.targeting === "string") {
+    try {
+      args.targeting = JSON.parse(post.targeting);
+    } catch {
+      args.targeting = post.targeting;
     }
   }
   if (opts?.dry_run) args.dry_run = true;
@@ -3254,7 +3270,7 @@ async function espelhar(
         : { ok: true, tabela: "ads" };
     }
 
-    if (acao === "ajustar_posicionamentos_do_conjunto") {
+    if (acao === "ajustar_posicionamentos_do_conjunto" || acao === "alterar_geo_do_conjunto") {
       const { error } = await supa
         .from("ad_sets")
         .update({
@@ -5192,6 +5208,103 @@ Deno.serve(async (req) => {
       r.payload.posicionamentos_excluidos = derivado.excluidos;
       r.payload.perfil_posicionamento = derivado.perfil;
     }
+    if (acao === "alterar_geo_do_conjunto") {
+      if (antes.status !== 200 || !antes.body || typeof antes.body !== "object") {
+        const motivo = "estado_atual_do_conjunto_nao_pode_ser_lido";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          acao,
+          driver_escrita: driver,
+          leitura_graph: antes,
+        });
+        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+        continue;
+      }
+      const paramsGeo = paramsGeoComAliasCidades((r.payload ?? {}) as Record<string, unknown>);
+      const geoNorm = normalizarGeoDoPedido(paramsGeo);
+      if (geoNorm.erro || !geoNorm.geo) {
+        const motivo = geoNorm.erro ?? "geo_obrigatorio";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          detalhe: geoNorm.detalhe,
+          acao,
+          driver_escrita: driver,
+        });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo,
+          detalhe: geoNorm.detalhe,
+          driver_escrita: driver,
+        });
+        continue;
+      }
+      const tokGeo = tokenAdsPorCompanyId(String(r.company_id));
+      const gateGeo = await aplicarGateGeoCriarConjunto({
+        companyId: String(r.company_id),
+        params: paramsGeo,
+        sinaisMeio: [
+          String(r.payload?.target_name ?? ""),
+          String(r.payload?.campanha_nome ?? ""),
+          String((antes.body as any)?.name ?? ""),
+        ],
+        geoNorm,
+        supa,
+        tokenAds: tokGeo?.token ?? null,
+      });
+      if ((gateGeo as any).erro || !(gateGeo as any).geo) {
+        const motivo = String((gateGeo as any).erro ?? "geo_gate_sem_resultado");
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          detalhe: (gateGeo as any).detalhe,
+          acao,
+          driver_escrita: driver,
+        });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo,
+          detalhe: (gateGeo as any).detalhe,
+          driver_escrita: driver,
+        });
+        continue;
+      }
+      const geoEfetivo = (gateGeo as any).geo as Record<string, unknown>;
+      const { data: seg } = await supa.rpc("checar_segmentacao", {
+        p_company_id: r.company_id,
+        p_targeting: { geo_locations: geoEfetivo },
+      });
+      if (seg && typeof seg === "object" && (seg as any).aplica === true && (seg as any).permitido === false) {
+        const motivo = "segmentacao_recusada_pelo_gate";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          detalhe: (seg as any).mensagem_para_o_gestor ?? (seg as any).motivo,
+          segmentacao: seg,
+          acao,
+          driver_escrita: driver,
+        });
+        resultados.push({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo,
+          detalhe: String((seg as any).mensagem_para_o_gestor ?? (seg as any).motivo ?? ""),
+          driver_escrita: driver,
+        });
+        continue;
+      }
+      const tgtAtual = ((antes.body as any)?.targeting ?? {}) as Record<string, unknown>;
+      const tgtNovo = aplicarGeoNoTargeting(
+        tgtAtual && typeof tgtAtual === "object" ? tgtAtual : {},
+        geoEfetivo,
+      );
+      post = { targeting: JSON.stringify(tgtNovo) };
+      r.payload.targeting_aprovado = tgtNovo;
+      r.payload.geo_resumo = (gateGeo as any).resumo ?? geoNorm.resumo ?? null;
+      r.payload.geo_contagem = (gateGeo as any).contagem ?? geoNorm.contagem ?? null;
+    }
 
     if (conf.dry_run) {
       let ensaioPipeboard: ResultadoEscrita | null = null;
@@ -5416,7 +5529,7 @@ Deno.serve(async (req) => {
           );
         }
       }
-      if (acao === "ajustar_posicionamentos_do_conjunto") {
+      if (acao === "ajustar_posicionamentos_do_conjunto" || acao === "alterar_geo_do_conjunto") {
         const esp = await espelhar(
           acao,
           alvoExt,
@@ -5432,7 +5545,9 @@ Deno.serve(async (req) => {
         await audit(
           r.company_id,
           sistema,
-          esp.ok ? "meta_action_espelho_posicionamentos" : "meta_action_espelho_posicionamentos_falhou",
+          esp.ok
+            ? (acao === "alterar_geo_do_conjunto" ? "meta_action_espelho_geo" : "meta_action_espelho_posicionamentos")
+            : (acao === "alterar_geo_do_conjunto" ? "meta_action_espelho_geo_falhou" : "meta_action_espelho_posicionamentos_falhou"),
           r.id,
           {
             acao,

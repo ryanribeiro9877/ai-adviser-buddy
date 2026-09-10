@@ -3,6 +3,7 @@ import {
   aplicarGeoNoTargeting,
   itemParaGeoKey,
   normalizarGeoDoPedido,
+  paramsGeoComAliasCidades,
 } from "./geo_targeting.ts";
 
 function assert(cond: unknown, msg: string) {
@@ -47,5 +48,18 @@ const merged = aplicarGeoNoTargeting(base, b.geo!);
 assert((merged.geo_locations as any).neighborhoods.length === 2, "merge geo");
 assert((merged as any).age_min === 18, "mantem idade");
 assert((merged as any).publisher_platforms[0] === "facebook", "mantem plataformas");
+
+const alias = paramsGeoComAliasCidades({
+  cidades: [{ key: "267730", name: "Salvador" }, "246867"],
+});
+const aliasNorm = normalizarGeoDoPedido(alias);
+assert((aliasNorm.contagem as any).cities === 2, "alias cidades vira geo_locations.cities");
+assert(!(alias as any).countries, "alias cidades nao injeta pais");
+
+const aliasIgnora = paramsGeoComAliasCidades({
+  cidades: ["1"],
+  bairros: ["2"],
+});
+assert((aliasIgnora as any).geo_locations == null, "alias nao mistura com bairros");
 
 console.log("OK geo_targeting prova");
