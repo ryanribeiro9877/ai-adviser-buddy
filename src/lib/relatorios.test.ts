@@ -5,11 +5,13 @@ import {
   especialistasPorSecoes,
   extrairJsonRelatorio,
   flattenCampanhasPipeboard,
+  humanizarMarkdownRelatorio,
   mergeCampanhasRelatorio,
   normalizarAchados,
   periodoDaJanela,
   presetDiarioOperacional,
   proximaExecucaoRelatorio,
+  titulosDasSecoes,
   validarSecoesRelatorio,
   type CampanhaRelatorio,
 } from "./relatorios";
@@ -38,6 +40,19 @@ describe("especialistasPorSecoes", () => {
     const e = especialistasPorSecoes(["custo_vs_teto", "criativos_ranking"]);
     expect(e).toContain("desempenho_campanhas");
     expect(e).toContain("criativos");
+  });
+});
+
+describe("humanizarMarkdownRelatorio", () => {
+  it("troca a chave da seção pelo título que o gestor lê", () => {
+    const md = humanizarMarkdownRelatorio("## resumo_executivo\nJanela fechada.\n## criativos_ranking\n- peça");
+    expect(md).toContain("## Resumo executivo");
+    expect(md).toContain("## Ranking de criativos");
+    expect(md).not.toMatch(/^## resumo_executivo/m);
+  });
+
+  it("titulosDasSecoes usa o catálogo, não a chave crua", () => {
+    expect(titulosDasSecoes(["custo_vs_teto"])).toEqual(["Custo versus teto vigente"]);
   });
 });
 

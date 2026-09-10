@@ -266,8 +266,10 @@ import {
   extrairJsonRelatorio,
   flattenCampanhasPipeboard,
   hojeYmdBrasilia,
+  humanizarMarkdownRelatorio,
   mergeCampanhasRelatorio,
   periodoDaJanela,
+  titulosDasSecoes,
   type CampanhaAoVivoBruta,
   type CampanhaRelatorio,
   type JanelaAnalise,
@@ -4600,10 +4602,16 @@ async function sintetizarRelatorioAutonomo(args: {
   const blocos = args.relatorios
     .map((r) => `=== ${r.nome} [${r.completo ? "completo" : "incompleto"}] ===\n${r.relatorio}`)
     .join("\n\n");
-  const sys = `Voce e o gestor de trafego de ${args.companyName}. Relatorio AUTONOMO: le, diagnostica, opina. NAO executa na Meta e NAO pede aprovacao.
-REGRAS: todo numero desta conta vem dos RELATORIOS INTERNOS abaixo. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (effective_status), nao o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados.
+  const sys = `Voce e o gestor de trafego de ${args.companyName}. Relatorio AUTONOMO para o HUMANO que opera a conta: le, diagnostica, opina. NAO executa na Meta e NAO pede aprovacao.
+
+LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: nome de ferramenta/especialista (desempenho_campanhas, estrutura_conta, get_ads_ranking), codigo interno (openrouter_timeout), chave JSON (amostra_pequena=true, budget_remaining=0, effective_status). Traduza: "a leitura de desempenho desta campanha falhou por tempo esgotado"; "amostra pequena"; "orcamento restante da campanha zerado"; "status real". ID numerico da Meta so entre parenteses no fim do nome, se precisar.
+
+NUMEROS: so o que estiver nos RELATORIOS INTERNOS. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real, nao o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados.
+
+corpo_md: markdown com titulos HUMANOS (Resumo executivo, Status e entrega, Investimento e pacing, Custo versus teto, Funil de midia, Por campanha, Conjuntos, Ranking de criativos, Fadiga, Diagnostico de custo, Escala, Alertas, Recomendacoes, Compliance, Comparativo, WhatsApp, Cobertura). NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de pecas em TABELA markdown (Peca | Gasto | Impressoes | Resultado | Custo). Nao despeje o relatorio interno: sintetize.
+
 Responda APENAS um JSON valido, sem cerca markdown, com:
-{"corpo_md":"narrativa em markdown para o gestor","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"cobertura":"o que nao foi medido"}`;
+{"corpo_md":"narrativa em markdown para o gestor","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"cobertura":"o que nao foi medido, em portugues"}`;
   const timeoutMs = Math.min(90_000, Math.max(args.prazo(), 8_000));
   const r = await chamarLLM(
     [
@@ -4662,9 +4670,9 @@ async function processarRelatorio(relatorioId: string, mcpKey: string): Promise<
 Empresa: ${companyName}.
 Periodo FECHADO: ${periodo.inicio} a ${periodo.fim} (America/Sao_Paulo; hoje nao entra).
 Campanhas do recorte (unicas permitidas): ${nomes}.
-Secoes obrigatorias: ${secoes.join(", ")}.
+Secoes obrigatorias (use estes titulos humanos no markdown): ${titulosDasSecoes(secoes).join("; ")}.
 ${resolvidas.cobertura}
-Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contrato fora. Nao misture bases de resultado. Nao execute acao.`;
+Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contrato fora. Nao misture bases de resultado. Nao execute acao. Escreva para o gestor, nao para o log da ferramenta.`;
 
     const lote: { nome: string; foco: string }[] = especialistasPorSecoes(secoes)
       .filter((n) => SUBAGENTES[n] && n !== "analise_visual_drive" && n !== "criativos_drive")
@@ -4698,7 +4706,7 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
       campaign_ids_resolvidos: resolvidas.ids,
       periodo_inicio: periodo.inicio,
       periodo_fim: periodo.fim,
-      corpo_md: extraido.corpo_md,
+      corpo_md: humanizarMarkdownRelatorio(extraido.corpo_md),
       achados: extraido.achados,
       cobertura,
       erro: null,

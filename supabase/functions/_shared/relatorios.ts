@@ -197,6 +197,28 @@ export function especialistasPorSecoes(secoes: string[]): string[] {
   return [...set];
 }
 
+const TITULO_POR_CHAVE = new Map(SECOES_RELATORIO.map((s) => [s.chave, s.titulo] as const));
+
+export function tituloDaSecaoRelatorio(chave: string): string {
+  return TITULO_POR_CHAVE.get(chave as ChaveSecaoRelatorio) ?? String(chave ?? "");
+}
+
+export function titulosDasSecoes(secoes: string[]): string[] {
+  if (!Array.isArray(secoes)) return [];
+  return secoes.map((k) => tituloDaSecaoRelatorio(String(k)));
+}
+
+export function humanizarMarkdownRelatorio(md: string): string {
+  const texto = String(md ?? "");
+  if (!texto) return texto;
+  let out = texto;
+  for (const s of SECOES_RELATORIO) {
+    const re = new RegExp(`^(#{1,4}[ \\t]*)${s.chave}\\b`, "gmi");
+    out = out.replace(re, `$1${s.titulo}`);
+  }
+  return out;
+}
+
 export type CampanhaRelatorio = {
   external_id: string;
   nome: string;

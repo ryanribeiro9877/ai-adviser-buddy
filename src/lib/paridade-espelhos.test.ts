@@ -159,6 +159,8 @@ const OUTROS: unknown[] = [
   ["resumo_executivo"],
   ["custo_vs_teto", "criativos_ranking"],
   ["nao_existe"],
+  "resumo_executivo",
+  "custo_vs_teto",
   {
     frequencia: "diaria",
     horaLocal: "08:00",
@@ -173,6 +175,8 @@ const OUTROS: unknown[] = [
   JSON.stringify({ corpo_md: "texto", cobertura: "ok", achados: [] }),
   [{ external_id: "111", nome: "Espelho", status: "paused", gasto: 12.5 }],
   [{ id: "111", name: "Ao vivo", effective_status: "ACTIVE" }],
+  "## resumo_executivo\ntexto",
+  "## custo_vs_teto",
 ];
 
 const CORPUS: unknown[] = [...FALAS, ...OUTROS];
