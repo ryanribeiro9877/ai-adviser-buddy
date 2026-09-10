@@ -857,6 +857,154 @@ export type Database = {
         };
         Relationships: [];
       };
+      relatorio_agendamentos: {
+        Row: {
+          id: string;
+          company_id: string;
+          nome: string;
+          ativo: boolean;
+          frequencia: string;
+          hora_local: string;
+          dia_semana: number | null;
+          intervalo_horas: number | null;
+          recorte_campanhas: string;
+          campaign_ids: string[];
+          janela_analise: string;
+          secoes: string[];
+          proxima_execucao_em: string | null;
+          ultima_execucao_em: string | null;
+          criado_por: string | null;
+          criado_em: string;
+          atualizado_em: string;
+        };
+        Insert: {
+          id?: string;
+          company_id: string;
+          nome: string;
+          ativo?: boolean;
+          frequencia: string;
+          hora_local?: string;
+          dia_semana?: number | null;
+          intervalo_horas?: number | null;
+          recorte_campanhas?: string;
+          campaign_ids?: string[];
+          janela_analise?: string;
+          secoes: string[];
+          proxima_execucao_em?: string | null;
+          ultima_execucao_em?: string | null;
+          criado_por?: string | null;
+          criado_em?: string;
+          atualizado_em?: string;
+        };
+        Update: {
+          id?: string;
+          company_id?: string;
+          nome?: string;
+          ativo?: boolean;
+          frequencia?: string;
+          hora_local?: string;
+          dia_semana?: number | null;
+          intervalo_horas?: number | null;
+          recorte_campanhas?: string;
+          campaign_ids?: string[];
+          janela_analise?: string;
+          secoes?: string[];
+          proxima_execucao_em?: string | null;
+          ultima_execucao_em?: string | null;
+          criado_por?: string | null;
+          criado_em?: string;
+          atualizado_em?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "relatorio_agendamentos_company_id_fkey";
+            columns: ["company_id"];
+            isOneToOne: false;
+            referencedRelation: "companies";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      relatorio_gerados: {
+        Row: {
+          id: string;
+          company_id: string;
+          agendamento_id: string | null;
+          nome: string;
+          status: string;
+          recorte_campanhas: string;
+          campaign_ids: string[];
+          campaign_ids_resolvidos: string[];
+          fonte_campanhas: string | null;
+          janela_analise: string;
+          secoes: string[];
+          periodo_inicio: string | null;
+          periodo_fim: string | null;
+          corpo_md: string | null;
+          achados: Json;
+          cobertura: string | null;
+          erro: string | null;
+          criado_por: string | null;
+          criado_em: string;
+          iniciado_em: string | null;
+          finalizado_em: string | null;
+        };
+        Insert: {
+          id?: string;
+          company_id: string;
+          agendamento_id?: string | null;
+          nome: string;
+          status?: string;
+          recorte_campanhas: string;
+          campaign_ids?: string[];
+          campaign_ids_resolvidos?: string[];
+          fonte_campanhas?: string | null;
+          janela_analise: string;
+          secoes: string[];
+          periodo_inicio?: string | null;
+          periodo_fim?: string | null;
+          corpo_md?: string | null;
+          achados?: Json;
+          cobertura?: string | null;
+          erro?: string | null;
+          criado_por?: string | null;
+          criado_em?: string;
+          iniciado_em?: string | null;
+          finalizado_em?: string | null;
+        };
+        Update: {
+          id?: string;
+          company_id?: string;
+          agendamento_id?: string | null;
+          nome?: string;
+          status?: string;
+          recorte_campanhas?: string;
+          campaign_ids?: string[];
+          campaign_ids_resolvidos?: string[];
+          fonte_campanhas?: string | null;
+          janela_analise?: string;
+          secoes?: string[];
+          periodo_inicio?: string | null;
+          periodo_fim?: string | null;
+          corpo_md?: string | null;
+          achados?: Json;
+          cobertura?: string | null;
+          erro?: string | null;
+          criado_por?: string | null;
+          criado_em?: string;
+          iniciado_em?: string | null;
+          finalizado_em?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "relatorio_gerados_company_id_fkey";
+            columns: ["company_id"];
+            isOneToOne: false;
+            referencedRelation: "companies";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       targets: {
         Row: {
           active: boolean;
@@ -1270,6 +1418,40 @@ export type Database = {
       is_company_member: {
         Args: { _company_id: string; _user_id: string };
         Returns: boolean;
+      };
+      listar_campanhas_para_relatorio: {
+        Args: { p_company_id: string };
+        Returns: {
+          external_id: string;
+          nome: string;
+          status: string;
+          objetivo: string | null;
+          tipo: string | null;
+          gasto: number;
+          last_synced_at: string | null;
+        }[];
+      };
+      enfileirar_relatorio_agora: {
+        Args: {
+          p_company_id: string;
+          p_agendamento_id?: string | null;
+          p_nome?: string | null;
+          p_recorte_campanhas?: string | null;
+          p_campaign_ids?: string[] | null;
+          p_janela_analise?: string | null;
+          p_secoes?: string[] | null;
+        };
+        Returns: string;
+      };
+      proxima_execucao_relatorio: {
+        Args: {
+          p_frequencia: string;
+          p_hora_local: string;
+          p_dia_semana?: number | null;
+          p_intervalo_horas?: number | null;
+          p_a_partir_de?: string;
+        };
+        Returns: string;
       };
       sincronizar_whatsapp_numeros_de_anuncios: {
         Args: { p_company_id?: string | null };

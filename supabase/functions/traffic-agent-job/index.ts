@@ -259,6 +259,18 @@ import {
   type TipoTarefaLlm,
 } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
+import {
+  campanhaEstaAtiva,
+  especialistasPorSecoes,
+  extrairJsonRelatorio,
+  flattenCampanhasPipeboard,
+  hojeYmdBrasilia,
+  mergeCampanhasRelatorio,
+  periodoDaJanela,
+  type CampanhaAoVivoBruta,
+  type CampanhaRelatorio,
+  type JanelaAnalise,
+} from "../_shared/relatorios.ts";
 import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
 import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto, statusObjetoOperacional } from "../_shared/memoria_conjunto.ts";
 import { carregarMemoriaInstitucional, type FatoMemoria } from "../_shared/agent_memory.ts";
@@ -2022,7 +2034,7 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
   conhecimento: {
     tools: ["get_conhecimento"],
     maxPorTool: { get_conhecimento: 5 }, maxToolsTotal: 5,
-    missao: "FUNDAMENTO TECNICO puro (politica da Meta, definicao de metrica, metodo de otimizacao, boa pratica de criativo), citando o tema consultado e declarando [VENCIDO] quando for o caso. So e acionado quando a pergunta exige conceito alem do que os outros especialistas ja fundamentam.",
+    missao: "FUNDAMENTO TECNICO puro. Pedido de metodo: comece por get_conhecimento(tema=gestor_trafego_meta) e siga o mapa de temas. Politica da Meta, definicao de metrica, otimizacao, boa pratica de criativo — cite o tema consultado e declare [VENCIDO] quando for o caso. So e acionado quando a pergunta exige conceito alem do que os outros especialistas ja fundamentam.",
   },
 };
 
@@ -4481,6 +4493,242 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
 }
 
 // ============================================================================
+// RELATORIO AUTONOMO — modo ao lado de drive_watch: sem planner, sem chat_messages.
+// ============================================================================
+
+function emBackground(p: Promise<unknown>) {
+  const rt = (globalThis as any).EdgeRuntime;
+  if (rt?.waitUntil) rt.waitUntil(p);
+  else void p;
+}
+
+async function campanhasAoVivoDaEmpresa(companyId: string): Promise<{
+  itens: CampanhaAoVivoBruta[];
+  erro?: string;
+}> {
+  let contas: string[] = [];
+  try {
+    contas = await companyMetaAccounts(supa, companyId);
+  } catch (e) {
+    return { itens: [], erro: String((e as Error).message ?? e) };
+  }
+  if (!contas.length) return { itens: [], erro: "empresa_sem_conta_meta_vinculada" };
+  const itens: CampanhaAoVivoBruta[] = [];
+  const erros: string[] = [];
+  for (const acc of contas) {
+    const r = await t_ler_pipeboard(companyId, "get_campaigns", { account_id: acc });
+    if ((r as { erro?: string })?.erro) {
+      erros.push(String((r as { erro?: string }).erro));
+      continue;
+    }
+    const payload = (r as { resultado?: unknown })?.resultado ?? r;
+    itens.push(...flattenCampanhasPipeboard(payload));
+  }
+  if (!itens.length && erros.length) return { itens: [], erro: erros[0] };
+  return { itens };
+}
+
+async function resolverCampanhasDoRelatorio(row: {
+  company_id: string;
+  recorte_campanhas: string;
+  campaign_ids: string[] | null;
+}): Promise<{ ids: string[]; nomes: string[]; fonte: "ao_vivo" | "espelho"; cobertura: string }> {
+  const { data: espelhoRows } = await supa
+    .from("campaigns")
+    .select("external_id,name,status,objective,category,spend,last_synced_at")
+    .eq("company_id", row.company_id);
+  const espelho: CampanhaRelatorio[] = (espelhoRows ?? [])
+    .filter((c: { external_id?: string | null }) => String(c.external_id ?? "").trim())
+    .map((c: Record<string, unknown>) => ({
+      external_id: String(c.external_id),
+      nome: String(c.name ?? "(sem nome)"),
+      status: String(c.status ?? ""),
+      objective: c.objective != null ? String(c.objective) : null,
+      tipo: c.category != null ? String(c.category) : null,
+      gasto: Number(c.spend ?? 0),
+      last_synced_at: c.last_synced_at != null ? String(c.last_synced_at) : null,
+      fonte: "espelho" as const,
+    }));
+  const vivo = await campanhasAoVivoDaEmpresa(row.company_id);
+  const merge = mergeCampanhasRelatorio(espelho, vivo.itens);
+  const fonte = vivo.erro && !vivo.itens.length ? "espelho" : merge.fonte;
+  let escolhidas = merge.campanhas;
+  if (row.recorte_campanhas === "todas_ativas") {
+    escolhidas = escolhidas.filter((c) => campanhaEstaAtiva(c.status));
+  } else {
+    const pedidas = new Set((row.campaign_ids ?? []).map((x) => String(x)));
+    escolhidas = escolhidas.filter((c) => pedidas.has(c.external_id));
+  }
+  const cobertura = [
+    vivo.erro && fonte === "espelho"
+      ? `Lista de campanhas veio do espelho local (${vivo.erro}), nao da Graph nesta rodada.`
+      : fonte === "ao_vivo"
+        ? "Lista de campanhas conferida ao vivo no Pipeboard."
+        : "Lista de campanhas do espelho local.",
+    row.recorte_campanhas === "todas_ativas"
+      ? `Recorte: ativas agora (${escolhidas.length}).`
+      : `Recorte: ${escolhidas.length} campanha(s) fixa(s).`,
+  ].join(" ");
+  return {
+    ids: escolhidas.map((c) => c.external_id),
+    nomes: escolhidas.map((c) => c.nome),
+    fonte,
+    cobertura,
+  };
+}
+
+async function sintetizarRelatorioAutonomo(args: {
+  companyName: string;
+  pergunta: string;
+  relatorios: { nome: string; relatorio: string; completo: boolean }[];
+  prazo: () => number;
+}): Promise<string> {
+  const blocos = args.relatorios
+    .map((r) => `=== ${r.nome} [${r.completo ? "completo" : "incompleto"}] ===\n${r.relatorio}`)
+    .join("\n\n");
+  const sys = `Voce e o gestor de trafego de ${args.companyName}. Relatorio AUTONOMO: le, diagnostica, opina. NAO executa na Meta e NAO pede aprovacao.
+REGRAS: todo numero desta conta vem dos RELATORIOS INTERNOS abaixo. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (effective_status), nao o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados.
+Responda APENAS um JSON valido, sem cerca markdown, com:
+{"corpo_md":"narrativa em markdown para o gestor","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"cobertura":"o que nao foi medido"}`;
+  const timeoutMs = Math.min(90_000, Math.max(args.prazo(), 8_000));
+  const r = await chamarLLM(
+    [
+      { role: "system", content: sys },
+      { role: "user", content: `${args.pergunta}\n\n=== RELATORIOS INTERNOS ===\n${blocos}` },
+    ],
+    { maxTokens: 6000, reasoning: REASONING_OFF, timeoutMs, tipo: "sintese", faixaForcada: "economia" },
+  );
+  if (r.erro) throw new Error(String(r.erro));
+  return String(r.parsed?.choices?.[0]?.message?.content ?? "");
+}
+
+async function processarRelatorio(relatorioId: string, mcpKey: string): Promise<void> {
+  const { data: claimed } = await supa.rpc("claim_relatorio_gerado", { p_id: relatorioId });
+  const row = (Array.isArray(claimed) ? claimed[0] : claimed) as Record<string, unknown> | null;
+  if (!row?.id) return;
+  const companyId = String(row.company_id);
+  const t0 = Date.now();
+  const prazo = () => 300_000 - (Date.now() - t0);
+  const tel: Record<string, unknown> = { versao: "relatorio-v1", subagentes: [] };
+  try {
+    const { data: companyRow } = await supa.from("companies").select("name").eq("id", companyId).maybeSingle();
+    const companyName = String(companyRow?.name ?? "").trim();
+    if (!companyName) throw new Error("empresa_do_relatorio_nao_encontrada");
+
+    const janela = String(row.janela_analise ?? "ontem") as JanelaAnalise;
+    const periodoBanco = {
+      inicio: row.periodo_inicio ? String(row.periodo_inicio).slice(0, 10) : "",
+      fim: row.periodo_fim ? String(row.periodo_fim).slice(0, 10) : "",
+    };
+    const periodo = periodoBanco.inicio && periodoBanco.fim
+      ? periodoBanco
+      : periodoDaJanela(janela, hojeYmdBrasilia(new Date()));
+    const secoes = Array.isArray(row.secoes) ? (row.secoes as string[]) : [];
+    const resolvidas = await resolverCampanhasDoRelatorio({
+      company_id: companyId,
+      recorte_campanhas: String(row.recorte_campanhas ?? "todas_ativas"),
+      campaign_ids: Array.isArray(row.campaign_ids) ? (row.campaign_ids as string[]) : [],
+    });
+
+    if (!resolvidas.ids.length) {
+      await supa.from("relatorio_gerados").update({
+        status: "done",
+        fonte_campanhas: resolvidas.fonte,
+        campaign_ids_resolvidos: [],
+        corpo_md: "Nenhuma campanha no recorte desta rodada. Nao ha o que opinar — isto nao e falha do motor.",
+        achados: [],
+        cobertura: resolvidas.cobertura,
+        finalizado_em: new Date().toISOString(),
+      }).eq("id", relatorioId);
+      return;
+    }
+
+    const nomes = resolvidas.nomes.map((n, i) => `${n} (${resolvidas.ids[i]})`).join("; ");
+    const pergunta = `RELATORIO AUTONOMO (nao e conversa).
+Empresa: ${companyName}.
+Periodo FECHADO: ${periodo.inicio} a ${periodo.fim} (America/Sao_Paulo; hoje nao entra).
+Campanhas do recorte (unicas permitidas): ${nomes}.
+Secoes obrigatorias: ${secoes.join(", ")}.
+${resolvidas.cobertura}
+Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contrato fora. Nao misture bases de resultado. Nao execute acao.`;
+
+    const lote: { nome: string; foco: string }[] = especialistasPorSecoes(secoes)
+      .filter((n) => SUBAGENTES[n] && n !== "analise_visual_drive" && n !== "criativos_drive")
+      .map((nome) => ({
+        nome,
+        foco: `Cubra a parte da sua missao para o relatorio. ${pergunta}`,
+      }));
+    if (!lote.length) {
+      lote.push({ nome: "desempenho_campanhas", foco: pergunta });
+    }
+
+    const relatorios = await executarLote(
+      lote,
+      pergunta,
+      { companyId, companyName, mcpKey, pedido: pergunta },
+      prazo,
+      tel,
+      80_000,
+    );
+    const texto = await sintetizarRelatorioAutonomo({
+      companyName,
+      pergunta,
+      relatorios,
+      prazo,
+    });
+    const extraido = extrairJsonRelatorio(texto);
+    const cobertura = [resolvidas.cobertura, extraido.cobertura].filter(Boolean).join(" ");
+    await supa.from("relatorio_gerados").update({
+      status: "done",
+      fonte_campanhas: resolvidas.fonte,
+      campaign_ids_resolvidos: resolvidas.ids,
+      periodo_inicio: periodo.inicio,
+      periodo_fim: periodo.fim,
+      corpo_md: extraido.corpo_md,
+      achados: extraido.achados,
+      cobertura,
+      erro: null,
+      finalizado_em: new Date().toISOString(),
+    }).eq("id", relatorioId);
+  } catch (e) {
+    const erro = String((e as Error)?.message ?? e).slice(0, 800);
+    await supa.from("relatorio_gerados").update({
+      status: "error",
+      erro,
+      finalizado_em: new Date().toISOString(),
+    }).eq("id", relatorioId);
+  }
+}
+
+async function despacharRelatorios(mcpKey: string): Promise<{
+  ok: true;
+  enfileirados: unknown;
+  processados: string[];
+}> {
+  const { data: fila, error } = await supa.rpc("enfileirar_relatorios_vencidos", { p_limite: 2 });
+  if (error) throw new Error(error.message);
+  const { data: queued } = await supa
+    .from("relatorio_gerados")
+    .select("id")
+    .eq("status", "queued")
+    .order("criado_em", { ascending: true })
+    .limit(2);
+  const ids: string[] = [];
+  const visto = new Set<string>();
+  for (const id of [
+    ...(((fila as { ids?: unknown[] })?.ids ?? []).map((x) => String(x))),
+    ...((queued ?? []).map((q: { id: string }) => String(q.id))),
+  ]) {
+    if (!id || visto.has(id)) continue;
+    visto.add(id);
+    ids.push(id);
+    if (ids.length >= 2) break;
+  }
+  await Promise.all(ids.map((id) => processarRelatorio(id, mcpKey)));
+  return { ok: true, enfileirados: fila, processados: ids };
+}
+
+// ============================================================================
 // HANDLER - responde rapido, processa depois.
 // ============================================================================
 Deno.serve(async (req) => {
@@ -4562,6 +4810,28 @@ Deno.serve(async (req) => {
         ((v.falhas_gravacao ?? 0) > 0 ? ` - ATENCAO: ${v.falhas_gravacao} falha(s) ao GRAVAR, o veredito foi produzido e nao persistiu` : "") +
         (v.analisados_nesta_rodada === 0 ? " - nada a analisar nesta base, o que NAO e falha" : ""),
       duracao_ms: Date.now() - tw });
+  }
+
+  // Relatorio autonomo: sem planner, sem chat_messages. Cron (dispatcher) ou "Gerar agora".
+  const modoRel = String(body?.modo ?? "");
+  if (modoRel === "relatorio_dispatcher") {
+    emBackground(despacharRelatorios(String(cfg?.api_key ?? "")));
+    return json({ ok: true, modo: "relatorio_dispatcher", aviso: "despacho em segundo plano; o historico cresce em relatorio_gerados" }, 202);
+  }
+  if (modoRel === "relatorio") {
+    const relatorioId = String(body?.relatorio_id ?? "").trim();
+    if (!relatorioId) return json({ error: "relatorio exige relatorio_id" }, 400);
+    if (userId) {
+      const { data: alvo } = await supa.from("relatorio_gerados").select("company_id").eq("id", relatorioId).maybeSingle();
+      if (!alvo) return json({ error: "relatorio nao encontrado" }, 404);
+      const { data: membro } = await supa.rpc("is_company_member", {
+        _company_id: alvo.company_id,
+        _user_id: userId,
+      });
+      if (!membro) return json({ error: "nao_e_membro_da_empresa" }, 403);
+    }
+    emBackground(processarRelatorio(relatorioId, String(cfg?.api_key ?? "")));
+    return json({ ok: true, async: true, modo: "relatorio", relatorio_id: relatorioId }, 202);
   }
 
   // v2: CONTINUACAO DE SEGMENTO - a propria edge se reinvoca com o job_id; o novo worker

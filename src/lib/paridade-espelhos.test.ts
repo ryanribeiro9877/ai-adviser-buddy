@@ -144,6 +144,32 @@ const OUTROS: unknown[] = [
   { estruturaNomes: ["JURIDICO_CONJ.02"], pecaSinais: ["CONJ.1_LAF_8CRIATIVOS"] },
   { estruturaNomes: ["CONJ.1_LAF_8CRIATIVOS"], pecaSinais: ["CONJ.1_LAF_8CRIATIVOS"] },
   { estruturaNomes: [], pecaSinais: [] },
+  // Relatórios autônomos: horário, seções, merge ao vivo × espelho, achados.
+  "08:00",
+  "08:30",
+  "24:00",
+  "ontem",
+  "7d",
+  "2026-09-10",
+  new Date("2026-09-10T19:00:00Z"),
+  new Date("2026-09-10T10:00:00Z"),
+  ["resumo_executivo"],
+  ["custo_vs_teto", "criativos_ranking"],
+  ["nao_existe"],
+  {
+    frequencia: "diaria",
+    horaLocal: "08:00",
+    aPartirDe: new Date("2026-09-10T19:00:00Z"),
+  },
+  {
+    frequencia: "diaria",
+    horaLocal: "08:00",
+    aPartirDe: new Date("2026-09-10T10:00:00Z"),
+  },
+  [{ tipo: "teto", evidencia: "CPL R$ 3,10 > teto R$ 2,30", alvo_nome: "X" }],
+  JSON.stringify({ corpo_md: "texto", cobertura: "ok", achados: [] }),
+  [{ external_id: "111", nome: "Espelho", status: "paused", gasto: 12.5 }],
+  [{ id: "111", name: "Ao vivo", effective_status: "ACTIVE" }],
 ];
 
 const CORPUS: unknown[] = [...FALAS, ...OUTROS];
@@ -163,6 +189,9 @@ const CORPUS2: unknown[] = [
   ],
   // Sinais da peça (escolherConjuntos*).
   ["CONJ.1_LAF_8CRIATIVOS"],
+  "2026-09-10",
+  "ontem",
+  1,
 ];
 
 /** Resultado observável de uma chamada — inclui a exceção, que também é comportamento. */
@@ -193,6 +222,7 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
       "lote-criativo",
       "memoria-conjunto",
       "orcamento-reais",
+      "relatorios",
     ]);
   });
 
@@ -255,6 +285,9 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
         .filter((k) => typeof a[k] === "function")
         .filter((k) => {
           const fn = a[k] as (...x: unknown[]) => unknown;
+          // Factory sem parâmetro (secoesRelatorioPadrao / preset) não varia com o
+          // corpus — a paridade dela já é coberta pelo teste de mesma saída.
+          if (fn.length === 0) return false;
           const vistos = new Set(chamadas(fn.length).map((args) => observar(fn, args)));
           return vistos.size < 2;
         });

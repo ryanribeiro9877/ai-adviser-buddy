@@ -97,6 +97,7 @@ describe("navegação", () => {
     render(<AppShell />);
     for (const label of [
       "Dashboard executivo",
+      "Relatórios",
       "Empresas e contas",
       "Campanhas",
       "Conjuntos e públicos",
