@@ -1352,6 +1352,23 @@ async function audit(
 // neste arquivo, nos dois caminhos (criacao e modificacao). Marcar uma a uma garante que a
 // proxima saida nova nasca invisivel de novo - que e literalmente a historia deste bug. Toda
 // saida ja chama audit(); pendurar aqui e o unico ponto por onde TODAS passam.
+function resultadoAtoRitmo(saida: { resultado?: unknown } | null | undefined): "ok" | "simulado" | "falhou" | "bloqueado" {
+  const r = String(saida?.resultado ?? "");
+  if (r === "SIMULADO" || r === "simulado") return "simulado";
+  if (r === "bloqueado" || r === "pulado") return "bloqueado";
+  if (r === "EXECUTADO" || r === "CRIADO" || r === "ok") return "ok";
+  return "falhou";
+}
+
+let persistenciaPedido: "approval" | "ritmo" = "approval";
+
+async function persistirSaidaRitmo(atoId: string, saida: Record<string, unknown>) {
+  await supa.from("ritmo_atos").update({
+    resultado: resultadoAtoRitmo(saida),
+    resposta_meta: saida,
+  }).eq("id", atoId);
+}
+
 async function marcarFalhaNoCard(
   cardId: string,
   dados: {
@@ -1364,6 +1381,7 @@ async function marcarFalhaNoCard(
     bloqueado?: boolean;
   },
 ) {
+  if (persistenciaPedido === "ritmo") return;
   const t = dados.bloqueado
     ? {
         recusa: String(dados.recusa ?? "bloqueado_por_trava_do_sistema"),
@@ -4034,37 +4052,16 @@ Deno.serve(async (req) => {
   let pipeboardMonitor: ConexaoPipeboard | null = null;
   if (pbToken) pipeboardMonitor = await monitorConexaoPipeboard(pbToken);
 
-  let q = supa
-    .from("approval_requests")
-    .select("*")
-    .eq("status", "approved")
-    .is("executed_at", null);
-  if (onlyId) q = q.eq("id", onlyId);
-  const { data: fila } = await q.order("created_at", { ascending: true }).limit(10);
-  if (!fila?.length)
-    return json({
-      ok: true,
-      processados: 0,
-      nota: "fila vazia (nenhum aprovado pendente de execução)",
-      pipeboard_conexao: pipeboardMonitor ?? {
-        ok: false,
-        token_status: null,
-        connection_id: null,
-        alerta:
-          "PIPEBOARD_API_TOKEN ausente — monitor e driver pipeboard indisponiveis ate cadastrar o Edge Secret",
-        erro: "token_ausente",
-      },
-      versao: "meta-actions-v5",
-      mcp_chamador: auth.chamador,
-      mcp_chave_legada: auth.legado,
-    });
-
   // Teto por EMPRESA (alinha com contar_acoes_na_hora / pode_executar_acao). Contagem
   // global misturava empresas e podia barrar slate de uma por causa de outra.
   const executadasNaHoraPorEmpresa = new Map<string, number>();
 
-  const resultados: any[] = [];
-  for (const r of fila) {
+  async function executarUmPedido(
+    r: any,
+    opts?: { dryRun?: boolean; persistencia?: "approval" | "ritmo" },
+  ) {
+    async function corpo(): Promise<Record<string, unknown>> {
+
     const acao = String(r.action);
     const alvoExt = String(r.payload?.target_external_id ?? "");
     const alvoNome = String(r.payload?.target_name ?? r.summary);
@@ -4077,34 +4074,36 @@ Deno.serve(async (req) => {
         motivo: ativTok.motivo,
         acao,
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         resultado: "bloqueado",
         motivo: ativTok.motivo,
       });
-      continue;
+
     }
 
     // v3: config DA EMPRESA DESTE CARD. Sem linha propria, nada executa.
-    const { data: conf } = await supa
+    const { data: confCarregada } = await supa
       .from("meta_execution_config")
       .select("*")
       .eq("company_id", r.company_id)
       .maybeSingle();
-    if (!conf) {
+    if (!confCarregada) {
       await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
         motivo: "empresa sem configuracao de execucao propria",
         acao,
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         resultado: "bloqueado",
         motivo: "empresa sem configuracao de execucao - nada e executado sem config propria",
       });
-      continue;
+
     }
+    const conf = opts?.dryRun === true ? { ...confCarregada, dry_run: true } : confCarregada;
+
     if (!executadasNaHoraPorEmpresa.has(r.company_id)) {
       const { count: naHoraEmpresa } = await supa
         .from("audit_log")
@@ -4135,14 +4134,14 @@ Deno.serve(async (req) => {
           prazo: r.expires_at,
           driver_escrita: driver,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "bloqueado",
           motivo: "pedido expirado (24h)",
           driver_escrita: driver,
         });
-        continue;
+
       }
 
       const conta = actId(String(r.payload?.conta_destino ?? ""));
@@ -4154,8 +4153,8 @@ Deno.serve(async (req) => {
           contas_permitidas: contasOk,
           driver_escrita: driver,
         });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
-        continue;
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+
       }
 
       // v28.11 (06/08/2026) - PECA EM REVISAO DE COMPLIANCE E IMPEDIMENTO, TAMBEM AQUI.
@@ -4187,14 +4186,14 @@ Deno.serve(async (req) => {
             dry_run: conf.dry_run === true,
             peca_em_revisao: bloq ?? null,
           });
-          resultados.push({
+          return ({
             id: r.id,
             acao,
             resultado: "bloqueado",
             motivo: (bloq as any)?.mensagem ?? motivo,
             driver_escrita: driver,
           });
-          continue;
+
         }
       }
 
@@ -4226,8 +4225,8 @@ Deno.serve(async (req) => {
             driver_escrita: driver,
             dry_run: conf.dry_run === true,
           });
-          resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
-          continue;
+          return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+
         }
         // v5.6 (04/09/2026) - LISTA DE LIBERADOS, e nao mais igualdade com "reprova". A versao
         // anterior so bloqueava no literal exato, entao vocabulario novo no veredito (ou
@@ -4256,8 +4255,8 @@ Deno.serve(async (req) => {
             dry_run: conf.dry_run === true,
             par_texto_e_peca: par,
           });
-          resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo: detalhe, driver_escrita: driver });
-          continue;
+          return ({ id: r.id, acao, resultado: "bloqueado", motivo: detalhe, driver_escrita: driver });
+
         }
       }
 
@@ -4269,14 +4268,14 @@ Deno.serve(async (req) => {
           acao,
           driver_escrita: driver,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "bloqueado",
           motivo: pipeboardMonitor.alerta ?? "pipeboard_conexao_inativa",
           driver_escrita: driver,
         });
-        continue;
+
       }
       if (driver === "pipeboard" && !pbToken) {
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
@@ -4284,7 +4283,7 @@ Deno.serve(async (req) => {
           acao,
           driver_escrita: driver,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "bloqueado",
@@ -4292,7 +4291,7 @@ Deno.serve(async (req) => {
             "PIPEBOARD_API_TOKEN ausente — cadastre o Edge Secret antes de usar driver pipeboard",
           driver_escrita: driver,
         });
-        continue;
+
       }
 
       const plano = await montarCriacao(acao, r.payload, conta, tetoSanidade, String(r.company_id ?? ""));
@@ -4307,14 +4306,14 @@ Deno.serve(async (req) => {
           acao,
           driver_escrita: driver,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "falha",
           motivo: (plano as any).erro,
           driver_escrita: driver,
         });
-        continue;
+
       }
       const pl: any = plano;
 
@@ -4352,7 +4351,7 @@ Deno.serve(async (req) => {
           },
           nota: "dry_run=true: NADA foi criado na Meta; executed_at NÃO preenchido",
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "SIMULADO",
@@ -4367,7 +4366,7 @@ Deno.serve(async (req) => {
           flags_permitiriam: flagsOk && rateOk,
           pipeboard_dry_run_nativo: ensaioPipeboard?.dry_run_nativo ?? null,
         });
-        continue;
+
       }
 
       if (!flagsOk || !rateOk) {
@@ -4381,8 +4380,8 @@ Deno.serve(async (req) => {
           acao,
           driver_escrita: driver,
         });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
-        continue;
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+
       }
 
       // Um anuncio substituto pode depender de um ajuste sancionado no MESMO conjunto. Nao
@@ -4410,7 +4409,7 @@ Deno.serve(async (req) => {
             dependencia: dep ?? null,
             driver_escrita: driver,
           });
-          resultados.push({
+          return ({
             id: r.id,
             acao,
             resultado: "bloqueado",
@@ -4418,7 +4417,7 @@ Deno.serve(async (req) => {
             depende_de_approval_id: dependenciaId,
             driver_escrita: driver,
           });
-          continue;
+
         }
       }
 
@@ -4477,7 +4476,7 @@ Deno.serve(async (req) => {
               acao,
               driver_escrita: driver,
             });
-            resultados.push({
+            return ({
               id: r.id,
               acao,
               resultado: "falha_meta",
@@ -4485,7 +4484,7 @@ Deno.serve(async (req) => {
               driver_escrita: driver,
               detalhe: up.body,
             });
-            continue;
+
           }
         }
         // Espelho fica com o que a Meta tem de fato: quando ja estava certo, o valor lido
@@ -4516,7 +4515,7 @@ Deno.serve(async (req) => {
             acao,
             driver_escrita: driver,
           });
-          resultados.push({
+          return ({
             id: r.id,
             acao,
             resultado: "falha_meta",
@@ -4524,7 +4523,7 @@ Deno.serve(async (req) => {
             driver_escrita: driver,
             detalhe: cc.body,
           });
-          continue;
+
         }
         creativeCriado = cc.id;
         bodyFinal.creative = JSON.stringify({ creative_id: creativeCriado });
@@ -4552,14 +4551,14 @@ Deno.serve(async (req) => {
             acao,
             driver_escrita: driver,
           });
-          resultados.push({
+          return ({
             id: r.id,
             acao,
             resultado: "falha",
             motivo: "sem creative_id",
             driver_escrita: driver,
           });
-          continue;
+
         }
         exec = await escreverAd(driver, conta, pl.path, bodyFinal, String(creativeId), pbToken);
       } else {
@@ -4703,6 +4702,7 @@ Deno.serve(async (req) => {
                 : "NAO consegui olhar o objeto na Graph. Isto NAO afirma que o objeto esta errado - nada foi concluido sobre valor nenhum. O objeto EXISTE na Meta (a escrita voltou id).",
           });
         }
+        if (opts?.persistencia !== "ritmo") {
         await supa
           .from("approval_requests")
           .update({
@@ -4730,6 +4730,7 @@ Deno.serve(async (req) => {
             },
           })
           .eq("id", r.id);
+        }
       }
       // Falha DEPOIS de criar adcreative deixa o card re-executavel (executed_at null) e a
       // proxima corrida cria OUTRO creative orfao. Evidencia 07/08: card e4dd146d gerou
@@ -4738,6 +4739,7 @@ Deno.serve(async (req) => {
       if (!sucesso) {
         const t = traduzirFalha(exec.body ?? exec.erro ?? null);
         if (creativeCriado) {
+          if (opts?.persistencia !== "ritmo") {
           await supa
             .from("approval_requests")
             .update({
@@ -4766,13 +4768,14 @@ Deno.serve(async (req) => {
               },
             })
             .eq("id", r.id);
+          }
         }
         // Sem creativeCriado, NADA foi escrito na Meta: o card segue elegivel para nova tentativa
         // e executed_at continua nulo, de proposito. Esse e o caso do b5e2f338, e ele ja saiu
         // marcado pelo audit("meta_action_failed") logo acima - o unico caminho que, antes desta
         // versao, nao deixava rastro nenhum no card.
       }
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         resultado: sucesso ? "CRIADO" : "falha_meta",
@@ -4786,7 +4789,7 @@ Deno.serve(async (req) => {
         reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
         adcreative_orfao: !sucesso && creativeCriado ? creativeCriado : null,
       });
-      continue;
+
     }
 
     if (acao === "vincular_instagram_dos_anuncios") {
@@ -4800,14 +4803,14 @@ Deno.serve(async (req) => {
           detalhe: escopo.detalhe,
           acao,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "bloqueado",
           motivo: escopo.erro,
           detalhe: escopo.detalhe,
         });
-        continue;
+
       }
       const campExt = String(
         r.payload?.campanha_external_id ?? r.payload?.target_external_id ?? "",
@@ -4823,13 +4826,13 @@ Deno.serve(async (req) => {
         accountId = String((campRow as any)?.external_account_id ?? "").replace(/^act_/i, "");
       }
       if (!campExt || !accountId) {
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "falha",
           motivo: "campanha_external_id ou conta_destino ausente",
         });
-        continue;
+
       }
       const { data: cfgIg } = await supa
         .from("meta_execution_config")
@@ -4852,13 +4855,13 @@ Deno.serve(async (req) => {
           }
         : await resolverIdentidadeInstagram(String(r.company_id), "", r.payload);
       if (!identPayload.encontrada || !identPayload.instagram_actor_id) {
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "falha",
           motivo: "instagram_destino_ausente",
         });
-        continue;
+
       }
       const gIg = criarGraphClient(TOKEN);
       const { data: setsIg } = await supa
@@ -4895,6 +4898,7 @@ Deno.serve(async (req) => {
         else failN++;
       }
       const sucessoLote = failN === 0;
+      if (opts?.persistencia !== "ritmo") {
       await supa
         .from("approval_requests")
         .update({
@@ -4916,13 +4920,14 @@ Deno.serve(async (req) => {
           },
         })
         .eq("id", r.id);
+      }
       await audit(r.company_id, sistema, sucessoLote ? "meta_action_executed" : "meta_action_failed", r.id, {
         acao,
         relincados: okN,
         ja_estavam: skipN,
         falhas: failN,
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         resultado: sucessoLote ? "EXECUTADO" : "falha_meta",
@@ -4931,31 +4936,30 @@ Deno.serve(async (req) => {
         falhas: failN,
         driver_escrita: "graph",
       });
-      continue;
+
     }
 
     // ==================== CAMINHO v1: MODIFICAR EXISTENTE ====================
     if (!EXECUTAVEIS.includes(acao)) {
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         resultado: "pulado",
         motivo: "ação não automatizada (decisão manual)",
       });
-      continue;
+
     }
     if (!alvoExt) {
-      resultados.push({
+      await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+        motivo: "sem target_external_id",
+        acao,
+      });
+      return ({
         id: r.id,
         acao,
         resultado: "falha",
         motivo: "payload sem target_external_id",
       });
-      await audit(r.company_id, sistema, "meta_action_failed", r.id, {
-        motivo: "sem target_external_id",
-        acao,
-      });
-      continue;
     }
     if (r.expires_at && new Date(r.expires_at) < new Date()) {
       await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
@@ -4964,14 +4968,14 @@ Deno.serve(async (req) => {
         prazo: r.expires_at,
         driver_escrita: driver,
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         resultado: "bloqueado",
         motivo: "pedido expirado (24h)",
         driver_escrita: driver,
       });
-      continue;
+
     }
 
     if (driver === "pipeboard" && pipeboardMonitor && !pipeboardMonitor.ok) {
@@ -4982,14 +4986,14 @@ Deno.serve(async (req) => {
         acao,
         driver_escrita: driver,
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         resultado: "bloqueado",
         motivo: pipeboardMonitor.alerta ?? "pipeboard_conexao_inativa",
         driver_escrita: driver,
       });
-      continue;
+
     }
     if (driver === "pipeboard" && !pbToken) {
       await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
@@ -4997,14 +5001,14 @@ Deno.serve(async (req) => {
         acao,
         driver_escrita: driver,
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         resultado: "bloqueado",
         motivo: "PIPEBOARD_API_TOKEN ausente",
         driver_escrita: driver,
       });
-      continue;
+
     }
 
     // v5.3: mesma lista derivada por nivel do caminho de criacao. A lista fixa que estava aqui
@@ -5049,7 +5053,7 @@ Deno.serve(async (req) => {
         leitura_do_alvo: { status: antes.status, erro: (antes.body as any)?.error ?? null },
         driver_escrita: driver,
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         alvo: alvoNome,
@@ -5058,7 +5062,7 @@ Deno.serve(async (req) => {
         detalhe: decisaoDoAlvo.detalhe,
         driver_escrita: driver,
       });
-      continue;
+
     }
     // Escreveu sem que nenhuma das duas fontes confirmasse o nivel. Nao recusa (seria fechar por
     // indisponibilidade), mas tambem nao passa calado: sem esta linha o caso viraria o silencio de
@@ -5086,11 +5090,10 @@ Deno.serve(async (req) => {
     if (RENOMEACOES.includes(acao)) {
       const novoNome = String(r.payload?.novo_nome ?? "").trim();
       if (!novoNome) {
-        resultados.push({ id: r.id, acao, resultado: "falha", motivo: "novo_nome ausente/vazio", driver_escrita: driver });
         await audit(r.company_id, sistema, "meta_action_failed", r.id, {
           motivo: "novo_nome ausente/vazio", payload: r.payload, driver_escrita: driver,
         });
-        continue;
+        return ({ id: r.id, acao, resultado: "falha", motivo: "novo_nome ausente/vazio", driver_escrita: driver });
       }
       // Nome livre: novo_nome e a fonte da verdade. nome_partes e metadado opcional.
       post = { name: novoNome };
@@ -5098,15 +5101,14 @@ Deno.serve(async (req) => {
     if (acao === "alterar_categoria_especial_campanha") {
       const rawCats = r.payload?.special_ad_categories;
       if (!Array.isArray(rawCats)) {
-        resultados.push({
+        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+          motivo: "special_ad_categories ausente/invalido", payload: r.payload, driver_escrita: driver,
+        });
+        return ({
           id: r.id, acao, resultado: "falha",
           motivo: "special_ad_categories deve ser array (use [] para remover)",
           driver_escrita: driver,
         });
-        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
-          motivo: "special_ad_categories ausente/invalido", payload: r.payload, driver_escrita: driver,
-        });
-        continue;
       }
       const cats = (rawCats as unknown[])
         .map((x) => String(x).trim().toUpperCase())
@@ -5116,26 +5118,31 @@ Deno.serve(async (req) => {
     if (acao === "alterar_orcamento") {
       let reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
       if (!(reais > 0)) {
-        resultados.push({
+        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+          motivo: "orcamento invalido",
+          payload: r.payload,
+          driver_escrita: driver,
+        });
+        return ({
           id: r.id,
           acao,
           resultado: "falha",
           motivo: "novo_orcamento_diario_reais ausente/inválido",
           driver_escrita: driver,
         });
-        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
-          motivo: "orcamento invalido",
-          payload: r.payload,
-          driver_escrita: driver,
-        });
-        continue;
       }
       const checkOrc = conferirOrcamentoReais({
         reais,
         confirmadoReais: ehFlagOrcamentoConfirmadoReais(r.payload?.orcamento_confirmado_reais),
       });
       if (!checkOrc.ok) {
-        resultados.push({
+        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+          motivo: checkOrc.erro,
+          detalhe: checkOrc.detalhe,
+          payload: r.payload,
+          driver_escrita: driver,
+        });
+        return ({
           id: r.id,
           acao,
           resultado: "falha",
@@ -5143,13 +5150,6 @@ Deno.serve(async (req) => {
           detalhe: checkOrc.detalhe,
           driver_escrita: driver,
         });
-        await audit(r.company_id, sistema, "meta_action_failed", r.id, {
-          motivo: checkOrc.erro,
-          detalhe: checkOrc.detalhe,
-          payload: r.payload,
-          driver_escrita: driver,
-        });
-        continue;
       }
       reais = checkOrc.reais;
       // ESP-26: mesmo juiz da proposta (avaliar_orcamento_diario). Comparacao local SAIU.
@@ -5163,7 +5163,7 @@ Deno.serve(async (req) => {
           payload: r.payload,
           driver_escrita: driver,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "bloqueado",
@@ -5171,7 +5171,7 @@ Deno.serve(async (req) => {
           detalhe: julgado.detalhe,
           driver_escrita: driver,
         });
-        continue;
+
       }
       post = { daily_budget: String(Math.round(reais * 100)) };
     }
@@ -5185,8 +5185,8 @@ Deno.serve(async (req) => {
           driver_escrita: driver,
           leitura_graph: antes,
         });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
-        continue;
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+
       }
       const derivado = targetingCompativelComFormato(
         ((antes.body as any)?.targeting ?? {}) as Record<string, unknown>,
@@ -5200,8 +5200,8 @@ Deno.serve(async (req) => {
           formato_midia: formato,
           driver_escrita: driver,
         });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
-        continue;
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+
       }
       post = { targeting: JSON.stringify(derivado.targeting) };
       r.payload.targeting_aprovado = derivado.targeting;
@@ -5217,8 +5217,8 @@ Deno.serve(async (req) => {
           driver_escrita: driver,
           leitura_graph: antes,
         });
-        resultados.push({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
-        continue;
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+
       }
       const paramsGeo = paramsGeoComAliasCidades((r.payload ?? {}) as Record<string, unknown>);
       const geoNorm = normalizarGeoDoPedido(paramsGeo);
@@ -5230,7 +5230,7 @@ Deno.serve(async (req) => {
           acao,
           driver_escrita: driver,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "bloqueado",
@@ -5238,7 +5238,7 @@ Deno.serve(async (req) => {
           detalhe: geoNorm.detalhe,
           driver_escrita: driver,
         });
-        continue;
+
       }
       const tokGeo = tokenAdsPorCompanyId(String(r.company_id));
       const gateGeo = await aplicarGateGeoCriarConjunto({
@@ -5261,7 +5261,7 @@ Deno.serve(async (req) => {
           acao,
           driver_escrita: driver,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "bloqueado",
@@ -5269,7 +5269,7 @@ Deno.serve(async (req) => {
           detalhe: (gateGeo as any).detalhe,
           driver_escrita: driver,
         });
-        continue;
+
       }
       const geoEfetivo = (gateGeo as any).geo as Record<string, unknown>;
       const { data: seg } = await supa.rpc("checar_segmentacao", {
@@ -5285,7 +5285,7 @@ Deno.serve(async (req) => {
           acao,
           driver_escrita: driver,
         });
-        resultados.push({
+        return ({
           id: r.id,
           acao,
           resultado: "bloqueado",
@@ -5293,7 +5293,7 @@ Deno.serve(async (req) => {
           detalhe: String((seg as any).mensagem_para_o_gestor ?? (seg as any).motivo ?? ""),
           driver_escrita: driver,
         });
-        continue;
+
       }
       const tgtAtual = ((antes.body as any)?.targeting ?? {}) as Record<string, unknown>;
       const tgtNovo = aplicarGeoNoTargeting(
@@ -5347,7 +5347,7 @@ Deno.serve(async (req) => {
         },
         nota: "dry_run=true: NADA foi enviado à Meta; executed_at NÃO preenchido",
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         alvo: alvoNome,
@@ -5358,7 +5358,7 @@ Deno.serve(async (req) => {
         driver_escrita: driver,
         pipeboard_dry_run_nativo: ensaioPipeboard?.dry_run_nativo ?? null,
       });
-      continue;
+
     }
 
     if (!flagsOk || !rateOk) {
@@ -5373,7 +5373,7 @@ Deno.serve(async (req) => {
         alvo: alvoNome,
         driver_escrita: driver,
       });
-      resultados.push({
+      return ({
         id: r.id,
         acao,
         alvo: alvoNome,
@@ -5381,7 +5381,7 @@ Deno.serve(async (req) => {
         motivo,
         driver_escrita: driver,
       });
-      continue;
+
     }
     const exec = await escreverUpdate(driver, acao, alvoExt, post!, pbToken);
     const depois: { status: number; body: any } = camposAlvo
@@ -5592,6 +5592,7 @@ Deno.serve(async (req) => {
           }
         }
       }
+      if (opts?.persistencia !== "ritmo") {
       await supa
         .from("approval_requests")
         .update({
@@ -5609,8 +5610,9 @@ Deno.serve(async (req) => {
           },
         })
         .eq("id", r.id);
+      }
     }
-    resultados.push({
+    return ({
       id: r.id,
       acao,
       alvo: alvoNome,
@@ -5622,6 +5624,91 @@ Deno.serve(async (req) => {
       reconciliacao_estado: reconciliacao?.estado ?? null,
       reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
     });
+    }
+
+    const prevPersistencia = persistenciaPedido;
+    persistenciaPedido = opts?.persistencia ?? "approval";
+    try {
+      const saida = await corpo();
+      if (persistenciaPedido === "ritmo") {
+        await persistirSaidaRitmo(String(r.id), saida);
+      }
+      return saida;
+    } finally {
+      persistenciaPedido = prevPersistencia;
+    }
+  }
+
+  // Origem ritmo: o portao SQL decide ANTES de qualquer Graph. 403 sai deste if;
+  // g(`/ vive so em executarUmPedido, chamado depois de ok === true. Sem card.
+  if (String(body?.origem ?? "") === "ritmo") {
+    const atoId = String(body?.ritmo_ato_id ?? "").trim();
+    if (!atoId) return json({ error: "ritmo_ato_id obrigatorio" }, 400);
+    const { data: ato, error: ate } = await supa.from("ritmo_atos").select("*").eq("id", atoId).maybeSingle();
+    if (ate || !ato) return json({ error: "ato_ritmo_nao_encontrado" }, 404);
+    const { data: missao } = await supa.from("ritmo_missoes").select("*").eq("id", ato.missao_id).maybeSingle();
+    if (!missao) return json({ error: "missao_nao_encontrada" }, 404);
+    const { data: porta } = await supa.rpc("pode_executar_ato_ritmo", {
+      p_missao_id: ato.missao_id,
+      p_company_id: ato.company_id,
+      p_campaign_id: missao.campaign_id,
+      p_acao: ato.acao,
+    });
+    const ok = porta && (porta as { ok?: boolean }).ok === true;
+    if (!ok) {
+      await supa.from("ritmo_atos").update({
+        resultado: "bloqueado",
+        resposta_meta: porta ?? { motivo: "portao_negou" },
+      }).eq("id", atoId);
+      return json({ error: "portao_ritmo", porta }, 403);
+    }
+    const dry = (porta as { dry_run?: boolean }).dry_run === true;
+    const r = {
+      id: ato.id,
+      company_id: ato.company_id,
+      action: ato.acao,
+      payload: ato.payload ?? {},
+      summary: ato.acao,
+      reviewed_by: "ritmo",
+      requested_by: "ritmo",
+      expires_at: null,
+    };
+    const saida = await executarUmPedido(r, { dryRun: dry, persistencia: "ritmo" });
+    return json({
+      ok: true,
+      resultado: resultadoAtoRitmo(saida),
+      ritmo_ato_id: atoId,
+    });
+  }
+
+  let q = supa
+    .from("approval_requests")
+    .select("*")
+    .eq("status", "approved")
+    .is("executed_at", null);
+  if (onlyId) q = q.eq("id", onlyId);
+  const { data: fila } = await q.order("created_at", { ascending: true }).limit(10);
+  if (!fila?.length)
+    return json({
+      ok: true,
+      processados: 0,
+      nota: "fila vazia (nenhum aprovado pendente de execução)",
+      pipeboard_conexao: pipeboardMonitor ?? {
+        ok: false,
+        token_status: null,
+        connection_id: null,
+        alerta:
+          "PIPEBOARD_API_TOKEN ausente — monitor e driver pipeboard indisponiveis ate cadastrar o Edge Secret",
+        erro: "token_ausente",
+      },
+      versao: "meta-actions-v5",
+      mcp_chamador: auth.chamador,
+      mcp_chave_legada: auth.legado,
+    });
+
+  const resultados: any[] = [];
+  for (const r of fila) {
+    resultados.push(await executarUmPedido(r));
   }
 
   // v3: nao ha "modo" unico - cada card foi avaliado sob a config da sua empresa.
