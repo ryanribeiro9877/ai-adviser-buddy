@@ -5219,7 +5219,7 @@ LEITOR: o job vai persistir o json; o humano ve o plano depois. Proibido: nome d
 NUMEROS: a BASE COLETADA e a fonte autoritativa. Baseline de gasto e teto da janela JA VIERAM CALCULADOS no contrato — nao invente outros. Sem numero, null. Distinga zero / nao existe / nao coletado. Amostra pequena: null no horizonte, nunca decimal fingido. Nao invente media de mercado.
 
 Responda APENAS um JSON valido, sem cerca markdown, com as chaves:
-leitura, possibilidades {nada_muda, plano, maximo_envelope cada um com d3,d7,d15,d30}, sonho {valor, atingivel_no_prazo, nota}, atos[], recusas[], lacunas[], premissas[].
+leitura { texto } (narrativa; objeto, nao string solta), possibilidades {nada_muda, plano, maximo_envelope cada um com d3,d7,d15,d30}, sonho {valor, atingivel_no_prazo, nota}, atos[], recusas[], lacunas[], premissas[].
 Nao envie baseline nem teto_janela — o codigo grava os calculados.
 Cada ato: acao do catalogo Meta, alvo_external_id, quando imediato|apos_janela, evidencia, mecanismo, metrica_sucesso, janela_leitura, reversa.
 Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo novo se manter depois do prazo".`;
@@ -5433,6 +5433,7 @@ Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal 
       return;
     }
     const raw = extraido as Record<string, unknown>;
+    if (typeof raw.leitura === "string") raw.leitura = { texto: raw.leitura };
     raw.baseline = baselineObj;
     raw.teto_janela = teto;
     const plano = parsePlanoRitmo(raw);

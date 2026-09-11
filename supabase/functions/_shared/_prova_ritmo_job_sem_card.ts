@@ -11,4 +11,8 @@ for (const t of toolsJob) {
     Deno.exit(1);
   }
 }
+if (!job.includes('typeof raw.leitura === "string"') || !job.includes("{ texto: raw.leitura }")) {
+  console.error("FALHOU: coerce de leitura string ausente apos extrairJsonRitmo");
+  Deno.exit(1);
+}
 console.log("OK ritmo_analise sem card");
