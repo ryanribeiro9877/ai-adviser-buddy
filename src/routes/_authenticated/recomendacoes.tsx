@@ -6,13 +6,14 @@ import { useApp, logAudit } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
 import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { MessagesSquare, Sparkles, Check, X, MessageSquare } from "lucide-react";
+import { MessagesSquare } from "lucide-react";
 import { toast } from "sonner";
 import { OperacaoChat } from "@/components/operacao-chat";
 import { ApprovalsQueue } from "@/components/approvals-queue";
+import { RecomendacaoCard } from "@/components/recomendacao-card";
+import { rotuloFamiliaRecomendacao } from "@/lib/recomendacao-texto";
 
 export const Route = createFileRoute("/_authenticated/recomendacoes")({
   component: Operacao,
@@ -37,20 +38,6 @@ type RecoRow = {
   source?: string | null;
   family?: string | null;
 };
-
-function evidencePreview(ev: Record<string, unknown> | null | undefined): string[] {
-  if (!ev) return [];
-  const skip = new Set(["fonte", "legenda", "base_clique", "janela"]);
-  const lines: string[] = [];
-  for (const [k, v] of Object.entries(ev)) {
-    if (skip.has(k) || v == null || typeof v === "object") continue;
-    lines.push(`${k}: ${String(v)}`);
-    if (lines.length >= 4) break;
-  }
-  if (ev.fonte) lines.unshift(`fonte: ${String(ev.fonte)}`);
-  if (ev.base_clique) lines.push(`base_clique: ${String(ev.base_clique)}`);
-  return lines.slice(0, 5);
-}
 
 function Recomendacoes() {
   const { selectedCompany } = useApp();
@@ -121,6 +108,9 @@ function Recomendacoes() {
 
   return (
     <div className="space-y-3">
+      <p className="text-sm text-muted-foreground">
+        Cada card diz o que está acontecendo, o que fazer e o que o SuperGestor acha de realizar agora.
+      </p>
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs text-muted-foreground">Status:</span>
         {(["new", "all", "accepted", "dismissed"] as const).map((s) => (
@@ -139,7 +129,7 @@ function Recomendacoes() {
                   : "Descartadas"}
           </Button>
         ))}
-        <span className="text-xs text-muted-foreground ml-2">Família:</span>
+        <span className="text-xs text-muted-foreground ml-2">Tipo:</span>
         <Button
           size="sm"
           variant={familyFilter === "all" ? "default" : "outline"}
@@ -154,7 +144,7 @@ function Recomendacoes() {
             variant={familyFilter === f ? "default" : "outline"}
             onClick={() => setFamilyFilter(f)}
           >
-            {f}
+            {rotuloFamiliaRecomendacao(f)}
           </Button>
         ))}
       </div>
@@ -167,80 +157,15 @@ function Recomendacoes() {
         />
       ) : (
       <div className="grid md:grid-cols-2 gap-3">
-        {items.map((r) => {
-          const evLines = evidencePreview(r.evidence_json ?? undefined);
-          return (
-            <Card key={r.id} className="p-4">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <Sparkles className="h-4 w-4 text-primary shrink-0" />
-                  <span className="font-semibold truncate">{r.title}</span>
-                </div>
-                <Badge variant="outline">{r.impact ?? "medium"}</Badge>
-              </div>
-              {r.entity_name && (
-                <p className="text-xs text-muted-foreground mt-1">
-                  {r.entity_type}: {r.entity_name}
-                  {r.maturity_days != null ? ` · ${r.maturity_days} dias de entrega` : ""}
-                </p>
-              )}
-              <p className="text-sm text-muted-foreground mt-2 whitespace-pre-wrap">
-                {r.description}
-              </p>
-              {evLines.length > 0 && (
-                <div className="mt-2 rounded-md bg-muted/50 px-2 py-1.5 text-xs text-muted-foreground space-y-0.5">
-                  {evLines.map((line) => (
-                    <div key={line}>{line}</div>
-                  ))}
-                </div>
-              )}
-              <div className="mt-3 flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex gap-1.5 flex-wrap">
-                  <Badge variant="secondary">{r.family ?? r.category ?? "geral"}</Badge>
-                  {r.signal_key && <Badge variant="outline">{r.signal_key}</Badge>}
-                  {r.family === "meta_dica" && r.evidence_json?.veredito != null && (
-                    <Badge
-                      variant={
-                        String(r.evidence_json.veredito) === "discorda"
-                          ? "destructive"
-                          : String(r.evidence_json.veredito) === "concorda"
-                            ? "default"
-                            : "outline"
-                      }
-                    >
-                      Meta → {String(r.evidence_json.veredito)}
-                    </Badge>
-                  )}
-                  {r.family === "meta_dica" && r.evidence_json?.first_seen_on != null && (
-                    <Badge variant="outline">desde {String(r.evidence_json.first_seen_on)}</Badge>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  {(r.status === "new" || r.status === "accepted") && (
-                    <Button size="sm" variant="secondary" onClick={() => openChat(r)}>
-                      <MessageSquare className="h-4 w-4 mr-1" />
-                      Chat
-                    </Button>
-                  )}
-                  {r.status === "new" ? (
-                    <>
-                      <Button size="sm" variant="ghost" onClick={() => update(r.id, "dismissed")}>
-                        <X className="h-4 w-4 mr-1" />
-                        Descartar
-                      </Button>
-                      <Button size="sm" onClick={() => update(r.id, "accepted")}>
-                        <Check className="h-4 w-4 mr-1" />
-                        Aceitar
-                      </Button>
-                    </>
-                  ) : (
-                    <Badge>{r.status === "accepted" ? "Aceita" : "Descartada"}</Badge>
-                  )}
-                </div>
-              </div>
-            </Card>
-          );
-        })}
+        {items.map((r) => (
+          <RecomendacaoCard
+            key={r.id}
+            reco={r}
+            onChat={() => void openChat(r)}
+            onAccept={() => void update(r.id, "accepted")}
+            onDismiss={() => void update(r.id, "dismissed")}
+          />
+        ))}
         {items.length === 0 && (
           <Card className="p-6 text-sm text-muted-foreground md:col-span-2">
             Nenhuma recomendação neste filtro.
