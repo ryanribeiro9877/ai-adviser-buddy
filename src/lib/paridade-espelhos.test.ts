@@ -177,6 +177,86 @@ const OUTROS: unknown[] = [
   [{ id: "111", name: "Ao vivo", effective_status: "ACTIVE" }],
   "## resumo_executivo\ntexto",
   "## custo_vs_teto",
+  [{ date: "2026-09-01", spend: 100 }, { date: "2026-09-02", spend: 0 }, { date: "2026-09-03", spend: 50 }],
+  "2026-09-06",
+  "conversas",
+  "ctr",
+  "ctr_link",
+  {
+    status: "em_execucao",
+    companyIdMissao: "emp-a",
+    companyIdAto: "emp-a",
+    campaignIdMissao: "camp-1",
+    campaignIdAto: "camp-1",
+    hojeYmd: "2026-09-12",
+    periodoInicio: "2026-09-10",
+    periodoFim: "2026-09-20",
+    gastoJanela: 50,
+    teto: 200,
+    masterLigado: true,
+    concessaoEm: "2026-09-10T15:00:00Z",
+    acao: "pausar_criativo",
+  },
+  {
+    hojeYmd: "2026-09-20",
+    periodoFim: "2026-09-19",
+    gastoJanela: 10,
+    teto: 100,
+    sonhoBateu: false,
+    encerrarHumano: false,
+    masterLigado: true,
+  },
+  {
+    hojeYmd: "2026-09-10",
+    periodoFim: "2026-09-19",
+    gastoJanela: 100,
+    teto: 100,
+    sonhoBateu: false,
+    encerrarHumano: false,
+    masterLigado: true,
+  },
+  {
+    hojeYmd: "2026-09-10",
+    periodoFim: "2026-09-19",
+    gastoJanela: 10,
+    teto: 100,
+    sonhoBateu: true,
+    encerrarHumano: false,
+    masterLigado: true,
+  },
+  { encerrarHumano: true, hojeYmd: "2026-09-10", periodoFim: "2026-09-19", masterLigado: true },
+  { masterLigado: false, hojeYmd: "2026-09-10", periodoFim: "2026-09-19" },
+  [
+    { acao: "pausar_criativo", quando: "imediato", alvo_external_id: "a1" },
+    { acao: "alterar_orcamento", quando: "imediato", alvo_external_id: "c1" },
+    { acao: "pausar_conjunto", quando: "apos_janela", alvo_external_id: "s1" },
+  ],
+  [{ acao: "pausar_conjunto", quando: "apos_janela", alvo_external_id: "s1" }],
+  {
+    baseline: { gasto_diario: 10, janela: "7d_com_gasto", dias_usados: 7, confianca: "alta" },
+    teto_janela: 100,
+    possibilidades: {
+      nada_muda: { d3: 1, d7: 2, d15: 3, d30: 4 },
+      plano: { d3: 2, d7: 4, d15: 6, d30: 8 },
+      maximo_envelope: { d3: 3, d7: 6, d15: 9, d30: 12 },
+    },
+    atos: [
+      { acao: "criar_anuncio_a_partir_de", alvo_external_id: "ad1", quando: "imediato" },
+      { acao: "pausar_criativo", quando: "imediato" },
+    ],
+    recusas: ["Guardião recusou a copy da peça ad1"],
+  },
+  [
+    { date: "2026-09-10", valor: 10 },
+    { date: "2026-09-11", valor: 40 },
+  ],
+  [
+    { date: "2026-09-10", valor: 2, impressoes: 100, cliques: 2 },
+    { date: "2026-09-11", valor: 3, impressoes: 100, cliques: 3 },
+  ],
+  50,
+  51,
+  2,
 ];
 
 const CORPUS: unknown[] = [...FALAS, ...OUTROS];
@@ -197,8 +277,23 @@ const CORPUS2: unknown[] = [
   // Sinais da peça (escolherConjuntos*).
   ["CONJ.1_LAF_8CRIATIVOS"],
   "2026-09-10",
+  "2026-09-01",
+  "2026-09-03",
+  "2026-09-06",
   "ontem",
   1,
+  50,
+  51,
+  2,
+  [
+    { date: "2026-09-01", spend: 100 },
+    { date: "2026-09-02", spend: 0 },
+    { date: "2026-09-03", spend: 50 },
+  ],
+  [
+    { date: "2026-09-10", valor: 10 },
+    { date: "2026-09-11", valor: 40 },
+  ],
 ];
 
 /** Resultado observável de uma chamada — inclui a exceção, que também é comportamento. */
@@ -213,12 +308,49 @@ function observar(fn: (...a: unknown[]) => unknown, args: unknown[]): string {
   }
 }
 
-const chamadas = (aridade: number): unknown[][] =>
-  aridade >= 3
-    ? CORPUS.flatMap((a) => CORPUS2.flatMap((b) => CORPUS2.map((c) => [a, b, c])))
-    : aridade === 2
-      ? CORPUS.flatMap((a) => CORPUS2.map((b) => [a, b]))
-      : CORPUS.map((a) => [a]);
+// Tuplas explícitas para funções com aridade > 3 — o produto cartesiano explodiria sem ganho.
+const CHAMADAS_ALT: Partial<Record<number, unknown[][]>> = {
+  5: [
+    [
+      "conversas",
+      50,
+      [
+        { date: "2026-09-10", valor: 10 },
+        { date: "2026-09-11", valor: 40 },
+      ],
+      "2026-09-10",
+      "2026-09-10",
+    ],
+    [
+      "conversas",
+      51,
+      [{ date: "2026-09-10", valor: 10 }],
+      "2026-09-10",
+      "2026-09-10",
+    ],
+    [
+      "ctr",
+      2,
+      [
+        { date: "2026-09-10", impressoes: 100, cliques: 2 },
+        { date: "2026-09-11", impressoes: 100, cliques: 3 },
+      ],
+      "2026-09-10",
+      "2026-09-10",
+    ],
+  ],
+};
+
+const chamadas = (aridade: number): unknown[][] => {
+  const base =
+    aridade >= 3
+      ? CORPUS.flatMap((a) => CORPUS2.flatMap((b) => CORPUS2.map((c) => [a, b, c])))
+      : aridade === 2
+        ? CORPUS.flatMap((a) => CORPUS2.map((b) => [a, b]))
+        : CORPUS.map((a) => [a]);
+  const alt = CHAMADAS_ALT[aridade] ?? [];
+  return alt.length ? [...base, ...alt] : base;
+};
 
 describe("paridade dos espelhos src/lib <-> _shared", () => {
   it("encontra os pares espelhados (a descoberta não pode silenciar)", () => {
@@ -230,6 +362,7 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
       "memoria-conjunto",
       "orcamento-reais",
       "relatorios",
+      "ritmo",
     ]);
   });
 
