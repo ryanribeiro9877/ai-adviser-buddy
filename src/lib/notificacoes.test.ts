@@ -97,6 +97,13 @@ describe("destinoNotificacao", () => {
       search: { tab: "aprovacoes", item: "p3" },
     });
   });
+
+  it("ritmo vai para /ritmo com o item destacado", () => {
+    expect(destinoNotificacao(item({ tipo: "ritmo", id: "m2" }))).toEqual({
+      pathname: "/ritmo",
+      search: { item: "m2" },
+    });
+  });
 });
 
 describe("agruparPorTitulo", () => {
@@ -284,6 +291,54 @@ describe("ehNovaPendencia — o filtro do realtime", () => {
       ehNovaPendencia(
         ev({ eventType: "UPDATE", old: { status: "pending" }, new: { status: "pending" } }),
         "aprovacao",
+      ),
+    ).toBe(false);
+  });
+
+  it("INSERT de ritmo e novidade mesmo sem status pending", () => {
+    expect(ehNovaPendencia(ev({ new: { id: "m1", status: "em_analise" } }), "ritmo")).toBe(true);
+    expect(ehNovaPendencia(ev({ new: { id: "a1", resultado: "falhou" } }), "ritmo")).toBe(true);
+  });
+
+  it("UPDATE de ritmo so e novidade quando entra em estado que o sino lista", () => {
+    expect(
+      ehNovaPendencia(
+        ev({
+          eventType: "UPDATE",
+          old: { status: "em_analise" },
+          new: { status: "plano_pronto" },
+        }),
+        "ritmo",
+      ),
+    ).toBe(true);
+    expect(
+      ehNovaPendencia(
+        ev({
+          eventType: "UPDATE",
+          old: { status: "em_execucao" },
+          new: { status: "encerrada" },
+        }),
+        "ritmo",
+      ),
+    ).toBe(true);
+    expect(
+      ehNovaPendencia(
+        ev({
+          eventType: "UPDATE",
+          old: { resultado: "pendente" },
+          new: { resultado: "falhou" },
+        }),
+        "ritmo",
+      ),
+    ).toBe(true);
+    expect(
+      ehNovaPendencia(
+        ev({
+          eventType: "UPDATE",
+          old: { status: "plano_pronto" },
+          new: { status: "plano_pronto" },
+        }),
+        "ritmo",
       ),
     ).toBe(false);
   });

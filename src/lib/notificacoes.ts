@@ -1,10 +1,10 @@
-// Notificação não é entidade: é projeção de `approval_requests.status = pendente`
-// e `alerts.resolved = false`. Não existe tabela, não existe "marcar como lida" —
-// o item sai do sino quando é resolvido de fato no banco.
-// Fonte única de conteúdo, contagem e urgência: a RPC get_notificacoes_pendentes.
+// Notificação não é entidade: é projeção de `approval_requests.status = pending`,
+// `alerts.resolved = false` e estados da força-tarefa Ritmo. Não existe tabela,
+// não existe "marcar como lida" — o item sai do sino quando é resolvido de fato
+// no banco. Fonte única de conteúdo, contagem e urgência: a RPC get_notificacoes_pendentes.
 
 export type UrgenciaNotif = "critical" | "high" | "medium" | "low";
-export type TipoNotif = "aprovacao" | "alerta";
+export type TipoNotif = "aprovacao" | "alerta" | "ritmo";
 
 export type ItemNotificacao = {
   id: string;
@@ -23,6 +23,8 @@ export type Notificacoes = {
   total: number;
   aprovacoes_pendentes: number;
   alertas_abertos: number;
+  /** Extra da RPC; o front pode ignorar. */
+  ritmo_pendentes?: number;
   /** A RPC conta critical + high aqui. */
   criticos: number;
   expirando_em_2h: number;
@@ -89,6 +91,7 @@ export type Destino = { pathname: string; search: Record<string, string> };
  */
 export function destinoNotificacao(item: ItemNotificacao): Destino {
   if (item.tipo === "alerta") return { pathname: "/alertas", search: { item: item.id } };
+  if (item.tipo === "ritmo") return { pathname: "/ritmo", search: { item: item.id } };
   return { pathname: "/recomendacoes", search: { tab: "aprovacoes", item: item.id } };
 }
 
@@ -166,6 +169,18 @@ export type EventoRealtime = {
  */
 export function ehNovaPendencia(ev: EventoRealtime, tipo: TipoNotif): boolean {
   if (ev.eventType === "DELETE") return false;
+  if (tipo === "ritmo") {
+    // Ritmo não tem status pending. INSERT de missão/ato já é candidato;
+    // o flush só toasta se a RPC ainda mostrar o id. UPDATE só quando entra
+    // num estado que o sino lista (plano_pronto, encerrada, ato falhou).
+    if (ev.eventType === "INSERT") return true;
+    const n = ev.new ?? {};
+    const o = ev.old ?? {};
+    if (n.status === "plano_pronto" && o.status !== "plano_pronto") return true;
+    if (n.status === "encerrada" && o.status !== "encerrada") return true;
+    if (n.resultado === "falhou" && o.resultado !== "falhou") return true;
+    return false;
+  }
   const aberto = (r?: Record<string, unknown> | null) =>
     tipo === "alerta" ? r?.resolved === false : r?.status === "pending";
   if (ev.eventType === "INSERT") return aberto(ev.new);

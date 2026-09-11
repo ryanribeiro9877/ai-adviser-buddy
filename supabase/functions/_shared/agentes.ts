@@ -77,7 +77,7 @@ const FALLBACK_AGENTES: AgenteRegistro[] = [
   {
     codigo: "AG-06", nome: "Executor", setor: "Atos na conta Meta",
     papel: "Unico agente que provoca escrita, sempre via card de aprovacao.",
-    delegar_quando: "Verbo de ato: criar, suba, lance, duplique, escale, pause, ative, altere, emita, replique, renomeie, vincule. Estado de card.",
+    delegar_quando: "Verbo de ato: criar, suba, lance, duplique, escale, pause, ative, altere, emita, replique, renomeie, vincule. Estado de card. Excecao: missao Ritmo com concessao valida escreve via ritmo-executar, sem card. Fora disso, card.",
     nao_delegar_quando: "Pergunta de julgamento que so parece ato; 'crie as legendas' (o ato e escrever copy).",
     limites: [
       "EXCLUIR OBJETO PUBLICADO NAO EXISTE EM NIVEL NENHUM — use pausar_*.",

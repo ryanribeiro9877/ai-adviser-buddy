@@ -39,6 +39,8 @@ O gestor humano decide. O agente mede, explica, propõe e executa o que foi auto
 4. Volume e escala — depois das três acima.
 5. Elegância da análise — nunca acima de nenhuma das quatro.
 
+Autonomia da força-tarefa é concessão nomeada, não interruptor global: vale só daquela missão, com teto, prazo e travas da casa.
+
 ### Doutrina que o produto impõe (não é estilo: é regra)
 
 - Toda afirmação declara de qual empresa fala, a categoria regulatória e o nível (conta, campanha, conjunto ou anúncio).
@@ -230,7 +232,13 @@ O menu “Aprovações pendentes” está oculto (a fila vive dentro de Operaç�
 
 ### 5.14 Notificações (sino)
 
-Presente em todas as telas autenticadas. Agrega alertas abertos e aprovações pendentes. Clique leva à tela e ao item. Toasts em tempo real, agrupados quando vários alertas nascem juntos (os crons da manhã). Urgência sobe quando a aprovação está perto de expirar.
+Presente em todas as telas autenticadas. Agrega alertas abertos, aprovações pendentes e estados da força-tarefa Ritmo. Clique leva à tela e ao item. Toasts em tempo real, agrupados quando vários alertas nascem juntos (os crons da manhã). Urgência sobe quando a aprovação está perto de expirar.
+
+### 5.15 Ritmo
+
+Força-tarefa de **uma** campanha, com prazo, teto de gasto na janela e uma autorização nomeada. O administrador disserta o que quer; o sistema lê a campanha, monta o plano e mostra projeções (incluindo o sonho, que não é previsão). Autorizar concede autonomia só daquela missão: a escrita na Meta sai sem card. Encerrar devolve a campanha ao regime normal.
+
+Fora da missão, ou sem concessão válida, todo ato na Meta continua sendo card. O sino aponta para `/ritmo` (plano pronto, teto a 80%, ato falhou, encerrada nas últimas 24 h).
 
 ### Filtros globais (campanhas, conjuntos, anúncios, funil)
 
@@ -499,7 +507,7 @@ Não há CRM no produto: receita, proposta e contrato **não** entram. CPL é pr
 
 - Não é CRM, esteira de crédito, nem ferramenta de atendimento.
 - Não é gerenciador genérico de todas as plataformas de anúncio — é Meta, com honestidade sobre o que falta.
-- Não é robô que liga campanha sozinho. Autonomia sem trava humana seria mudança de doutrina, não um interruptor escondido.
+- Não é robô que liga campanha sozinho, exceto missão Ritmo autorizada, ainda presa a teto, prazo e travas da casa. Autonomia sem trava humana seria mudança de doutrina, não um interruptor escondido.
 - Não substitui o Gerenciador da Meta para conferência de categoria especial enquanto esse campo não estiver coletado de ponta a ponta.
 - Não mede saldo da conta de anúncios nem capacidade de pagamento (o agente pergunta ao humano).
 - Não é a fonte da verdade de canais que gastam fora da Meta.
@@ -515,6 +523,7 @@ Não há CRM no produto: receita, proposta e contrato **não** entram. CPL é pr
 | `/dashboard` | KPIs, contas, campanhas, relatório semanal |
 | `/empresas` | Empresas, contas, verificação de integração |
 | `/campanhas` | Lista operacional + pedido de ato |
+| `/ritmo` | Força-tarefa da campanha: plano, teto, autorização nomeada |
 | `/conjuntos` | Conjuntos, públicos, orçamento |
 | `/anuncios` | Criativos no ar |
 | `/funil` | Conversão por etapa |

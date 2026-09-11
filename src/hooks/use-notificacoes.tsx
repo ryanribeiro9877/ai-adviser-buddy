@@ -142,20 +142,10 @@ export function NotificacoesProvider({ children }: { children: ReactNode }) {
 
   const irPara = useCallback(
     (item: ItemNotificacao) => {
-      if (item.tipo === "alerta") {
-        navigate({
-          to: "/alertas",
-          search: (prev: Record<string, unknown>) => ({ ...prev, item: item.id }),
-        });
-        return;
-      }
+      const dest = destinoNotificacao(item);
       navigate({
-        to: "/recomendacoes",
-        search: (prev: Record<string, unknown>) => ({
-          ...prev,
-          tab: "aprovacoes",
-          item: item.id,
-        }),
+        to: dest.pathname as "/alertas" | "/recomendacoes" | "/ritmo",
+        search: (prev: Record<string, unknown>) => ({ ...prev, ...dest.search }),
       });
     },
     [navigate],
@@ -301,7 +291,9 @@ export function NotificacoesProvider({ children }: { children: ReactNode }) {
     ) => {
       invalidar(); // badge e lista sobem/descem em qualquer evento
       if (!ehNovaPendencia(payload as EventoRealtime, tipo)) return;
-      const id = (payload.new as { id?: string } | undefined)?.id;
+      const row = payload.new as { id?: string; missao_id?: string } | undefined;
+      // Ato falhou: a RPC usa missao_id (destaca a linha em /ritmo), não o id do ato.
+      const id = tipo === "ritmo" && row?.missao_id ? row.missao_id : row?.id;
       if (id) enfileirar(id, tipo);
     };
 
@@ -323,6 +315,26 @@ export function NotificacoesProvider({ children }: { children: ReactNode }) {
         "postgres_changes",
         { event: "*", schema: "public", table: "alerts", filter: `company_id=eq.${companyId}` },
         (p) => aoEvento(p, "alerta"),
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "ritmo_missoes",
+          filter: `company_id=eq.${companyId}`,
+        },
+        (p) => aoEvento(p, "ritmo"),
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "ritmo_atos",
+          filter: `company_id=eq.${companyId}`,
+        },
+        (p) => aoEvento(p, "ritmo"),
       )
       .subscribe();
 

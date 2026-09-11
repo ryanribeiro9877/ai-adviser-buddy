@@ -108,6 +108,9 @@ function Sonda() {
         ir-alerta
       </button>
       <button onClick={() => ctx.irPara(item({ id: "p3" }) as never)}>ir-aprovacao</button>
+      <button onClick={() => ctx.irPara(item({ id: "m2", tipo: "ritmo" }) as never)}>
+        ir-ritmo
+      </button>
     </div>
   );
 }
@@ -192,7 +195,7 @@ describe("consulta da RPC", () => {
 });
 
 describe("canal de realtime", () => {
-  it("assina as duas tabelas FILTRANDO por empresa", async () => {
+  it("assina aprovacoes, alertas e ritmo FILTRANDO por empresa", async () => {
     // Sem o filtro, o admin (que pertence as duas empresas) receberia aviso da
     // empresa que nao esta olhando.
     montar();
@@ -200,6 +203,8 @@ describe("canal de realtime", () => {
     expect(nomeDoCanal).toBe("notificacoes:empresa-1");
     expect(filtros["approval_requests"]).toBe("company_id=eq.empresa-1");
     expect(filtros["alerts"]).toBe("company_id=eq.empresa-1");
+    expect(filtros["ritmo_missoes"]).toBe("company_id=eq.empresa-1");
+    expect(filtros["ritmo_atos"]).toBe("company_id=eq.empresa-1");
   });
 
   it("remove o canal ao desmontar", async () => {
@@ -397,6 +402,18 @@ describe("navegação e abertura do sino", () => {
     };
     expect(arg.to).toBe("/recomendacoes");
     expect(arg.search({})).toEqual({ tab: "aprovacoes", item: "p3" });
+  });
+
+  it("irPara(ritmo) vai para /ritmo com o item destacado", async () => {
+    montar();
+    await waitFor(() => expect(subscribeMock).toHaveBeenCalled());
+    act(() => screen.getByText("ir-ritmo").click());
+    const arg = navigateMock.mock.calls[0][0] as {
+      to: string;
+      search: (p: Record<string, unknown>) => unknown;
+    };
+    expect(arg.to).toBe("/ritmo");
+    expect(arg.search({ company: "x" })).toEqual({ company: "x", item: "m2" });
   });
 
   it("abrirSino incrementa o pedido (o sino escuta a mudanca)", async () => {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { Plus } from "lucide-react";
@@ -87,6 +87,8 @@ function Ritmo() {
   const { selectedCompany, selectedCompanyId, isAdmin } = useApp();
   const qc = useQueryClient();
   const companyId = selectedCompanyId;
+  // ?item=<id> vem do sino/toast: seleciona a missão e a destaca.
+  const { item: destacado } = useSearch({ strict: false }) as { item?: string };
   const [formAberto, setFormAberto] = useState(false);
   const [form, setForm] = useState<FormMissaoRitmo>(formVazioMissao);
   const [detalheId, setDetalheId] = useState<string | null>(null);
@@ -150,8 +152,8 @@ function Ritmo() {
   });
 
   useEffect(() => {
-    setDetalheId(null);
-  }, [companyId]);
+    setDetalheId(destacado ?? null);
+  }, [companyId, destacado]);
 
   const criar = useMutation({
     mutationFn: async (pedido: FormMissaoRitmo) => {
@@ -338,7 +340,7 @@ function Ritmo() {
               {missoes.map((m) => (
                 <TableRow
                   key={m.id}
-                  className={`cursor-pointer ${detalhe?.id === m.id ? "bg-muted/50" : ""}`}
+                  className={`cursor-pointer ${detalhe?.id === m.id ? "bg-muted/50" : ""} ${m.id === destacado ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
                   onClick={() => setDetalheId(m.id)}
                 >
                   <TableCell>

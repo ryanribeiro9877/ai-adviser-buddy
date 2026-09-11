@@ -149,7 +149,11 @@ export function NotificationBell() {
                       <span className={u.texto}>{u.rotulo}</span>
                       <span>·</span>
                       <span>
-                        {principal.tipo === "aprovacao" ? "Aprovação" : "Alerta"}{" "}
+                        {principal.tipo === "aprovacao"
+                          ? "Aprovação"
+                          : principal.tipo === "ritmo"
+                            ? "Ritmo"
+                            : "Alerta"}{" "}
                         {haQuanto(principal.created_at, agora)}
                       </span>
                       {prazo && (

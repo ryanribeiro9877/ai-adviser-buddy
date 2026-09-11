@@ -34,8 +34,11 @@ const channelMock = {
   subscribe: vi.fn().mockReturnThis(),
 };
 
+let searchAtual: { item?: string } = {};
+
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (opts: Record<string, unknown>) => ({ options: opts }),
+  useSearch: () => searchAtual,
 }));
 
 vi.mock("@/lib/app-context", () => ({
@@ -173,6 +176,7 @@ beforeEach(() => {
     selectedCompanyId: "c1",
     isAdmin: true,
   };
+  searchAtual = {};
   linhas = [];
   erroLista = null;
   campanhaEspelho = { id: "camp-uuid", external_account_id: "act_1" };
@@ -429,5 +433,19 @@ describe("Ritmo", () => {
     const projecoes = (planoRow as HTMLElement).closest("table");
     expect(projecoes).toBeTruthy();
     expect(within(projecoes as HTMLElement).queryByText("8")).not.toBeInTheDocument();
+  });
+
+  it("?item= seleciona e destaca a missão do sino", async () => {
+    searchAtual = { item: "m2" };
+    linhas = [
+      { ...missaoFalhou(), id: "m1", campaign_name: "Campanha A" },
+      missaoPlanoPronto(),
+    ];
+    montar();
+    const nomes = await screen.findAllByText("Consignado SP");
+    const row = nomes.find((el) => el.closest("tr"))?.closest("tr");
+    expect(row?.className).toMatch(/ring-2/);
+    expect(screen.getByRole("button", { name: "Autorizar" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Tentar análise de novo" })).not.toBeInTheDocument();
   });
 });
