@@ -5201,18 +5201,22 @@ function valorMetricaSnap(metrica: string, s: Record<string, unknown>): number |
   return null;
 }
 
+const RITMO_REPLANO_EXTRA =
+  "isto e REPLANO de missao em execucao; compare realizado vs projecao; so desvie com evidencia nova; dissertacao e metrica e teto permanecem";
+
 async function sintetizarPlanoRitmo(args: {
   companyName: string;
   pergunta: string;
   relatorios: { nome: string; relatorio: string; completo: boolean }[];
   baseColetada: string;
   prazo: () => number;
+  extraSys?: string;
 }): Promise<string> {
   const blocos = args.relatorios
     .map((r) => `=== ${r.nome} [${r.completo ? "completo" : "incompleto"}] ===\n${r.relatorio}`)
     .join("\n\n");
   const sys = `Voce e o gestor de trafego de ${args.companyName} na FORCA-TAREFA RITMO.
-NAO e conversa. NAO emita card. NAO chame propose_action. NAO peca aprovacao. NAO escreva na Meta.
+NAO e conversa. NAO emita card. NAO chame propose_action. NAO peca aprovacao. NAO escreva na Meta.${args.extraSys ? `\n${args.extraSys}` : ""}
 
 LEITOR: o job vai persistir o json; o humano ve o plano depois. Proibido: nome de ferramenta/especialista, codigo interno, chave JSON crua na narrativa da leitura.
 
@@ -5239,15 +5243,42 @@ Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo no
 }
 
 async function processarRitmoAnalise(missaoId: string, mcpKey: string): Promise<void> {
+  await processarPlanoRitmo(missaoId, mcpKey, false);
+}
+
+async function processarRitmoReplano(missaoId: string, mcpKey: string): Promise<void> {
+  await processarPlanoRitmo(missaoId, mcpKey, true);
+}
+
+async function processarPlanoRitmo(missaoId: string, mcpKey: string, replano: boolean): Promise<void> {
+  const tag = replano ? "ritmo_replano" : "ritmo_analise";
   const falhou = async (erro: string) => {
     const msg = String(erro ?? "analise_falhou").slice(0, 800);
+    if (replano) {
+      console.warn(`[${tag}] nao persiste falha id=${missaoId} ${msg}`);
+      return;
+    }
     const r = await gravarPlanoRitmoRpc({ missaoId, erro: msg });
-    if (r.error) console.warn(`[ritmo_analise] gravar falha id=${missaoId} ${r.error}`);
+    if (r.error) console.warn(`[${tag}] gravar falha id=${missaoId} ${r.error}`);
   };
   try {
-    const { data: claimed, error: claimErr } = await supa.rpc("claim_ritmo_missao_analise", { p_id: missaoId });
-    if (claimErr) throw new Error(claimErr.message);
-    const row = (Array.isArray(claimed) ? claimed[0] : claimed) as Record<string, unknown> | null;
+    let row: Record<string, unknown> | null = null;
+    if (replano) {
+      const { data, error } = await supa
+        .from("ritmo_missoes")
+        .select(
+          "id,company_id,campaign_id,campaign_name,periodo_inicio,periodo_fim,metrica,dissertacao,extra_investimento,sonho,baseline_gasto_diario,baseline_json,teto_gasto_janela,plano_json,leitura_json,projecoes_json,status",
+        )
+        .eq("id", missaoId)
+        .eq("status", "em_execucao")
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      row = (data ?? null) as Record<string, unknown> | null;
+    } else {
+      const { data: claimed, error: claimErr } = await supa.rpc("claim_ritmo_missao_analise", { p_id: missaoId });
+      if (claimErr) throw new Error(claimErr.message);
+      row = (Array.isArray(claimed) ? claimed[0] : claimed) as Record<string, unknown> | null;
+    }
     if (!row?.id) return;
 
     const companyId = String(row.company_id ?? "");
@@ -5260,8 +5291,8 @@ async function processarRitmoAnalise(missaoId: string, mcpKey: string): Promise<
     const sonhoTxt = row.sonho == null || row.sonho === "" ? "nao declarado" : String(row.sonho);
     const t0 = Date.now();
     const prazo = () => JOB_LIMIT_MS - (Date.now() - t0);
-    const tel: Record<string, unknown> = { versao: "ritmo-analise-v1", subagentes: [] };
-    console.warn(`[ritmo_analise] start id=${missaoId} company=${companyId} camp=${campaignExternalId}`);
+    const tel: Record<string, unknown> = { versao: replano ? "ritmo-replano-v1" : "ritmo-analise-v1", subagentes: [] };
+    console.warn(`[${tag}] start id=${missaoId} company=${companyId} camp=${campaignExternalId}`);
 
     const { data: companyRow } = await supa.from("companies").select("name").eq("id", companyId).maybeSingle();
     const companyName = String(companyRow?.name ?? "").trim();
@@ -5302,15 +5333,38 @@ async function processarRitmoAnalise(missaoId: string, mcpKey: string): Promise<
       date: String(s.snapshot_date ?? "").slice(0, 10),
       spend: Number(s.spend ?? 0),
     }));
-    const baseline = calcularBaseline(series, periodoInicio, hoje);
+    const baselineCalc = calcularBaseline(series, periodoInicio, hoje);
     const nDias = nDiasPrazo(periodoInicio, periodoFim);
-    const teto = calcularTeto(baseline.gasto_diario, nDias, extra);
-    const baselineObj = {
-      gasto_diario: baseline.gasto_diario,
-      janela: baseline.janela,
-      dias_usados: baseline.dias_usados,
-      confianca: baseline.confianca,
+    let baselineObj: {
+      gasto_diario: number;
+      janela: string;
+      dias_usados: number;
+      confianca: "alta" | "baixa";
     };
+    let teto: number;
+    if (replano) {
+      const br = row.baseline_json && typeof row.baseline_json === "object"
+        ? row.baseline_json as Record<string, unknown>
+        : {};
+      const gasto = Number(br.gasto_diario ?? row.baseline_gasto_diario ?? 0);
+      baselineObj = {
+        gasto_diario: Number.isFinite(gasto) ? gasto : 0,
+        janela: String(br.janela ?? "7d_com_gasto"),
+        dias_usados: Number(br.dias_usados ?? 0) || 0,
+        confianca: br.confianca === "alta" ? "alta" : "baixa",
+      };
+      const tetoStored = Number(row.teto_gasto_janela ?? 0);
+      teto = Number.isFinite(tetoStored) ? tetoStored : 0;
+    } else {
+      teto = calcularTeto(baselineCalc.gasto_diario, nDias, extra);
+      baselineObj = {
+        gasto_diario: baselineCalc.gasto_diario,
+        janela: baselineCalc.janela,
+        dias_usados: baselineCalc.dias_usados,
+        confianca: baselineCalc.confianca,
+      };
+    }
+    const baseline = baselineObj;
 
     const periodoColheita = periodoDaJanela("14d", hoje);
     const campanhaStub: CampanhaRelatorio = {
@@ -5334,7 +5388,7 @@ Teto da janela: ${brl(teto)} (= baseline × ${nDias} + extra ${brl(extra)}).
 Devolva UM json com chaves: leitura, possibilidades {nada_muda, plano, maximo_envelope cada um d3,d7,d15,d30}, sonho {valor, atingivel_no_prazo, nota}, atos[], recusas[], lacunas[], premissas[].
 Cada ato: acao do catalogo Meta, alvo_external_id, quando imediato|apos_janela, evidencia, mecanismo, metrica_sucesso, janela_leitura, reversa.
 Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo novo se manter depois do prazo".
-Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal fingido.`;
+Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal fingido.${replano ? `\n${RITMO_REPLANO_EXTRA}` : ""}`;
 
     const serieMetrica = snaps.map((s) => ({
       date: String(s.snapshot_date ?? "").slice(0, 10),
@@ -5367,9 +5421,20 @@ Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal 
       janela: { inicio: snapInicio, fim: snapFim },
       baseline,
       teto_janela: teto,
+      ritmo_recente: replano ? baselineCalc : undefined,
       serie: serieMetrica,
       nota: campUuid ? null : "espelho local nao achou a campanha; baseline pode estar zerado",
-    })}`;
+    })}${
+      replano
+        ? `\n\n=== PLANO VIGENTE (compare realizado vs projecao; so desvie com evidencia nova) ===\n${
+          JSON.stringify({
+            leitura: row.leitura_json,
+            projecoes: row.projecoes_json,
+            plano: row.plano_json,
+          }).slice(0, 14000)
+        }`
+        : ""
+    }`;
 
     const focoExtra = `Cubra a parte da sua missao para o plano Ritmo desta UNICA campanha. A BASE abaixo ja foi lida nesta rodada: so chame ferramenta se faltar um dado ESPECIFICO da sua missao que nao esteja nela.\n${baseComSerie.slice(0, 8000)}\n\n${pergunta}`;
     const nomesLote: string[] = ["desempenho_campanhas", "estrutura_conta", "criativos"];
@@ -5407,7 +5472,7 @@ Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal 
         (tel.subagentes as unknown[]).push({ nome: p.nome, erro: "sem_prazo", relatorio_completo: false });
       }
     }
-    console.warn(`[ritmo_analise] especialistas ${JSON.stringify((tel.subagentes as { nome?: string; erro?: string; relatorio_completo?: boolean }[]).map((s) => ({
+    console.warn(`[${tag}] especialistas ${JSON.stringify((tel.subagentes as { nome?: string; erro?: string; relatorio_completo?: boolean }[]).map((s) => ({
       nome: s.nome, completo: s.relatorio_completo, erro: s.erro ?? null,
     })))} prazo_ms=${prazo()}`);
 
@@ -5419,10 +5484,11 @@ Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal 
         relatorios,
         baseColetada: baseComSerie,
         prazo,
+        extraSys: replano ? RITMO_REPLANO_EXTRA : undefined,
       });
     } catch (e) {
       const motivo = String((e as Error)?.message ?? e).slice(0, 400);
-      console.warn(`[ritmo_analise] sintese falhou: ${motivo}`);
+      console.warn(`[${tag}] sintese falhou: ${motivo}`);
       await falhou(`sintese: ${motivo}`);
       return;
     }
@@ -5436,9 +5502,35 @@ Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal 
     if (typeof raw.leitura === "string") raw.leitura = { texto: raw.leitura };
     raw.baseline = baselineObj;
     raw.teto_janela = teto;
+    if (replano && Array.isArray(raw.atos)) {
+      for (const a of raw.atos) {
+        if (a && typeof a === "object") (a as Record<string, unknown>).replano = true;
+      }
+    }
     const plano = parsePlanoRitmo(raw);
     if (!plano) {
       await falhou("plano nao veio em json");
+      return;
+    }
+    if (replano) {
+      for (const ato of plano.atos) {
+        (ato as Record<string, unknown>).replano = true;
+      }
+      const { error: updErr } = await supa
+        .from("ritmo_missoes")
+        .update({
+          plano_json: plano as unknown as Record<string, unknown>,
+          leitura_json: (plano.leitura ?? {}) as Record<string, unknown>,
+          projecoes_json: plano.possibilidades as unknown as Record<string, unknown>,
+          atualizado_em: new Date().toISOString(),
+        })
+        .eq("id", missaoId)
+        .eq("status", "em_execucao");
+      if (updErr) {
+        console.warn(`[${tag}] persistir falha id=${missaoId} ${updErr.message}`);
+        return;
+      }
+      console.warn(`[${tag}] plano_atualizado id=${missaoId} ms=${Date.now() - t0} colheita=${colheita.ok}/${colheita.total}`);
       return;
     }
 
@@ -5457,14 +5549,14 @@ Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal 
       await falhou(grav.error);
       return;
     }
-    console.warn(`[ritmo_analise] plano_pronto id=${missaoId} ms=${Date.now() - t0} colheita=${colheita.ok}/${colheita.total}`);
+    console.warn(`[${tag}] plano_pronto id=${missaoId} ms=${Date.now() - t0} colheita=${colheita.ok}/${colheita.total}`);
   } catch (e) {
     const erro = String((e as Error)?.message ?? e).slice(0, 800);
-    console.warn(`[ritmo_analise] error id=${missaoId} ${erro}`);
+    console.warn(`[${tag}] error id=${missaoId} ${erro}`);
     try {
       await falhou(erro);
     } catch (e2) {
-      console.warn(`[ritmo_analise] persistir falha id=${missaoId} ${String((e2 as Error)?.message ?? e2)}`);
+      console.warn(`[${tag}] persistir falha id=${missaoId} ${String((e2 as Error)?.message ?? e2)}`);
     }
   }
 }
@@ -5613,6 +5705,18 @@ Deno.serve(async (req) => {
     }
     emBackground(processarRitmoAnalise(missaoId, String(cfg?.api_key ?? "")));
     return json({ ok: true, async: true, modo: "ritmo_analise", missao_id: missaoId }, 202);
+  }
+  if (modoRel === "ritmo_replano") {
+    const missaoId = String(body?.missao_id ?? "").trim();
+    if (!missaoId) return json({ error: "ritmo_replano exige missao_id" }, 400);
+    if (userId) {
+      const { data: alvo } = await supa.from("ritmo_missoes").select("company_id").eq("id", missaoId).maybeSingle();
+      if (!alvo) return json({ error: "missao nao encontrada" }, 404);
+      const { data: membro } = await supa.rpc("is_company_member", { _company_id: alvo.company_id, _user_id: userId });
+      if (!membro) return json({ error: "nao_e_membro_da_empresa" }, 403);
+    }
+    emBackground(processarRitmoReplano(missaoId, String(cfg?.api_key ?? "")));
+    return json({ ok: true, async: true, modo: "ritmo_replano", missao_id: missaoId }, 202);
   }
 
   // v2: CONTINUACAO DE SEGMENTO - a propria edge se reinvoca com o job_id; o novo worker
