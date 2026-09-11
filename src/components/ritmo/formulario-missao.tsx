@@ -62,6 +62,7 @@ export function FormularioMissao({
   carregandoCampanhas,
   onRecarregarCampanhas,
   isAdmin,
+  onSubmit,
 }: {
   form: FormMissaoRitmo;
   onChange: (next: FormMissaoRitmo) => void;
@@ -71,6 +72,7 @@ export function FormularioMissao({
   carregandoCampanhas: boolean;
   onRecarregarCampanhas: () => void;
   isAdmin: boolean;
+  onSubmit?: (form: FormMissaoRitmo) => void;
 }) {
   const set = (patch: Partial<FormMissaoRitmo>) => onChange({ ...form, ...patch });
   const ativas = useMemo(
@@ -95,7 +97,7 @@ export function FormularioMissao({
       toast.error(MOTIVO_TOAST[r.motivo ?? ""] ?? "Não foi possível validar o pedido.");
       return;
     }
-    toast.success("Pedido validado. A análise ainda não entra na fila nesta versão.");
+    onSubmit?.(form);
   };
 
   return (

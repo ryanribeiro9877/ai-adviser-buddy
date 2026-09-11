@@ -57,11 +57,13 @@ function Harness({
   isAdmin = true,
   avisoFonte = null,
   fonteCampanhas = "ao_vivo",
+  onSubmit,
 }: {
   inicial: FormMissaoRitmo;
   isAdmin?: boolean;
   avisoFonte?: string | null;
   fonteCampanhas?: "ao_vivo" | "espelho";
+  onSubmit?: (form: FormMissaoRitmo) => void;
 }) {
   const [form, setForm] = useState(inicial);
   return (
@@ -74,6 +76,7 @@ function Harness({
       carregandoCampanhas={false}
       onRecarregarCampanhas={() => {}}
       isAdmin={isAdmin}
+      onSubmit={onSubmit}
     />
   );
 }
@@ -95,13 +98,13 @@ describe("FormularioMissao", () => {
     expect(toastSuccessMock).not.toHaveBeenCalled();
   });
 
-  it("aceita extra em branco (vale 0) e não enfileira", async () => {
-    montar(<Harness inicial={valido({ extra: "" })} />);
+  it("aceita extra em branco (vale 0) e entrega o form ao pai", async () => {
+    const onSubmit = vi.fn();
+    montar(<Harness inicial={valido({ extra: "" })} onSubmit={onSubmit} />);
     await userEvent.click(screen.getByRole("button", { name: "Criar força-tarefa" }));
     expect(toastErrorMock).not.toHaveBeenCalled();
-    expect(toastSuccessMock).toHaveBeenCalledWith(
-      "Pedido validado. A análise ainda não entra na fila nesta versão.",
-    );
+    expect(toastSuccessMock).not.toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ extra: "", campaignId: "120" }));
   });
 
   it("recusa extra negativo", async () => {

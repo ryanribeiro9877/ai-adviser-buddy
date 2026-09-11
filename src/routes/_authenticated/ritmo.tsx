@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { Plus } from "lucide-react";
-import { useApp } from "@/lib/app-context";
+import { toast } from "sonner";
+import { logAudit, useApp } from "@/lib/app-context";
 import { supabase } from "@/integrations/supabase/client";
 import { EmptyCompany } from "@/components/metric-card";
 import { FalhaDeCarga } from "@/components/falha-de-carga";
@@ -29,6 +31,7 @@ import {
   formVazioMissao,
   type FormMissaoRitmo,
 } from "@/components/ritmo/formulario-missao";
+import { DetalheMissao } from "@/components/ritmo/detalhe-missao";
 import { rotuloMetrica, unidadeSonho } from "@/lib/ritmo";
 import {
   mergeCampanhasRelatorio,
@@ -86,6 +89,7 @@ function Ritmo() {
   const companyId = selectedCompanyId;
   const [formAberto, setFormAberto] = useState(false);
   const [form, setForm] = useState<FormMissaoRitmo>(formVazioMissao);
+  const [detalheId, setDetalheId] = useState<string | null>(null);
 
   const missoesQ = useQuery({
     queryKey: ["ritmo-missoes", companyId],
@@ -146,6 +150,62 @@ function Ritmo() {
   });
 
   useEffect(() => {
+    setDetalheId(null);
+  }, [companyId]);
+
+  const criar = useMutation({
+    mutationFn: async (pedido: FormMissaoRitmo) => {
+      if (!companyId) throw new Error("sem empresa");
+      const db = supabase as unknown as SupabaseClient;
+      const { data: camp } = await db
+        .from("campaigns")
+        .select("external_account_id")
+        .eq("company_id", companyId)
+        .eq("external_id", pedido.campaignId)
+        .maybeSingle();
+      const bruto = (camp as { external_account_id?: string | null } | null)?.external_account_id;
+      const p_ad_account_id = bruto && String(bruto).trim() ? String(bruto).trim() : null;
+      const { data, error } = await supabase.rpc("enfileirar_ritmo_analise", {
+        p_company_id: companyId,
+        p_campaign_id: pedido.campaignId,
+        p_campaign_name: pedido.campaignName,
+        p_ad_account_id,
+        p_periodo_inicio: pedido.periodoInicio,
+        p_periodo_fim: pedido.periodoFim,
+        p_metrica: pedido.metrica,
+        p_dissertacao: pedido.dissertacao,
+        p_sonho: pedido.sonho.trim() === "" ? null : Number(pedido.sonho),
+        p_extra: pedido.extra.trim() === "" ? 0 : Number(pedido.extra),
+        p_fonte_campanhas: campanhasQ.data?.fonte ?? "espelho",
+      });
+      if (error) throw error;
+      const id = String(data ?? "");
+      if (!id || id === "null" || id === "undefined") {
+        throw new Error("Não foi possível enfileirar a análise.");
+      }
+      const inv = await supabase.functions.invoke("traffic-agent-job", {
+        body: { modo: "ritmo_analise", missao_id: id },
+      });
+      if (inv.error) throw new Error(inv.error.message);
+      return id;
+    },
+    onSuccess: async (id) => {
+      toast.success("Análise na fila. O plano aparece nesta tela.");
+      setFormAberto(false);
+      setForm(formVazioMissao());
+      setDetalheId(id);
+      void qc.invalidateQueries({ queryKey: ["ritmo-missoes", companyId] });
+      await logAudit({
+        companyId,
+        action: "ritmo.analise",
+        targetType: "ritmo_missoes",
+        targetId: id,
+      });
+    },
+    onError: (e: Error) => toast.error(e.message || "Não foi possível enfileirar a análise."),
+  });
+
+  useEffect(() => {
     if (!companyId) return;
     const canal = supabase
       .channel(`ritmo-${companyId}`)
@@ -182,6 +242,9 @@ function Ritmo() {
   if (!selectedCompany || !companyId) return <EmptyCompany />;
 
   const missoes = missoesQ.data ?? [];
+  const detalhe = detalheId
+    ? (missoes.find((m) => m.id === detalheId) ?? null)
+    : (missoes[0] ?? null);
 
   return (
     <div className="space-y-6">
@@ -234,7 +297,11 @@ function Ritmo() {
             </TableHeader>
             <TableBody>
               {missoes.map((m) => (
-                <TableRow key={m.id}>
+                <TableRow
+                  key={m.id}
+                  className={`cursor-pointer ${detalhe?.id === m.id ? "bg-muted/50" : ""}`}
+                  onClick={() => setDetalheId(m.id)}
+                >
                   <TableCell>
                     <Badge variant={varianteStatus(m.status)}>{rotuloStatus(m.status)}</Badge>
                   </TableCell>
@@ -263,6 +330,16 @@ function Ritmo() {
           </Table>
         </Card>
       )}
+      {detalhe && (
+        <DetalheMissao
+          missao={detalhe}
+          isAdmin={isAdmin}
+          companyId={companyId}
+          onMudou={() => {
+            void qc.invalidateQueries({ queryKey: ["ritmo-missoes", companyId] });
+          }}
+        />
+      )}
 
       <Dialog open={formAberto} onOpenChange={setFormAberto}>
         <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
@@ -285,6 +362,7 @@ function Ritmo() {
             carregandoCampanhas={campanhasQ.isFetching}
             onRecarregarCampanhas={() => campanhasQ.refetch()}
             isAdmin={isAdmin}
+            onSubmit={(pedido) => criar.mutate(pedido)}
           />
         </DialogContent>
       </Dialog>

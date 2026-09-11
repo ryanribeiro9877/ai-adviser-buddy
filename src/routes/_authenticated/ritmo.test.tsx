@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
@@ -18,11 +18,17 @@ let ctx = {
 
 let linhas: Record<string, unknown>[] = [];
 let erroLista: unknown = null;
+let campanhaEspelho: Record<string, unknown> | null = {
+  id: "camp-uuid",
+  external_account_id: "act_1",
+};
+let snapshots: Record<string, unknown>[] = [];
 const fromMock = vi.fn();
 const rpcMock = vi.fn();
 const invokeMock = vi.fn();
 const toastErrorMock = vi.fn();
 const toastSuccessMock = vi.fn();
+const logAuditMock = vi.fn();
 const channelMock = {
   on: vi.fn().mockReturnThis(),
   subscribe: vi.fn().mockReturnThis(),
@@ -34,6 +40,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("@/lib/app-context", () => ({
   useApp: () => ctx,
+  logAudit: (...a: unknown[]) => logAuditMock(...a),
 }));
 
 vi.mock("sonner", () => ({
@@ -67,11 +74,17 @@ function encadear(data: unknown, error: unknown = null) {
     select: () => unknown;
     eq: () => unknown;
     order: () => unknown;
+    gte: () => unknown;
+    lte: () => unknown;
+    maybeSingle: () => typeof result;
     then: typeof result.then;
   } = {
     select: () => q,
     eq: () => q,
     order: () => q,
+    gte: () => q,
+    lte: () => q,
+    maybeSingle: () => result,
     then: result.then.bind(result),
   };
   return q;
@@ -106,6 +119,53 @@ function missaoFalhou(): Record<string, unknown> {
   };
 }
 
+function missaoPlanoPronto(): Record<string, unknown> {
+  return {
+    id: "m2",
+    company_id: "c1",
+    campaign_id: "120",
+    campaign_name: "Consignado SP",
+    ad_account_id: "act_1",
+    status: "plano_pronto",
+    periodo_inicio: "2026-09-10",
+    periodo_fim: "2026-09-20",
+    metrica: "conversas",
+    dissertacao: "subir conversas",
+    sonho: 50,
+    extra_investimento: 0,
+    teto_gasto_janela: 110,
+    autonomia_concedida_em: null,
+    erro_analise: null,
+    criado_em: "2026-09-10T11:00:00Z",
+    plano_json: {
+      leitura: { texto: "Campanha ativa, learning ok." },
+      baseline: { gasto_diario: 10, janela: "7d_com_gasto", dias_usados: 7, confianca: "alta" },
+      teto_janela: 110,
+      possibilidades: {
+        nada_muda: { d3: 5, d7: 10, d15: 20, d30: 40 },
+        plano: { d3: 12, d7: 24, d15: 40, d30: 80 },
+        maximo_envelope: { d3: 15, d7: 30, d15: 50, d30: 90 },
+      },
+      sonho: { valor: 50, atingivel_no_prazo: true, nota: null },
+      atos: [
+        {
+          acao: "pausar_criativo",
+          alvo_external_id: "ad1",
+          quando: "imediato",
+          evidencia: "CTR caiu",
+          mecanismo: "fadiga do criativo",
+          metrica_sucesso: "CTR 2%",
+          janela_leitura: "3 dias",
+          reversa: "reativar o anúncio",
+        },
+      ],
+      recusas: [],
+      lacunas: ["sem reach único do período"],
+      premissas: [],
+    },
+  };
+}
+
 beforeEach(() => {
   ctx = {
     selectedCompany: { id: "c1", name: "JCR2", industry: null },
@@ -114,16 +174,51 @@ beforeEach(() => {
   };
   linhas = [];
   erroLista = null;
+  campanhaEspelho = { id: "camp-uuid", external_account_id: "act_1" };
+  snapshots = [];
   toastErrorMock.mockReset();
   toastSuccessMock.mockReset();
+  logAuditMock.mockReset();
   channelMock.on.mockClear();
   channelMock.subscribe.mockClear();
   fromMock.mockImplementation((tabela: string) => {
     if (tabela === "ritmo_missoes") return encadear(linhas, erroLista);
+    if (tabela === "campaigns") return encadear(campanhaEspelho);
+    if (tabela === "metric_snapshots") return encadear(snapshots);
     return encadear([]);
   });
-  rpcMock.mockResolvedValue({ data: [], error: null });
-  invokeMock.mockResolvedValue({ data: { ok: false }, error: null });
+  rpcMock.mockImplementation(async (nome: string) => {
+    if (nome === "listar_campanhas_para_relatorio") {
+      return {
+        data: [
+          {
+            external_id: "120",
+            nome: "Consignado SP",
+            status: "ACTIVE",
+            objetivo: null,
+            tipo: null,
+            gasto: 0,
+            last_synced_at: null,
+          },
+        ],
+        error: null,
+      };
+    }
+    if (nome === "enfileirar_ritmo_analise") {
+      return { data: "nova-missao-id", error: null };
+    }
+    if (nome === "reenviar_ritmo_analise") {
+      return { data: "m1", error: null };
+    }
+    if (nome === "encerrar_ritmo_missao") {
+      return { data: { ok: true }, error: null };
+    }
+    return { data: null, error: null };
+  });
+  invokeMock.mockImplementation(async (nome: string) => {
+    if (nome === "pipeboard-read") return { data: { ok: false }, error: null };
+    return { data: { ok: true }, error: null };
+  });
 });
 
 describe("Ritmo", () => {
@@ -152,8 +247,8 @@ describe("Ritmo", () => {
   it("mostra o erro da análise falha em vez de silêncio", async () => {
     linhas = [missaoFalhou()];
     montar();
-    expect(await screen.findByText("timeout")).toBeInTheDocument();
-    expect(screen.getByText("Análise falhou")).toBeInTheDocument();
+    expect((await screen.findAllByText("timeout")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Análise falhou").length).toBeGreaterThan(0);
     expect(screen.queryByText("Nenhuma força-tarefa nesta empresa")).not.toBeInTheDocument();
   });
 
@@ -178,5 +273,107 @@ describe("Ritmo", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Nova força-tarefa" }));
     await userEvent.click(screen.getByRole("button", { name: "Criar força-tarefa" }));
     expect(toastErrorMock).toHaveBeenCalledWith("Escolha uma campanha ativa.");
+  });
+
+  it("submit válido enfileira a análise e dispara o job", async () => {
+    montar();
+    await userEvent.click(await screen.findByRole("button", { name: "Nova força-tarefa" }));
+    await screen.findByRole("option", { name: "Consignado SP" });
+    await userEvent.selectOptions(screen.getByLabelText("Campanha"), "120");
+    await userEvent.type(screen.getByLabelText("Dissertação"), "subir conversas");
+    await userEvent.click(screen.getByRole("button", { name: "Criar força-tarefa" }));
+    await waitFor(() => {
+      expect(rpcMock).toHaveBeenCalledWith(
+        "enfileirar_ritmo_analise",
+        expect.objectContaining({
+          p_company_id: "c1",
+          p_campaign_id: "120",
+          p_campaign_name: "Consignado SP",
+          p_ad_account_id: "act_1",
+          p_metrica: "conversas",
+          p_dissertacao: "subir conversas",
+          p_sonho: null,
+          p_extra: 0,
+          p_fonte_campanhas: "espelho",
+        }),
+      );
+    });
+    expect(invokeMock).toHaveBeenCalledWith("traffic-agent-job", {
+      body: { modo: "ritmo_analise", missao_id: "nova-missao-id" },
+    });
+    await waitFor(() => {
+      expect(logAuditMock).toHaveBeenCalledWith({
+        companyId: "c1",
+        action: "ritmo.analise",
+        targetType: "ritmo_missoes",
+        targetId: "nova-missao-id",
+      });
+    });
+    expect(rpcMock).not.toHaveBeenCalledWith("autorizar_ritmo_missao", expect.anything());
+  });
+
+  it("plano pronto mostra projeção d3=12 e o rótulo do sonho", async () => {
+    linhas = [missaoPlanoPronto()];
+    montar();
+    expect(await screen.findByText("12")).toBeInTheDocument();
+    expect(screen.getByText(/sonho \(não é previsão\)/i)).toBeInTheDocument();
+    expect(screen.getByText("Se nada mudar")).toBeInTheDocument();
+    expect(screen.getByText("Se executar o plano")).toBeInTheDocument();
+    expect(screen.getByText("Máximo do envelope")).toBeInTheDocument();
+    expect(screen.getByText(/se o ritmo novo se manter depois do prazo/i)).toBeInTheDocument();
+    const autorizar = screen.getByRole("button", { name: "Autorizar" });
+    expect(autorizar).toBeDisabled();
+    expect(autorizar).toHaveAttribute("title", "Próxima entrega");
+  });
+
+  it("encerrar em plano_pronto descarta a missão sem autorizar", async () => {
+    linhas = [missaoPlanoPronto()];
+    montar();
+    await userEvent.click(await screen.findByRole("button", { name: "Encerrar agora" }));
+    await waitFor(() => {
+      expect(rpcMock).toHaveBeenCalledWith("encerrar_ritmo_missao", {
+        p_id: "m2",
+        p_motivo: "descartada",
+      });
+    });
+    expect(rpcMock).not.toHaveBeenCalledWith("autorizar_ritmo_missao", expect.anything());
+  });
+
+  it("análise falhou oferece retry de análise para o admin", async () => {
+    linhas = [missaoFalhou()];
+    montar();
+    expect((await screen.findAllByText("timeout")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Os agentes estão lendo a campanha…")).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Tentar análise de novo" }));
+    await waitFor(() => {
+      expect(rpcMock).toHaveBeenCalledWith("reenviar_ritmo_analise", { p_id: "m1" });
+    });
+    expect(invokeMock).toHaveBeenCalledWith("traffic-agent-job", {
+      body: { modo: "ritmo_analise", missao_id: "m1" },
+    });
+  });
+
+  it("em análise mostra que os agentes estão lendo", async () => {
+    linhas = [{ ...missaoFalhou(), status: "em_analise", erro_analise: null }];
+    montar();
+    expect(await screen.findByText("Os agentes estão lendo a campanha…")).toBeInTheDocument();
+  });
+
+  it("mostra realizado até agora somando snapshots da campanha (id interno)", async () => {
+    linhas = [missaoPlanoPronto()];
+    snapshots = [
+      {
+        snapshot_date: "2026-09-10",
+        messaging_started: 8,
+        impressions: 100,
+        clicks: 2,
+        link_clicks: 1,
+        form_leads: 0,
+        reach: 40,
+      },
+    ];
+    montar();
+    expect(await screen.findByText(/Realizado até agora/)).toBeInTheDocument();
+    expect(screen.getByText("8")).toBeInTheDocument();
   });
 });
