@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { toast } from "sonner";
 import { logAudit } from "@/lib/app-context";
@@ -28,6 +28,7 @@ import {
 import type { Tables } from "@/integrations/supabase/types";
 
 export type MissaoRitmo = Tables<"ritmo_missoes">;
+type AtoRitmo = Tables<"ritmo_atos">;
 
 type SnapLinha = {
   snapshot_date?: string | null;
@@ -56,6 +57,60 @@ function varianteStatus(status: string): "default" | "secondary" | "destructive"
   if (status === "em_execucao") return "default";
   if (status === "plano_pronto") return "secondary";
   return "outline";
+}
+
+const ROTULO_RESULTADO: Record<string, string> = {
+  pendente: "Pendente",
+  executando: "Executando",
+  ok: "Ok",
+  simulado: "Simulado",
+  falhou: "Falhou",
+  bloqueado: "Bloqueado",
+};
+
+const ROTULO_TIQUE: Record<string, string> = {
+  primeiro_passe: "Primeiro passe",
+  leve: "Leve",
+  fundo: "Fundo",
+};
+
+function rotuloResultado(r: string): string {
+  return ROTULO_RESULTADO[r] ?? r;
+}
+
+function rotuloTique(t: string): string {
+  return ROTULO_TIQUE[t] ?? t;
+}
+
+function varianteResultado(r: string): "default" | "secondary" | "destructive" | "outline" {
+  if (r === "falhou" || r === "bloqueado") return "destructive";
+  if (r === "ok") return "default";
+  if (r === "simulado") return "secondary";
+  return "outline";
+}
+
+function linhaRespostaMeta(raw: unknown): string {
+  if (raw == null || raw === "") return "—";
+  if (typeof raw === "string") return raw.trim() || "—";
+  if (typeof raw !== "object") return String(raw);
+  const o = raw as Record<string, unknown>;
+  for (const k of ["motivo", "error", "erro", "mensagem", "message", "nota"]) {
+    const v = o[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  try {
+    const s = JSON.stringify(raw);
+    if (!s || s === "{}") return "—";
+    return s.length > 160 ? `${s.slice(0, 157)}…` : s;
+  } catch {
+    return "—";
+  }
+}
+
+function textoDryRun(dryRun: boolean | null | undefined): string | null {
+  if (dryRun === true) return "Simulação (dry-run): a Meta não muda.";
+  if (dryRun === false) return "Escrita real na Meta, presa ao teto e ao prazo.";
+  return null;
 }
 
 function num(v: unknown): number {
@@ -203,6 +258,7 @@ export function DetalheMissao({
   onMudou?: () => void;
 }) {
   const [ocupado, setOcupado] = useState(false);
+  const qc = useQueryClient();
   const plano = useMemo(() => planoDaMissao(missao.plano_json), [missao.plano_json]);
   const leitura =
     plano?.leitura ??
@@ -252,6 +308,37 @@ export function DetalheMissao({
         .lte("snapshot_date", fimSnap);
       if (error) throw error;
       return (data ?? []) as SnapLinha[];
+    },
+  });
+
+  const atosQ = useQuery({
+    queryKey: ["ritmo-atos", missao.id],
+    enabled: !!missao.id,
+    queryFn: async (): Promise<AtoRitmo[]> => {
+      const { data, error } = await supabase
+        .from("ritmo_atos")
+        .select("*")
+        .eq("missao_id", missao.id)
+        .order("criado_em");
+      if (error) throw error;
+      return (data ?? []) as AtoRitmo[];
+    },
+  });
+
+  const dryRunQ = useQuery({
+    queryKey: ["ritmo-dry-run", companyId],
+    enabled: !!companyId,
+    queryFn: async (): Promise<boolean | null> => {
+      const db = supabase as unknown as SupabaseClient;
+      const { data, error } = await db
+        .from("meta_execution_config")
+        .select("dry_run")
+        .eq("company_id", companyId)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+      const v = (data as { dry_run?: unknown }).dry_run;
+      return typeof v === "boolean" ? v : null;
     },
   });
 
@@ -311,6 +398,7 @@ export function DetalheMissao({
         targetId: missao.id,
       });
       toast.success("Força-tarefa autorizada.");
+      void qc.invalidateQueries({ queryKey: ["ritmo-atos", missao.id] });
       onMudou?.();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Não foi possível autorizar.");
@@ -357,6 +445,13 @@ export function DetalheMissao({
     d30: vencido === "d30" ? realizado : null,
   };
 
+  const atos = atosQ.data ?? [];
+  const declaracaoDryRun = textoDryRun(dryRunQ.data);
+  const mostraAutorizarArea =
+    missao.status === "plano_pronto" || missao.status === "em_execucao";
+  const mostraHistorico =
+    missao.status !== "em_analise" && missao.status !== "analise_falhou";
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -372,16 +467,23 @@ export function DetalheMissao({
               : ""}
           </p>
         </div>
-        {isAdmin && (missao.status === "plano_pronto" || missao.status === "em_execucao") && (
-          <div className="flex flex-wrap gap-2">
-            {missao.status === "plano_pronto" && (
-              <Button type="button" disabled={ocupado} onClick={() => void autorizar()}>
-                Autorizar
-              </Button>
+        {mostraAutorizarArea && (
+          <div className="flex max-w-md flex-col items-end gap-2">
+            {declaracaoDryRun && (
+              <p className="text-right text-sm text-muted-foreground">{declaracaoDryRun}</p>
             )}
-            <Button type="button" variant="outline" disabled={ocupado} onClick={() => void encerrar()}>
-              Encerrar agora
-            </Button>
+            {isAdmin && (
+              <div className="flex flex-wrap gap-2">
+                {missao.status === "plano_pronto" && (
+                  <Button type="button" disabled={ocupado} onClick={() => void autorizar()}>
+                    Autorizar
+                  </Button>
+                )}
+                <Button type="button" variant="outline" disabled={ocupado} onClick={() => void encerrar()}>
+                  Encerrar agora
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -557,6 +659,46 @@ export function DetalheMissao({
             )}
           </Card>
         </>
+      )}
+
+      {mostraHistorico && (
+        <Card className="space-y-3 p-4">
+          <h3 className="text-base font-semibold">Histórico de atos</h3>
+          {atosQ.isError ? (
+            <p className="text-sm text-muted-foreground">Não foi possível carregar os atos.</p>
+          ) : atos.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Nenhum ato ainda.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Ação</TableHead>
+                  <TableHead>Alvo</TableHead>
+                  <TableHead>Tique</TableHead>
+                  <TableHead>Resultado</TableHead>
+                  <TableHead>Resposta da Meta</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {atos.map((ato) => (
+                  <TableRow key={ato.id}>
+                    <TableCell className="font-medium">{ato.acao}</TableCell>
+                    <TableCell className="tabular-nums">{ato.alvo_external_id || "—"}</TableCell>
+                    <TableCell>{rotuloTique(ato.tique)}</TableCell>
+                    <TableCell>
+                      <Badge variant={varianteResultado(ato.resultado)}>
+                        {rotuloResultado(ato.resultado)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="max-w-xs text-sm text-muted-foreground">
+                      {linhaRespostaMeta(ato.resposta_meta)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </Card>
       )}
     </div>
   );

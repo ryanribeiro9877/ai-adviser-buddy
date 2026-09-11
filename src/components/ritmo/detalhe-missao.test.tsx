@@ -118,6 +118,8 @@ beforeEach(() => {
   toastSuccessMock.mockReset();
   fromMock.mockImplementation((tabela: string) => {
     if (tabela === "campaigns") return encadear({ id: "camp-uuid" });
+    if (tabela === "ritmo_atos") return encadear([]);
+    if (tabela === "meta_execution_config") return encadear({ dry_run: false });
     return encadear([]);
   });
   rpcMock.mockImplementation(async (nome: string) => {
@@ -233,5 +235,51 @@ describe("DetalheMissao", () => {
       targetType: "ritmo_missoes",
       targetId: "m2",
     });
+  });
+
+  it("em execução mostra o resultado simulado do ato", async () => {
+    fromMock.mockImplementation((tabela: string) => {
+      if (tabela === "campaigns") return encadear({ id: "camp-uuid" });
+      if (tabela === "ritmo_atos") {
+        return encadear([
+          {
+            id: "ato-1",
+            missao_id: "m2",
+            company_id: "c1",
+            tique: "primeiro_passe",
+            acao: "pausar_criativo",
+            alvo_external_id: "ad1",
+            resultado: "simulado",
+            resposta_meta: { motivo: "dry_run" },
+            criado_em: "2026-09-11T12:00:00Z",
+          },
+        ]);
+      }
+      if (tabela === "meta_execution_config") return encadear({ dry_run: true });
+      return encadear([]);
+    });
+    montar(
+      <DetalheMissao
+        missao={missao({ status: "em_execucao", autonomia_concedida_em: "2026-09-11T12:00:00Z" })}
+        isAdmin
+        companyId="c1"
+      />,
+    );
+    expect(await screen.findByText("Simulado")).toBeInTheDocument();
+    expect(screen.getByText("Histórico de atos")).toBeInTheDocument();
+    expect(screen.getByText("dry_run")).toBeInTheDocument();
+    expect(screen.getByText("Primeiro passe")).toBeInTheDocument();
+  });
+
+  it("na área de Autorizar declara dry-run quando a config está ligada", async () => {
+    fromMock.mockImplementation((tabela: string) => {
+      if (tabela === "campaigns") return encadear({ id: "camp-uuid" });
+      if (tabela === "ritmo_atos") return encadear([]);
+      if (tabela === "meta_execution_config") return encadear({ dry_run: true });
+      return encadear([]);
+    });
+    montar(<DetalheMissao missao={missao({ status: "plano_pronto" })} isAdmin companyId="c1" />);
+    expect(await screen.findByText("Simulação (dry-run): a Meta não muda.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Autorizar" })).toBeInTheDocument();
   });
 });

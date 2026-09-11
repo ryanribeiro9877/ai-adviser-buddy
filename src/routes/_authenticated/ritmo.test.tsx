@@ -190,6 +190,8 @@ beforeEach(() => {
     if (tabela === "ritmo_missoes") return encadear(linhas, erroLista);
     if (tabela === "campaigns") return encadear(campanhaEspelho);
     if (tabela === "metric_snapshots") return encadear(snapshots);
+    if (tabela === "ritmo_atos") return encadear([]);
+    if (tabela === "meta_execution_config") return encadear({ dry_run: false });
     return encadear([]);
   });
   rpcMock.mockImplementation(async (nome: string) => {

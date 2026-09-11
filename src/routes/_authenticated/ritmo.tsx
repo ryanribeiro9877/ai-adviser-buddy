@@ -270,8 +270,13 @@ function Ritmo() {
           table: "ritmo_atos",
           filter: `company_id=eq.${companyId}`,
         },
-        () => {
+        (payload) => {
           void qc.invalidateQueries({ queryKey: ["ritmo-missoes", companyId] });
+          const row = (payload.new ?? payload.old) as { missao_id?: string } | null;
+          const missaoId = typeof row?.missao_id === "string" ? row.missao_id : undefined;
+          void qc.invalidateQueries({
+            queryKey: missaoId ? ["ritmo-atos", missaoId] : ["ritmo-atos"],
+          });
         },
       )
       .subscribe();
@@ -378,6 +383,7 @@ function Ritmo() {
           companyId={companyId}
           onMudou={() => {
             void qc.invalidateQueries({ queryKey: ["ritmo-missoes", companyId] });
+            void qc.invalidateQueries({ queryKey: ["ritmo-atos", detalhe.id] });
           }}
         />
       )}
