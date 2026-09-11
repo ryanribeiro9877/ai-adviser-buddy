@@ -1360,8 +1360,6 @@ function resultadoAtoRitmo(saida: { resultado?: unknown } | null | undefined): "
   return "falhou";
 }
 
-let persistenciaPedido: "approval" | "ritmo" = "approval";
-
 async function persistirSaidaRitmo(atoId: string, saida: Record<string, unknown>) {
   await supa.from("ritmo_atos").update({
     resultado: resultadoAtoRitmo(saida),
@@ -1381,7 +1379,6 @@ async function marcarFalhaNoCard(
     bloqueado?: boolean;
   },
 ) {
-  if (persistenciaPedido === "ritmo") return;
   const t = dados.bloqueado
     ? {
         recusa: String(dados.recusa ?? "bloqueado_por_trava_do_sistema"),
@@ -5626,17 +5623,11 @@ Deno.serve(async (req) => {
     });
     }
 
-    const prevPersistencia = persistenciaPedido;
-    persistenciaPedido = opts?.persistencia ?? "approval";
-    try {
-      const saida = await corpo();
-      if (persistenciaPedido === "ritmo") {
-        await persistirSaidaRitmo(String(r.id), saida);
-      }
-      return saida;
-    } finally {
-      persistenciaPedido = prevPersistencia;
+    const saida = await corpo();
+    if (opts?.persistencia === "ritmo") {
+      await persistirSaidaRitmo(String(r.id), saida);
     }
+    return saida;
   }
 
   // Origem ritmo: o portao SQL decide ANTES de qualquer Graph. 403 sai deste if;

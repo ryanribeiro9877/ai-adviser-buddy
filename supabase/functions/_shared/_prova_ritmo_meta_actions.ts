@@ -112,6 +112,10 @@ ok(
     /persistencia:\s*"ritmo"/.test(ramo),
   'ramo ritmo tem de chamar executarUmPedido com persistencia: "ritmo"',
 );
+ok(
+  !src.includes("persistenciaPedido"),
+  "meta-actions nao pode ter persistenciaPedido (flag de modulo: falha de card some se Ritmo corre no mesmo isolate)",
+);
 
 if (falhas.length > 0) {
   console.error("FALHOU: meta-actions nao executa ato Ritmo pelo portao, sem card.\n");
