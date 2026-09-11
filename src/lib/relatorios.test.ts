@@ -7,10 +7,12 @@ import {
   flattenCampanhasPipeboard,
   humanizarMarkdownRelatorio,
   filtrarConjuntosDoRecorte,
+  injetarRankingConjuntosNoMarkdown,
   janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   normalizarAchados,
   periodoDaJanela,
+  rankingConjuntosRelatorio,
   recortarAlertasDoRecorte,
   presetDiarioOperacional,
   proximaExecucaoRelatorio,
@@ -48,14 +50,50 @@ describe("especialistasPorSecoes", () => {
 
 describe("humanizarMarkdownRelatorio", () => {
   it("troca a chave da seção pelo título que o gestor lê", () => {
-    const md = humanizarMarkdownRelatorio("## resumo_executivo\nJanela fechada.\n## criativos_ranking\n- peça");
+    const md = humanizarMarkdownRelatorio("## resumo_executivo\nJanela fechada.\n## criativos_ranking\n- peça\n## conjuntos_ranking\n- conjunto");
     expect(md).toContain("## Resumo executivo");
     expect(md).toContain("## Ranking de criativos");
+    expect(md).toContain("## Ranking de conjuntos");
     expect(md).not.toMatch(/^## resumo_executivo/m);
   });
 
   it("titulosDasSecoes usa o catálogo, não a chave crua", () => {
     expect(titulosDasSecoes(["custo_vs_teto"])).toEqual(["Custo versus teto vigente"]);
+  });
+});
+
+describe("rankingConjuntosRelatorio", () => {
+  it("ordena do melhor para o pior e nao omite conjunto sem resultado", () => {
+    const r = rankingConjuntosRelatorio([
+      {
+        nome: "Caro", campanha: "JUR", conjunto_id: "1",
+        totais_janela: { gasto: "R$ 20,00", impressoes: 100, cliques_no_link: 2, resultados_na_base: 1, custo_por_resultado: "R$ 20,00" },
+      },
+      {
+        nome: "Barato", campanha: "JUR", conjunto_id: "2",
+        totais_janela: { gasto: "R$ 10,00", impressoes: 80, cliques_no_link: 4, resultados_na_base: 2, custo_por_resultado: "R$ 5,00" },
+      },
+      {
+        nome: "Zerado", campanha: "JUR", conjunto_id: "3",
+        totais_janela: { gasto: "R$ 3,00", impressoes: 10, cliques_no_link: 0, resultados_na_base: 0 },
+      },
+      { nome: "So estrutura", campanha: "JUR", conjunto: "So estrutura", conjunto_id: "4" },
+    ]);
+    expect(r.total).toBe(4);
+    expect(r.linhas.map((l) => l.nome)).toEqual(["Barato", "Caro", "Zerado", "So estrutura"]);
+    expect(r.markdown).toContain("| 4 | So estrutura |");
+  });
+});
+
+describe("injetarRankingConjuntosNoMarkdown", () => {
+  it("coloca o ranking de conjuntos logo apos o de criativos, sem apagar o resto", () => {
+    const md = injetarRankingConjuntosNoMarkdown({
+      md: "## Ranking de criativos\n\n| Peça |\n\n## Fadiga\ntexto",
+      tabela: "| # | Conjunto |\n| 1 | A |",
+    });
+    expect(md.indexOf("Ranking de criativos")).toBeLessThan(md.indexOf("Ranking de conjuntos"));
+    expect(md.indexOf("Ranking de conjuntos")).toBeLessThan(md.indexOf("Fadiga"));
+    expect(md).toContain("| 1 | A |");
   });
 });
 

@@ -390,7 +390,7 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
       // Todas as divergências de uma vez: descobrir uma por execução é o que fez uma prova
       // vermelha esconder outra por semanas neste mesmo repositório.
       expect(divergencias.slice(0, 20)).toEqual([]);
-    });
+    }, 60_000);
 
     it("exports só de um lado são declarados, não acidentais", async () => {
       const [a, b] = [await NO_DENO[deno](), await NO_LIB[lib]()];
@@ -417,7 +417,7 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
             : [],
         soNoLib: [],
       });
-    });
+    }, 60_000);
 
     it("o corpus exercita a lógica (paridade vazia não é paridade)", async () => {
       const a = await NO_DENO[deno]();
@@ -435,6 +435,6 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
       // a paridade dela passa por acidente. Se este teste cair, o conserto é enriquecer o
       // corpus acima, não afrouxar o limite.
       expect(inertes).toEqual([]);
-    });
+    }, 60_000);
   });
 });

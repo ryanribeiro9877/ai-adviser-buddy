@@ -268,9 +268,11 @@ import {
   flattenCampanhasPipeboard,
   hojeYmdBrasilia,
   humanizarMarkdownRelatorio,
+  injetarRankingConjuntosNoMarkdown,
   janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   periodoDaJanela,
+  rankingConjuntosRelatorio,
   recortarAlertasDoRecorte,
   titulosDasSecoes,
   type CampanhaAoVivoBruta,
@@ -4637,6 +4639,7 @@ function ferramentaColheitaFalhou(v: unknown): boolean {
 }
 
 function prioridadePecaColheita(nome: string): number {
+  if (nome === "ranking_conjuntos") return -1;
   if (nome.startsWith("get_campaign_detail")) return 0;
   if (nome.startsWith("get_detalhe_anuncios")) return 1;
   if (nome.startsWith("get_ads_ranking")) return 2;
@@ -4653,7 +4656,10 @@ function montarTextoColheita(pecas: PecaColheita[]): string {
   let usados = 0;
   const linhas: string[] = [];
   for (const p of ord) {
-    const chunk = `${p.nome} [${p.ok ? "ok" : "falhou"}]: ${jsonCurtoRelatorio(p.dado)}`;
+    const dadoTxt = p.nome === "ranking_conjuntos"
+      ? JSON.stringify(p.dado)
+      : jsonCurtoRelatorio(p.dado);
+    const chunk = `${p.nome} [${p.ok ? "ok" : "falhou"}]: ${dadoTxt}`;
     if (usados + chunk.length > RELATORIO_TETO_COLHEITA) {
       linhas.push(`${p.nome}: omitido do texto por teto (${p.ok ? "ok" : "falhou"}).`);
       continue;
@@ -4724,6 +4730,21 @@ function compactarRetornoPipeboard(raw: unknown): unknown {
   return { ferramenta: o.ferramenta ?? null, amostra: jsonCurtoRelatorio(o.resultado, 2000) };
 }
 
+function fontesConjuntoComCampanha(raw: unknown, campanha: string): unknown[] {
+  if (!raw || typeof raw !== "object") return [];
+  const o = raw as Record<string, unknown>;
+  const origem = Array.isArray(o.conjuntos)
+    ? o.conjuntos
+    : Array.isArray(o.objetos)
+      ? o.objetos
+      : [];
+  return origem.map((c) => {
+    if (!c || typeof c !== "object") return c;
+    const item = c as Record<string, unknown>;
+    return { ...item, campanha: String(item.campanha ?? campanha) };
+  });
+}
+
 async function colherBaseRelatorio(args: {
   companyId: string;
   mcpKey: string;
@@ -4742,6 +4763,7 @@ async function colherBaseRelatorio(args: {
   temDesempenho: boolean;
   temEstrutura: boolean;
   temWaba: boolean;
+  markdownConjuntos: string;
   ms: number;
 }> {
   const t0 = Date.now();
@@ -4886,6 +4908,26 @@ async function colherBaseRelatorio(args: {
     marcar(`ao_vivo_anuncios:${p.id}`, compactarRetornoPipeboard(p.ads));
   }
 
+  const nomePorId = new Map(ids.map((id, i) => [id, nomes[i] ?? id]));
+  const fontesConjuntos: unknown[] = [];
+  if (!ferramentaColheitaFalhou(estrutura) && Array.isArray(estruturaRecorte.conjuntos)) {
+    fontesConjuntos.push(...estruturaRecorte.conjuntos);
+  }
+  for (const p of porCampanha) {
+    fontesConjuntos.push(...fontesConjuntoComCampanha(p.ads, nomePorId.get(p.id) ?? p.id));
+  }
+  for (const p of liveCamp) {
+    const compacto = compactarRetornoPipeboard(p.adsets);
+    fontesConjuntos.push(...fontesConjuntoComCampanha(compacto, nomePorId.get(p.id) ?? p.id));
+  }
+  const rankingConjuntos = rankingConjuntosRelatorio(fontesConjuntos);
+  marcar("ranking_conjuntos", {
+    total: rankingConjuntos.total,
+    linhas: rankingConjuntos.linhas,
+    markdown: rankingConjuntos.markdown,
+    nota: "Lista completa, do melhor para o pior. Nao cortar. Custo da janela, nao gasto acumulado da conta.",
+  });
+
   const falhas = pecas.filter((p) => !p.ok).map((p) => p.nome);
   const ok = pecas.filter((p) => p.ok).length;
   const temDesempenho = ids.every((id) =>
@@ -4905,6 +4947,7 @@ async function colherBaseRelatorio(args: {
     temDesempenho,
     temEstrutura: !!pecaEstrutura?.ok,
     temWaba: !!pecaWaba?.ok,
+    markdownConjuntos: rankingConjuntos.markdown,
     ms: Date.now() - t0,
   };
 }
@@ -4925,7 +4968,7 @@ LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: no
 
 NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio.
 
-corpo_md: markdown com titulos HUMANOS (Resumo executivo, Status e entrega, Investimento e pacing, Custo versus teto, Funil de midia, Por campanha, Conjuntos, Ranking de criativos, Fadiga, Diagnostico de custo, Escala, Alertas, Recomendacoes, Compliance, Comparativo, WhatsApp, Cobertura). NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de pecas em TABELA markdown (Peca | Gasto | Impressoes | Resultado | Custo). Nao despeje o relatorio interno: sintetize.
+corpo_md: markdown com titulos HUMANOS (Resumo executivo, Status e entrega, Investimento e pacing, Custo versus teto, Funil de midia, Por campanha, Conjuntos, Ranking de criativos, Ranking de conjuntos, Fadiga, Diagnostico de custo, Escala, Alertas, Recomendacoes, Compliance, Comparativo, WhatsApp, Cobertura). NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista, EXCETO os dois rankings: TABELA com TODAS as linhas da base, sem cortar, melhor no topo. Ranking de pecas (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos (use a tabela ja montada em ranking_conjuntos). Nao despeje o relatorio interno: sintetize.
 
 Responda APENAS um JSON valido, sem cerca markdown, com:
 {"corpo_md":"narrativa em markdown para o gestor","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"cobertura":"o que nao foi medido, em portugues"}`;
@@ -5077,13 +5120,22 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
       };
     }
     const cobertura = [resolvidas.cobertura, colheita.cobertura, extraido.cobertura].filter(Boolean).join(" ");
+    const querRankingConjuntos = secoes.includes("conjuntos_ranking")
+      || secoes.includes("criativos_ranking")
+      || secoes.includes("por_conjunto");
+    const corpo = querRankingConjuntos
+      ? injetarRankingConjuntosNoMarkdown({
+        md: humanizarMarkdownRelatorio(extraido.corpo_md),
+        tabela: colheita.markdownConjuntos,
+      })
+      : humanizarMarkdownRelatorio(extraido.corpo_md);
     await supa.from("relatorio_gerados").update({
       status: "done",
       fonte_campanhas: resolvidas.fonte,
       campaign_ids_resolvidos: resolvidas.ids,
       periodo_inicio: periodo.inicio,
       periodo_fim: periodo.fim,
-      corpo_md: humanizarMarkdownRelatorio(extraido.corpo_md),
+      corpo_md: corpo,
       achados: extraido.achados,
       cobertura,
       erro: null,

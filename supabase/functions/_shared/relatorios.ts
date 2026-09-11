@@ -27,6 +27,7 @@ export type ChaveSecaoRelatorio =
   | "por_campanha"
   | "por_conjunto"
   | "criativos_ranking"
+  | "conjuntos_ranking"
   | "fadiga"
   | "diagnostico_custo"
   | "escala"
@@ -93,6 +94,12 @@ export const SECOES_RELATORIO: readonly SecaoRelatorio[] = [
     titulo: "Ranking de criativos",
     descricao: "Anúncios por gasto, CTR e resultado. Conteúdo real das peças.",
     especialistas: ["criativos"],
+  },
+  {
+    chave: "conjuntos_ranking",
+    titulo: "Ranking de conjuntos",
+    descricao: "Todos os conjuntos do recorte, do melhor para o pior, na janela. Sem cortar a lista.",
+    especialistas: ["desempenho_campanhas", "estrutura_conta"],
   },
   {
     chave: "fadiga",
@@ -524,6 +531,235 @@ export function recortarAlertasDoRecorte(
     outros_da_conta: lista.length - doRecorte.length,
     nota: "Zero no recorte significa nenhum alerta nestas campanhas, nao 'nao coletado'.",
   };
+}
+
+export type LinhaRankingConjunto = {
+  posicao: number;
+  conjunto_id: string | null;
+  nome: string;
+  campanha: string;
+  status: string;
+  anuncios: number;
+  gasto: number;
+  impressoes: number;
+  cliques_link: number;
+  resultados: number;
+  base_resultado: string;
+  custo_por_resultado: number | null;
+  custo_txt: string;
+};
+
+function reaisDeRelatorio(v: unknown): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  const s = String(v ?? "").trim();
+  if (!s) return 0;
+  const limpo = s.replace(/[^\d,.-]/g, "");
+  if (!limpo) return 0;
+  const n = limpo.includes(",")
+    ? Number(limpo.replace(/\./g, "").replace(",", "."))
+    : Number(limpo);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function fmtReaisRelatorio(n: number): string {
+  if (!Number.isFinite(n)) return "—";
+  const [i, d] = Math.abs(n).toFixed(2).split(".");
+  const mil = i.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${n < 0 ? "-" : ""}R$ ${mil},${d}`;
+}
+
+function listaConjuntosFonte(fonte: unknown): Record<string, unknown>[] {
+  if (fonte == null) return [];
+  if (Array.isArray(fonte)) return fonte.flatMap((x) => listaConjuntosFonte(x));
+  if (typeof fonte !== "object") return [];
+  const o = fonte as Record<string, unknown>;
+  if (Array.isArray(o.linhas)) return listaConjuntosFonte(o.linhas);
+  if (Array.isArray(o.conjuntos)) return listaConjuntosFonte(o.conjuntos);
+  if (Array.isArray(o.objetos)) return listaConjuntosFonte(o.objetos);
+  if (Array.isArray(o.ranking)) return listaConjuntosFonte(o.ranking);
+  if (
+    o.conjunto != null ||
+    o.conjunto_id != null ||
+    o.totais_janela != null ||
+    o.name != null ||
+    o.nome != null ||
+    o.adset_id != null
+  ) {
+    return [o];
+  }
+  return [];
+}
+
+function normalizarConjuntoRanking(
+  item: Record<string, unknown>,
+): Omit<LinhaRankingConjunto, "posicao"> {
+  const tot =
+    item.totais_janela && typeof item.totais_janela === "object"
+      ? (item.totais_janela as Record<string, unknown>)
+      : null;
+  const janela = tot != null;
+  const nome = String(item.nome ?? item.name ?? item.conjunto ?? "").trim() || "(sem nome)";
+  const campanha = String(item.campanha ?? item.campaign_name ?? "").trim();
+  const id = String(item.conjunto_id ?? item.adset_id ?? item.id ?? "").trim() || null;
+  const status = String(item.effective_status ?? item.status ?? item.campanha_status ?? "").trim();
+  const anuncios = Number(item.anuncios ?? item.n ?? 0) || 0;
+  const gasto = janela ? reaisDeRelatorio(tot.gasto) : 0;
+  const impressoes = janela ? Number(tot.impressoes ?? 0) || 0 : 0;
+  const cliques_link = janela ? Number(tot.cliques_no_link ?? 0) || 0 : 0;
+  const resultados = janela
+    ? Number(tot.resultados_na_base ?? tot.conversas ?? tot.formularios ?? 0) || 0
+    : 0;
+  const custoNum = janela && resultados > 0 ? gasto / resultados : null;
+  const custoTxt = janela
+    ? (tot.custo_por_resultado != null
+      ? String(tot.custo_por_resultado)
+      : custoNum == null
+        ? "sem resultado"
+        : fmtReaisRelatorio(custoNum))
+    : "sem entrega na janela";
+  return {
+    conjunto_id: id,
+    nome,
+    campanha,
+    status,
+    anuncios,
+    gasto,
+    impressoes,
+    cliques_link,
+    resultados,
+    base_resultado: janela ? String(tot.base_de_resultado_rotulo ?? tot.base_de_resultado ?? "") : "",
+    custo_por_resultado: custoNum,
+    custo_txt: custoTxt,
+  };
+}
+
+function chaveConjuntoRanking(l: Omit<LinhaRankingConjunto, "posicao">): string {
+  if (l.conjunto_id) return `id:${l.conjunto_id}`;
+  return `nome:${l.campanha.toLowerCase()}|${l.nome.toLowerCase()}`;
+}
+
+function fundirConjuntoRanking(
+  a: Omit<LinhaRankingConjunto, "posicao">,
+  b: Omit<LinhaRankingConjunto, "posicao">,
+): Omit<LinhaRankingConjunto, "posicao"> {
+  const janelaA = a.impressoes > 0 || a.gasto > 0 || a.resultados > 0 || a.custo_txt !== "sem entrega na janela";
+  const janelaB = b.impressoes > 0 || b.gasto > 0 || b.resultados > 0 || b.custo_txt !== "sem entrega na janela";
+  const base = janelaB && !janelaA ? b : janelaA && !janelaB ? a : a.gasto >= b.gasto ? a : b;
+  const outro = base === a ? b : a;
+  return {
+    ...base,
+    conjunto_id: base.conjunto_id || outro.conjunto_id,
+    nome: base.nome !== "(sem nome)" ? base.nome : outro.nome,
+    campanha: base.campanha || outro.campanha,
+    status: outro.status || base.status,
+    anuncios: Math.max(base.anuncios, outro.anuncios),
+  };
+}
+
+function compararConjuntoMelhorPior(a: LinhaRankingConjunto, b: LinhaRankingConjunto): number {
+  const aTem = a.resultados > 0;
+  const bTem = b.resultados > 0;
+  if (aTem !== bTem) return aTem ? -1 : 1;
+  if (aTem && bTem) {
+    const ca = a.custo_por_resultado ?? Number.POSITIVE_INFINITY;
+    const cb = b.custo_por_resultado ?? Number.POSITIVE_INFINITY;
+    if (ca !== cb) return ca - cb;
+    if (b.resultados !== a.resultados) return b.resultados - a.resultados;
+  }
+  if (b.gasto !== a.gasto) return b.gasto - a.gasto;
+  return a.nome.localeCompare(b.nome, "pt-BR");
+}
+
+/** Ranking de TODOS os conjuntos do recorte, melhor (menor custo na base) no topo. */
+export function rankingConjuntosRelatorio(fonte: unknown): {
+  linhas: LinhaRankingConjunto[];
+  markdown: string;
+  total: number;
+} {
+  const mapa = new Map<string, Omit<LinhaRankingConjunto, "posicao">>();
+  for (const item of listaConjuntosFonte(fonte)) {
+    const n = normalizarConjuntoRanking(item);
+    if (!n.nome && !n.conjunto_id) continue;
+    const k = chaveConjuntoRanking(n);
+    const prev = mapa.get(k);
+    mapa.set(k, prev ? fundirConjuntoRanking(prev, n) : n);
+  }
+  const linhas = [...mapa.values()]
+    .sort((a, b) => compararConjuntoMelhorPior(a as LinhaRankingConjunto, b as LinhaRankingConjunto))
+    .map((l, i) => ({ ...l, posicao: i + 1 }));
+  if (!linhas.length) {
+    return {
+      linhas,
+      total: 0,
+      markdown: "Nenhum conjunto no recorte desta janela.",
+    };
+  }
+  const header =
+    "| # | Conjunto | Campanha | Status | Gasto | Impressões | Cliques | Resultado | Custo | Anúncios |";
+  const sep = "|---|---|---|---|---|---|---|---|---|---|";
+  const rows = linhas.map((l) =>
+    `| ${l.posicao} | ${l.nome} | ${l.campanha || "—"} | ${l.status || "—"} | ${fmtReaisRelatorio(l.gasto)} | ${l.impressoes} | ${l.cliques_link} | ${l.resultados} | ${l.custo_txt} | ${l.anuncios} |`
+  );
+  return {
+    linhas,
+    total: linhas.length,
+    markdown: [
+      `Todos os ${linhas.length} conjunto(s) do recorte, do melhor para o pior (menor custo por resultado na base da campanha; sem resultado fica abaixo).`,
+      "",
+      header,
+      sep,
+      ...rows,
+    ].join("\n"),
+  };
+}
+
+function injetarSecaoMarkdownRelatorio(
+  md: string,
+  titulo: string,
+  corpo: string,
+): string {
+  const texto = String(md ?? "");
+  const tituloOk = String(titulo ?? "").trim();
+  const corpoOk = String(corpo ?? "").trim();
+  if (!tituloOk || !corpoOk) return texto;
+  const bloco = `## ${tituloOk}\n\n${corpoOk}`;
+  const isH = (l: string) => /^#{1,4}[ \t]+\S/.test(l);
+  const escapar = tituloOk.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tituloRe = new RegExp(`^#{1,4}[ \\t]+${escapar}\\b`, "i");
+  const lines = texto.split(/\r?\n/);
+  const start = lines.findIndex((l) => tituloRe.test(l));
+  if (start >= 0) {
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      if (isH(lines[i])) {
+        end = i;
+        break;
+      }
+    }
+    return [...lines.slice(0, start), bloco, ...lines.slice(end)].join("\n").replace(/\n{3,}/g, "\n\n");
+  }
+  const cri = lines.findIndex((l) => /^#{1,4}[ \t]+Ranking de criativos\b/i.test(l));
+  if (cri >= 0) {
+    let end = lines.length;
+    for (let i = cri + 1; i < lines.length; i++) {
+      if (isH(lines[i])) {
+        end = i;
+        break;
+      }
+    }
+    return [...lines.slice(0, end), "", bloco, ...lines.slice(end)].join("\n").replace(/\n{3,}/g, "\n\n");
+  }
+  return texto ? `${texto.replace(/\s*$/, "")}\n\n${bloco}\n` : `${bloco}\n`;
+}
+
+export function injetarRankingConjuntosNoMarkdown(args: unknown): string {
+  if (args == null || typeof args !== "object" || Array.isArray(args)) {
+    return String(args ?? "");
+  }
+  const o = args as { md?: unknown; tabela?: unknown; corpo_md?: unknown };
+  const md = String(o.md ?? o.corpo_md ?? "");
+  const tabela = String(o.tabela ?? "");
+  return injetarSecaoMarkdownRelatorio(md, "Ranking de conjuntos", tabela);
 }
 
 export type AchadoRelatorio = {
