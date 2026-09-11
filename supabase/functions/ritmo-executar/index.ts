@@ -258,11 +258,14 @@ async function inserirEExecutarAtos(opts: {
   return { inseridos, pulados, execucoes };
 }
 
-function imediatosDoPlano(planoJson: unknown): AtoPlanoEntrada[] {
+function imediatosDoPlano(planoJson: unknown, existentes: Set<string>): AtoPlanoEntrada[] {
   const plano = parsePlanoRitmo(planoJson);
   if (!plano) return [];
   const executaveis = plano.atos.filter((a) => a.executavel);
-  return atosDoPrimeiroPasse(executaveis);
+  const novos = executaveis.filter(
+    (a) => !existentes.has(chaveAto(a.acao, a.alvo_external_id)),
+  );
+  return atosDoPrimeiroPasse(novos);
 }
 
 async function rodarPrimeiroPasse(missaoId: string, mcpKey: string) {
@@ -275,7 +278,8 @@ async function rodarPrimeiroPasse(missaoId: string, mcpKey: string) {
   if (ymdDe(missao.periodo_inicio) > hoje) {
     return json({ ok: true, modo: "primeiro_passe", pulado: "antes_do_inicio", hoje });
   }
-  const atos = imediatosDoPlano(missao.plano_json);
+  const existentes = await chavesAtosExistentes(missao.id);
+  const atos = imediatosDoPlano(missao.plano_json, existentes);
   const r = await inserirEExecutarAtos({
     missao,
     atos,
@@ -465,7 +469,8 @@ async function rodarFundo(missaoId: string, mcpKey: string) {
       pulado: atual ? "status" : "missao_ausente",
     });
   }
-  const atos = imediatosDoPlano(atual.plano_json);
+  const existentes = await chavesAtosExistentes(atual.id);
+  const atos = imediatosDoPlano(atual.plano_json, existentes);
   const r = await inserirEExecutarAtos({
     missao: atual,
     atos,
