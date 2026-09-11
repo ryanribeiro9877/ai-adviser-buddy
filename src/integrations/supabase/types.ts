@@ -1005,6 +1005,162 @@ export type Database = {
           },
         ];
       };
+      ritmo_atos: {
+        Row: {
+          id: string;
+          missao_id: string;
+          company_id: string;
+          tique: string;
+          acao: string;
+          alvo_external_id: string | null;
+          payload: Json;
+          evidencia: string | null;
+          mecanismo: string | null;
+          metrica_sucesso: string | null;
+          janela_leitura: string | null;
+          reversa: string | null;
+          resultado: string;
+          resposta_meta: Json | null;
+          replano: boolean;
+          criado_em: string;
+        };
+        Insert: {
+          id?: string;
+          missao_id: string;
+          company_id: string;
+          tique: string;
+          acao: string;
+          alvo_external_id?: string | null;
+          payload?: Json;
+          evidencia?: string | null;
+          mecanismo?: string | null;
+          metrica_sucesso?: string | null;
+          janela_leitura?: string | null;
+          reversa?: string | null;
+          resultado?: string;
+          resposta_meta?: Json | null;
+          replano?: boolean;
+          criado_em?: string;
+        };
+        Update: {
+          id?: string;
+          missao_id?: string;
+          company_id?: string;
+          tique?: string;
+          acao?: string;
+          alvo_external_id?: string | null;
+          payload?: Json;
+          evidencia?: string | null;
+          mecanismo?: string | null;
+          metrica_sucesso?: string | null;
+          janela_leitura?: string | null;
+          reversa?: string | null;
+          resultado?: string;
+          resposta_meta?: Json | null;
+          replano?: boolean;
+          criado_em?: string;
+        };
+        Relationships: [];
+      };
+      ritmo_missoes: {
+        Row: {
+          id: string;
+          company_id: string;
+          campaign_id: string;
+          campaign_name: string;
+          ad_account_id: string | null;
+          status: string;
+          periodo_inicio: string;
+          periodo_fim: string;
+          metrica: string;
+          dissertacao: string;
+          sonho: number | null;
+          extra_investimento: number;
+          baseline_gasto_diario: number | null;
+          baseline_json: Json;
+          teto_gasto_janela: number | null;
+          plano_json: Json | null;
+          leitura_json: Json | null;
+          projecoes_json: Json | null;
+          confianca_baseline: string | null;
+          fonte_campanhas: string | null;
+          autonomia_concedida_em: string | null;
+          autonomia_concedida_por: string | null;
+          encerrada_em: string | null;
+          encerrada_por: string | null;
+          encerrada_motivo: string | null;
+          erro_analise: string | null;
+          job_id: string | null;
+          criado_por: string | null;
+          criado_em: string;
+          atualizado_em: string;
+        };
+        Insert: {
+          id?: string;
+          company_id: string;
+          campaign_id: string;
+          campaign_name?: string;
+          ad_account_id?: string | null;
+          status?: string;
+          periodo_inicio: string;
+          periodo_fim: string;
+          metrica: string;
+          dissertacao: string;
+          sonho?: number | null;
+          extra_investimento?: number;
+          baseline_gasto_diario?: number | null;
+          baseline_json?: Json;
+          teto_gasto_janela?: number | null;
+          plano_json?: Json | null;
+          leitura_json?: Json | null;
+          projecoes_json?: Json | null;
+          confianca_baseline?: string | null;
+          fonte_campanhas?: string | null;
+          autonomia_concedida_em?: string | null;
+          autonomia_concedida_por?: string | null;
+          encerrada_em?: string | null;
+          encerrada_por?: string | null;
+          encerrada_motivo?: string | null;
+          erro_analise?: string | null;
+          job_id?: string | null;
+          criado_por?: string | null;
+          criado_em?: string;
+          atualizado_em?: string;
+        };
+        Update: {
+          id?: string;
+          company_id?: string;
+          campaign_id?: string;
+          campaign_name?: string;
+          ad_account_id?: string | null;
+          status?: string;
+          periodo_inicio?: string;
+          periodo_fim?: string;
+          metrica?: string;
+          dissertacao?: string;
+          sonho?: number | null;
+          extra_investimento?: number;
+          baseline_gasto_diario?: number | null;
+          baseline_json?: Json;
+          teto_gasto_janela?: number | null;
+          plano_json?: Json | null;
+          leitura_json?: Json | null;
+          projecoes_json?: Json | null;
+          confianca_baseline?: string | null;
+          fonte_campanhas?: string | null;
+          autonomia_concedida_em?: string | null;
+          autonomia_concedida_por?: string | null;
+          encerrada_em?: string | null;
+          encerrada_por?: string | null;
+          encerrada_motivo?: string | null;
+          erro_analise?: string | null;
+          job_id?: string | null;
+          criado_por?: string | null;
+          criado_em?: string;
+          atualizado_em?: string;
+        };
+        Relationships: [];
+      };
       targets: {
         Row: {
           active: boolean;
@@ -1456,6 +1612,70 @@ export type Database = {
       sincronizar_whatsapp_numeros_de_anuncios: {
         Args: { p_company_id?: string | null };
         Returns: Json;
+      };
+      enfileirar_ritmo_analise: {
+        Args: {
+          p_company_id: string;
+          p_campaign_id: string;
+          p_campaign_name: string;
+          p_ad_account_id: string | null;
+          p_periodo_inicio: string;
+          p_periodo_fim: string;
+          p_metrica: string;
+          p_dissertacao: string;
+          p_sonho: number | null;
+          p_extra: number | null;
+          p_fonte_campanhas: string | null;
+        };
+        Returns: string;
+      };
+      reenviar_ritmo_analise: {
+        Args: { p_id: string };
+        Returns: string;
+      };
+      autorizar_ritmo_missao: {
+        Args: { p_id: string };
+        Returns: Json;
+      };
+      encerrar_ritmo_missao: {
+        Args: { p_id: string; p_motivo: string };
+        Returns: Json;
+      };
+      pode_executar_ato_ritmo: {
+        Args: {
+          p_missao_id: string;
+          p_company_id: string;
+          p_campaign_id: string;
+          p_acao: string;
+        };
+        Returns: Json;
+      };
+      claim_ritmo_missao_analise: {
+        Args: { p_id: string };
+        Returns: Json;
+      };
+      gravar_plano_ritmo: {
+        Args: {
+          p_id: string;
+          p_plano_json: Json | null;
+          p_leitura_json: Json | null;
+          p_projecoes_json: Json | null;
+          p_baseline_gasto_diario: number | null;
+          p_baseline_json: Json | null;
+          p_teto_gasto_janela: number | null;
+          p_confianca_baseline: string | null;
+          p_erro_analise: string | null;
+          p_job_id: string | null;
+        };
+        Returns: string;
+      };
+      listar_ritmo_tiques_devidos: {
+        Args: { p_tique: string; p_limite: number };
+        Returns: {
+          id: string;
+          company_id: string;
+          campaign_id: string;
+        }[];
       };
     };
     Enums: {
