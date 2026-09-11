@@ -261,6 +261,7 @@ import {
 } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import {
+  addDaysYmd,
   campanhaEstaAtiva,
   especialistasPorSecoes,
   extrairJsonRelatorio,
@@ -279,6 +280,13 @@ import {
   type CampanhaRelatorio,
   type JanelaAnalise,
 } from "../_shared/relatorios.ts";
+import {
+  calcularBaseline,
+  calcularTeto,
+  nDiasPrazo,
+  parsePlanoRitmo,
+  extrairJsonRitmo,
+} from "../_shared/ritmo.ts";
 import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
 import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto, statusObjetoOperacional } from "../_shared/memoria_conjunto.ts";
 import { carregarMemoriaInstitucional, type FatoMemoria } from "../_shared/agent_memory.ts";
@@ -5153,6 +5161,313 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
   }
 }
 
+async function gravarPlanoRitmoRpc(args: {
+  missaoId: string;
+  plano?: Record<string, unknown> | null;
+  leitura?: Record<string, unknown> | null;
+  projecoes?: Record<string, unknown> | null;
+  baselineDiario?: number | null;
+  baseline?: Record<string, unknown> | null;
+  teto?: number | null;
+  confianca?: "alta" | "baixa" | null;
+  erro?: string | null;
+}): Promise<{ error: string | null }> {
+  const { error } = await supa.rpc("gravar_plano_ritmo", {
+    p_id: args.missaoId,
+    p_plano_json: args.plano ?? null,
+    p_leitura_json: args.leitura ?? null,
+    p_projecoes_json: args.projecoes ?? null,
+    p_baseline_gasto_diario: args.baselineDiario ?? null,
+    p_baseline_json: args.baseline ?? null,
+    p_teto_gasto_janela: args.teto ?? null,
+    p_confianca_baseline: args.confianca ?? null,
+    p_erro_analise: args.erro ?? null,
+    p_job_id: null,
+  });
+  return { error: error?.message ?? null };
+}
+
+function valorMetricaSnap(metrica: string, s: Record<string, unknown>): number | null {
+  const n = (v: unknown) => Number(v || 0);
+  if (metrica === "conversas") return n(s.messaging_started);
+  if (metrica === "cliques_no_link") return n(s.link_clicks);
+  if (metrica === "formularios") return n(s.form_leads);
+  if (metrica === "alcance") return n(s.reach);
+  if (metrica === "impressoes") return n(s.impressions);
+  const imp = n(s.impressions);
+  if (imp <= 0) return null;
+  if (metrica === "ctr") return (100 * n(s.clicks)) / imp;
+  if (metrica === "ctr_link") return (100 * n(s.link_clicks)) / imp;
+  return null;
+}
+
+async function sintetizarPlanoRitmo(args: {
+  companyName: string;
+  pergunta: string;
+  relatorios: { nome: string; relatorio: string; completo: boolean }[];
+  baseColetada: string;
+  prazo: () => number;
+}): Promise<string> {
+  const blocos = args.relatorios
+    .map((r) => `=== ${r.nome} [${r.completo ? "completo" : "incompleto"}] ===\n${r.relatorio}`)
+    .join("\n\n");
+  const sys = `Voce e o gestor de trafego de ${args.companyName} na FORCA-TAREFA RITMO.
+NAO e conversa. NAO emita card. NAO chame propose_action. NAO peca aprovacao. NAO escreva na Meta.
+
+LEITOR: o job vai persistir o json; o humano ve o plano depois. Proibido: nome de ferramenta/especialista, codigo interno, chave JSON crua na narrativa da leitura.
+
+NUMEROS: a BASE COLETADA e a fonte autoritativa. Baseline de gasto e teto da janela JA VIERAM CALCULADOS no contrato — nao invente outros. Sem numero, null. Distinga zero / nao existe / nao coletado. Amostra pequena: null no horizonte, nunca decimal fingido. Nao invente media de mercado.
+
+Responda APENAS um JSON valido, sem cerca markdown, com as chaves:
+leitura, possibilidades {nada_muda, plano, maximo_envelope cada um com d3,d7,d15,d30}, sonho {valor, atingivel_no_prazo, nota}, atos[], recusas[], lacunas[], premissas[].
+Nao envie baseline nem teto_janela — o codigo grava os calculados.
+Cada ato: acao do catalogo Meta, alvo_external_id, quando imediato|apos_janela, evidencia, mecanismo, metrica_sucesso, janela_leitura, reversa.
+Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo novo se manter depois do prazo".`;
+  const timeoutMs = Math.min(90_000, Math.max(args.prazo(), 8_000));
+  const r = await chamarLLM(
+    [
+      { role: "system", content: sys },
+      {
+        role: "user",
+        content: `${args.pergunta}\n\n=== BASE COLETADA (fonte dos numeros) ===\n${args.baseColetada}\n\n=== RELATORIOS INTERNOS ===\n${blocos || "(nenhum especialista extra; use so a base coletada)"}`,
+      },
+    ],
+    { maxTokens: 6000, reasoning: REASONING_OFF, timeoutMs, tipo: "sintese", faixaForcada: "economia" },
+  );
+  if (r.erro) throw new Error(String(r.erro));
+  return String(r.parsed?.choices?.[0]?.message?.content ?? "");
+}
+
+async function processarRitmoAnalise(missaoId: string, mcpKey: string): Promise<void> {
+  const falhou = async (erro: string) => {
+    const msg = String(erro ?? "analise_falhou").slice(0, 800);
+    const r = await gravarPlanoRitmoRpc({ missaoId, erro: msg });
+    if (r.error) console.warn(`[ritmo_analise] gravar falha id=${missaoId} ${r.error}`);
+  };
+  try {
+    const { data: claimed, error: claimErr } = await supa.rpc("claim_ritmo_missao_analise", { p_id: missaoId });
+    if (claimErr) throw new Error(claimErr.message);
+    const row = (Array.isArray(claimed) ? claimed[0] : claimed) as Record<string, unknown> | null;
+    if (!row?.id) return;
+
+    const companyId = String(row.company_id ?? "");
+    const campaignExternalId = String(row.campaign_id ?? "").trim();
+    const periodoInicio = String(row.periodo_inicio ?? "").slice(0, 10);
+    const periodoFim = String(row.periodo_fim ?? "").slice(0, 10);
+    const metrica = String(row.metrica ?? "");
+    const dissertacao = String(row.dissertacao ?? "");
+    const extra = Number(row.extra_investimento ?? 0);
+    const sonhoTxt = row.sonho == null || row.sonho === "" ? "nao declarado" : String(row.sonho);
+    const t0 = Date.now();
+    const prazo = () => JOB_LIMIT_MS - (Date.now() - t0);
+    const tel: Record<string, unknown> = { versao: "ritmo-analise-v1", subagentes: [] };
+    console.warn(`[ritmo_analise] start id=${missaoId} company=${companyId} camp=${campaignExternalId}`);
+
+    const { data: companyRow } = await supa.from("companies").select("name").eq("id", companyId).maybeSingle();
+    const companyName = String(companyRow?.name ?? "").trim();
+    if (!companyName) throw new Error("empresa_da_missao_nao_encontrada");
+
+    const { data: campRow } = await supa
+      .from("campaigns")
+      .select("id,name,status,objective,spend,external_id,external_account_id,category")
+      .eq("company_id", companyId)
+      .eq("external_id", campaignExternalId)
+      .maybeSingle();
+    const campUuid = campRow?.id ? String(campRow.id) : "";
+    const campNome = String(row.campaign_name ?? campRow?.name ?? campaignExternalId);
+
+    const hoje = hojeYmdBrasilia(new Date());
+    const ancora = hoje <= periodoInicio ? periodoInicio : hoje;
+    const janelas = [addDaysYmd(periodoInicio, -14), addDaysYmd(ancora, -14)];
+    const fins = [addDaysYmd(periodoInicio, -1), addDaysYmd(ancora, -1)];
+    janelas.sort();
+    fins.sort();
+    const snapInicio = janelas[0];
+    const snapFim = fins[1];
+
+    let snaps: Record<string, unknown>[] = [];
+    if (campUuid) {
+      const { data: snapRows } = await supa
+        .from("metric_snapshots")
+        .select("snapshot_date,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started")
+        .eq("company_id", companyId)
+        .eq("campaign_id", campUuid)
+        .gte("snapshot_date", snapInicio)
+        .lte("snapshot_date", snapFim)
+        .order("snapshot_date");
+      snaps = (snapRows ?? []) as Record<string, unknown>[];
+    }
+
+    const series = snaps.map((s) => ({
+      date: String(s.snapshot_date ?? "").slice(0, 10),
+      spend: Number(s.spend ?? 0),
+    }));
+    const baseline = calcularBaseline(series, periodoInicio, hoje);
+    const nDias = nDiasPrazo(periodoInicio, periodoFim);
+    const teto = calcularTeto(baseline.gasto_diario, nDias, extra);
+    const baselineObj = {
+      gasto_diario: baseline.gasto_diario,
+      janela: baseline.janela,
+      dias_usados: baseline.dias_usados,
+      confianca: baseline.confianca,
+    };
+
+    const periodoColheita = periodoDaJanela("14d", hoje);
+    const campanhaStub: CampanhaRelatorio = {
+      external_id: campaignExternalId,
+      nome: campNome,
+      status: String(campRow?.status ?? ""),
+      objective: campRow?.objective != null ? String(campRow.objective) : null,
+      tipo: campRow?.category != null ? String((campRow as { category?: unknown }).category) : null,
+      gasto: Number(campRow?.spend ?? 0),
+      last_synced_at: null,
+      fonte: "espelho",
+    };
+
+    const pergunta = `FORCA-TAREFA RITMO (nao e conversa, NAO emita card, NAO chame propose_action).
+Empresa: ${companyName}. Campanha UNICA: ${campNome} (${campaignExternalId}).
+Prazo: ${periodoInicio} a ${periodoFim} America/Sao_Paulo.
+Metrica-alvo: ${metrica}. Dissertacao do gestor: ${dissertacao}.
+Sonho (opcional, NAO e previsao): ${sonhoTxt}.
+Baseline de gasto ja calculado: ${brl(baseline.gasto_diario)}/dia em ${baseline.dias_usados} dias com gasto; confianca ${baseline.confianca}.
+Teto da janela: ${brl(teto)} (= baseline × ${nDias} + extra ${brl(extra)}).
+Devolva UM json com chaves: leitura, possibilidades {nada_muda, plano, maximo_envelope cada um d3,d7,d15,d30}, sonho {valor, atingivel_no_prazo, nota}, atos[], recusas[], lacunas[], premissas[].
+Cada ato: acao do catalogo Meta, alvo_external_id, quando imediato|apos_janela, evidencia, mecanismo, metrica_sucesso, janela_leitura, reversa.
+Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo novo se manter depois do prazo".
+Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal fingido.`;
+
+    const serieMetrica = snaps.map((s) => ({
+      date: String(s.snapshot_date ?? "").slice(0, 10),
+      spend: Number(s.spend ?? 0),
+      metrica: valorMetricaSnap(metrica, s),
+    }));
+
+    const colheita = await colherBaseRelatorio({
+      companyId,
+      mcpKey,
+      pedido: pergunta,
+      periodo: periodoColheita,
+      ids: [campaignExternalId],
+      nomes: [campNome],
+      secoes: [],
+      campanhas: [campanhaStub],
+    });
+    tel.colheita = {
+      ok: colheita.ok,
+      total: colheita.total,
+      falhas: colheita.falhas,
+      ms: colheita.ms,
+      temDesempenho: colheita.temDesempenho,
+      temEstrutura: colheita.temEstrutura,
+      temWaba: colheita.temWaba,
+      camp_uuid: campUuid || null,
+    };
+
+    const baseComSerie = `${colheita.texto}\n\n=== SERIE SNAPSHOT (campaigns.id=${campUuid || "nao_resolvido"}; NAO e o id Meta) ===\n${JSON.stringify({
+      janela: { inicio: snapInicio, fim: snapFim },
+      baseline,
+      teto_janela: teto,
+      serie: serieMetrica,
+      nota: campUuid ? null : "espelho local nao achou a campanha; baseline pode estar zerado",
+    })}`;
+
+    const focoExtra = `Cubra a parte da sua missao para o plano Ritmo desta UNICA campanha. A BASE abaixo ja foi lida nesta rodada: so chame ferramenta se faltar um dado ESPECIFICO da sua missao que nao esteja nela.\n${baseComSerie.slice(0, 8000)}\n\n${pergunta}`;
+    const nomesLote: string[] = ["desempenho_campanhas", "estrutura_conta", "criativos"];
+    if (empresaEhCredito(companyId)) nomesLote.push("compliance");
+    if (metrica === "conversas") nomesLote.push("whatsapp_waba");
+    nomesLote.push("alertas_recomendacoes", "conhecimento");
+    let lote: { nome: string; foco: string }[] = nomesLote
+      .filter((n) => SUBAGENTES[n])
+      .map((nome) => ({ nome, foco: focoExtra }));
+    if (colheita.temDesempenho) lote = lote.filter((p) => p.nome !== "desempenho_campanhas");
+    if (colheita.temEstrutura) lote = lote.filter((p) => p.nome !== "estrutura_conta");
+    if (colheita.temWaba) lote = lote.filter((p) => p.nome !== "whatsapp_waba");
+
+    const ctxLote = { companyId, companyName, mcpKey, pedido: pergunta };
+    const onda1 = lote.filter((p) => p.nome === "desempenho_campanhas" || p.nome === "estrutura_conta");
+    const onda2 = lote.filter((p) => p.nome !== "desempenho_campanhas" && p.nome !== "estrutura_conta");
+    let relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
+    if (onda1.length) {
+      relatorios = relatorios.concat(await executarLote(
+        onda1, pergunta, ctxLote, prazo, tel, RELATORIO_RESERVA_SINTESE_MS,
+      ));
+    }
+    if (onda2.length && prazo() > RELATORIO_MIN_ONDA2_MS) {
+      relatorios = relatorios.concat(await executarLote(
+        onda2, pergunta, ctxLote, prazo, tel, RELATORIO_RESERVA_SINTESE_MS,
+      ));
+    } else if (onda2.length) {
+      for (const p of onda2) {
+        relatorios.push({
+          nome: p.nome,
+          relatorio: "(nao rodou: tempo insuficiente apos a colheita)",
+          completo: false,
+          erro: "sem_prazo",
+        });
+        (tel.subagentes as unknown[]).push({ nome: p.nome, erro: "sem_prazo", relatorio_completo: false });
+      }
+    }
+    console.warn(`[ritmo_analise] especialistas ${JSON.stringify((tel.subagentes as { nome?: string; erro?: string; relatorio_completo?: boolean }[]).map((s) => ({
+      nome: s.nome, completo: s.relatorio_completo, erro: s.erro ?? null,
+    })))} prazo_ms=${prazo()}`);
+
+    let texto: string;
+    try {
+      texto = await sintetizarPlanoRitmo({
+        companyName,
+        pergunta,
+        relatorios,
+        baseColetada: baseComSerie,
+        prazo,
+      });
+    } catch (e) {
+      const motivo = String((e as Error)?.message ?? e).slice(0, 400);
+      console.warn(`[ritmo_analise] sintese falhou: ${motivo}`);
+      await falhou(`sintese: ${motivo}`);
+      return;
+    }
+
+    const extraido = extrairJsonRitmo(texto);
+    if (extraido == null || typeof extraido !== "object") {
+      await falhou("plano nao veio em json");
+      return;
+    }
+    const raw = extraido as Record<string, unknown>;
+    raw.baseline = baselineObj;
+    raw.teto_janela = teto;
+    const plano = parsePlanoRitmo(raw);
+    if (!plano) {
+      await falhou("plano nao veio em json");
+      return;
+    }
+
+    const grav = await gravarPlanoRitmoRpc({
+      missaoId,
+      plano: plano as unknown as Record<string, unknown>,
+      leitura: (plano.leitura ?? {}) as Record<string, unknown>,
+      projecoes: plano.possibilidades as unknown as Record<string, unknown>,
+      baselineDiario: baseline.gasto_diario,
+      baseline: baselineObj,
+      teto,
+      confianca: baseline.confianca,
+      erro: null,
+    });
+    if (grav.error) {
+      await falhou(grav.error);
+      return;
+    }
+    console.warn(`[ritmo_analise] plano_pronto id=${missaoId} ms=${Date.now() - t0} colheita=${colheita.ok}/${colheita.total}`);
+  } catch (e) {
+    const erro = String((e as Error)?.message ?? e).slice(0, 800);
+    console.warn(`[ritmo_analise] error id=${missaoId} ${erro}`);
+    try {
+      await falhou(erro);
+    } catch (e2) {
+      console.warn(`[ritmo_analise] persistir falha id=${missaoId} ${String((e2 as Error)?.message ?? e2)}`);
+    }
+  }
+}
+
 async function despacharRelatorios(mcpKey: string): Promise<{
   ok: true;
   enfileirados: unknown;
@@ -5285,6 +5600,18 @@ Deno.serve(async (req) => {
     }
     emBackground(processarRelatorio(relatorioId, String(cfg?.api_key ?? "")));
     return json({ ok: true, async: true, modo: "relatorio", relatorio_id: relatorioId }, 202);
+  }
+  if (modoRel === "ritmo_analise") {
+    const missaoId = String(body?.missao_id ?? "").trim();
+    if (!missaoId) return json({ error: "ritmo_analise exige missao_id" }, 400);
+    if (userId) {
+      const { data: alvo } = await supa.from("ritmo_missoes").select("company_id").eq("id", missaoId).maybeSingle();
+      if (!alvo) return json({ error: "missao nao encontrada" }, 404);
+      const { data: membro } = await supa.rpc("is_company_member", { _company_id: alvo.company_id, _user_id: userId });
+      if (!membro) return json({ error: "nao_e_membro_da_empresa" }, 403);
+    }
+    emBackground(processarRitmoAnalise(missaoId, String(cfg?.api_key ?? "")));
+    return json({ ok: true, async: true, modo: "ritmo_analise", missao_id: missaoId }, 202);
   }
 
   // v2: CONTINUACAO DE SEGMENTO - a propria edge se reinvoca com o job_id; o novo worker
