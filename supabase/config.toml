@@ -31,6 +31,9 @@ verify_jwt = false
 [functions.meta-actions]
 verify_jwt = false
 
+[functions.ritmo-executar]
+verify_jwt = false
+
 [functions.traffic-chat]
 verify_jwt = false
 
