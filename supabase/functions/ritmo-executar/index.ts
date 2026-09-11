@@ -2,7 +2,7 @@
 // { origem: "ritmo", ritmo_ato_id }. Sem Graph. Sem approval_requests.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
+import { bearerDe, chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import {
   atosDoPrimeiroPasse,
   parsePlanoRitmo,
@@ -487,6 +487,29 @@ async function rodarFundo(missaoId: string, mcpKey: string) {
   });
 }
 
+async function chaveCascataMcp(headerKey: string): Promise<string> {
+  if (headerKey) return headerKey;
+  const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
+  return String((cfg as { api_key?: string } | null)?.api_key ?? "");
+}
+
+/** JWT do gestor: admin + membro da empresa da missão. Dispatchers não passam daqui. */
+async function jwtAdminDaMissao(bearer: string, missaoId: string): Promise<Response | null> {
+  const { data: u } = await supa.auth.getUser(bearer);
+  const userId = u?.user?.id;
+  if (!userId) return json({ error: "unauthorized" }, 401);
+  const { data: admin } = await supa.rpc("has_role", { _user_id: userId, _role: "admin" });
+  if (!admin) return json({ error: "nao_e_admin" }, 403);
+  const { data: alvo } = await supa.from("ritmo_missoes").select("company_id").eq("id", missaoId).maybeSingle();
+  if (!alvo) return json({ error: "missao nao encontrada" }, 404);
+  const { data: membro } = await supa.rpc("is_company_member", {
+    _company_id: alvo.company_id,
+    _user_id: userId,
+  });
+  if (!membro) return json({ error: "nao_e_membro_da_empresa" }, 403);
+  return null;
+}
+
 async function despachar(tique: "leve" | "fundo", mcpKey: string, limite: number) {
   const { data, error } = await supa.rpc("listar_ritmo_tiques_devidos", {
     p_tique: tique,
@@ -513,10 +536,6 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST") return json({ error: "POST only" }, 405);
 
-  const mcpKey = chaveMcpDe(req, "header-only");
-  const auth = await mcpKeyValida(supa, mcpKey);
-  if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
-
   let body: Record<string, unknown> = {};
   try {
     body = await req.json();
@@ -532,17 +551,33 @@ Deno.serve(async (req) => {
     }, 400);
   }
 
-  if (modo === "dispatcher_leve") {
-    const limite = Number(body?.limite ?? LIMITE_DESPACHO);
-    return await despachar("leve", mcpKey, Number.isFinite(limite) ? limite : LIMITE_DESPACHO);
+  const mcpKeyHeader = chaveMcpDe(req, "header-only");
+  let mcpKey = mcpKeyHeader;
+  let mcpOk = false;
+  if (mcpKeyHeader) {
+    const auth = await mcpKeyValida(supa, mcpKeyHeader);
+    if (!auth.ok) return json({ error: "unauthorized", motivo: auth.motivo }, 401);
+    mcpOk = true;
   }
-  if (modo === "dispatcher_fundo") {
+
+  const ehDispatcher = modo === "dispatcher_leve" || modo === "dispatcher_fundo";
+  if (ehDispatcher) {
+    if (!mcpOk) return json({ error: "unauthorized", motivo: "chave_ausente_ou_curta" }, 401);
     const limite = Number(body?.limite ?? LIMITE_DESPACHO);
-    return await despachar("fundo", mcpKey, Number.isFinite(limite) ? limite : LIMITE_DESPACHO);
+    const n = Number.isFinite(limite) ? limite : LIMITE_DESPACHO;
+    return await despachar(modo === "dispatcher_leve" ? "leve" : "fundo", mcpKey, n);
   }
 
   const missaoId = uuidDe(body?.missao_id);
   if (!missaoId) return json({ error: "missao_id obrigatorio" }, 400);
+
+  if (!mcpOk) {
+    const bearer = bearerDe(req);
+    if (!bearer) return json({ error: "unauthorized", motivo: "chave_ausente_ou_curta" }, 401);
+    const recusa = await jwtAdminDaMissao(bearer, missaoId);
+    if (recusa) return recusa;
+    mcpKey = await chaveCascataMcp("");
+  }
 
   if (modo === "primeiro_passe") return await rodarPrimeiroPasse(missaoId, mcpKey);
   if (modo === "leve") return await rodarLeve(missaoId, mcpKey);

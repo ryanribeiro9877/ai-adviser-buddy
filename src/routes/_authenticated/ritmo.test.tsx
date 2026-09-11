@@ -214,6 +214,9 @@ beforeEach(() => {
     if (nome === "encerrar_ritmo_missao") {
       return { data: { ok: true }, error: null };
     }
+    if (nome === "autorizar_ritmo_missao") {
+      return { data: { ok: true }, error: null };
+    }
     return { data: null, error: null };
   });
   invokeMock.mockImplementation(async (nome: string) => {
@@ -323,8 +326,36 @@ describe("Ritmo", () => {
     expect(screen.getByText("Máximo do envelope")).toBeInTheDocument();
     expect(screen.getByText(/se o ritmo novo se manter depois do prazo/i)).toBeInTheDocument();
     const autorizar = screen.getByRole("button", { name: "Autorizar" });
-    expect(autorizar).toBeDisabled();
-    expect(autorizar).toHaveAttribute("title", "Próxima entrega");
+    expect(autorizar).toBeEnabled();
+    expect(autorizar).not.toHaveAttribute("title", "Próxima entrega");
+  });
+
+  it("visualizador não vê Autorizar em plano pronto", async () => {
+    ctx.isAdmin = false;
+    linhas = [missaoPlanoPronto()];
+    montar();
+    expect(await screen.findByText("12")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Autorizar" })).not.toBeInTheDocument();
+  });
+
+  it("admin autoriza e dispara o primeiro passe sem card", async () => {
+    linhas = [missaoPlanoPronto()];
+    montar();
+    await userEvent.click(await screen.findByRole("button", { name: "Autorizar" }));
+    await waitFor(() => {
+      expect(rpcMock).toHaveBeenCalledWith("autorizar_ritmo_missao", { p_id: "m2" });
+    });
+    expect(invokeMock).toHaveBeenCalledWith("ritmo-executar", {
+      body: { modo: "primeiro_passe", missao_id: "m2" },
+    });
+    await waitFor(() => {
+      expect(logAuditMock).toHaveBeenCalledWith({
+        companyId: "c1",
+        action: "ritmo.autorizar",
+        targetType: "ritmo_missoes",
+        targetId: "m2",
+      });
+    });
   });
 
   it("encerrar em plano_pronto descarta a missão sem autorizar", async () => {
@@ -336,6 +367,12 @@ describe("Ritmo", () => {
         p_id: "m2",
         p_motivo: "descartada",
       });
+    });
+    expect(logAuditMock).toHaveBeenCalledWith({
+      companyId: "c1",
+      action: "ritmo.encerrar",
+      targetType: "ritmo_missoes",
+      targetId: "m2",
     });
     expect(rpcMock).not.toHaveBeenCalledWith("autorizar_ritmo_missao", expect.anything());
   });

@@ -17,6 +17,17 @@ const toml = await Deno.readTextFile(new URL("../../config.toml", import.meta.ur
 
 ok(src.includes('chaveMcpDe(req, "header-only")'), "auth tem de ser chaveMcpDe header-only");
 ok(src.includes("mcpKeyValida"), "auth tem de chamar mcpKeyValida");
+ok(src.includes("bearerDe"), "primeiro_passe/leve/fundo aceitam JWT do usuario");
+ok(src.includes("getUser"), "JWT valida via auth.getUser");
+ok(src.includes('rpc("has_role"'), "JWT exige has_role admin");
+ok(src.includes("is_company_member"), "JWT exige is_company_member da missao");
+{
+  const serve = src.indexOf("Deno.serve");
+  const disp = src.indexOf("ehDispatcher", serve);
+  const jwtCall = src.indexOf("jwtAdminDaMissao(bearer", serve);
+  ok(disp >= 0 && jwtCall > disp, "dispatcher recusa JWT antes de jwtAdminDaMissao");
+  ok(src.includes('motivo: "chave_ausente_ou_curta"'), "dispatcher sem x-mcp-key e 401");
+}
 ok(src.includes("listar_ritmo_tiques_devidos"), "dispatcher tem de chamar listar_ritmo_tiques_devidos");
 ok(src.includes("encerrar_ritmo_missao"), "leve tem de chamar encerrar_ritmo_missao");
 ok(src.includes("verificar_parada"), "parada sem escrita vira ato verificar_parada");

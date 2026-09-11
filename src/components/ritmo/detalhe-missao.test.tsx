@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { DetalheMissao, type MissaoRitmo } from "./detalhe-missao";
@@ -7,9 +8,19 @@ import { DetalheMissao, type MissaoRitmo } from "./detalhe-missao";
 const fromMock = vi.fn();
 const rpcMock = vi.fn();
 const invokeMock = vi.fn();
+const logAuditMock = vi.fn();
+const toastErrorMock = vi.fn();
+const toastSuccessMock = vi.fn();
 
 vi.mock("@/lib/app-context", () => ({
-  logAudit: vi.fn(),
+  logAudit: (...a: unknown[]) => logAuditMock(...a),
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: (...a: unknown[]) => toastErrorMock(...a),
+    success: (...a: unknown[]) => toastSuccessMock(...a),
+  },
 }));
 
 vi.mock("@/integrations/supabase/client", () => ({
@@ -102,11 +113,18 @@ function missao(patch: Partial<MissaoRitmo> & Pick<MissaoRitmo, "status">): Miss
 }
 
 beforeEach(() => {
+  logAuditMock.mockReset();
+  toastErrorMock.mockReset();
+  toastSuccessMock.mockReset();
   fromMock.mockImplementation((tabela: string) => {
     if (tabela === "campaigns") return encadear({ id: "camp-uuid" });
     return encadear([]);
   });
-  rpcMock.mockResolvedValue({ data: { ok: true }, error: null });
+  rpcMock.mockImplementation(async (nome: string) => {
+    if (nome === "autorizar_ritmo_missao") return { data: { ok: true }, error: null };
+    if (nome === "encerrar_ritmo_missao") return { data: { ok: true }, error: null };
+    return { data: null, error: null };
+  });
   invokeMock.mockResolvedValue({ data: { ok: true }, error: null });
 });
 
@@ -126,10 +144,94 @@ describe("DetalheMissao", () => {
     expect(screen.getByText("copy recusada")).toBeInTheDocument();
   });
 
-  it("Autorizar fica visível e desabilitado no plano pronto", async () => {
+  it("visualizador não vê Autorizar no plano pronto", async () => {
+    montar(
+      <DetalheMissao missao={missao({ status: "plano_pronto" })} isAdmin={false} companyId="c1" />,
+    );
+    expect(await screen.findByText("Campanha ativa, learning ok.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Autorizar" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Encerrar agora" })).not.toBeInTheDocument();
+  });
+
+  it("admin em plano_pronto autoriza e dispara o primeiro passe", async () => {
     montar(<DetalheMissao missao={missao({ status: "plano_pronto" })} isAdmin companyId="c1" />);
     const autorizar = await screen.findByRole("button", { name: "Autorizar" });
-    expect(autorizar).toBeDisabled();
-    expect(autorizar).toHaveAttribute("title", "Próxima entrega");
+    expect(autorizar).toBeEnabled();
+    expect(autorizar).not.toHaveAttribute("title", "Próxima entrega");
+    await userEvent.click(autorizar);
+    await waitFor(() => {
+      expect(rpcMock).toHaveBeenCalledWith("autorizar_ritmo_missao", { p_id: "m2" });
+    });
+    expect(invokeMock).toHaveBeenCalledWith("ritmo-executar", {
+      body: { modo: "primeiro_passe", missao_id: "m2" },
+    });
+    expect(logAuditMock).toHaveBeenCalledWith({
+      companyId: "c1",
+      action: "ritmo.autorizar",
+      targetType: "ritmo_missoes",
+      targetId: "m2",
+    });
+  });
+
+  it("Autorizar com ok falso mostra o motivo e não dispara o tique", async () => {
+    rpcMock.mockImplementation(async (nome: string) => {
+      if (nome === "autorizar_ritmo_missao") {
+        return { data: { ok: false, motivo: "master_desligado" }, error: null };
+      }
+      return { data: null, error: null };
+    });
+    montar(<DetalheMissao missao={missao({ status: "plano_pronto" })} isAdmin companyId="c1" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Autorizar" }));
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith("master_desligado");
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(logAuditMock).not.toHaveBeenCalled();
+  });
+
+  it("Autorizar e Encerrar ficam desabilitados enquanto a autorização pende", async () => {
+    let liberar: (v: { data: unknown; error: unknown }) => void = () => {};
+    rpcMock.mockImplementation((nome: string) => {
+      if (nome === "autorizar_ritmo_missao") {
+        return new Promise((resolve) => {
+          liberar = resolve;
+        });
+      }
+      return Promise.resolve({ data: { ok: true }, error: null });
+    });
+    montar(<DetalheMissao missao={missao({ status: "plano_pronto" })} isAdmin companyId="c1" />);
+    await userEvent.click(await screen.findByRole("button", { name: "Autorizar" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Autorizar" })).toBeDisabled();
+    });
+    expect(screen.getByRole("button", { name: "Encerrar agora" })).toBeDisabled();
+    liberar({ data: { ok: true }, error: null });
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalled();
+    });
+  });
+
+  it("encerrar em execução usa motivo humano e audita", async () => {
+    montar(
+      <DetalheMissao
+        missao={missao({ status: "em_execucao", autonomia_concedida_em: "2026-09-11T12:00:00Z" })}
+        isAdmin
+        companyId="c1"
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Autorizar" })).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", { name: "Encerrar agora" }));
+    await waitFor(() => {
+      expect(rpcMock).toHaveBeenCalledWith("encerrar_ritmo_missao", {
+        p_id: "m2",
+        p_motivo: "humano",
+      });
+    });
+    expect(logAuditMock).toHaveBeenCalledWith({
+      companyId: "c1",
+      action: "ritmo.encerrar",
+      targetType: "ritmo_missoes",
+      targetId: "m2",
+    });
   });
 });

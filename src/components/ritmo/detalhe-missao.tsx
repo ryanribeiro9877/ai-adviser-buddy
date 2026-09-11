@@ -288,13 +288,44 @@ export function DetalheMissao({
     }
   };
 
+  const autorizar = async () => {
+    if (ocupado) return;
+    setOcupado(true);
+    try {
+      const { data, error } = await supabase.rpc("autorizar_ritmo_missao", { p_id: missao.id });
+      if (error) throw error;
+      const r = data as { ok?: boolean; motivo?: string } | null;
+      if (r?.ok !== true) {
+        const motivo = typeof r?.motivo === "string" ? r.motivo.trim() : "";
+        toast.error(motivo || "Não foi possível autorizar.");
+        return;
+      }
+      const inv = await supabase.functions.invoke("ritmo-executar", {
+        body: { modo: "primeiro_passe", missao_id: missao.id },
+      });
+      if (inv.error) throw new Error(inv.error.message);
+      await logAudit({
+        companyId,
+        action: "ritmo.autorizar",
+        targetType: "ritmo_missoes",
+        targetId: missao.id,
+      });
+      toast.success("Força-tarefa autorizada.");
+      onMudou?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Não foi possível autorizar.");
+    } finally {
+      setOcupado(false);
+    }
+  };
+
   const encerrar = async () => {
     if (ocupado) return;
     setOcupado(true);
     try {
       const { error } = await supabase.rpc("encerrar_ritmo_missao", {
         p_id: missao.id,
-        p_motivo: "descartada",
+        p_motivo: missao.status === "em_execucao" ? "humano" : "descartada",
       });
       if (error) throw error;
       await logAudit({
@@ -341,11 +372,13 @@ export function DetalheMissao({
               : ""}
           </p>
         </div>
-        {isAdmin && missao.status === "plano_pronto" && (
+        {isAdmin && (missao.status === "plano_pronto" || missao.status === "em_execucao") && (
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled title="Próxima entrega">
-              Autorizar
-            </Button>
+            {missao.status === "plano_pronto" && (
+              <Button type="button" disabled={ocupado} onClick={() => void autorizar()}>
+                Autorizar
+              </Button>
+            )}
             <Button type="button" variant="outline" disabled={ocupado} onClick={() => void encerrar()}>
               Encerrar agora
             </Button>
