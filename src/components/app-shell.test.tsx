@@ -100,6 +100,7 @@ describe("navegação", () => {
       "Relatórios",
       "Empresas e contas",
       "Campanhas",
+      "Ritmo",
       "Conjuntos e públicos",
       "Anúncios e criativos",
       "Funil e conversões",

@@ -16,6 +16,7 @@ import { Route as AuthenticatedWhatsappRouteImport } from './routes/_authenticat
 import { Route as AuthenticatedTarefasRouteImport } from './routes/_authenticated/tarefas'
 import { Route as AuthenticatedRecomendacoesRouteImport } from './routes/_authenticated/recomendacoes'
 import { Route as AuthenticatedRelatoriosRouteImport } from './routes/_authenticated/relatorios'
+import { Route as AuthenticatedRitmoRouteImport } from './routes/_authenticated/ritmo'
 import { Route as AuthenticatedMetasRouteImport } from './routes/_authenticated/metas'
 import { Route as AuthenticatedFunilRouteImport } from './routes/_authenticated/funil'
 import { Route as AuthenticatedEmpresasRouteImport } from './routes/_authenticated/empresas'
@@ -61,6 +62,11 @@ const AuthenticatedRecomendacoesRoute =
 const AuthenticatedRelatoriosRoute = AuthenticatedRelatoriosRouteImport.update({
   id: '/relatorios',
   path: '/relatorios',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedRitmoRoute = AuthenticatedRitmoRouteImport.update({
+  id: '/ritmo',
+  path: '/ritmo',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedMetasRoute = AuthenticatedMetasRouteImport.update({
@@ -136,6 +142,7 @@ export interface FileRoutesByFullPath {
   '/metas': typeof AuthenticatedMetasRoute
   '/recomendacoes': typeof AuthenticatedRecomendacoesRoute
   '/relatorios': typeof AuthenticatedRelatoriosRoute
+  '/ritmo': typeof AuthenticatedRitmoRoute
   '/tarefas': typeof AuthenticatedTarefasRoute
   '/whatsapp': typeof AuthenticatedWhatsappRoute
 }
@@ -155,6 +162,7 @@ export interface FileRoutesByTo {
   '/metas': typeof AuthenticatedMetasRoute
   '/recomendacoes': typeof AuthenticatedRecomendacoesRoute
   '/relatorios': typeof AuthenticatedRelatoriosRoute
+  '/ritmo': typeof AuthenticatedRitmoRoute
   '/tarefas': typeof AuthenticatedTarefasRoute
   '/whatsapp': typeof AuthenticatedWhatsappRoute
 }
@@ -176,6 +184,7 @@ export interface FileRoutesById {
   '/_authenticated/metas': typeof AuthenticatedMetasRoute
   '/_authenticated/recomendacoes': typeof AuthenticatedRecomendacoesRoute
   '/_authenticated/relatorios': typeof AuthenticatedRelatoriosRoute
+  '/_authenticated/ritmo': typeof AuthenticatedRitmoRoute
   '/_authenticated/tarefas': typeof AuthenticatedTarefasRoute
   '/_authenticated/whatsapp': typeof AuthenticatedWhatsappRoute
 }
@@ -197,6 +206,7 @@ export interface FileRouteTypes {
     | '/metas'
     | '/recomendacoes'
     | '/relatorios'
+    | '/ritmo'
     | '/tarefas'
     | '/whatsapp'
   fileRoutesByTo: FileRoutesByTo
@@ -216,6 +226,7 @@ export interface FileRouteTypes {
     | '/metas'
     | '/recomendacoes'
     | '/relatorios'
+    | '/ritmo'
     | '/tarefas'
     | '/whatsapp'
   id:
@@ -236,6 +247,7 @@ export interface FileRouteTypes {
     | '/_authenticated/metas'
     | '/_authenticated/recomendacoes'
     | '/_authenticated/relatorios'
+    | '/_authenticated/ritmo'
     | '/_authenticated/tarefas'
     | '/_authenticated/whatsapp'
   fileRoutesById: FileRoutesById
@@ -295,6 +307,13 @@ declare module '@tanstack/react-router' {
       path: '/relatorios'
       fullPath: '/relatorios'
       preLoaderRoute: typeof AuthenticatedRelatoriosRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/ritmo': {
+      id: '/_authenticated/ritmo'
+      path: '/ritmo'
+      fullPath: '/ritmo'
+      preLoaderRoute: typeof AuthenticatedRitmoRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/metas': {
@@ -391,6 +410,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedMetasRoute: typeof AuthenticatedMetasRoute
   AuthenticatedRecomendacoesRoute: typeof AuthenticatedRecomendacoesRoute
   AuthenticatedRelatoriosRoute: typeof AuthenticatedRelatoriosRoute
+  AuthenticatedRitmoRoute: typeof AuthenticatedRitmoRoute
   AuthenticatedTarefasRoute: typeof AuthenticatedTarefasRoute
   AuthenticatedWhatsappRoute: typeof AuthenticatedWhatsappRoute
 }
@@ -409,6 +429,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedMetasRoute: AuthenticatedMetasRoute,
   AuthenticatedRecomendacoesRoute: AuthenticatedRecomendacoesRoute,
   AuthenticatedRelatoriosRoute: AuthenticatedRelatoriosRoute,
+  AuthenticatedRitmoRoute: AuthenticatedRitmoRoute,
   AuthenticatedTarefasRoute: AuthenticatedTarefasRoute,
   AuthenticatedWhatsappRoute: AuthenticatedWhatsappRoute,
 }

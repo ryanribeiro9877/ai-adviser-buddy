@@ -22,6 +22,7 @@ import {
   ChevronDown,
   Menu,
   FileText,
+  Gauge,
 } from "lucide-react";
 import { useApp } from "@/lib/app-context";
 import { FEATURES } from "@/lib/features";
@@ -48,6 +49,7 @@ const nav: NavItem[] = [
   { to: "/relatorios", label: "Relatórios", icon: FileText },
   { to: "/empresas", label: "Empresas e contas", icon: Building2 },
   { to: "/campanhas", label: "Campanhas", icon: Megaphone },
+  { to: "/ritmo", label: "Ritmo", icon: Gauge },
   { to: "/conjuntos", label: "Conjuntos e públicos", icon: Target },
   { to: "/anuncios", label: "Anúncios e criativos", icon: ImageIcon },
   { to: "/funil", label: "Funil e conversões", icon: Funnel },
