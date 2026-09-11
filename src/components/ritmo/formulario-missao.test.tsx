@@ -58,12 +58,14 @@ function Harness({
   avisoFonte = null,
   fonteCampanhas = "ao_vivo",
   onSubmit,
+  ocupado = false,
 }: {
   inicial: FormMissaoRitmo;
   isAdmin?: boolean;
   avisoFonte?: string | null;
   fonteCampanhas?: "ao_vivo" | "espelho";
   onSubmit?: (form: FormMissaoRitmo) => void;
+  ocupado?: boolean;
 }) {
   const [form, setForm] = useState(inicial);
   return (
@@ -77,6 +79,7 @@ function Harness({
       onRecarregarCampanhas={() => {}}
       isAdmin={isAdmin}
       onSubmit={onSubmit}
+      ocupado={ocupado}
     />
   );
 }
@@ -162,5 +165,14 @@ describe("FormularioMissao", () => {
     montar(<Harness inicial={valido()} isAdmin={false} />);
     expect(screen.queryByRole("button", { name: "Criar força-tarefa" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Dissertação")).toBeDisabled();
+  });
+
+  it("desabilita criar força-tarefa enquanto ocupa a fila", async () => {
+    const onSubmit = vi.fn();
+    montar(<Harness inicial={valido()} ocupado onSubmit={onSubmit} />);
+    const botao = screen.getByRole("button", { name: "Criar força-tarefa" });
+    expect(botao).toBeDisabled();
+    await userEvent.click(botao);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

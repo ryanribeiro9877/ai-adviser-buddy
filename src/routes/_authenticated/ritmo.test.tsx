@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
@@ -64,6 +64,7 @@ vi.mock("@/components/metric-card", () => ({
   EmptyCompany: () => <div data-testid="empty-company" />,
 }));
 
+import { addDaysYmd, hojeYmdBrasilia } from "@/lib/relatorios";
 import { Route } from "./ritmo";
 
 const Ritmo = (Route.options as unknown as { component: () => ReactNode }).component;
@@ -360,10 +361,18 @@ describe("Ritmo", () => {
   });
 
   it("mostra realizado até agora somando snapshots da campanha (id interno)", async () => {
-    linhas = [missaoPlanoPronto()];
+    const hoje = hojeYmdBrasilia(new Date());
+    const dia1 = addDaysYmd(hoje, -1);
+    linhas = [
+      {
+        ...missaoPlanoPronto(),
+        periodo_inicio: dia1,
+        periodo_fim: addDaysYmd(hoje, 9),
+      },
+    ];
     snapshots = [
       {
-        snapshot_date: "2026-09-10",
+        snapshot_date: dia1,
         messaging_started: 8,
         impressions: 100,
         clicks: 2,
@@ -373,7 +382,15 @@ describe("Ritmo", () => {
       },
     ];
     montar();
-    expect(await screen.findByText(/Realizado até agora/)).toBeInTheDocument();
-    expect(screen.getByText("8")).toBeInTheDocument();
+    const caption = await screen.findByText(/Realizado até agora \(2 dias\):/);
+    expect(caption).toHaveTextContent("8");
+    const planoRow = screen.getByText("Se executar o plano").closest("tr");
+    expect(planoRow).toBeTruthy();
+    const d3 = within(planoRow as HTMLElement).getAllByRole("cell")[1];
+    expect(d3).toHaveTextContent("12");
+    expect(d3).not.toHaveTextContent("8");
+    const projecoes = (planoRow as HTMLElement).closest("table");
+    expect(projecoes).toBeTruthy();
+    expect(within(projecoes as HTMLElement).queryByText("8")).not.toBeInTheDocument();
   });
 });

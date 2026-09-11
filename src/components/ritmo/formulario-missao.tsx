@@ -63,6 +63,7 @@ export function FormularioMissao({
   onRecarregarCampanhas,
   isAdmin,
   onSubmit,
+  ocupado = false,
 }: {
   form: FormMissaoRitmo;
   onChange: (next: FormMissaoRitmo) => void;
@@ -73,6 +74,7 @@ export function FormularioMissao({
   onRecarregarCampanhas: () => void;
   isAdmin: boolean;
   onSubmit?: (form: FormMissaoRitmo) => void;
+  ocupado?: boolean;
 }) {
   const set = (patch: Partial<FormMissaoRitmo>) => onChange({ ...form, ...patch });
   const ativas = useMemo(
@@ -82,6 +84,7 @@ export function FormularioMissao({
   const sufixoSonho = unidadeSonho(form.metrica) === "pct" ? "%" : "unid.";
 
   const enviar = () => {
+    if (ocupado) return;
     const extra = form.extra.trim() === "" ? undefined : form.extra;
     const sonho = form.sonho.trim() === "" ? undefined : form.sonho;
     const r = validarPedidoMissao({
@@ -226,7 +229,7 @@ export function FormularioMissao({
       </div>
 
       {isAdmin && (
-        <Button type="button" onClick={enviar}>
+        <Button type="button" onClick={enviar} disabled={ocupado}>
           Criar força-tarefa
         </Button>
       )}

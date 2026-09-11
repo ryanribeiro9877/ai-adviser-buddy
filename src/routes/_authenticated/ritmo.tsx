@@ -189,8 +189,47 @@ function Ritmo() {
       if (inv.error) throw new Error(inv.error.message);
       return id;
     },
-    onSuccess: async (id) => {
+    onSuccess: async (id, pedido) => {
       toast.success("Análise na fila. O plano aparece nesta tela.");
+      if (!companyId) return;
+      const agora = new Date().toISOString();
+      const otimista: MissaoRitmo = {
+        id,
+        company_id: companyId,
+        campaign_id: pedido.campaignId,
+        campaign_name: pedido.campaignName,
+        ad_account_id: null,
+        status: "em_analise",
+        periodo_inicio: pedido.periodoInicio,
+        periodo_fim: pedido.periodoFim,
+        metrica: pedido.metrica,
+        dissertacao: pedido.dissertacao,
+        sonho: pedido.sonho.trim() === "" ? null : Number(pedido.sonho),
+        extra_investimento: pedido.extra.trim() === "" ? 0 : Number(pedido.extra),
+        baseline_gasto_diario: null,
+        baseline_json: {},
+        teto_gasto_janela: null,
+        plano_json: null,
+        leitura_json: null,
+        projecoes_json: null,
+        confianca_baseline: null,
+        fonte_campanhas: campanhasQ.data?.fonte ?? "espelho",
+        autonomia_concedida_em: null,
+        autonomia_concedida_por: null,
+        encerrada_em: null,
+        encerrada_por: null,
+        encerrada_motivo: null,
+        erro_analise: null,
+        job_id: null,
+        criado_por: null,
+        criado_em: agora,
+        atualizado_em: agora,
+      };
+      qc.setQueryData<MissaoRitmo[]>(["ritmo-missoes", companyId], (old) => {
+        if (!old) return [otimista];
+        if (old.some((m) => m.id === id)) return old;
+        return [otimista, ...old];
+      });
       setFormAberto(false);
       setForm(formVazioMissao());
       setDetalheId(id);
@@ -362,7 +401,11 @@ function Ritmo() {
             carregandoCampanhas={campanhasQ.isFetching}
             onRecarregarCampanhas={() => campanhasQ.refetch()}
             isAdmin={isAdmin}
-            onSubmit={(pedido) => criar.mutate(pedido)}
+            ocupado={criar.isPending}
+            onSubmit={(pedido) => {
+              if (criar.isPending) return;
+              criar.mutate(pedido);
+            }}
           />
         </DialogContent>
       </Dialog>

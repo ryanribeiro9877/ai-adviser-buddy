@@ -16,7 +16,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { fmtBRL, fmtInt, fmtPct } from "@/lib/breakdown";
-import { hojeYmdBrasilia } from "@/lib/relatorios";
+import { addDaysYmd, hojeYmdBrasilia } from "@/lib/relatorios";
 import {
   nDiasPrazo,
   parsePlanoRitmo,
@@ -213,9 +213,12 @@ export function DetalheMissao({
   const temSonho = missao.sonho != null && Number(missao.sonho) > 0;
   const corte = corteRealizado(missao.periodo_inicio, missao.autonomia_concedida_em);
   const hoje = hojeYmdBrasilia(new Date());
-  const fimSnap = minYmd(hoje, missao.periodo_fim);
-  const diasDecorridos = nDiasPrazo(corte, fimSnap);
+  const fimAteHoje = minYmd(hoje, missao.periodo_fim);
+  const diasDecorridos = nDiasPrazo(corte, fimAteHoje);
   const vencido = horizonteVencido(diasDecorridos);
+  const fimSnap = vencido
+    ? minYmd(fimAteHoje, addDaysYmd(corte, diasDoHorizonte(vencido) - 1))
+    : fimAteHoje;
 
   const realizadoQ = useQuery({
     queryKey: [
@@ -252,11 +255,15 @@ export function DetalheMissao({
     },
   });
 
-  const snaps = realizadoQ.data ?? [];
+  const snaps = (realizadoQ.data ?? []).filter((s) => {
+    const ymd = (s.snapshot_date ?? "").slice(0, 10);
+    return ymd >= corte && ymd <= fimSnap;
+  });
   const realizado = realizadoDaMetrica(missao.metrica, snaps);
   const mostrarRealizado = snaps.length > 0 && realizado !== null;
 
   const reenviar = async () => {
+    if (ocupado) return;
     setOcupado(true);
     try {
       const { data, error } = await supabase.rpc("reenviar_ritmo_analise", { p_id: missao.id });
@@ -282,6 +289,7 @@ export function DetalheMissao({
   };
 
   const encerrar = async () => {
+    if (ocupado) return;
     setOcupado(true);
     try {
       const { error } = await supabase.rpc("encerrar_ritmo_missao", {
@@ -417,28 +425,21 @@ export function DetalheMissao({
                     <CelulasHorizonte h={sonhoHorizontes} metrica={missao.metrica} />
                   </TableRow>
                 )}
-                {mostrarRealizado && (
+                {mostrarRealizado && vencido && (
                   <TableRow>
                     <TableCell>
-                      Realizado até agora
-                      {vencido ? ` (horizonte de ${diasDoHorizonte(vencido)} dias)` : ""}
+                      Realizado até agora (horizonte de {diasDoHorizonte(vencido)} dias)
                     </TableCell>
-                    {vencido ? (
-                      <CelulasHorizonte h={realizadoHorizontes} metrica={missao.metrica} destaque={vencido} />
-                    ) : (
-                      <>
-                        <TableCell className="text-right tabular-nums">
-                          {fmtHorizonte(realizado, missao.metrica)}
-                        </TableCell>
-                        <TableCell className="text-right">—</TableCell>
-                        <TableCell className="text-right">—</TableCell>
-                        <TableCell className="text-right">—</TableCell>
-                      </>
-                    )}
+                    <CelulasHorizonte h={realizadoHorizontes} metrica={missao.metrica} destaque={vencido} />
                   </TableRow>
                 )}
               </TableBody>
             </Table>
+            {mostrarRealizado && !vencido && (
+              <p className="text-sm text-muted-foreground">
+                Realizado até agora ({diasDecorridos} dias): {fmtHorizonte(realizado, missao.metrica)}
+              </p>
+            )}
             {nDias < 15 && (
               <p className="text-xs text-muted-foreground">
                 15 e 30 dias: se o ritmo novo se manter depois do prazo
