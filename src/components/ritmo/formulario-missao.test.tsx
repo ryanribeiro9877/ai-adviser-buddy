@@ -145,6 +145,9 @@ describe("FormularioMissao", () => {
 
   it("opções de campanha usam texto preto no seletor", () => {
     montar(<Harness inicial={formVazioMissao()} />);
+    const seletor = screen.getByLabelText("Campanha");
+    expect(seletor.className).toContain("text-black");
+    expect(seletor.className).toContain("[color-scheme:light]");
     expect(screen.getByRole("option", { name: "Consignado SP" }).className).toContain("text-black");
     expect(screen.getByRole("option", { name: "Escolha uma campanha ativa" }).className).toContain(
       "text-black",

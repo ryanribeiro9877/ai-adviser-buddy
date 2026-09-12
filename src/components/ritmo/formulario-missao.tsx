@@ -18,8 +18,14 @@ import {
   type CampanhaRelatorio,
 } from "@/lib/relatorios";
 
-/** Lista nativa no Windows/Chrome é clara; o tema do app é escuro (texto claro). */
+/**
+ * Lista nativa no Windows/Chrome ignora className em <option> e herda a cor do <select>.
+ * color-scheme:light + texto preto no próprio select é o que deixa os nomes legíveis.
+ */
+const CLASSE_SELETOR_CAMPANHA =
+  "flex h-9 w-full rounded-md border border-input bg-white px-3 py-1 text-sm text-black shadow-sm [color-scheme:light] disabled:cursor-not-allowed disabled:opacity-50";
 const CLASSE_OPCAO_CAMPANHA = "bg-white text-black";
+const ESTILO_OPCAO_CAMPANHA = { color: "#000", backgroundColor: "#fff" } as const;
 
 /**
  * Digitos do campo → reais canônicos ("50000000", "50.5") para Number()/RPC.
@@ -173,7 +179,7 @@ export function FormularioMissao({
         {avisoFonte && <p className="text-xs text-muted-foreground">{avisoFonte}</p>}
         <select
           id="ritmo-campanha"
-          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+          className={CLASSE_SELETOR_CAMPANHA}
           disabled={!isAdmin}
           value={form.campaignId}
           onChange={(e) => {
@@ -186,11 +192,16 @@ export function FormularioMissao({
             });
           }}
         >
-          <option value="" className={CLASSE_OPCAO_CAMPANHA}>
+          <option value="" className={CLASSE_OPCAO_CAMPANHA} style={ESTILO_OPCAO_CAMPANHA}>
             Escolha uma campanha ativa
           </option>
           {ativas.map((c) => (
-            <option key={c.external_id} value={c.external_id} className={CLASSE_OPCAO_CAMPANHA}>
+            <option
+              key={c.external_id}
+              value={c.external_id}
+              className={CLASSE_OPCAO_CAMPANHA}
+              style={ESTILO_OPCAO_CAMPANHA}
+            >
               {c.nome}
             </option>
           ))}
