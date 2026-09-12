@@ -6,6 +6,7 @@ import type { CampanhaRelatorio } from "@/lib/relatorios";
 import {
   FormularioMissao,
   formVazioMissao,
+  formatarExtraInvestimento,
   type FormMissaoRitmo,
 } from "./formulario-missao";
 
@@ -140,6 +141,26 @@ describe("FormularioMissao", () => {
     montar(<Harness inicial={formVazioMissao()} />);
     expect(screen.getByRole("option", { name: "Consignado SP" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Pausada velha" })).not.toBeInTheDocument();
+  });
+
+  it("opções de campanha usam texto preto no seletor", () => {
+    montar(<Harness inicial={formVazioMissao()} />);
+    expect(screen.getByRole("option", { name: "Consignado SP" }).className).toContain("text-black");
+    expect(screen.getByRole("option", { name: "Escolha uma campanha ativa" }).className).toContain(
+      "text-black",
+    );
+  });
+
+  it("formata extra de investimento em real ao digitar e envia o número em reais", async () => {
+    const onSubmit = vi.fn();
+    montar(<Harness inicial={valido({ extra: "" })} onSubmit={onSubmit} />);
+    const campo = screen.getByLabelText("Extra de investimento (R$, opcional)");
+    expect(formatarExtraInvestimento("50000000")).toMatch(/R\$\s*50\.000\.000/);
+    await userEvent.type(campo, "50000000");
+    expect((campo as HTMLInputElement).value).toMatch(/R\$\s*50\.000\.000/);
+    await userEvent.click(screen.getByRole("button", { name: "Criar força-tarefa" }));
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ extra: "50000000" }));
   });
 
   it("mostra aviso da fonte espelho", () => {

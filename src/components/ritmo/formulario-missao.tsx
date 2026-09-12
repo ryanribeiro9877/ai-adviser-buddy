@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { fmtBRL } from "@/lib/breakdown";
 import {
   METRICAS_RITMO,
   rotuloMetrica,
@@ -16,6 +17,52 @@ import {
   hojeYmdBrasilia,
   type CampanhaRelatorio,
 } from "@/lib/relatorios";
+
+/** Lista nativa no Windows/Chrome é clara; o tema do app é escuro (texto claro). */
+const CLASSE_OPCAO_CAMPANHA = "bg-white text-black";
+
+/**
+ * Digitos do campo → reais canônicos ("50000000", "50.5") para Number()/RPC.
+ * Ponto de milhar é ignorado; vírgula é decimal.
+ */
+export function parseExtraInvestimento(bruto: string): string {
+  const t = bruto.trim();
+  if (t === "") return "";
+  const negativo = t.startsWith("-");
+  const so = bruto.replace(/[^\d,]/g, "");
+  if (so === "" || so === ",") return "";
+  const virgula = so.indexOf(",");
+  const temCentavos = virgula !== -1;
+  const inteiros = (temCentavos ? so.slice(0, virgula) : so).replace(/\D/g, "");
+  const centavos = temCentavos ? so.slice(virgula + 1).replace(/\D/g, "").slice(0, 2) : "";
+  const intNorm = inteiros.replace(/^0+(?=\d)/, "");
+  if (!temCentavos) {
+    if (intNorm === "") return "";
+    return `${negativo ? "-" : ""}${intNorm}`;
+  }
+  const intOuZero = intNorm === "" ? "0" : intNorm;
+  const corpo = centavos === "" ? `${intOuZero}.` : `${intOuZero}.${centavos}`;
+  return `${negativo ? "-" : ""}${corpo}`;
+}
+
+/** Mostra pt-BR (R$ 50.000.000); centavos só quando existem. */
+export function formatarExtraInvestimento(extra: string): string {
+  const t = extra.trim();
+  if (t === "") return "";
+  const incompleto = t.endsWith(".");
+  const n = Number(incompleto ? t.slice(0, -1) || "0" : t);
+  if (!Number.isFinite(n)) return extra;
+  if (incompleto || Number.isInteger(n)) {
+    const texto = n.toLocaleString("pt-BR", {
+      style: "currency",
+      currency: "BRL",
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    });
+    return incompleto ? `${texto},` : texto;
+  }
+  return fmtBRL(n);
+}
 
 export type FormMissaoRitmo = {
   campaignId: string;
@@ -139,9 +186,11 @@ export function FormularioMissao({
             });
           }}
         >
-          <option value="">Escolha uma campanha ativa</option>
+          <option value="" className={CLASSE_OPCAO_CAMPANHA}>
+            Escolha uma campanha ativa
+          </option>
           {ativas.map((c) => (
-            <option key={c.external_id} value={c.external_id}>
+            <option key={c.external_id} value={c.external_id} className={CLASSE_OPCAO_CAMPANHA}>
               {c.nome}
             </option>
           ))}
@@ -207,12 +256,12 @@ export function FormularioMissao({
           <Label htmlFor="ritmo-extra">Extra de investimento (R$, opcional)</Label>
           <Input
             id="ritmo-extra"
-            type="number"
-            min={0}
-            step="0.01"
+            type="text"
+            inputMode="decimal"
+            autoComplete="off"
             disabled={!isAdmin}
-            value={form.extra}
-            onChange={(e) => set({ extra: e.target.value })}
+            value={formatarExtraInvestimento(form.extra)}
+            onChange={(e) => set({ extra: parseExtraInvestimento(e.target.value) })}
           />
         </div>
       </div>
