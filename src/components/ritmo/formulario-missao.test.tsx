@@ -92,7 +92,14 @@ function montar(el: ReactNode) {
 beforeEach(() => {
   toastErrorMock.mockReset();
   toastSuccessMock.mockReset();
+  Element.prototype.hasPointerCapture = vi.fn(() => false);
+  Element.prototype.releasePointerCapture = vi.fn();
+  Element.prototype.scrollIntoView = vi.fn();
 });
+
+async function abrirListaCampanha() {
+  await userEvent.click(screen.getByRole("combobox", { name: "Campanha" }));
+}
 
 describe("FormularioMissao", () => {
   it("recusa dissertação vazia em português", async () => {
@@ -137,33 +144,41 @@ describe("FormularioMissao", () => {
     expect(toastErrorMock).toHaveBeenCalledWith("Escolha uma métrica válida.");
   });
 
-  it("oculta campanha pausada e mostra só ativas", () => {
+  it("oculta campanha pausada e mostra só ativas", async () => {
     montar(<Harness inicial={formVazioMissao()} />);
-    expect(screen.getByRole("option", { name: "Consignado SP" })).toBeInTheDocument();
+    await abrirListaCampanha();
+    expect(await screen.findByRole("option", { name: "Consignado SP" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Pausada velha" })).not.toBeInTheDocument();
   });
 
-  it("opções de campanha usam texto preto no seletor", () => {
+  it("opções de campanha usam texto preto na lista controlada", async () => {
     montar(<Harness inicial={formVazioMissao()} />);
-    const seletor = screen.getByLabelText("Campanha");
-    expect(seletor.className).toContain("text-black");
-    expect(seletor.className).toContain("[color-scheme:light]");
-    expect(screen.getByRole("option", { name: "Consignado SP" }).className).toContain("text-black");
-    expect(screen.getByRole("option", { name: "Escolha uma campanha ativa" }).className).toContain(
-      "text-black",
-    );
+    expect(screen.queryByRole("option", { name: "Consignado SP" })).not.toBeInTheDocument();
+    await abrirListaCampanha();
+    const item = await screen.findByRole("option", { name: "Consignado SP" });
+    expect(item.className).toContain("text-black");
+    expect(item).toHaveStyle({ color: "rgb(0, 0, 0)" });
+    expect(screen.getByText("Escolha uma campanha ativa")).toBeInTheDocument();
   });
 
   it("formata extra de investimento em real ao digitar e envia o número em reais", async () => {
     const onSubmit = vi.fn();
     montar(<Harness inicial={valido({ extra: "" })} onSubmit={onSubmit} />);
     const campo = screen.getByLabelText("Extra de investimento (R$, opcional)");
-    expect(formatarExtraInvestimento("50000000")).toMatch(/R\$\s*50\.000\.000/);
-    await userEvent.type(campo, "50000000");
-    expect((campo as HTMLInputElement).value).toMatch(/R\$\s*50\.000\.000/);
+    expect(formatarExtraInvestimento("5000000")).toMatch(/R\$\s*5\.000\.000/);
+    await userEvent.type(campo, "5000000");
+    expect((campo as HTMLInputElement).value).toMatch(/R\$\s*5\.000\.000/);
+    expect((campo as HTMLInputElement).value).not.toBe("5000000");
     await userEvent.click(screen.getByRole("button", { name: "Criar força-tarefa" }));
     expect(toastErrorMock).not.toHaveBeenCalled();
-    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ extra: "50000000" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ extra: "5000000" }));
+  });
+
+  it("extra já preenchido com inteiro cru aparece em real, nunca como 5000000", () => {
+    montar(<Harness inicial={valido({ extra: "5000000" })} />);
+    const campo = screen.getByLabelText("Extra de investimento (R$, opcional)") as HTMLInputElement;
+    expect(campo.value).toMatch(/R\$\s*5\.000\.000/);
+    expect(campo.value).not.toBe("5000000");
   });
 
   it("mostra aviso da fonte espelho", () => {
@@ -181,7 +196,8 @@ describe("FormularioMissao", () => {
   it("sufixo do sonho muda com a métrica", async () => {
     montar(<Harness inicial={valido({ metrica: "conversas" })} />);
     expect(screen.getByText("unid.")).toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByLabelText("Métrica"), "ctr");
+    await userEvent.click(screen.getByRole("combobox", { name: "Métrica" }));
+    await userEvent.click(await screen.findByRole("option", { name: "CTR" }));
     expect(screen.getByText("%")).toBeInTheDocument();
   });
 
@@ -189,6 +205,7 @@ describe("FormularioMissao", () => {
     montar(<Harness inicial={valido()} isAdmin={false} />);
     expect(screen.queryByRole("button", { name: "Criar força-tarefa" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Dissertação")).toBeDisabled();
+    expect(screen.getByRole("combobox", { name: "Campanha" })).toBeDisabled();
   });
 
   it("desabilita criar força-tarefa enquanto ocupa a fila", async () => {

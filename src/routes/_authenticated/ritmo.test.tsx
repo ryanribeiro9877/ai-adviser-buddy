@@ -171,6 +171,9 @@ function missaoPlanoPronto(): Record<string, unknown> {
 }
 
 beforeEach(() => {
+  Element.prototype.hasPointerCapture = vi.fn(() => false);
+  Element.prototype.releasePointerCapture = vi.fn();
+  Element.prototype.scrollIntoView = vi.fn();
   ctx = {
     selectedCompany: { id: "c1", name: "JCR2", industry: null },
     selectedCompanyId: "c1",
@@ -288,8 +291,14 @@ describe("Ritmo", () => {
   it("submit válido enfileira a análise e dispara o job", async () => {
     montar();
     await userEvent.click(await screen.findByRole("button", { name: "Nova força-tarefa" }));
-    await screen.findByRole("option", { name: "Consignado SP" });
-    await userEvent.selectOptions(screen.getByLabelText("Campanha"), "120");
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "pipeboard-read",
+        expect.objectContaining({ body: expect.objectContaining({ modo: "listar_campanhas" }) }),
+      );
+    });
+    await userEvent.click(screen.getByRole("combobox", { name: "Campanha" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Consignado SP" }));
     await userEvent.type(screen.getByLabelText("Dissertação"), "subir conversas");
     await userEvent.click(screen.getByRole("button", { name: "Criar força-tarefa" }));
     await waitFor(() => {

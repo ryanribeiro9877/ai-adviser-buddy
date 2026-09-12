@@ -5,6 +5,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { fmtBRL } from "@/lib/breakdown";
 import {
   METRICAS_RITMO,
@@ -18,14 +25,11 @@ import {
   type CampanhaRelatorio,
 } from "@/lib/relatorios";
 
-/**
- * Lista nativa no Windows/Chrome ignora className em <option> e herda a cor do <select>.
- * color-scheme:light + texto preto no próprio select é o que deixa os nomes legíveis.
- */
-const CLASSE_SELETOR_CAMPANHA =
-  "flex h-9 w-full rounded-md border border-input bg-white px-3 py-1 text-sm text-black shadow-sm [color-scheme:light] disabled:cursor-not-allowed disabled:opacity-50";
-const CLASSE_OPCAO_CAMPANHA = "bg-white text-black";
-const ESTILO_OPCAO_CAMPANHA = { color: "#000", backgroundColor: "#fff" } as const;
+/** Lista aberta: preto no branco. Hover cinza claro. Gatilho fechado segue o diálogo. */
+const CLASSE_LISTA_SELETOR = "z-[300] bg-white text-black";
+const CLASSE_ITEM_SELETOR =
+  "cursor-pointer bg-white text-black hover:bg-neutral-200 hover:text-black focus:bg-neutral-200 focus:text-black data-[highlighted]:bg-neutral-200 data-[highlighted]:text-black data-[state=checked]:text-black";
+const ESTILO_ITEM_SELETOR = { color: "#000" } as const;
 
 /**
  * Digitos do campo → reais canônicos ("50000000", "50.5") para Number()/RPC.
@@ -51,13 +55,17 @@ export function parseExtraInvestimento(bruto: string): string {
   return `${negativo ? "-" : ""}${corpo}`;
 }
 
-/** Mostra pt-BR (R$ 50.000.000); centavos só quando existem. */
+/** Mostra pt-BR (R$ 5.000.000); centavos só quando existem. Nunca devolve só dígitos. */
 export function formatarExtraInvestimento(extra: string): string {
   const t = extra.trim();
   if (t === "") return "";
   const incompleto = t.endsWith(".");
   const n = Number(incompleto ? t.slice(0, -1) || "0" : t);
-  if (!Number.isFinite(n)) return extra;
+  if (!Number.isFinite(n)) {
+    const canon = parseExtraInvestimento(extra);
+    if (canon !== "" && canon !== extra) return formatarExtraInvestimento(canon);
+    return extra;
+  }
   if (incompleto || Number.isInteger(n)) {
     const texto = n.toLocaleString("pt-BR", {
       style: "currency",
@@ -177,13 +185,10 @@ export function FormularioMissao({
           </div>
         </div>
         {avisoFonte && <p className="text-xs text-muted-foreground">{avisoFonte}</p>}
-        <select
-          id="ritmo-campanha"
-          className={CLASSE_SELETOR_CAMPANHA}
+        <Select
+          value={form.campaignId || undefined}
           disabled={!isAdmin}
-          value={form.campaignId}
-          onChange={(e) => {
-            const id = e.target.value;
+          onValueChange={(id) => {
             const c = ativas.find((x) => x.external_id === id);
             set({
               campaignId: id,
@@ -192,20 +197,22 @@ export function FormularioMissao({
             });
           }}
         >
-          <option value="" className={CLASSE_OPCAO_CAMPANHA} style={ESTILO_OPCAO_CAMPANHA}>
-            Escolha uma campanha ativa
-          </option>
-          {ativas.map((c) => (
-            <option
-              key={c.external_id}
-              value={c.external_id}
-              className={CLASSE_OPCAO_CAMPANHA}
-              style={ESTILO_OPCAO_CAMPANHA}
-            >
-              {c.nome}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger id="ritmo-campanha" className="w-full">
+            <SelectValue placeholder="Escolha uma campanha ativa" />
+          </SelectTrigger>
+          <SelectContent position="item-aligned" className={CLASSE_LISTA_SELETOR}>
+            {ativas.map((c) => (
+              <SelectItem
+                key={c.external_id}
+                value={c.external_id}
+                className={CLASSE_ITEM_SELETOR}
+                style={ESTILO_ITEM_SELETOR}
+              >
+                {c.nome}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         {ativas.length === 0 && (
           <p className="text-xs text-muted-foreground">Nenhuma campanha ativa nesta empresa.</p>
         )}
@@ -234,19 +241,27 @@ export function FormularioMissao({
         </div>
         <div className="space-y-2">
           <Label htmlFor="ritmo-metrica">Métrica</Label>
-          <select
-            id="ritmo-metrica"
-            className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!isAdmin}
+          <Select
             value={form.metrica}
-            onChange={(e) => set({ metrica: e.target.value })}
+            disabled={!isAdmin}
+            onValueChange={(v) => set({ metrica: v })}
           >
-            {METRICAS_RITMO.map((m) => (
-              <option key={m} value={m}>
-                {rotuloMetrica(m)}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger id="ritmo-metrica" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="item-aligned" className={CLASSE_LISTA_SELETOR}>
+              {METRICAS_RITMO.map((m) => (
+                <SelectItem
+                  key={m}
+                  value={m}
+                  className={CLASSE_ITEM_SELETOR}
+                  style={ESTILO_ITEM_SELETOR}
+                >
+                  {rotuloMetrica(m)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
         <div className="space-y-2">
           <Label htmlFor="ritmo-sonho">Sonho (opcional)</Label>
