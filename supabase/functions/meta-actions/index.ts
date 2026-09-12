@@ -1,4 +1,6 @@
-// supabase/functions/meta-actions/index.ts (v5.62)
+// supabase/functions/meta-actions/index.ts (v5.63)
+// v5.63 (12/09/2026) - ALTERAR ORCAMENTO aceita alias orcamento_diario_reais no payload
+//   (o chat passou a emitir com os dois nomes apos o incidente CONJ.04 / R$ 20).
 // v5.62 (10/09/2026) - ALTERAR GEO DO CONJUNTO PUBLICADO. O gestor pediu recorte RMS
 //   (8 cidades BA) nos CONJ.1-4 VISTTA e o chat disse que geo nao se edita no objeto
 //   vivo — so existia geo em criar_conjunto, entao nasciam conjuntos novos a +R$ 30/dia.
@@ -450,6 +452,7 @@ import { julgarOrcamentoDiario } from "../_shared/avaliar_orcamento.ts";
 import {
   conferirOrcamentoReais,
   ehFlagOrcamentoConfirmadoReais,
+  reaisPedidoAlterarOrcamento,
 } from "../_shared/orcamento_reais.ts";
 import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import {
@@ -5113,7 +5116,7 @@ Deno.serve(async (req) => {
       post = { special_ad_categories: JSON.stringify(cats) };
     }
     if (acao === "alterar_orcamento") {
-      let reais = Number(r.payload?.novo_orcamento_diario_reais ?? 0);
+      let reais = reaisPedidoAlterarOrcamento(r.payload);
       if (!(reais > 0)) {
         await audit(r.company_id, sistema, "meta_action_failed", r.id, {
           motivo: "orcamento invalido",

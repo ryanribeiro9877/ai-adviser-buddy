@@ -19,6 +19,25 @@ export function pareceOrcamentoCentavosComoReais(reais: number): boolean {
   return comoReais >= 5 && comoReais <= 80;
 }
 
+/**
+ * CONJ.04, 9331-6245 e "nos 4 conjuntos" nao sao diaria.
+ * Incidente 12/09/2026: "altere o orçamento desse conjunto JUR_WA_CONJ.04_9331-6245 para 20,00"
+ * extraia 4 do NOME e o card de alterar_orcamento morria com orcamento_diferente_do_contrato.
+ */
+export function ehIdentificadorNaoOrcamento(texto: string, idx: number, trechoInt: string): boolean {
+  const before = String(texto ?? "").slice(Math.max(0, idx - 24), idx);
+  const after = String(texto ?? "").slice(idx + String(trechoInt).length, idx + String(trechoInt).length + 16);
+  if (/CONJ\.?\s*_?$/i.test(before)) return true;
+  if (/\d{3,}\s*[-_]$/.test(before)) return true;
+  if (/^\s*[-_]\s*\d{3,}/.test(after)) return true;
+  if (/[_-]$/.test(before) && /^\d{3,}/.test(trechoInt) && /[-_]\d/.test(after)) return true;
+  if (/\bnos\s+$/i.test(before)) return true;
+  // JUN/JUL26, 8CRIATIVOS — numero colado em letra nao e diaria.
+  if (/[A-Za-zÁ-ú]$/.test(before)) return true;
+  if (/^[A-Za-zÁ-ú]/.test(after)) return true;
+  return false;
+}
+
 export function extrairOrcamentoDiarioDaFala(texto: string): number | null {
   const t = String(texto ?? "");
   if (!t.trim()) return null;
@@ -26,6 +45,7 @@ export function extrairOrcamentoDiarioDaFala(texto: string): number | null {
   const add = (idx: number, intP: string, dec?: string | null) => {
     const n = parseParte(intP, dec);
     if (n == null) return;
+    if (ehIdentificadorNaoOrcamento(t, idx, intP)) return;
     hits.push({ idx, val: n });
   };
 
@@ -39,18 +59,53 @@ export function extrairOrcamentoDiarioDaFala(texto: string): number | null {
         const janela = t.slice(i0, i1);
         if (!/or[cç]amento|reais|r\$|\/\s*dia|conjuntos?/i.test(janela)) continue;
       }
-      add(m.index, m[1], m[2] ?? null);
+      const g = m[1];
+      const numIdx = g ? m.index + m[0].lastIndexOf(g) : m.index;
+      add(numIdx, m[1], m[2] ?? null);
     }
   };
 
-  run(/or[cç]amento[\s\S]{0,80}?(\d{1,4})(?:[.,](\d{2}))?/gi);
+  const reOrc = /or[cç]amento/gi;
+  let mOrc: RegExpExecArray | null;
+  while ((mOrc = reOrc.exec(t))) {
+    const start = mOrc.index + mOrc[0].length;
+    const end = Math.min(t.length, start + 120);
+    const janela = t.slice(start, end);
+    const numRe = /(\d{1,4})(?:[.,](\d{2}))?/g;
+    let n: RegExpExecArray | null;
+    while ((n = numRe.exec(janela))) {
+      add(start + n.index, n[1], n[2] ?? null);
+    }
+  }
   run(/(?:r\$)\s*(\d{1,4})(?:[.,](\d{2}))?/gi);
   run(/(\d{1,4})(?:[.,](\d{2}))?\s*(?:reais?|\/\s*dia)\b/gi);
   run(/\(\s*(\d{1,4})[.,](\d{2})\s*\)/g, true);
+  run(/(?:para|pra)\s+(?:r\$\s*)?(\d{1,4})(?:[.,](\d{2}))?/gi, true);
 
   if (!hits.length) return null;
   hits.sort((a, b) => a.idx - b.idx);
   return hits[hits.length - 1].val;
+}
+
+/**
+ * Valor pedido em alterar_orcamento. Aceita o campo da acao e o alias de criar_conjunto
+ * (incidente 12/09/2026: a primeira chamada veio com orcamento_diario_reais).
+ */
+export function reaisPedidoAlterarOrcamento(origem: unknown): number {
+  const bag: unknown[] = [];
+  if (origem && typeof origem === "object") {
+    const o = origem as Record<string, unknown>;
+    bag.push(o.novo_orcamento_diario_reais, o.orcamento_diario_reais);
+    if (o.params && typeof o.params === "object") {
+      const p = o.params as Record<string, unknown>;
+      bag.push(p.novo_orcamento_diario_reais, p.orcamento_diario_reais);
+    }
+  }
+  for (const c of bag) {
+    const n = Number(c);
+    if (n > 0 && Number.isFinite(n)) return n;
+  }
+  return 0;
 }
 
 /**

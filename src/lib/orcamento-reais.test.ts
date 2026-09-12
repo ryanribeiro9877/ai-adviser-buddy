@@ -5,6 +5,7 @@ import {
   ehFlagOrcamentoConfirmadoReais,
   extrairOrcamentoDiarioDaFala,
   pareceOrcamentoCentavosComoReais,
+  reaisPedidoAlterarOrcamento,
 } from "./orcamento-reais";
 
 describe("extrairOrcamentoDiarioDaFala", () => {
@@ -140,5 +141,34 @@ describe("extrairOrcamentoDiarioDaFala — bordas", () => {
     // "(30,00)" no meio de um contrato de conjuntos e orcamento; o mesmo
     // "(45,00)" numa lista de tarefas nao e.
     expect(extrairOrcamentoDiarioDaFala("o item (45,00) ficou para a proxima etapa")).toBe(null);
+  });
+
+  it("CONJ.04 no nome nao vira R$ 4 — o 20,00 do pedido e o contrato", () => {
+    const fala =
+      "altere o orçamento desse conjunto JUR_WA_CONJ.04_9331-6245 para 20,00 por favor";
+    expect(extrairOrcamentoDiarioDaFala(fala)).toBe(20);
+  });
+
+  it("nomenclatura JUN/JUL26 e 8CRIATIVOS nao viram diaria", () => {
+    expect(
+      extrairOrcamentoDiarioDaFala(
+        "o orçamento do CONJ.1_LAF_8CRIATIVOS_JUN/JUL26 fica (30,00)",
+      ),
+    ).toBe(30);
+  });
+
+  it("nome CONJ.04 sem valor de diaria nao inventa contrato", () => {
+    expect(
+      extrairOrcamentoDiarioDaFala("altere o orçamento desse conjunto JUR_WA_CONJ.04_9331-6245"),
+    ).toBe(null);
+  });
+});
+
+describe("reaisPedidoAlterarOrcamento", () => {
+  it("aceita o campo da acao e o alias de criar_conjunto", () => {
+    expect(reaisPedidoAlterarOrcamento({ novo_orcamento_diario_reais: 20 })).toBe(20);
+    expect(reaisPedidoAlterarOrcamento({ orcamento_diario_reais: 20 })).toBe(20);
+    expect(reaisPedidoAlterarOrcamento({ params: { orcamento_diario_reais: 20 } })).toBe(20);
+    expect(reaisPedidoAlterarOrcamento({})).toBe(0);
   });
 });

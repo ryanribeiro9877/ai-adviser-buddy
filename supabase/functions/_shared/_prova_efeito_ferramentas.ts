@@ -46,6 +46,10 @@ const MIGRATIONS = [
     "supabase/migrations/20260910180000_seguidores_instagram_ads.sql",
     RAIZ,
   ),
+  new URL(
+    "supabase/migrations/20260912180000_alterar_orcamento_conjunto_publicado.sql",
+    RAIZ,
+  ),
 ];
 
 // Os 9 setores de public.agents. Setor fora desta lista nao e erro de digitacao inofensivo: a
@@ -74,6 +78,7 @@ const DONO_DA_ESCRITA: Record<string, string> = {
   registrar_veredito_peca_em_revisao: "AG-04",
   alterar_categoria_especial: "AG-06",
   alterar_geo_do_conjunto: "AG-06",
+  alterar_orcamento: "AG-06",
   propose_action: "AG-06",
   renomear_campanha: "AG-06",
   upload_midia: "AG-06",
@@ -172,11 +177,11 @@ for (const chave of Object.keys(DONO_DA_ESCRITA)) {
   );
 }
 
-// 6) O total. 57 em 03/09/2026; 58 com alterar_geo; 59 com get_seguidores_instagram_ads.
-// Ferramenta nova faz este teste falhar de proposito.
+// 6) O total. 57 em 03/09/2026; 58 com alterar_geo; 59 com get_seguidores_instagram_ads;
+//    60 com alterar_orcamento. Ferramenta nova faz este teste falhar de proposito.
 ok(
-  doSnapshot.length === 59,
-  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 59 — classifique a nova e atualize este numero`,
+  doSnapshot.length === 60,
+  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 60 — classifique a nova e atualize este numero`,
 );
 
 // ===== Tabela viva (opcional) =====

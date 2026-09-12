@@ -98,7 +98,7 @@ export const TOPICOS_DISPENSAVEIS: TopicoMemoria[] = [
   {
     nome: "acao_e_emissao",
     fato:
-      /\b(card|propose_action|acao sancionada|acoes sancionadas|renomear|escalar_|duplicac|criar_campanha|criar_conjunto|create_adset|contrato de ativacao|aprovar|emissao de cards|emite os n|alterar_categoria|permissao|execucao e sincrona|abo pelo pipeboard|conjunto sem orcamento|escrita meta habilitada|conta habilitada para criacao|driver de transporte)\b/i,
+      /\b(card|propose_action|acao sancionada|acoes sancionadas|renomear|escalar_|duplicac|criar_campanha|criar_conjunto|create_adset|contrato de ativacao|aprovar|emissao de cards|emite os n|alterar_categoria|alterar_orcamento|permissao|execucao e sincrona|abo pelo pipeboard|conjunto sem orcamento|escrita meta habilitada|conta habilitada para criacao|driver de transporte)\b/i,
     gatilho:
       /\b(cri(a|e|ar|ando)|emit|card|aprov|renome|escal|duplic|pausa|ativa|desativa|subir|public|alter|execut|a[cç][aã]o|acoes|lance|or[cç]amento novo)\b/i,
     porque:

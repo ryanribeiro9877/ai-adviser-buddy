@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v28.99)
+// supabase/functions/traffic-chat/index.ts (v29.00)
+// v29.00 (12/09/2026) - ALTERAR ORCAMENTO DE CONJUNTO PUBLICADO. O gestor pediu
+//   JUR_WA_CONJ.04_9331-6245 para R$ 20/dia. A primeira chamada usou o campo de
+//   CRIAR (orcamento_diario_reais); a segunda, o campo certo, e o extrator leu
+//   CONJ.04 como contrato de R$ 4,00. Recusa orcamento_diferente_do_contrato e
+//   o agente pediu confirmacao em vez de emitir. Entram: extrator ignora CONJ.N
+//   e telefone no nome; alias do campo; contrato da ULTIMA fala no alterar;
+//   tool dedicada alterar_orcamento no AG-06.
 // v28.99 (10/09/2026) - GEO DE CONJUNTO PUBLICADO. O gestor pediu cidades RMS nos
 //   CONJ.1-4 VISTTA e o chat recusou ("nao ha ferramenta") e emitiu conjuntos novos.
 //   Graph/Pipeboard ja aceitam update_adset(targeting). Entram alterar_geo_do_conjunto
@@ -754,6 +761,7 @@ import {
   conferirOrcamentoReais,
   ehFlagOrcamentoConfirmadoReais,
   extrairOrcamentoDiarioDaFala,
+  reaisPedidoAlterarOrcamento,
 } from "../_shared/orcamento_reais.ts";
 import { resolverNomeFinal, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import {
@@ -927,6 +935,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   get_ads_ranking: 4,
   vincular_instagram_dos_anuncios: 2,
   alterar_geo_do_conjunto: 8,
+  alterar_orcamento: 8,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
   get_seguidores_instagram_ads: 2,
@@ -1118,6 +1127,19 @@ async function contratoOrcamentoDaConversa(convId: string | null | undefined): P
     .order("created_at", { ascending: true })
     .limit(80);
   return extrairOrcamentoDiarioDaFala((data ?? []).map((m: { content?: string }) => String(m.content ?? "")).join("\n\n"));
+}
+
+/** Pedido de ALTERAR usa so a ultima fala: orcamento de criacao anterior nao trava este ato. */
+async function contratoOrcamentoDaUltimaFala(convId: string | null | undefined): Promise<number | null> {
+  if (!convId) return null;
+  const { data } = await supa.from("chat_messages")
+    .select("content")
+    .eq("conversation_id", convId)
+    .eq("role", "user")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return extrairOrcamentoDiarioDaFala(String((data as { content?: string } | null)?.content ?? ""));
 }
 const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
 // v25: slug para UTM. Gerado no CODIGO - a cobertura de UTM e KPI e nao pode depender de o
@@ -2354,7 +2376,9 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   const sucesso = String(args?.metrica_sucesso ?? "").trim();
   if (!reversa) return { erro: "reversa obrigatoria: descreva COMO desfazer esta acao, QUEM desfaz e EM QUANTO TEMPO. Sem plano de reversao o pedido nao pode ser criado." };
   if (!sucesso) return { erro: "metrica_sucesso obrigatoria: qual metrica e qual limiar dizem que deu certo, lida no funil COMPLETO (ate contrato pago), nao apenas no custo de midia." };
-  if (action === "alterar_orcamento" && !(Number(params?.novo_orcamento_diario_reais) > 0)) return { erro: "informe params.novo_orcamento_diario_reais (> 0)" };
+  if (action === "alterar_orcamento" && !(reaisPedidoAlterarOrcamento(params) > 0)) {
+    return { erro: "informe params.novo_orcamento_diario_reais (> 0). Alias aceito: params.orcamento_diario_reais." };
+  }
   if (RENOMEACOES.includes(action) && !String(params?.novo_nome ?? "").trim()) return { erro: "informe params.novo_nome (nao vazio)" };
   if (action === "alterar_categoria_especial_campanha") {
     if (!Array.isArray(params?.special_ad_categories)) {
@@ -2490,10 +2514,12 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   }
 
   // ESP-26: alterar_orcamento julga o valor NA PROPOSTA com a mesma RPC da execucao.
+  // Incidente 12/09/2026: contrato da CONVERSA inteira (criacao a R$ 4) recusava o pedido
+  // DESTA mensagem (R$ 20). Alterar usa a ultima fala; CONJ.N no nome nao e dinheiro.
   let avisoOrcamentoAlteracao: string | null = null;
   if (action === "alterar_orcamento") {
-    const reaisPedido = Number(params?.novo_orcamento_diario_reais ?? 0);
-    const contratoOrc = await contratoOrcamentoDaConversa(convId);
+    const reaisPedido = reaisPedidoAlterarOrcamento(params);
+    const contratoOrc = await contratoOrcamentoDaUltimaFala(convId);
     const checkOrc = conferirOrcamentoReais({
       reais: reaisPedido,
       contrato: contratoOrc,
@@ -2668,7 +2694,41 @@ async function t_alterar_categoria_especial(
   }, cards);
 }
 
-/** Tool dedicada: edita geo de conjunto publicado (nao duplica). */
+/** Tool dedicada: edita orcamento de conjunto publicado (nao cria conjunto novo). */
+async function t_alterar_orcamento(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+) {
+  const conjunto = String(args?.conjunto ?? args?.target_name ?? "").trim();
+  if (!conjunto) return { erro: "conjunto obrigatorio (nome atual do conjunto)" };
+  const reais = reaisPedidoAlterarOrcamento(args);
+  if (!(reais > 0)) {
+    return {
+      erro: "informe orcamento_diario_reais (> 0) em REAIS por dia (ex.: 20, nao 2000).",
+    };
+  }
+  return await t_propose_action(companyId, convId, requestedBy, {
+    action_type: "alterar_orcamento",
+    target_name: conjunto,
+    justificativa: String(args?.justificativa ?? "").trim() ||
+      `Pedido do gestor: alterar o orcamento diario de "${conjunto}" para R$ ${reais.toFixed(2)}/dia.`,
+    reversa: String(args?.reversa ?? "").trim() ||
+      "Devolver o orcamento diario ao valor anterior (gravado no audit_log e no card) com a mesma acao alterar_orcamento.",
+    metrica_sucesso: String(args?.metrica_sucesso ?? "").trim() ||
+      `Gasto diario do conjunto alinhado a R$ ${reais.toFixed(2)} (media; um dia isolado pode chegar a ~1,25x).`,
+    risco: String(args?.risco ?? "").trim() || "medio",
+    mecanismo: String(args?.mecanismo ?? "").trim() ||
+      "Graph POST /{adset_id} daily_budget (ou Pipeboard update_adset) no conjunto vivo.",
+    params: {
+      novo_orcamento_diario_reais: reais,
+      orcamento_confirmado_reais: args?.orcamento_confirmado_reais,
+      alvo_external_id: args?.alvo_external_id ?? args?.target_external_id ?? args?.external_id,
+    },
+  }, cards);
+}
 async function t_alterar_geo_do_conjunto(
   companyId: string,
   convId: string,
@@ -5216,6 +5276,7 @@ const ORDEM_TOOLS = [
   "renomear_campanha",
   "alterar_categoria_especial",
   "alterar_geo_do_conjunto",
+  "alterar_orcamento",
   "get_instagram_dos_anuncios",
   "vincular_instagram_dos_anuncios",
   "propose_action",
@@ -5332,7 +5393,8 @@ function prioridadeTool(nome: string, pedido: string): number {
   const perguntaLeitura = ehPerguntaDeLeitura(pedido);
   if (perguntaLeitura && (
     nome === "propose_action" || nome === "gerar_legendas" ||
-    nome === "upload_midia" || nome === "registrar_legenda_da_conversa"
+    nome === "upload_midia" || nome === "registrar_legenda_da_conversa" ||
+    nome === "alterar_orcamento" || nome === "alterar_geo_do_conjunto"
   )) return 99;
   if (pedidoUsaSlateExistente(pedido)) {
     if (
@@ -5374,7 +5436,7 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (pedeMetaDica && (nome === "listar_ferramentas_pipeboard" || nome === "ler_pipeboard")) return 99;
   // v28.31: pedido de emitir cards — propose_action primeiro; nao gastar o teto em re-auditoria.
   const pedeEmitir = /\bemite|\bemita|\bemiss[aã]o|\bcards?\b.*\baprov|\baprova.*\bcard|criar_anuncio|propose_action/.test(p);
-  if (pedeEmitir && !perguntaLeitura && nome === "propose_action") return 0;
+  if (pedeEmitir && !perguntaLeitura && (nome === "propose_action" || nome === "alterar_orcamento")) return 0;
   if (pedidoComentarioDoPostSemEmissao(pedido) && nome === "propose_action") return 99;
   if (pedeUtm && nome === "panorama_utm_anuncios") return 0;
   if (pedeCustoLlm && nome === "custo_llm_periodo") return 0;
@@ -5695,6 +5757,16 @@ async function runTool(name: string, args: any, ctx: any) {
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_categoria_especial": return await t_alterar_categoria_especial(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_geo_do_conjunto": return await t_alterar_geo_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "alterar_orcamento": {
+        if (ctx.perguntaLeitura) {
+          return {
+            erro: "pergunta_nao_e_ato",
+            aviso:
+              "O gestor PERGUNTOU (nao pediu alterar). Use get_estrutura_conjuntos e RESPONDA o fato. NAO emita card nesta rodada.",
+          };
+        }
+        return await t_alterar_orcamento(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      }
       case "get_instagram_dos_anuncios":
         return await t_ler_instagram_anuncios(ctx.companyId, args);
       case "vincular_instagram_dos_anuncios":
@@ -5987,7 +6059,7 @@ OBJETIVO ODAX (criar_campanha): OUTCOME_LEADS (default da casa, LP/CLT), OUTCOME
 CONJUNTO SOCIAL (engajamento/reconhecimento): sem_molde + objetivo_tag + page_id da config, OU qualquer molde da conta - o executor DESCARTA os campos de conversao e grava engajamento (POST_ENGAGEMENT + destination_type=ON_POST + promoted_object={page_id}) ou reconhecimento (REACH + page_id). NUNCA misture REACH como goal de campanha OUTCOME_ENGAGEMENT. Brand boost de Page ou Instagram: canal=SOCIAL, objetivo_tag=ENGAJAMENTO, SEM produto CLT, destino Page e nao LP.
 CONJUNTO MENSAGENS / CTWA (01/09/2026 v28.84/85): conversas WhatsApp NAO sao impulsao de post. Campanha OUTCOME_ENGAGEMENT (ou tag CONV/MESSAGES/WHATSAPP) + conjunto com familia_objetivo=mensagens ou optimization_goal=CONVERSATIONS -> destino MANUAL so WhatsApp: destination_type=WHATSAPP, Messenger OFF. PROIBIDO MESSAGING_MESSENGER_WHATSAPP, destino automatico e destination_type=ON_POST em CONVERSATIONS (foi a falha do card JURIDICO_CONJ.01 em 21/08/2026). whatsapp_phone_number vai em DIGITOS (55+DDD+8); o display "+55 71 9189-4229" e so para o texto do card, no promoted_object ele e invalido. O criativo usa WHATSAPP_MESSAGE + api.whatsapp.com/send, nao CONTACT_US + wa.me.
 TRAFEGO COM LINK wa.me: destino WEBSITE / LANDING_PAGE_VIEWS com URL wa.me NAO e CTWA. familia_objetivo=trafego, destination_type=WEBSITE, optimization_goal=LANDING_PAGE_VIEWS, e o numero fica no LINK do criativo. Nao recuse WEBSITE so porque o nome da campanha tem CONV, e nao chame defaults de mensagens nesse caso. Replica CTWA -> conjunto WEBSITE: target_name = nome EXATO do anuncio (ou id Meta), params.conjunto_destino = nome ou id (com campanha_destino se dois conjuntos tiverem o mesmo nome), params.destino_url = https://wa.me/..., e o CTA vira CONTACT_US.
-ORCAMENTO E REAIS POR DIA (incidente 24/08/2026): params.orcamento_diario_reais=30 quando o gestor disse 30,00 - NUNCA 3000, que e centavos da Meta e nasceria R$ 3.000/dia. Se o gestor definiu um valor nesta conversa, esse valor E o contrato de TODOS os conjuntos. Se ele nao disse quanto quer gastar por dia, PERGUNTE: e o unico valor que nao se inventa.
+ORCAMENTO E REAIS POR DIA (incidente 24/08/2026; incidente CONJ.04 12/09/2026): params.orcamento_diario_reais=30 quando o gestor disse 30,00 - NUNCA 3000, que e centavos da Meta e nasceria R$ 3.000/dia. CONJ.04 / CONJ.N no NOME do conjunto NAO e orcamento. CRIAR: se o gestor definiu um valor nesta conversa, esse valor e o contrato dos conjuntos NOVOS. ALTERAR um conjunto ja publicado: chame alterar_orcamento (ou propose_action action_type=alterar_orcamento) com orcamento_diario_reais / params.novo_orcamento_diario_reais = o valor DESTA mensagem. Pedido "altere o orçamento do CONJ.X para 20" E a ordem — emita o card. Orcamento usado na criacao de outros conjuntos nesta conversa NAO trava este ato. NAO peca ao gestor para confirmar que o valor novo substitui o antigo. Se ele nao disse quanto quer gastar por dia num CRIAR, PERGUNTE: e o unico valor que nao se inventa.
 UTM: o sistema monta a string. Se o gestor deu identificador (ex.: TEST-RR-AGO262), use em params.utm_campaign; se nao deu, o codigo deriva do rotulo/periodo - nao trave a emissao por isso.
 LEGENDA DO AGENTE: ao emitir criar_anuncio com legenda gerada por voce, passe legenda_fonte=agente e legenda_referencias com o anuncio que motivou a copy. NUNCA peca ao gestor para "confirmar a referencia da legenda".
 PLATAFORMAS: padrao facebook+instagram; Threads proibido; video no Facebook exclui a Coluna da direita. Nao entreviste o gestor so para repetir o padrao da casa - declare no card.
@@ -6283,6 +6355,7 @@ function toolsIncluemPropose(tools: { tool?: string }[]): boolean {
     return (
       nome === "propose_action" ||
       nome === "alterar_geo_do_conjunto" ||
+      nome === "alterar_orcamento" ||
       nome === "renomear_campanha" ||
       nome === "alterar_categoria_especial" ||
       nome === "vincular_instagram_dos_anuncios"
