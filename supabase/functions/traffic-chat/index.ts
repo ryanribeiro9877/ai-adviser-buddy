@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v29.00)
+// supabase/functions/traffic-chat/index.ts (v29.01)
+// v29.01 (14/09/2026) - OpenRouter 402: resgate para modelo da rede / max_tokens menor.
+//   get_waba_status normaliza meio Drive (sistema_ocular) antes da RPC.
 // v29.00 (12/09/2026) - ALTERAR ORCAMENTO DE CONJUNTO PUBLICADO. O gestor pediu
 //   JUR_WA_CONJ.04_9331-6245 para R$ 20/dia. A primeira chamada usou o campo de
 //   CRIAR (orcamento_diario_reais); a segunda, o campo certo, e o extrator leu
@@ -830,6 +832,7 @@ import {
   compactarInventarioDriveParaAgente,
   inferirMeioDeProduto,
   inferirMeioDrive,
+  normalizarMeioWaba,
   parseMeioDriveArg,
   injetarArgsDrive,
   deveDescerPastaDrive,
@@ -854,6 +857,7 @@ import {
   modeloOpenRouterPadrao,
 } from "../_shared/openrouter_auto.ts";
 import {
+  aplicarResgate402,
   bodyOpenRouter,
   diagnosticoRota,
   resolverChamadaLlm,
@@ -962,7 +966,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v28.99";
+const VERSAO = "chat-v29.01";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -5368,9 +5372,10 @@ async function t_conhecimento(tema: string, secao?: string) {
 
 // Inventario WhatsApp (Cloud/ON_PREMISE vs CTWA) — espelha traffic-agent-job via get_waba_phones.
 async function t_waba_status(companyId: string, meio?: string) {
+  const meioOk = normalizarMeioWaba(meio);
   const { data, error } = await supa.rpc("get_waba_phones", {
     p_company_id: companyId,
-    p_meio: meio && String(meio).trim() ? String(meio).trim().toLowerCase() : null,
+    p_meio: meioOk,
   });
   if (error) return { erro: error.message };
   const { data: snaps } = await supa.from("waba_phone_snapshots")
@@ -7053,7 +7058,7 @@ Deno.serve(async (req) => {
       return { erro: "orcamento_tempo_esgotado", detalhe: `restam ${restanteMs}ms — sem tempo util para nova geracao` };
     }
     const usarCache = !cacheDesativado;
-    const payload: any = bodyOpenRouter(rotaLlm, {
+    let payload: any = bodyOpenRouter(rotaLlm, {
       messages: usarCache ? messages : semCache(messages),
       max_tokens: maxTokens,
       // 03/09/2026: quem decide o esforco de raciocinio e o roteador (modo padrao = high,
@@ -7115,6 +7120,42 @@ Deno.serve(async (req) => {
           );
           if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
           return await chamar(comTools, maxTokens, semRaciocinio, retry429 + 1);
+        }
+      }
+      if (resp.status === 402) {
+        console.warn(`[openrouter] 402 model=${payload.model} detalhe=${text.slice(0, 400)}`);
+        for (let i = 0; i < 3 && !resp.ok && resp.status === 402; i++) {
+          const plano = aplicarResgate402(payload, text);
+          if (!plano) break;
+          const sobra402 = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
+          if (sobra402 < 8_000) break;
+          console.warn(`[openrouter] ${plano.motivo}`);
+          payload = plano.payload;
+          const ac402 = new AbortController();
+          const cap402 = Math.min(OPENROUTER_CALL_CAP_MS, sobra402);
+          const timer402 = setTimeout(() => ac402.abort(), cap402);
+          const t402 = Date.now();
+          try {
+            resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` },
+              body: JSON.stringify(payload),
+              signal: ac402.signal,
+            });
+            text = await resp.text();
+          } catch (e) {
+            const nome = String((e as any)?.name ?? "");
+            if (nome === "AbortError" || /abort/i.test(String((e as any)?.message ?? e))) {
+              return { erro: "openrouter_timeout", detalhe: `chamada abortada apos ${cap402}ms (resgate 402)` };
+            }
+            return { erro: "openrouter_fetch_failed", detalhe: String((e as any)?.message ?? e).slice(0, 200) };
+          } finally {
+            clearTimeout(timer402);
+            msModelo += Date.now() - t402;
+          }
+        }
+        if (resp.ok) {
+          try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
         }
       }
       return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };

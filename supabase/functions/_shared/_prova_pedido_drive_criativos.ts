@@ -9,6 +9,7 @@ import {
   itemDriveDoMeio,
   leituraDriveVoltouVazia,
   parseMeioDriveArg,
+  normalizarMeioWaba,
   pastaFormatoIgnorada,
   deveDescerPastaDrive,
   pedidoExigeInventarioDrive,
@@ -93,6 +94,14 @@ assert(inferirMeioDeProduto("sistema ocular") === "sistema_ocular", "produto ocu
 assert(inferirMeioDrive("criativos do Sistema Ocular no drive") === "sistema_ocular", "pedido ocular");
 assert(inferirMeioDrive("pasta VISTTA") === "sistema_ocular", "pedido VISTTA");
 assert(parseMeioDriveArg("vistta") === "sistema_ocular", "arg vistta");
+assert(normalizarMeioWaba("sistema_ocular") === "sistema_ocular", "WABA aceita ocular");
+assert(normalizarMeioWaba("vistta") === "sistema_ocular", "WABA alias vistta");
+assert(normalizarMeioWaba("financeiro") === "financeiro", "WABA financeiro");
+assert(normalizarMeioWaba("xyz-invalido") === null, "WABA invalido vira null, nao erro");
+assert(job.includes("normalizarMeioWaba"), "job nao passa meio Drive cru para a RPC WABA");
+assert(job.includes("aplicarResgate402"), "job resgata OpenRouter 402 na escrita");
+assert(chat.includes("normalizarMeioWaba"), "chat normaliza meio WABA");
+assert(chat.includes("aplicarResgate402"), "chat resgata OpenRouter 402");
 assert(serieCarrosselDrive("2Carrossel 2.png") === "2", "serie carrossel 2");
 assert(serieCarrosselDrive("4Carrossel 3.png") === "4", "serie carrossel 4");
 assert(serieCarrosselDrive("Criativo 01.jpeg") === null, "jpeg raiz nao e carrossel");

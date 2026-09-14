@@ -588,6 +588,60 @@ export function bodyOpenRouter(
   return body;
 }
 
+/**
+ * 402 da OpenRouter NAO e rate-limit e o array `models` do body NAO tenta fallback:
+ * a reserva e calculada no primario. Medido 14/09/2026 nos relatorios COHAPM: especialistas
+ * no Grok 4.6 cobraram, a sintese (prompt maior, mesmo primario) voltou
+ * `openrouter_http_402` em <1s, e o Engajamento paralelo (prompt menor) fechou. Trocar o
+ * primario para a rede de fallback e, se o corpo citar `affordable`, cortar `max_tokens`.
+ */
+export function maxTokensDo402(detalhe: string, maxAtual: number): number | null {
+  const n = Number(maxAtual);
+  if (!Number.isFinite(n) || n < 512) return null;
+  const s = String(detalhe ?? "");
+  const aff = s.match(/affordable[:\s]+(\d{2,8})/i)
+    ?? s.match(/can only afford\s+(\d{2,8})/i)
+    ?? s.match(/afford[^\d]{0,32}(\d{2,8})/i);
+  const y = Number(aff?.[1] ?? 0);
+  if (!Number.isFinite(y) || y < 256) return null;
+  const teto = Math.min(n - 1, Math.max(256, Math.floor(y * 0.85)));
+  return teto < n ? teto : null;
+}
+
+export function aplicarResgate402(
+  payload: Record<string, unknown>,
+  detalhe: string,
+): { payload: Record<string, unknown>; motivo: string } | null {
+  const s = String(detalhe ?? "");
+  const mencionaTeto = /max_tokens|affordable|fewer max/i.test(s);
+  const maxAtual = Number(payload.max_tokens ?? 0);
+  const teto = maxTokensDo402(s, maxAtual);
+  if (mencionaTeto && teto) {
+    return {
+      payload: { ...payload, max_tokens: teto },
+      motivo: `402 corta max_tokens ${maxAtual}→${teto}`,
+    };
+  }
+  const models = Array.isArray(payload.models)
+    ? payload.models.map((m) => String(m ?? "").trim()).filter(Boolean)
+    : [];
+  if (models.length) {
+    const [proximo, ...resto] = models;
+    return {
+      payload: { ...payload, model: proximo, models: resto },
+      motivo: `402 troca ${String(payload.model ?? "")}→${proximo}`,
+    };
+  }
+  if (Number.isFinite(maxAtual) && maxAtual > 1024) {
+    const novo = Math.max(1024, Math.floor(maxAtual / 2));
+    return {
+      payload: { ...payload, max_tokens: novo },
+      motivo: `402 corta max_tokens ${maxAtual}→${novo} (sem affordable no corpo)`,
+    };
+  }
+  return null;
+}
+
 export function diagnosticoRota(rota: RotaLlm): Record<string, unknown> {
   return {
     modelo_pedido: rota.model,

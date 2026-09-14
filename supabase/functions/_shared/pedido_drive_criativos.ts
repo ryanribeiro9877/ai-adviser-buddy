@@ -18,6 +18,24 @@ export function parseMeioDriveArg(raw: unknown): MeioDrive | null {
   return null;
 }
 
+export const MEIOS_WABA = ["juridico", "la_felicita", "financeiro", "sistema_ocular", "outro"] as const;
+export type MeioWaba = (typeof MEIOS_WABA)[number];
+
+/**
+ * O filtro de get_waba_phones NAO e o de pasta do Drive. Ate 14/09 o relatorio Ocular
+ * mandava `sistema_ocular` e a RPC devolvia `{erro: meio invalido}` — 30/31 leituras,
+ * falha so nessa. Valor fora da lista vira null (inventario inteiro), nunca erro.
+ */
+export function normalizarMeioWaba(raw: unknown): MeioWaba | null {
+  const drive = parseMeioDriveArg(raw);
+  if (drive) return drive;
+  const m = deaccPedido(String(raw ?? "")).trim().replace(/\s+/g, "_");
+  if (!m) return null;
+  if (m === "financeiro") return "financeiro";
+  if (m === "outro") return "outro";
+  return null;
+}
+
 /** Pasta/marca VISTTA = empreendimento Sistema Ocular (nao e Juridico nem La Felicita). */
 export function textoTemSistemaOcular(p: string): boolean {
   const n = deaccPedido(p);

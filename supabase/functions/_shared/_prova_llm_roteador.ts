@@ -3,6 +3,7 @@
 // (--allow-env porque a prova do modo legado precisa ligar o segredo LLM_ROTEADOR)
 import { acharModelo, atendeCapacidade, CATALOGO_ECONOMIA, CATALOGO_PREMIUM, CATALOGO_TODOS } from "./llm_catalogo.ts";
 import {
+  aplicarResgate402,
   bodyOpenRouter,
   diagnosticoRota,
   ehTarefaDeFusao,
@@ -10,6 +11,7 @@ import {
   ehTarefaInterativa,
   esforcoDoModo,
   MAX_TOKENS_PISO_RACIOCINIO,
+  maxTokensDo402,
   MODELO_PADRAO,
   type ModoRaciocinio,
   resolverChamadaLlm,
@@ -293,6 +295,23 @@ try {
   Deno.env.delete("LLM_ROTEADOR");
 }
 assert(tetoDeSaida(900) === MAX_TOKENS_PISO_RACIOCINIO, "fora do legado, o piso volta a valer");
+
+// 14/09/2026: 402 do Grok na escrita do relatorio. O array `models` nao entra — o resgate
+// tem de TROCAR o primario e, se o corpo citar affordable, cortar max_tokens.
+{
+  const detalhe =
+    "This request requires more credits, or fewer max_tokens. You requested up to 8000 tokens, but can only afford 2000.";
+  assert(maxTokensDo402(detalhe, 8000) === 1700, `affordable 2000 * 0.85 = 1700, veio ${maxTokensDo402(detalhe, 8000)}`);
+  const corte = aplicarResgate402({ model: "x-ai/grok-4.6", models: ["openai/gpt-5.6-luna"], max_tokens: 8000 }, detalhe);
+  assert(corte != null && corte.payload.max_tokens === 1700, "402 com affordable corta teto, nao troca modelo ainda");
+  const troca = aplicarResgate402(
+    { model: "x-ai/grok-4.6", models: ["openai/gpt-5.6-luna", "google/gemini-2.5-flash"], max_tokens: 6000 },
+    "Insufficient credits. Add more using https://openrouter.ai/credits",
+  );
+  assert(troca != null && troca.payload.model === "openai/gpt-5.6-luna", "402 generico troca o primario");
+  assert(JSON.stringify(troca.payload.models) === JSON.stringify(["google/gemini-2.5-flash"]), "402 consome o primeiro fallback");
+  assert(aplicarResgate402({ model: "x-ai/grok-4.6", max_tokens: 800 }, "Insufficient credits") == null, "sem rede e sem teto para cortar, nao ha resgate");
+}
 
 // Os dois rotulos antigos (`esforco_padrao`/`esforco_profundo`) mentiam depois que as naturezas
 // nasceram: o primeiro lia um `chat_loop`, que e INTERATIVO, e o segundo uma `sintese` deep, que

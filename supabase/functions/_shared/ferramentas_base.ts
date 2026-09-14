@@ -337,8 +337,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_waba_status: {
     descricao:
-      "INVENTARIO WHATSAPP da empresa. Obrigatorio para pergunta sobre numero operacional ou de pe, qual WA linkar, WABA, Cloud, qualidade ou tier, e para o isolamento Juridico vs La Felicita. Filtro meio=juridico|la_felicita|financeiro|outro. NAO decide se um conjunto CTWA pode ser emitido: isso e get_whatsapp_da_pagina.",
-    parametros: {"type":"object","properties":{"meio":{"type":"string","description":"Opcional: juridico | la_felicita | financeiro | outro"}}},
+      "INVENTARIO WHATSAPP da empresa. Obrigatorio para pergunta sobre numero operacional ou de pe, qual WA linkar, WABA, Cloud, qualidade ou tier, e para o isolamento Juridico vs La Felicita vs Sistema Ocular/VISTTA. Filtro meio=juridico|la_felicita|financeiro|sistema_ocular|outro. NAO decide se um conjunto CTWA pode ser emitido: isso e get_whatsapp_da_pagina.",
+    parametros: {"type":"object","properties":{"meio":{"type":"string","description":"Opcional: juridico | la_felicita | financeiro | sistema_ocular | outro"}}},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Canal WhatsApp",

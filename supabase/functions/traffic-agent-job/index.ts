@@ -1,4 +1,8 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.19)
+// supabase/functions/traffic-agent-job/index.ts (v4.23)
+// v4.23 (14/09/2026) - RELATORIO OPENROUTER 402: a escrita morria no Grok (reserva do
+//   primario; `models` nao entra em 402). Resgate troca o primario da rede e corta
+//   max_tokens. get_waba_status deixa de mandar meio Drive `sistema_ocular` cru para a RPC.
+//   Sintese do relatorio: timeout 150s e reserva 120s (o 90s matou os semanais da manha).
 // v4.19 (04/09/2026) - TELEMETRIA DA COLETA: motivo de saida do especialista separado do
 //   finish_reason do provider (o `||` da reserva nunca entregava o valor novo), teto por chamada
 //   declarando quando saiu no PISO de 20s, parede livre no fim da coleta (o campo antigo saturava
@@ -254,6 +258,7 @@ import {
   modeloOpenRouterSubPadrao,
 } from "../_shared/openrouter_auto.ts";
 import {
+  aplicarResgate402,
   bodyOpenRouter,
   resolverChamadaLlm,
   type FaixaLlm,
@@ -315,6 +320,7 @@ import {
   conjuntoNomeDoMeioLaFelicita,
   inferirMeioDeProduto,
   inferirMeioDrive,
+  normalizarMeioWaba,
   parseMeioDriveArg,
   injetarArgsDrive,
   deveDescerPastaDrive,
@@ -1757,9 +1763,10 @@ async function t_conhecimento(tema: string, secao?: string) {
 // [WABA] Inventario via get_waba_phones: Cloud+ON_PREMISE vs CTWA, meio, de_pe.
 // Bug 21/08/2026: filtro so CLOUD_API omitia ON_PREMISE "Cohapm Juridico" DISCONNECTED.
 async function t_waba_status(companyId: string, meio?: string) {
+  const meioOk = normalizarMeioWaba(meio);
   const { data, error } = await supa.rpc("get_waba_phones", {
     p_company_id: companyId,
-    p_meio: meio && String(meio).trim() ? String(meio).trim().toLowerCase() : null,
+    p_meio: meioOk,
   });
   if (error) return { erro: error.message };
   const { data: snaps } = await supa.from("waba_phone_snapshots")
@@ -2252,10 +2259,8 @@ function ehRateLimitErro(s: string): boolean {
  * jogaria fora uma coleta inteira por causa de um relogio.
  */
 function ehErroDeCredencial(s: string): boolean {
-  // 402 entrou em 03/09, quando a conta da OpenRouter zerou o credito no meio de um job deep
-  // (`erro_llm:openrouter_http_402`). Ele nao casava com nenhum padrao de resgate, entao o job
-  // ja se comportava certo — por acidente. Declarar 402 aqui torna a intencao explicita: sem
-  // credito, a segunda tentativa recebe a mesma recusa e so queima um segmento.
+  // 402: chamarLLM ja tentou primario mais barato e cortar max_tokens. Se ainda assim
+  // voltou 402, a conta nao cobre nem o fallback — worker novo cobra a mesma recusa.
   return /openrouter_http_40[123]\b|invalid.?api|billing|payment|insufficient|credit|forbidden|unauthorized/i.test(s);
 }
 
@@ -2288,7 +2293,7 @@ async function chamarLLM(messages: any[], opts: {
     sessionId: opts.sessionId ?? JOB_SESSION_ID,
     tier: JOB_TIER,
   });
-  const payload: any = bodyOpenRouter(rota, {
+  let payload: any = bodyOpenRouter(rota, {
     messages,
     max_tokens: rota.esforco ? Math.max(opts.maxTokens, MIN_TOKENS_COM_RACIOCINIO) : opts.maxTokens,
     // O roteador SOBREPOE este campo (modo padrao = high, profundo = xhigh; e a `sintese` nao
@@ -2346,6 +2351,23 @@ async function chamarLLM(messages: any[], opts: {
     await new Promise((r) => setTimeout(r, esperaRetryOpenRouter(resp, t, retryCap)));
     ({ resp, text, aborted } = await postOnce(payload));
     if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
+  }
+  // 402 nao e retriaivel no mesmo primario: a OpenRouter reserva o Grok inteiro e recusa
+  // o request antes de tentar `models`. Troca o primario / corta max_tokens e tenta de novo.
+  if (!resp.ok && resp.status === 402) {
+    console.warn(`[openrouter] 402 model=${payload.model} detalhe=${text.slice(0, 400)}`);
+    for (let i = 0; i < 3 && !resp.ok && resp.status === 402; i++) {
+      const plano = aplicarResgate402(payload, text);
+      if (!plano) break;
+      console.warn(`[openrouter] ${plano.motivo}`);
+      payload = plano.payload;
+      JOB_LLM_ROTAS.push({
+        tipo: rota.tipo, model: String(payload.model ?? ""), faixa: rota.faixa,
+        motivo: plano.motivo, esforco: rota.esforco,
+      });
+      ({ resp, text, aborted } = await postOnce(payload));
+      if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
+    }
   }
   if (!resp.ok) return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };
   try {
@@ -4197,7 +4219,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.22";
+  tel.versao = "job-v4.23";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -4618,7 +4640,7 @@ async function resolverCampanhasDoRelatorio(row: {
   };
 }
 
-const RELATORIO_RESERVA_SINTESE_MS = 55_000;
+const RELATORIO_RESERVA_SINTESE_MS = 120_000;
 const RELATORIO_MIN_ONDA2_MS = 70_000;
 const RELATORIO_MAX_CAMPANHAS = 4;
 const RELATORIO_TETO_JSON = 6000;
@@ -4802,7 +4824,7 @@ async function colherBaseRelatorio(args: {
     if (id && acc) contaPorCampanha.set(id, acc);
   }
 
-  const meio = inferirMeioDrive(`${args.pedido} ${nomes.join(" ")}`);
+  const meio = normalizarMeioWaba(inferirMeioDrive(`${args.pedido} ${nomes.join(" ")}`));
   const [
     overview, tetoConv, tetoForm, pacing, alerts, recos, dicas, estrutura, waba, saude,
   ] = await Promise.all([
@@ -4980,7 +5002,7 @@ corpo_md: markdown com titulos HUMANOS (Resumo executivo, Status e entrega, Inve
 
 Responda APENAS um JSON valido, sem cerca markdown, com:
 {"corpo_md":"narrativa em markdown para o gestor","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"cobertura":"o que nao foi medido, em portugues"}`;
-  const timeoutMs = Math.min(90_000, Math.max(args.prazo(), 8_000));
+  const timeoutMs = Math.min(150_000, Math.max(args.prazo() - 8_000, 8_000));
   const r = await chamarLLM(
     [
       { role: "system", content: sys },
@@ -4991,7 +5013,7 @@ Responda APENAS um JSON valido, sem cerca markdown, com:
     ],
     { maxTokens: 6000, reasoning: REASONING_OFF, timeoutMs, tipo: "sintese", faixaForcada: "economia" },
   );
-  if (r.erro) throw new Error(String(r.erro));
+  if (r.erro) throw new Error([r.erro, r.detalhe].filter(Boolean).join(": ").slice(0, 400));
   return String(r.parsed?.choices?.[0]?.message?.content ?? "");
 }
 
@@ -5227,7 +5249,7 @@ leitura { texto } (narrativa; objeto, nao string solta), possibilidades {nada_mu
 Nao envie baseline nem teto_janela — o codigo grava os calculados.
 Cada ato: acao do catalogo Meta, alvo_external_id, quando imediato|apos_janela, evidencia, mecanismo, metrica_sucesso, janela_leitura, reversa.
 Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo novo se manter depois do prazo".`;
-  const timeoutMs = Math.min(90_000, Math.max(args.prazo(), 8_000));
+  const timeoutMs = Math.min(150_000, Math.max(args.prazo() - 8_000, 8_000));
   const r = await chamarLLM(
     [
       { role: "system", content: sys },
@@ -5238,7 +5260,7 @@ Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo no
     ],
     { maxTokens: 6000, reasoning: REASONING_OFF, timeoutMs, tipo: "sintese", faixaForcada: "economia" },
   );
-  if (r.erro) throw new Error(String(r.erro));
+  if (r.erro) throw new Error([r.erro, r.detalhe].filter(Boolean).join(": ").slice(0, 400));
   return String(r.parsed?.choices?.[0]?.message?.content ?? "");
 }
 
