@@ -10,6 +10,7 @@ import {
   sonhoAtingido,
   gastoNaJanela,
   nDiasPrazo,
+  montarAndamentoRitmo,
   type AtoPlanoEntrada,
 } from "../_shared/ritmo.ts";
 import { hojeYmdBrasilia } from "../_shared/relatorios.ts";
@@ -56,8 +57,10 @@ const MODOS = [
   "primeiro_passe",
   "leve",
   "fundo",
+  "boletim",
   "dispatcher_leve",
   "dispatcher_fundo",
+  "dispatcher_boletim",
 ] as const;
 type Modo = (typeof MODOS)[number];
 
@@ -487,6 +490,117 @@ async function rodarFundo(missaoId: string, mcpKey: string) {
   });
 }
 
+async function rodarBoletim(missaoId: string) {
+  const missao = await carregarMissao(missaoId);
+  if (!missao) return json({ error: "missao_nao_encontrada" }, 404);
+  if (missao.status !== "em_execucao" && missao.status !== "encerrada") {
+    return json({ ok: true, modo: "boletim", pulado: "status", status: missao.status });
+  }
+
+  const hoje = hojeYmdBrasilia(new Date());
+  const snaps = await snapshotsDaMissao(missao);
+  const { data: atosRaw } = await supa
+    .from("ritmo_atos")
+    .select("acao,alvo_external_id,resultado,tique,evidencia,replano,criado_em")
+    .eq("missao_id", missao.id)
+    .order("criado_em");
+  const atos = (atosRaw ?? []).map((a) => ({
+    data: hojeYmdBrasilia(new Date(String((a as { criado_em?: string }).criado_em ?? ""))),
+    acao: String((a as { acao?: string }).acao ?? ""),
+    alvo_external_id: (a as { alvo_external_id?: string | null }).alvo_external_id ?? null,
+    resultado: (a as { resultado?: string | null }).resultado ?? null,
+    tique: (a as { tique?: string | null }).tique ?? null,
+    evidencia: (a as { evidencia?: string | null }).evidencia ?? null,
+    replano: (a as { replano?: boolean }).replano === true,
+  }));
+  const corte = missao.autonomia_concedida_em
+    ? hojeYmdBrasilia(new Date(missao.autonomia_concedida_em))
+    : ymdDe(missao.periodo_inicio);
+  const andamento = montarAndamentoRitmo({
+    metrica: missao.metrica,
+    sonho: missao.sonho,
+    teto: missao.teto_gasto_janela,
+    periodo_inicio: ymdDe(missao.periodo_inicio),
+    periodo_fim: ymdDe(missao.periodo_fim),
+    corte,
+    hoje,
+    fechado: true,
+    snaps: snaps.map((s) => ({
+      date: ymdDe(s.snapshot_date),
+      spend: s.spend,
+      impressions: s.impressions,
+      reach: s.reach,
+      clicks: s.clicks,
+      link_clicks: s.link_clicks,
+      form_leads: s.form_leads,
+      messaging_started: s.messaging_started,
+    })),
+    atos,
+  });
+  const dia = andamento?.dias.find((d) => d.data === hoje) ?? andamento?.dias.at(-1) ?? null;
+  if (!dia) {
+    return json({ ok: true, modo: "boletim", pulado: "sem_dia", missao_id: missaoId, hoje });
+  }
+
+  const { error } = await supa.from("ritmo_diarios").upsert(
+    {
+      missao_id: missao.id,
+      company_id: missao.company_id,
+      data_civil: dia.data,
+      fechado_em: new Date().toISOString(),
+      numeros: {
+        gasto: dia.gasto,
+        metrica_valor: dia.metrica_valor,
+        custo: dia.custo,
+        acumulado_gasto: dia.acumulado_gasto,
+        acumulado_metrica: dia.acumulado_metrica,
+        tem_coleta: dia.tem_coleta,
+        gasto_janela: andamento?.gasto_janela ?? dia.acumulado_gasto,
+        metrica_janela: andamento?.metrica_janela ?? dia.acumulado_metrica,
+        sonho: andamento?.sonho ?? missao.sonho,
+        teto: andamento?.teto ?? missao.teto_gasto_janela,
+      },
+      atos: dia.atos,
+      lacunas: dia.lacunas,
+      narrativa: dia.narrativa,
+    },
+    { onConflict: "missao_id,data_civil" },
+  );
+  if (error) {
+    console.warn(`[ritmo-executar] boletim upsert falhou missao=${missaoId} ${error.message}`);
+    return json({ error: "boletim_falhou", detalhe: error.message, missao_id: missaoId }, 500);
+  }
+  return json({
+    ok: true,
+    modo: "boletim",
+    missao_id: missaoId,
+    data_civil: dia.data,
+    tem_coleta: dia.tem_coleta,
+    atos: dia.atos.length,
+  });
+}
+
+async function despacharBoletim(limite: number) {
+  const { data, error } = await supa.rpc("listar_ritmo_boletins_devidos", {
+    p_limite: limite,
+  });
+  if (error) return json({ error: "listar_falhou", detalhe: error.message }, 500);
+  const rows = (data ?? []) as { id: string; company_id: string; campaign_id: string }[];
+  for (const row of rows) {
+    const id = String(row.id);
+    emBackground(
+      rodarBoletim(id).catch((e) => {
+        console.warn(`[ritmo-executar] boletim missao=${id} ${String(e)}`);
+      }),
+    );
+  }
+  return json({
+    ok: true,
+    modo: "dispatcher_boletim",
+    despachados: rows.length,
+  }, 202);
+}
+
 async function chaveCascataMcp(headerKey: string): Promise<string> {
   if (headerKey) return headerKey;
   const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
@@ -560,11 +674,13 @@ Deno.serve(async (req) => {
     mcpOk = true;
   }
 
-  const ehDispatcher = modo === "dispatcher_leve" || modo === "dispatcher_fundo";
+  const ehDispatcher =
+    modo === "dispatcher_leve" || modo === "dispatcher_fundo" || modo === "dispatcher_boletim";
   if (ehDispatcher) {
     if (!mcpOk) return json({ error: "unauthorized", motivo: "chave_ausente_ou_curta" }, 401);
     const limite = Number(body?.limite ?? LIMITE_DESPACHO);
     const n = Number.isFinite(limite) ? limite : LIMITE_DESPACHO;
+    if (modo === "dispatcher_boletim") return await despacharBoletim(n);
     return await despachar(modo === "dispatcher_leve" ? "leve" : "fundo", mcpKey, n);
   }
 
@@ -581,5 +697,6 @@ Deno.serve(async (req) => {
 
   if (modo === "primeiro_passe") return await rodarPrimeiroPasse(missaoId, mcpKey);
   if (modo === "leve") return await rodarLeve(missaoId, mcpKey);
+  if (modo === "boletim") return await rodarBoletim(missaoId);
   return await rodarFundo(missaoId, mcpKey);
 });

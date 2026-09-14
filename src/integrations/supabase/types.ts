@@ -1062,6 +1062,45 @@ export type Database = {
         };
         Relationships: [];
       };
+      ritmo_diarios: {
+        Row: {
+          id: string;
+          missao_id: string;
+          company_id: string;
+          data_civil: string;
+          fechado_em: string;
+          numeros: Json;
+          atos: Json;
+          lacunas: Json;
+          narrativa: string;
+          criado_em: string;
+        };
+        Insert: {
+          id?: string;
+          missao_id: string;
+          company_id: string;
+          data_civil: string;
+          fechado_em?: string;
+          numeros?: Json;
+          atos?: Json;
+          lacunas?: Json;
+          narrativa?: string;
+          criado_em?: string;
+        };
+        Update: {
+          id?: string;
+          missao_id?: string;
+          company_id?: string;
+          data_civil?: string;
+          fechado_em?: string;
+          numeros?: Json;
+          atos?: Json;
+          lacunas?: Json;
+          narrativa?: string;
+          criado_em?: string;
+        };
+        Relationships: [];
+      };
       ritmo_missoes: {
         Row: {
           id: string;
@@ -1671,6 +1710,14 @@ export type Database = {
       };
       listar_ritmo_tiques_devidos: {
         Args: { p_tique: string; p_limite: number };
+        Returns: {
+          id: string;
+          company_id: string;
+          campaign_id: string;
+        }[];
+      };
+      listar_ritmo_boletins_devidos: {
+        Args: { p_limite: number };
         Returns: {
           id: string;
           company_id: string;

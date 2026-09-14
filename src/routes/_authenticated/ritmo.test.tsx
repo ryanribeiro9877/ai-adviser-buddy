@@ -80,6 +80,7 @@ function encadear(data: unknown, error: unknown = null) {
     order: () => unknown;
     gte: () => unknown;
     lte: () => unknown;
+    in: () => unknown;
     maybeSingle: () => typeof result;
     then: typeof result.then;
   } = {
@@ -88,6 +89,7 @@ function encadear(data: unknown, error: unknown = null) {
     order: () => q,
     gte: () => q,
     lte: () => q,
+    in: () => q,
     maybeSingle: () => result,
     then: result.then.bind(result),
   };
@@ -194,6 +196,7 @@ beforeEach(() => {
     if (tabela === "campaigns") return encadear(campanhaEspelho);
     if (tabela === "metric_snapshots") return encadear(snapshots);
     if (tabela === "ritmo_atos") return encadear([]);
+    if (tabela === "ritmo_diarios") return encadear([]);
     if (tabela === "meta_execution_config") return encadear({ dry_run: false });
     return encadear([]);
   });
@@ -246,7 +249,7 @@ describe("Ritmo", () => {
     montar();
     expect(screen.getByRole("heading", { name: "Ritmo" })).toBeInTheDocument();
     expect(
-      screen.getByText("Força-tarefa da campanha, com uma autorização."),
+      screen.getByText("Força-tarefa da campanha, com uma autorização. O andamento fecha às 18:30."),
     ).toBeInTheDocument();
     expect(await screen.findByText("Nenhuma força-tarefa nesta empresa")).toBeInTheDocument();
   });

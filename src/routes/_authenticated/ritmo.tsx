@@ -78,9 +78,11 @@ function sonhoLegivel(metrica: string, sonho: number | null): string {
   return unidadeSonho(metrica) === "pct" ? `${sonho}%` : String(sonho);
 }
 
-function gastoVsTeto(teto: number | null): string {
-  if (teto == null) return "—";
-  return `— / ${fmtBRL(Number(teto))}`;
+function gastoVsTeto(gasto: number | null, teto: number | null): string {
+  if (teto == null && gasto == null) return "—";
+  const g = gasto == null ? "—" : fmtBRL(gasto);
+  const t = teto == null ? "—" : fmtBRL(teto);
+  return `${g} / ${t}`;
 }
 
 function Ritmo() {
@@ -104,6 +106,66 @@ function Ritmo() {
         .order("criado_em", { ascending: false });
       if (error) throw error;
       return (data ?? []) as MissaoRitmo[];
+    },
+  });
+
+  const gastosQ = useQuery({
+    queryKey: [
+      "ritmo-gastos",
+      companyId,
+      (missoesQ.data ?? [])
+        .map((m) => `${m.campaign_id}:${m.periodo_inicio}:${m.periodo_fim}`)
+        .join("|"),
+    ],
+    enabled: !!companyId && (missoesQ.data?.length ?? 0) > 0,
+    queryFn: async (): Promise<Record<string, number>> => {
+      const missoes = missoesQ.data ?? [];
+      const ext = [...new Set(missoes.map((m) => m.campaign_id).filter(Boolean))];
+      if (ext.length === 0) return {};
+      const db = supabase as unknown as SupabaseClient;
+      const { data: camps, error: campErr } = await db
+        .from("campaigns")
+        .select("id,external_id")
+        .eq("company_id", companyId!)
+        .in("external_id", ext);
+      if (campErr) throw campErr;
+      const lista = Array.isArray(camps) ? camps : camps ? [camps] : [];
+      const porExt = new Map<string, string>();
+      for (const c of lista as { id?: string; external_id?: string }[]) {
+        if (c.id && c.external_id) porExt.set(c.external_id, c.id);
+      }
+      const uuids = [...new Set(porExt.values())];
+      if (uuids.length === 0) return {};
+      const inicios = missoes.map((m) => m.periodo_inicio).sort();
+      const fins = missoes.map((m) => m.periodo_fim).sort();
+      const { data: snaps, error: snapErr } = await db
+        .from("metric_snapshots")
+        .select("campaign_id,snapshot_date,spend")
+        .eq("company_id", companyId!)
+        .in("campaign_id", uuids)
+        .gte("snapshot_date", inicios[0])
+        .lte("snapshot_date", fins[fins.length - 1]);
+      if (snapErr) throw snapErr;
+      const rows = (snaps ?? []) as {
+        campaign_id?: string;
+        snapshot_date?: string;
+        spend?: number | string | null;
+      }[];
+      const out: Record<string, number> = {};
+      for (const m of missoes) {
+        const campUuid = porExt.get(m.campaign_id);
+        if (!campUuid) continue;
+        let soma = 0;
+        for (const s of rows) {
+          if (s.campaign_id !== campUuid) continue;
+          const d = String(s.snapshot_date ?? "").slice(0, 10);
+          if (d < m.periodo_inicio || d > m.periodo_fim) continue;
+          const n = Number(s.spend);
+          if (Number.isFinite(n)) soma += n;
+        }
+        out[m.id] = soma;
+      }
+      return out;
     },
   });
 
@@ -279,6 +341,24 @@ function Ritmo() {
           });
         },
       )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "ritmo_diarios",
+          filter: `company_id=eq.${companyId}`,
+        },
+        (payload) => {
+          void qc.invalidateQueries({ queryKey: ["ritmo-missoes", companyId] });
+          void qc.invalidateQueries({ queryKey: ["ritmo-gastos", companyId] });
+          const row = (payload.new ?? payload.old) as { missao_id?: string } | null;
+          const missaoId = typeof row?.missao_id === "string" ? row.missao_id : undefined;
+          void qc.invalidateQueries({
+            queryKey: missaoId ? ["ritmo-diarios", missaoId] : ["ritmo-diarios"],
+          });
+        },
+      )
       .subscribe();
     return () => {
       void supabase.removeChannel(canal);
@@ -298,7 +378,7 @@ function Ritmo() {
         <div>
           <h1 className="text-2xl font-semibold">Ritmo</h1>
           <p className="text-sm text-muted-foreground">
-            Força-tarefa da campanha, com uma autorização.
+            Força-tarefa da campanha, com uma autorização. O andamento fecha às 18:30.
           </p>
         </div>
         {isAdmin && (
@@ -368,7 +448,10 @@ function Ritmo() {
                     {sonhoLegivel(m.metrica, m.sonho == null ? null : Number(m.sonho))}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {gastoVsTeto(m.teto_gasto_janela == null ? null : Number(m.teto_gasto_janela))}
+                    {gastoVsTeto(
+                      gastosQ.data?.[m.id] ?? null,
+                      m.teto_gasto_janela == null ? null : Number(m.teto_gasto_janela),
+                    )}
                   </TableCell>
                 </TableRow>
               ))}
@@ -384,6 +467,8 @@ function Ritmo() {
           onMudou={() => {
             void qc.invalidateQueries({ queryKey: ["ritmo-missoes", companyId] });
             void qc.invalidateQueries({ queryKey: ["ritmo-atos", detalhe.id] });
+            void qc.invalidateQueries({ queryKey: ["ritmo-diarios", detalhe.id] });
+            void qc.invalidateQueries({ queryKey: ["ritmo-gastos", companyId] });
           }}
         />
       )}

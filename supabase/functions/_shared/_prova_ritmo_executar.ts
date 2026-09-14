@@ -29,6 +29,12 @@ ok(src.includes("is_company_member"), "JWT exige is_company_member da missao");
   ok(src.includes('motivo: "chave_ausente_ou_curta"'), "dispatcher sem x-mcp-key e 401");
 }
 ok(src.includes("listar_ritmo_tiques_devidos"), "dispatcher tem de chamar listar_ritmo_tiques_devidos");
+ok(src.includes("listar_ritmo_boletins_devidos"), "dispatcher boletim chama listar_ritmo_boletins_devidos");
+ok(src.includes("dispatcher_boletim"), "cron das 18:30 usa dispatcher_boletim");
+ok(src.includes('modo === "boletim"') || src.includes('modo==="boletim"'), "missao avulsa aceita modo boletim");
+ok(src.includes("ritmo_diarios"), "boletim grava ritmo_diarios");
+ok(src.includes("montarAndamentoRitmo"), "boletim usa o nucleo deterministico");
+ok(src.includes("fechado: true") || src.includes("fechado:true"), "fechamento marca o dia como fechado");
 ok(src.includes("encerrar_ritmo_missao"), "leve tem de chamar encerrar_ritmo_missao");
 ok(src.includes("verificar_parada"), "parada sem escrita vira ato verificar_parada");
 ok(src.includes("atosDoPrimeiroPasse"), "primeiro_passe/fundo usam atosDoPrimeiroPasse");

@@ -238,6 +238,8 @@ Presente em todas as telas autenticadas. Agrega alertas abertos, aprovações pe
 
 Força-tarefa de **uma** campanha, com prazo, teto de gasto na janela e uma autorização nomeada. O administrador disserta o que quer; o sistema lê a campanha, monta o plano e mostra projeções (incluindo o sonho, que não é previsão). Autorizar concede autonomia só daquela missão: a escrita na Meta sai sem card. Encerrar devolve a campanha ao regime normal.
 
+Com a missão em execução (ou encerrada), o detalhe abre no **andamento**: um dia civil em Brasília com o que a campanha apresentou (gasto, métrica, custo) e o que os agentes tentaram. O texto de fechamento sai às 18:30. A leitura da análise continua abaixo, congelada no plano.
+
 Fora da missão, ou sem concessão válida, todo ato na Meta continua sendo card. O sino aponta para `/ritmo` (plano pronto, teto a 80%, ato falhou, encerrada nas últimas 24 h).
 
 ### Filtros globais (campanhas, conjuntos, anúncios, funil)

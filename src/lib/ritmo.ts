@@ -565,3 +565,429 @@ export function extrairJsonRitmo(texto: unknown): unknown | null {
     return null;
   }
 }
+
+/** Dias civis inclusive; vazio se as datas não forem YMD válidas ou se o fim vier antes. */
+export function datasCivisInclusive(inicio: unknown, fim: unknown): string[] {
+  if (!ymdValido(inicio) || !ymdValido(fim)) return [];
+  if (utcMs(inicio) > utcMs(fim)) return [];
+  const out: string[] = [];
+  for (let ms = utcMs(inicio); ms <= utcMs(fim); ms += 864e5) {
+    out.push(ymdDeMs(ms));
+  }
+  return out;
+}
+
+const ROTULOS_ACAO_RITMO: Record<string, string> = {
+  pausar_criativo: "Pausar anúncio",
+  ativar_criativo: "Ativar anúncio",
+  escalar_criativo: "Escalar anúncio",
+  pausar_conjunto: "Pausar conjunto",
+  ativar_conjunto: "Ativar conjunto",
+  alterar_orcamento: "Alterar orçamento",
+  ajustar_posicionamentos_do_conjunto: "Ajustar posicionamentos",
+  alterar_geo_do_conjunto: "Alterar geo",
+  vincular_instagram_dos_anuncios: "Vincular Instagram",
+  criar_conjunto_a_partir_de: "Criar conjunto",
+  criar_anuncio_a_partir_de: "Criar anúncio",
+  escalar_duplicar: "Duplicar para escala",
+  verificar_parada: "Checagem de parada",
+};
+
+export function rotuloAcaoRitmo(acao: unknown): string {
+  if (typeof acao !== "string") return "";
+  const t = acao.trim();
+  if (!t) return "";
+  return ROTULOS_ACAO_RITMO[t] ?? t.replaceAll("_", " ");
+}
+
+export type SnapAndamento = {
+  date: string;
+  spend: number;
+  impressions: number;
+  reach: number | null;
+  clicks: number;
+  link_clicks: number;
+  form_leads: number;
+  messaging_started: number;
+};
+
+export type AtoAndamento = {
+  data: string;
+  acao: string;
+  alvo_external_id?: string | null;
+  resultado?: string | null;
+  tique?: string | null;
+  evidencia?: string | null;
+  replano?: boolean;
+};
+
+export type DiaAndamento = {
+  data: string;
+  gasto: number;
+  metrica_valor: number | null;
+  impressoes: number;
+  cliques: number;
+  cliques_link: number;
+  conversas: number;
+  formularios: number;
+  alcance: number | null;
+  custo: number | null;
+  tem_coleta: boolean;
+  atos: AtoAndamento[];
+  vs_gasto: number | null;
+  vs_metrica: number | null;
+  acumulado_gasto: number;
+  acumulado_metrica: number | null;
+  fechado: boolean;
+  lacunas: string[];
+  narrativa: string;
+};
+
+export type AndamentoRitmo = {
+  metrica: string;
+  rotulo_metrica: string;
+  dias: DiaAndamento[];
+  gasto_janela: number;
+  metrica_janela: number | null;
+  sonho: number | null;
+  teto: number | null;
+};
+
+function ymdDeCampo(v: unknown): string {
+  return String(v ?? "").slice(0, 10);
+}
+
+function fmtYmdBr(ymd: string): string {
+  if (!ymdValido(ymd)) return ymd;
+  return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}/${ymd.slice(0, 4)}`;
+}
+
+function fmtReaisRitmo(n: number): string {
+  const sinal = n < 0 ? "−" : "";
+  const arred = Math.round(Math.abs(n) * 100) / 100;
+  const [int, dec] = arred.toFixed(2).split(".");
+  const milhar = int.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${sinal}R$ ${milhar},${dec}`;
+}
+
+function fmtNumeroRitmo(n: number, metrica: string): string {
+  if (metrica === "ctr" || metrica === "ctr_link") {
+    return `${(Math.round(n * 100) / 100).toFixed(2)}%`;
+  }
+  if (Number.isInteger(n)) return String(n);
+  return String(Math.round(n * 100) / 100);
+}
+
+function rotuloResultadoAto(r: unknown): string {
+  if (r === "ok") return "ok";
+  if (r === "simulado") return "simulado";
+  if (r === "falhou") return "falhou";
+  if (r === "bloqueado") return "bloqueado";
+  if (r === "pendente" || r === "executando") return String(r);
+  return typeof r === "string" && r.trim() ? r.trim() : "sem resultado";
+}
+
+function lerSnapAndamento(v: unknown): SnapAndamento | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const date = ymdDeCampo(o.date ?? o.snapshot_date);
+  if (!ymdValido(date)) return null;
+  const reachRaw = o.reach;
+  return {
+    date,
+    spend: num(o.spend),
+    impressions: num(o.impressions),
+    reach: reachRaw == null || reachRaw === "" ? null : num(reachRaw),
+    clicks: num(o.clicks),
+    link_clicks: num(o.link_clicks),
+    form_leads: num(o.form_leads),
+    messaging_started: num(o.messaging_started),
+  };
+}
+
+function somarSnap(a: SnapAndamento, b: SnapAndamento): SnapAndamento {
+  return {
+    date: a.date,
+    spend: a.spend + b.spend,
+    impressions: a.impressions + b.impressions,
+    reach: a.reach == null && b.reach == null ? null : num(a.reach) + num(b.reach),
+    clicks: a.clicks + b.clicks,
+    link_clicks: a.link_clicks + b.link_clicks,
+    form_leads: a.form_leads + b.form_leads,
+    messaging_started: a.messaging_started + b.messaging_started,
+  };
+}
+
+function valorMetricaNoSnap(metrica: string, s: SnapAndamento): number | null {
+  if (metrica === "conversas") return s.messaging_started;
+  if (metrica === "cliques_no_link") return s.link_clicks;
+  if (metrica === "formularios") return s.form_leads;
+  if (metrica === "impressoes") return s.impressions;
+  if (metrica === "alcance") return s.reach;
+  if (metrica === "ctr") return s.impressions > 0 ? (100 * s.clicks) / s.impressions : null;
+  if (metrica === "ctr_link") {
+    return s.impressions > 0 ? (100 * s.link_clicks) / s.impressions : null;
+  }
+  return null;
+}
+
+function custoDoDia(metrica: string, gasto: number, valor: number | null): number | null {
+  if (!ehMetricaVolume(metrica)) return null;
+  if (valor == null || valor <= 0 || gasto <= 0) return null;
+  return gasto / valor;
+}
+
+function lerAtoAndamento(v: unknown): AtoAndamento | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const data = ymdDeCampo(o.data);
+  const acao = typeof o.acao === "string" ? o.acao.trim() : "";
+  if (!ymdValido(data) || !acao) return null;
+  return {
+    data,
+    acao,
+    alvo_external_id: typeof o.alvo_external_id === "string" ? o.alvo_external_id : null,
+    resultado: typeof o.resultado === "string" ? o.resultado : null,
+    tique: typeof o.tique === "string" ? o.tique : null,
+    evidencia: typeof o.evidencia === "string" ? o.evidencia : null,
+    replano: o.replano === true,
+  };
+}
+
+function fraseAgentes(atos: AtoAndamento[]): string {
+  if (atos.length === 0) {
+    return "Os agentes neste dia não escreveram na Meta.";
+  }
+  const partes = atos.map((a) => {
+    const alvo = a.alvo_external_id ? ` ${a.alvo_external_id}` : "";
+    return `${rotuloAcaoRitmo(a.acao).toLowerCase()}${alvo} (${rotuloResultadoAto(a.resultado)})`;
+  });
+  if (partes.length === 1) return `Os agentes neste dia: ${partes[0]}.`;
+  return `Os agentes neste dia: ${partes.join("; ")}.`;
+}
+
+function fraseContraste(
+  metrica: string,
+  rotulo: string,
+  vsGasto: number | null,
+  vsMetrica: number | null,
+): string {
+  if (vsGasto == null && vsMetrica == null) {
+    return "Primeiro dia da janela, sem contraste.";
+  }
+  const bits: string[] = [];
+  if (vsGasto != null) {
+    const dir = vsGasto > 0 ? "mais" : vsGasto < 0 ? "menos" : "igual";
+    bits.push(
+      dir === "igual" ? "gasto igual ao dia anterior" : `gasto ${fmtReaisRitmo(vsGasto)} (${dir})`,
+    );
+  }
+  if (vsMetrica != null) {
+    const dir = vsMetrica > 0 ? "mais" : vsMetrica < 0 ? "menos" : "igual";
+    const n = fmtNumeroRitmo(Math.abs(vsMetrica), metrica);
+    bits.push(
+      dir === "igual" ? `${rotulo.toLowerCase()} igual ao dia anterior` : `${rotulo.toLowerCase()} ${dir} ${n}`,
+    );
+  }
+  return `Contra o dia anterior: ${bits.join("; ")}.`;
+}
+
+function narrativaDoDia(opts: {
+  dia: Omit<DiaAndamento, "narrativa">;
+  metrica: string;
+  rotulo: string;
+  sonho: number | null;
+  teto: number | null;
+}): string {
+  const { dia, metrica, rotulo, sonho, teto } = opts;
+  const cabeca = dia.fechado
+    ? `${fmtYmdBr(dia.data)} — fechamento das 18:30.`
+    : `${fmtYmdBr(dia.data)} — andamento até agora (o fechamento sai às 18:30).`;
+  const linhas: string[] = [cabeca, ""];
+  if (!dia.tem_coleta) {
+    linhas.push(
+      "Campanha neste dia: sem linha de coleta — números do dia não medidos, não zerados.",
+    );
+  } else {
+    const valorTxt =
+      dia.metrica_valor == null
+        ? `${rotulo.toLowerCase()} não medido`
+        : `${fmtNumeroRitmo(dia.metrica_valor, metrica)} ${rotulo.toLowerCase()}`;
+    const custoTxt =
+      dia.custo != null ? ` (${fmtReaisRitmo(dia.custo)} por ${rotulo.toLowerCase().replace(/s$/, "")})` : "";
+    linhas.push(`A campanha gastou ${fmtReaisRitmo(dia.gasto)} e gerou ${valorTxt}${custoTxt}.`);
+    linhas.push(fraseContraste(metrica, rotulo, dia.vs_gasto, dia.vs_metrica));
+  }
+  const acumM =
+    dia.acumulado_metrica == null
+      ? `${rotulo.toLowerCase()} não medido`
+      : `${fmtNumeroRitmo(dia.acumulado_metrica, metrica)} ${rotulo.toLowerCase()}`;
+  const sonhoTxt = sonho != null && sonho > 0 ? ` (sonho ${fmtNumeroRitmo(sonho, metrica)})` : "";
+  const tetoTxt = teto != null ? ` de um teto de ${fmtReaisRitmo(teto)}` : "";
+  linhas.push(
+    `No prazo da força-tarefa: ${acumM}${sonhoTxt}; gasto ${fmtReaisRitmo(dia.acumulado_gasto)}${tetoTxt}.`,
+  );
+  linhas.push("");
+  linhas.push(fraseAgentes(dia.atos));
+  if (dia.lacunas.length > 0) {
+    linhas.push("");
+    linhas.push(`Lacuna: ${dia.lacunas.join(" ")}`);
+  }
+  return linhas.join("\n");
+}
+
+/**
+ * Série diária da missão: um dia civil de Brasília por linha, com o que a
+ * campanha apresentou e o que os agentes tentaram. `fechado` no dia de hoje
+ * só é verdadeiro quando o fechamento das 18:30 já rodou (`entrada.fechado`).
+ */
+export function montarAndamentoRitmo(entrada: unknown): AndamentoRitmo | null {
+  if (!entrada || typeof entrada !== "object" || Array.isArray(entrada)) return null;
+  const o = entrada as Record<string, unknown>;
+  const metrica = typeof o.metrica === "string" ? o.metrica : "";
+  if (!METRICAS_RITMO.includes(metrica as MetricaRitmo)) return null;
+  const periodoInicio = ymdDeCampo(o.periodo_inicio);
+  const periodoFim = ymdDeCampo(o.periodo_fim);
+  const corte = ymdDeCampo(o.corte ?? o.periodo_inicio);
+  const hoje = ymdDeCampo(o.hoje);
+  if (!ymdValido(periodoInicio) || !ymdValido(periodoFim) || !ymdValido(corte) || !ymdValido(hoje)) {
+    return null;
+  }
+  const inicio = corte < periodoInicio ? periodoInicio : corte;
+  const fim = hoje < periodoFim ? hoje : periodoFim;
+  const datas = datasCivisInclusive(inicio, fim);
+  const porData = new Map<string, SnapAndamento>();
+  if (Array.isArray(o.snaps)) {
+    for (const raw of o.snaps) {
+      const s = lerSnapAndamento(raw);
+      if (!s) continue;
+      const prev = porData.get(s.date);
+      porData.set(s.date, prev ? somarSnap(prev, s) : s);
+    }
+  }
+  const atosPorData = new Map<string, AtoAndamento[]>();
+  if (Array.isArray(o.atos)) {
+    for (const raw of o.atos) {
+      const a = lerAtoAndamento(raw);
+      if (!a) continue;
+      const lista = atosPorData.get(a.data) ?? [];
+      lista.push(a);
+      atosPorData.set(a.data, lista);
+    }
+  }
+  const sonho = o.sonho == null || o.sonho === "" ? null : num(o.sonho);
+  const teto = o.teto == null || o.teto === "" ? null : num(o.teto);
+  const fechadoHoje = o.fechado === true;
+  const rotulo = rotuloMetrica(metrica) || metrica;
+  const volume = ehMetricaVolume(metrica);
+
+  let accGasto = 0;
+  let accImp = 0;
+  let accCliques = 0;
+  let accLink = 0;
+  let accConv = 0;
+  let accForm = 0;
+  let accReach = 0;
+  let temReach = false;
+  let accVolume = 0;
+  let temColetaJanela = false;
+  const dias: DiaAndamento[] = [];
+
+  for (let i = 0; i < datas.length; i++) {
+    const data = datas[i];
+    const snap = porData.get(data) ?? null;
+    const tem_coleta = snap != null;
+    const gasto = snap ? snap.spend : 0;
+    const impressoes = snap ? snap.impressions : 0;
+    const cliques = snap ? snap.clicks : 0;
+    const cliques_link = snap ? snap.link_clicks : 0;
+    const conversas = snap ? snap.messaging_started : 0;
+    const formularios = snap ? snap.form_leads : 0;
+    const alcance = snap ? snap.reach : null;
+    const metrica_valor = snap ? valorMetricaNoSnap(metrica, snap) : null;
+    if (tem_coleta) {
+      temColetaJanela = true;
+      accGasto += gasto;
+      accImp += impressoes;
+      accCliques += cliques;
+      accLink += cliques_link;
+      accConv += conversas;
+      accForm += formularios;
+      if (alcance != null) {
+        accReach += alcance;
+        temReach = true;
+      }
+      if (volume && metrica_valor != null) accVolume += metrica_valor;
+    }
+    let acumulado_metrica: number | null = null;
+    if (temColetaJanela) {
+      if (metrica === "ctr") acumulado_metrica = accImp > 0 ? (100 * accCliques) / accImp : null;
+      else if (metrica === "ctr_link") {
+        acumulado_metrica = accImp > 0 ? (100 * accLink) / accImp : null;
+      } else if (metrica === "alcance") acumulado_metrica = temReach ? accReach : null;
+      else if (metrica === "conversas") acumulado_metrica = accConv;
+      else if (metrica === "cliques_no_link") acumulado_metrica = accLink;
+      else if (metrica === "formularios") acumulado_metrica = accForm;
+      else if (metrica === "impressoes") acumulado_metrica = accImp;
+      else acumulado_metrica = accVolume;
+    }
+    const prev = i > 0 ? dias[i - 1] : null;
+    const vs_gasto = prev && prev.tem_coleta && tem_coleta ? gasto - prev.gasto : null;
+    const vs_metrica =
+      prev && prev.metrica_valor != null && metrica_valor != null
+        ? metrica_valor - prev.metrica_valor
+        : null;
+    const lacunas: string[] = [];
+    if (!tem_coleta) {
+      lacunas.push("Sem linha de coleta neste dia civil.");
+    }
+    const fechado = data < hoje || (data === hoje && fechadoHoje);
+    const atoDia = atosPorData.get(data) ?? [];
+    const bruto: Omit<DiaAndamento, "narrativa"> = {
+      data,
+      gasto,
+      metrica_valor,
+      impressoes,
+      cliques,
+      cliques_link,
+      conversas,
+      formularios,
+      alcance,
+      custo: custoDoDia(metrica, gasto, metrica_valor),
+      tem_coleta,
+      atos: atoDia,
+      vs_gasto,
+      vs_metrica,
+      acumulado_gasto: accGasto,
+      acumulado_metrica,
+      fechado,
+      lacunas,
+    };
+    dias.push({
+      ...bruto,
+      narrativa: narrativaDoDia({ dia: bruto, metrica, rotulo, sonho, teto }),
+    });
+  }
+
+  let metrica_janela: number | null = null;
+  if (temColetaJanela) {
+    if (metrica === "ctr") metrica_janela = accImp > 0 ? (100 * accCliques) / accImp : null;
+    else if (metrica === "ctr_link") metrica_janela = accImp > 0 ? (100 * accLink) / accImp : null;
+    else if (metrica === "alcance") metrica_janela = temReach ? accReach : null;
+    else if (metrica === "conversas") metrica_janela = accConv;
+    else if (metrica === "cliques_no_link") metrica_janela = accLink;
+    else if (metrica === "formularios") metrica_janela = accForm;
+    else if (metrica === "impressoes") metrica_janela = accImp;
+    else metrica_janela = accVolume;
+  }
+
+  return {
+    metrica,
+    rotulo_metrica: rotulo,
+    dias,
+    gasto_janela: accGasto,
+    metrica_janela,
+    sonho: sonho != null && sonho > 0 ? sonho : null,
+    teto: teto != null && Number.isFinite(teto) ? teto : null,
+  };
+}

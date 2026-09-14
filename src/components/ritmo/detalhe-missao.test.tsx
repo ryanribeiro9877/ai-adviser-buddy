@@ -39,6 +39,7 @@ function encadear(data: unknown) {
     order: () => q,
     gte: () => q,
     lte: () => q,
+    in: () => q,
     maybeSingle: () => result,
     then: result.then.bind(result),
   };
@@ -119,6 +120,7 @@ beforeEach(() => {
   fromMock.mockImplementation((tabela: string) => {
     if (tabela === "campaigns") return encadear({ id: "camp-uuid" });
     if (tabela === "ritmo_atos") return encadear([]);
+    if (tabela === "ritmo_diarios") return encadear([]);
     if (tabela === "meta_execution_config") return encadear({ dry_run: false });
     return encadear([]);
   });
@@ -265,16 +267,78 @@ describe("DetalheMissao", () => {
         companyId="c1"
       />,
     );
-    expect(await screen.findByText("Simulado")).toBeInTheDocument();
+    expect((await screen.findAllByText("Simulado")).length).toBeGreaterThan(0);
     expect(screen.getByText("Histórico de atos")).toBeInTheDocument();
     expect(screen.getByText("dry_run")).toBeInTheDocument();
     expect(screen.getByText("Primeiro passe")).toBeInTheDocument();
+  });
+
+  it("em execução mostra o andamento diário da campanha e dos agentes", async () => {
+    fromMock.mockImplementation((tabela: string) => {
+      if (tabela === "campaigns") return encadear({ id: "camp-uuid" });
+      if (tabela === "ritmo_atos") {
+        return encadear([
+          {
+            id: "ato-1",
+            missao_id: "m2",
+            company_id: "c1",
+            tique: "primeiro_passe",
+            acao: "pausar_conjunto",
+            alvo_external_id: "s1",
+            resultado: "ok",
+            criado_em: "2026-09-13T15:00:00-03:00",
+          },
+        ]);
+      }
+      if (tabela === "ritmo_diarios") return encadear([]);
+      if (tabela === "metric_snapshots") {
+        return encadear([
+          {
+            snapshot_date: "2026-09-12",
+            spend: 63.06,
+            messaging_started: 17,
+            impressions: 1000,
+            clicks: 40,
+            link_clicks: 20,
+          },
+          {
+            snapshot_date: "2026-09-13",
+            spend: 58,
+            messaging_started: 10,
+            impressions: 800,
+            clicks: 30,
+            link_clicks: 15,
+          },
+        ]);
+      }
+      if (tabela === "meta_execution_config") return encadear({ dry_run: false });
+      return encadear([]);
+    });
+    montar(
+      <DetalheMissao
+        missao={missao({
+          status: "em_execucao",
+          periodo_inicio: "2026-09-12",
+          periodo_fim: "2026-09-20",
+          autonomia_concedida_em: "2026-09-12T12:00:00Z",
+        })}
+        isAdmin
+        companyId="c1"
+      />,
+    );
+    expect(await screen.findByText("Andamento")).toBeInTheDocument();
+    expect(screen.getByText(/o texto de fechamento sai às 18:30/i)).toBeInTheDocument();
+    expect(await screen.findByText("Pausar conjunto")).toBeInTheDocument();
+    expect(
+      await screen.findByText(/os agentes neste dia: pausar conjunto s1 \(ok\)/i),
+    ).toBeInTheDocument();
   });
 
   it("na área de Autorizar declara dry-run quando a config está ligada", async () => {
     fromMock.mockImplementation((tabela: string) => {
       if (tabela === "campaigns") return encadear({ id: "camp-uuid" });
       if (tabela === "ritmo_atos") return encadear([]);
+      if (tabela === "ritmo_diarios") return encadear([]);
       if (tabela === "meta_execution_config") return encadear({ dry_run: true });
       return encadear([]);
     });

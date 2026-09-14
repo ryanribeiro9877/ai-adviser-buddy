@@ -25,6 +25,7 @@ import {
   type Horizontes,
   type PlanoRitmo,
 } from "@/lib/ritmo";
+import { AndamentoMissao, montarEntradaAndamento } from "@/components/ritmo/andamento-missao";
 import type { Tables } from "@/integrations/supabase/types";
 
 export type MissaoRitmo = Tables<"ritmo_missoes">;
@@ -32,6 +33,7 @@ type AtoRitmo = Tables<"ritmo_atos">;
 
 type SnapLinha = {
   snapshot_date?: string | null;
+  spend?: number | string | null;
   impressions?: number | string | null;
   reach?: number | string | null;
   clicks?: number | string | null;
@@ -283,9 +285,9 @@ export function DetalheMissao({
       missao.id,
       missao.campaign_id,
       corte,
-      fimSnap,
+      fimAteHoje,
     ],
-    enabled: !!companyId && !!missao.campaign_id && corte <= fimSnap,
+    enabled: !!companyId && !!missao.campaign_id && corte <= fimAteHoje,
     queryFn: async (): Promise<SnapLinha[]> => {
       const db = supabase as unknown as SupabaseClient;
       const { data: camp, error: campErr } = await db
@@ -300,14 +302,28 @@ export function DetalheMissao({
       const { data, error } = await db
         .from("metric_snapshots")
         .select(
-          "snapshot_date,impressions,reach,clicks,link_clicks,form_leads,messaging_started",
+          "snapshot_date,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started",
         )
         .eq("company_id", companyId)
         .eq("campaign_id", campId)
         .gte("snapshot_date", corte)
-        .lte("snapshot_date", fimSnap);
+        .lte("snapshot_date", fimAteHoje);
       if (error) throw error;
       return (data ?? []) as SnapLinha[];
+    },
+  });
+
+  const diariosQ = useQuery({
+    queryKey: ["ritmo-diarios", missao.id],
+    enabled: !!missao.id,
+    queryFn: async (): Promise<Tables<"ritmo_diarios">[]> => {
+      const { data, error } = await supabase
+        .from("ritmo_diarios")
+        .select("*")
+        .eq("missao_id", missao.id)
+        .order("data_civil", { ascending: false });
+      if (error) throw error;
+      return (data ?? []) as Tables<"ritmo_diarios">[];
     },
   });
 
@@ -342,7 +358,11 @@ export function DetalheMissao({
     },
   });
 
-  const snaps = (realizadoQ.data ?? []).filter((s) => {
+  const snapsJanela = (realizadoQ.data ?? []).filter((s) => {
+    const ymd = (s.snapshot_date ?? "").slice(0, 10);
+    return ymd >= corte && ymd <= fimAteHoje;
+  });
+  const snaps = snapsJanela.filter((s) => {
     const ymd = (s.snapshot_date ?? "").slice(0, 10);
     return ymd >= corte && ymd <= fimSnap;
   });
@@ -446,6 +466,27 @@ export function DetalheMissao({
   };
 
   const atos = atosQ.data ?? [];
+  const diarios = diariosQ.data ?? [];
+  const fechadoHoje = diarios.some((d) => String(d.data_civil).slice(0, 10) === hoje);
+  const andamento =
+    missao.status === "em_execucao" || missao.status === "encerrada"
+      ? montarEntradaAndamento({
+          missao,
+          snaps: snapsJanela,
+          atos: atos.map((a) => ({
+            data: hojeYmdBrasilia(new Date(a.criado_em)),
+            acao: a.acao,
+            alvo_external_id: a.alvo_external_id,
+            resultado: a.resultado,
+            tique: a.tique,
+            evidencia: a.evidencia,
+            replano: a.replano,
+          })),
+          hoje,
+          corte,
+          fechadoHoje,
+        })
+      : null;
   const declaracaoDryRun = textoDryRun(dryRunQ.data);
   const mostraAutorizarArea =
     missao.status === "plano_pronto" || missao.status === "em_execucao";
@@ -501,6 +542,10 @@ export function DetalheMissao({
             </Button>
           )}
         </Card>
+      )}
+
+      {andamento && andamento.dias.length > 0 && (
+        <AndamentoMissao andamento={andamento} diarios={diarios} />
       )}
 
       {plano && missao.status !== "em_analise" && missao.status !== "analise_falhou" && (

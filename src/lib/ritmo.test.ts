@@ -12,6 +12,9 @@ import {
   decidirPortaoAto,
   unidadeSonho,
   extrairJsonRitmo,
+  datasCivisInclusive,
+  rotuloAcaoRitmo,
+  montarAndamentoRitmo,
 } from "./ritmo";
 
 const serie = [
@@ -212,5 +215,110 @@ describe("extrairJsonRitmo", () => {
   it("tira o json do meio da prosa", () => {
     expect(extrairJsonRitmo('foo {"a":1} bar')).toEqual({ a: 1 });
     expect(extrairJsonRitmo("sem json")).toBeNull();
+  });
+});
+
+describe("datasCivisInclusive", () => {
+  it("conta inclusive e recusa invertido", () => {
+    expect(datasCivisInclusive("2026-09-12", "2026-09-14")).toEqual([
+      "2026-09-12",
+      "2026-09-13",
+      "2026-09-14",
+    ]);
+    expect(datasCivisInclusive("2026-09-14", "2026-09-12")).toEqual([]);
+  });
+});
+
+describe("montarAndamentoRitmo", () => {
+  const base = {
+    metrica: "conversas",
+    sonho: 40,
+    teto: 448.78,
+    periodo_inicio: "2026-09-12",
+    periodo_fim: "2026-09-14",
+    corte: "2026-09-12",
+    hoje: "2026-09-14",
+    fechado: false,
+    snaps: [
+      {
+        snapshot_date: "2026-09-12",
+        spend: 63.06,
+        messaging_started: 17,
+        impressions: 1000,
+        clicks: 40,
+        link_clicks: 20,
+      },
+      {
+        date: "2026-09-13",
+        spend: 58,
+        messaging_started: 10,
+        impressions: 800,
+        clicks: 30,
+        link_clicks: 15,
+      },
+    ],
+    atos: [
+      {
+        data: "2026-09-13",
+        acao: "pausar_conjunto",
+        alvo_external_id: "s1",
+        resultado: "ok",
+      },
+    ],
+  };
+
+  it("abre um dia por data civil, soma conversas e agrupa atos", () => {
+    const a = montarAndamentoRitmo(base);
+    expect(a).not.toBeNull();
+    expect(a!.dias.map((d) => d.data)).toEqual(["2026-09-12", "2026-09-13", "2026-09-14"]);
+    expect(a!.dias[0].metrica_valor).toBe(17);
+    expect(a!.dias[1].metrica_valor).toBe(10);
+    expect(a!.dias[2].tem_coleta).toBe(false);
+    expect(a!.metrica_janela).toBe(27);
+    expect(a!.gasto_janela).toBeCloseTo(121.06);
+    expect(a!.dias[1].atos).toHaveLength(1);
+    expect(a!.dias[1].atos[0].acao).toBe("pausar_conjunto");
+    expect(a!.dias[2].atos).toHaveLength(0);
+  });
+
+  it("hoje sem fechamento fica como andamento até agora; dia anterior fecha", () => {
+    const a = montarAndamentoRitmo(base)!;
+    expect(a.dias[0].fechado).toBe(true);
+    expect(a.dias[2].fechado).toBe(false);
+    expect(a.dias[0].narrativa).toMatch(/fechamento das 18:30/);
+    expect(a.dias[2].narrativa).toMatch(/andamento até agora/);
+    expect(a.dias[2].narrativa).toMatch(/não medidos/);
+    expect(a.dias[0].narrativa).toMatch(/não escreveram na Meta/);
+    expect(a.dias[1].narrativa).toMatch(/pausar conjunto s1 \(ok\)/);
+  });
+
+  it("CTR acumula taxa da janela, não soma percentuais", () => {
+    const a = montarAndamentoRitmo({
+      metrica: "ctr",
+      periodo_inicio: "2026-09-12",
+      periodo_fim: "2026-09-13",
+      hoje: "2026-09-13",
+      snaps: [
+        { date: "2026-09-12", spend: 10, impressions: 100, clicks: 2 },
+        { date: "2026-09-13", spend: 10, impressions: 100, clicks: 4 },
+      ],
+    });
+    expect(a!.dias[0].metrica_valor).toBeCloseTo(2);
+    expect(a!.dias[1].metrica_valor).toBeCloseTo(4);
+    expect(a!.metrica_janela).toBeCloseTo(3);
+    expect(a!.dias[1].custo).toBeNull();
+  });
+
+  it("recusa métrica desconhecida", () => {
+    expect(montarAndamentoRitmo({ ...base, metrica: "leads" })).toBeNull();
+    expect(montarAndamentoRitmo("oi")).toBeNull();
+  });
+});
+
+describe("rotuloAcaoRitmo", () => {
+  it("traduz o catálogo e não inventa vazio", () => {
+    expect(rotuloAcaoRitmo("pausar_conjunto")).toBe("Pausar conjunto");
+    expect(rotuloAcaoRitmo("")).toBe("");
+    expect(rotuloAcaoRitmo("acao_nova")).toBe("acao nova");
   });
 });
