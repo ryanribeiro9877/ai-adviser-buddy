@@ -203,4 +203,18 @@ function ok(cond: boolean, msg: string) {
   );
 }
 
+// 14/09/2026: "monte um ranking" dos conjuntos do sistema ocular era classificado como
+// ato (verbo monte) e o turno forçava propose_action. Ranking e leitura.
+{
+  ok(
+    !deveForcarEmissao({
+      pedido:
+        "preciso que você realize uma verificação nos conjuntos da campanha do sistema ocular e identifique quais deles estão gastando mais e monte um ranking disso completo e me retorne aqui por favor",
+      chamouPropose: false,
+      cardsEmitidos: 0,
+    }),
+    "ranking de gasto dos conjuntos virou pressao por card",
+  );
+}
+
 console.log("ok: _prova_forcar_emissao");

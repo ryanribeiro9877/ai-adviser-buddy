@@ -10,9 +10,11 @@
 // sob o Estudio sem reescrever o executor.
 
 import {
+  ehPedidoDeAto,
   ehPedidoLeituraCruzada,
   ehPedidoUploadLote,
   pedidoSoLegendasSemEmissao,
+  pedidoComentarioDoPostSemEmissao,
 } from "./intencao_turno.ts";
 
 export type AgenteRegistro = {
@@ -246,13 +248,12 @@ export function agenteDoSubagente(cat: CatalogoAgentes, chave: string): AgenteRe
 /**
  * Agentes cujas ferramentas entram em TODO turno, escolhidos ou nao.
  *
- * AG-00 porque sem a memoria da conversa o fio se perde no meio do turno. AG-06 porque
- * propose_action nao pode faltar: o gestor muda de leitura para ato dentro da mesma frase, e
- * o guarda deveForcarEmissao devolve o turno ao modelo exigindo a chamada — se a ferramenta
- * nao estiver na mesa, o guarda entra em laco e nenhum card sai. Foi assim que 19 turnos
- * anunciaram cards que nunca existiram.
+ * AG-00 porque sem a memoria da conversa o fio se perde no meio do turno.
+ * AG-06 (Executor) NAO entra no nucleo: em leitura de desempenho ele puxava o
+ * modelo para prosa de card. Entra so quando o pedido e um ato real
+ * (reforcarPorIntencao).
  */
-export const NUCLEO_SEMPRE = ["AG-00", "AG-06"];
+export const NUCLEO_SEMPRE = ["AG-00"];
 
 /**
  * Quem vem junto por dependencia de fluxo. Estudio escreve copy e o Guardiao valida antes de
@@ -281,10 +282,17 @@ export function reforcarPorIntencao(agentes: string[], pergunta: string): string
   };
   // Cruzar anuncio no ar com peca do Drive precisa dos dois lados na mesa.
   if (ehPedidoLeituraCruzada(p)) juntar("AG-02", "AG-03");
-  // "crie as legendas" tem verbo de ato, mas o ato e escrever copy.
   if (pedidoSoLegendasSemEmissao(p)) juntar("AG-03");
-  // Subir lote exige saber o que ainda falta subir, e isso mora no acervo.
   if (ehPedidoUploadLote(p)) juntar("AG-03");
+  const precisaExecutor =
+    ehPedidoDeAto(p) &&
+    !pedidoSoLegendasSemEmissao(p) &&
+    !pedidoComentarioDoPostSemEmissao(p);
+  if (precisaExecutor) juntar("AG-06");
+  else if (!/\b(cards?|aprovac)/i.test(p)) {
+    const i = out.indexOf("AG-06");
+    if (i >= 0) out.splice(i, 1);
+  }
   return out;
 }
 

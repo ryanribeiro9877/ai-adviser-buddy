@@ -108,46 +108,31 @@ for (
   );
 }
 
-// A regra do lote nasceu de um 502 real: 22/08/2026, v28.59 — seis pecas mais gerar_legendas
-// estouravam o gateway (~150s) e a prosa "legendas pendentes" era tratada como turno FECHADO.
-//
-// A compactacao de prompt de 03/09 (0ed7a9f) NAO a perdeu: ela renomeou "LOTE DE 6 CRIATIVOS"
-// para "LOTE DE N CRIATIVOS" e generalizou "6 pecas = 6 EIXOS" para "N pecas = N EIXOS". O 6
-// fixo era, ele mesmo, o defeito seguinte — v28.96 (02/09) registra "o lote so reconhecia 6/8",
-// teto de coleta preso em 55s e approval_id inventado na sintese cega.
-//
-// Por isso esta guarda deixou de olhar o TITULO e passou a olhar o CONTEUDO que veio do
-// incidente, ancorada na etiqueta da versao (unica numa linha de regra do prompt; a outra
-// ocorrencia de v28.59 e comentario `//`). Renomear a regra e livre; perde-la, nao.
-{
-  const regraLote = chat
-    .split("\n")
-    .find((l) => l.trimStart().startsWith("- ") && l.includes("v28.59"));
-  assert(
-    !!regraLote,
-    "a regra do lote (v28.59) saiu dos LIMITES DUROS do prompt — nasceu de 502 real em 22/08/2026 " +
-      "e regra de incidente nao sai sem substituto declarado",
-  );
-  const exigencias: ReadonlyArray<readonly [string, string]> = [
-    ["EXCLUA", "excluir as pecas que ja estao no conjunto ativo (anti-repeticao de arquivo)"],
-    ["EIXOS", "N pecas = N eixos de mensagem (anti-repeticao de mensagem)"],
-    ["gerar_legendas", "uma chamada por peca, com teto por janela HTTP (anti-timeout)"],
-    ["legendas pendentes", "proibicao de encerrar o turno como se o pedido tivesse acabado"],
-  ];
-  for (const [marcador, porque] of exigencias) {
-    assert(
-      regraLote!.includes(marcador),
-      `a regra do lote perdeu "${marcador}" — ${porque}. Veio do 502 de 22/08/2026 (v28.59).`,
-    );
-  }
-}
+// A regra do lote nasceu de um 502 real: 22/08/2026, v28.59. O substituto deixou de ser
+// linha de prompt (roteiro de emissao no system viciava leitura de ranking) e passou a ser
+// o classificador + a continuacao automatica no codigo.
 {
   const loteEdge = await Deno.readTextFile(
     new URL("./lote_criativo.ts", import.meta.url),
   );
+  const intencao = await Deno.readTextFile(
+    new URL("./intencao_turno.ts", import.meta.url),
+  );
   assert(
     loteEdge.includes("7 criativ") && loteEdge.includes("conjunto [2-4]"),
     "lote_criativo deve reconhecer CONJ.4 com 7 criativos (senao o teto cai para 55s)",
+  );
+  assert(
+    loteEdge.includes("legendas pendentes") || chat.includes("replyLoteCriativoIncompleto"),
+    "lote incompleto ainda precisa auto-continuar em vez de fechar o turno",
+  );
+  assert(
+    chat.includes("pedidoLoteCriativo") && chat.includes("gerar_legendas"),
+    "chat ainda precisa reconhecer lote e chamar gerar_legendas por peca",
+  );
+  assert(
+    intencao.includes("pedidoSoLegendasSemEmissao"),
+    "legendas nao podem ser tratadas como emissao de card",
   );
 }
 // 02/09/2026: leitura do Drive Juridico voltou vazia por recorte de formato e a resposta pediu

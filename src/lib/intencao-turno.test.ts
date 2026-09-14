@@ -5,6 +5,7 @@ import {
   ehPedidoEmitirConjunto,
   ehPedidoLeituraCruzada,
   ehPerguntaDeLeitura,
+  ehLeituraDeDesempenho,
   recusaFalsaMoldeTrafego,
   ehPedidoUploadLote,
   ehUploadLoteCurto,
@@ -67,6 +68,22 @@ describe("ehPerguntaDeLeitura", () => {
       true,
     );
   });
+
+  it("ranking de gasto dos conjuntos e leitura, nao emissao de card", () => {
+    const ocular =
+      "preciso que você realize uma verificação nos conjuntos da campanha do sistema ocular e identifique quais deles estão gastando mais e monte um ranking disso completo e me retorne aqui por favor";
+    expect(ehLeituraDeDesempenho(ocular)).toBe(true);
+    expect(ehPedidoDeAto(ocular)).toBe(false);
+    expect(ehPerguntaDeLeitura(ocular)).toBe(true);
+    expect(ehPedidoEmitirConjunto(ocular)).toBe(false);
+    expect(ehPedidoDetalhamentoCampanha(ocular)).toBe(true);
+    expect(deveForcarEmissao({ pedido: ocular, chamouPropose: false, cardsEmitidos: 0 })).toBe(
+      false,
+    );
+    expect(ehPedidoDeAto("monte um ranking dos conjuntos por gasto")).toBe(false);
+    expect(ehPedidoDeAto("monte os conjuntos da campanha nova")).toBe(true);
+    expect(ehPedidoDeAto("altere o orçamento do conjunto que mais gasta")).toBe(true);
+  });
 });
 
 describe("recusaFalsaMoldeTrafego", () => {
@@ -105,6 +122,14 @@ describe("ehPedidoDetalhamentoCampanha", () => {
     expect(
       ehPedidoDetalhamentoCampanha(
         "detalhamento das campanhas 120236111 e 120236222, janela 21/08 a 27/08, por anúncio",
+      ),
+    ).toBe(true);
+  });
+
+  it("reconhece ranking de gasto dos conjuntos como detalhamento", () => {
+    expect(
+      ehPedidoDetalhamentoCampanha(
+        "monte um ranking dos conjuntos da campanha do sistema ocular por gasto",
       ),
     ).toBe(true);
   });
@@ -188,8 +213,13 @@ describe("objetivoDoFio", () => {
     expect(ehPedidoEmitirConjunto(composto)).toBe(true);
   });
 
-  it("nao junta pergunta de leitura", () => {
-    expect(objetivoDoFio("qual o gasto de ontem?", [criar])).toBe("qual o gasto de ontem?");
+  it("nao junta ranking de gasto ao criar campanha do turno anterior", () => {
+    expect(
+      objetivoDoFio(
+        "monte um ranking dos conjuntos da campanha do sistema ocular por gasto",
+        [criar],
+      ),
+    ).toBe("monte um ranking dos conjuntos da campanha do sistema ocular por gasto");
   });
 
   it("nao junta ok vazio de assunto", () => {
@@ -269,6 +299,16 @@ describe("deveForcarEmissao", () => {
 
   it("pergunta de leitura nunca forca emissao", () => {
     expect(deveForcarEmissao({ ...base, pedido: "o anuncio esta com o mesmo link?" })).toBe(false);
+  });
+
+  it("ranking de conjuntos por gasto nunca forca emissao", () => {
+    expect(
+      deveForcarEmissao({
+        ...base,
+        pedido:
+          "realize uma verificação nos conjuntos da campanha do sistema ocular e monte um ranking de gasto",
+      }),
+    ).toBe(false);
   });
 });
 

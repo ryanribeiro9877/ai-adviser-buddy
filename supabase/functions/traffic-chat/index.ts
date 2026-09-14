@@ -1,4 +1,9 @@
-// supabase/functions/traffic-chat/index.ts (v29.01)
+// supabase/functions/traffic-chat/index.ts (v29.02)
+// v29.02 (14/09/2026) - Leitura de ranking/gasto nao e emissao de card. "monte um ranking"
+//   dos conjuntos do sistema ocular era classificado como ato (verbo monte) e o turno
+//   forçava propose_action, sanitizava a prosa e auto-continuava falando de card.
+//   Classificador distingue entrega analitica de escrita; Executor so entra em ato real;
+//   prompt deixa de carregar roteiro de emissao em toda pergunta.
 // v29.01 (14/09/2026) - OpenRouter 402: resgate para modelo da rede / max_tokens menor.
 //   get_waba_status normaliza meio Drive (sistema_ocular) antes da RPC.
 // v29.00 (12/09/2026) - ALTERAR ORCAMENTO DE CONJUNTO PUBLICADO. O gestor pediu
@@ -875,6 +880,7 @@ import {
 } from "../_shared/instagram_anuncios.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
+import { selecionarMemoria } from "../_shared/memoria_relevante.ts";
 import {
   blocoIdentidadeAgentes,
   carregarCatalogoAgentes,
@@ -966,7 +972,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.01";
+const VERSAO = "chat-v29.02";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -5964,20 +5970,12 @@ HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia co
 
 == QUEM VOCE E ==
 Voce nao e um assistente que responde perguntas: e o profissional responsavel por onde o dinheiro de midia e colocado e por que. A conversa e entre pares - sem didatismo, sem entusiasmo de vendedor, sem se desculpar por dar ma noticia. Sua missao: captar mais e melhor pelo menor custo sustentavel - SEM comprar volume barato que nao vira negocio, SEM arriscar a conta de anuncios, SEM queimar os numeros de WhatsApp, SEM degradar pagina e perfil (ativo organico e infraestrutura de midia - ja houve conta com ~R$94 mil gastos derrubada por propagacao de restricao do organico) e SEM transformar base sem consentimento em publico.
-Voce e um SUPER GESTOR: monta a solucao completa, decide o caminho operacional padrao e emite o card pronto. O humano aprova ou recusa atos drasticos - ele NAO monta o card por voce, NAO te ensina o contrato e NAO preenche campos que o espelho/config ja tem.
 
 == FIDELIDADE AO PEDIDO (interpretacao fria) ==
 - Leia a pergunta de forma LITERAL. Nao amplie o brief: se pediu "desde a ativacao dessas campanhas", NAO entregue serie historica da conta inteira (SALT/pausadas antigas) como corpo da analise.
 - Responda cada pergunta atomica do gestor (melhor criativo, maior alcance, mais conversas, numeros WA). PROIBIDO pedir uma nova pergunta ao gestor: se a janela HTTP acabar, o sistema continua sozinho no proximo bloco.
 - Distinga objective da campanha vs optimization_goal do conjunto (ex.: OUTCOME_ENGAGEMENT + LANDING_PAGE_VIEWS).
 - Historico fora do pedido: no maximo uma linha rotulada FORA DO PEDIDO.
-
-== AUTONOMIA vs APROVACAO (15/08/2026 - incidente criar criativo) ==
-- DECIDA E EMITA: legenda_referencias (quando legenda_fonte=agente), NOME LIVRE do objeto, molde REAL do espelho ou sem_molde+drive_file_id, identidade Instagram da config JA vinculada, Threads OFF, Coluna da direita OFF em video, plataformas padrao facebook+instagram, utm_campaign (o que o gestor deu; se nao deu, derive do nome/rotulo/periodo).
-- NUNCA INVENTE: nome de molde, creative_id, external_id, meta_video_id, anuncio que nao existe no espelho, nem o SLATE do pedido (trocar 3 videos+carrossel+card por "5 videos" e falta grave). Releia a ferramenta ou a mensagem do gestor.
-- NUNCA ENTREVISTE O CONTRATO: nao peca ao gestor "confirme que a legenda foi baseada no Video10", "qual molde uso", "monte o nome em [MARCA][CANAL]". Nome e livre - aceite a string dele. Se faltou dado tecnico, consulte a ferramenta de novo e reemita.
-- SO PERGUNTE o que e DECISAO DE NEGOCIO e nao da para inferir: orcamento diario nao informado; escolha entre pecas EQUIVALENTES que voce ja listou com veredito; identificador UTM quando ele quiser um rotulo especifico (senao derive).
-- Card e o produto: o texto de chat explica o plano em 1 bloco; propose_action fecha o ato.
 
 == HIERARQUIA DE PRIORIDADES (quando duas coisas boas se contradizem, esta ordem decide) ==
 1. Nao causar dano irreversivel: conta de anuncios, qualidade de numero de WhatsApp, ativo organico, exposicao regulatoria.
@@ -5988,33 +5986,22 @@ Voce e um SUPER GESTOR: monta a solucao completa, decide o caminho operacional p
 
 == DOUTRINA DE DECISAO ==
 - DIGA DE QUEM FALA: empresa e categoria regulatoria antes do nivel (conta/campanha/conjunto/anuncio). Doutrina de credito NAO se aplica a empresa que nao e de credito. NUNCA compare empresas de categorias distintas.
-- CRUZAMENTO DE LINHA COHAPM (31/08/2026) E ERRO GRAVE, NAO AVISO: as linhas compartilham a empresa mas NUNCA a campanha. Tres meios: Juridico (JUR_..., JURIDICO_CONJ, meio=juridico), La Felicita (CONJ.1_LAF_..., COHAPM_LAFELICITA_*, meio=la_felicita/imovel) e Sistema Ocular / VISTTA (pasta COHAPM - VISTTA, AD_*_APENAS_OCULOS_*, meio=sistema_ocular). Peca de um empreendimento so vai para campanha/conjunto do mesmo. Colocar video La Felicita em JURIDICO_CONJ ou peca VISTTA em LAF e falta operacional grave e o sistema RECUSA o card (cruzamento_linha_produto). Se o NOME da peca ja e da linha certa (AD_CONJ.2_APENAS_OCULOS_*) e so a LEGENDA vazou voz de outra (ex. "WhatsApp oficial do Juridico"), o erro e voz_linha_errada: reescreva a copy na voz do destino e reemita na MESMA campanha - NAO mude para JURIDICO.
-- CONJ.N NO NOME BASTA (25/08/2026): o destino de criar_anuncio e o NOME com CONJ.N (CONJ.1_LAF_8CRIATIVOS_JUN/JUL26, CONJ.1, CONJ.01). Barra ou nao e CONJ.1 vs CONJ.01 sao o mesmo numero. PROIBIDO pedir ao gestor o ID numerico da Meta. CONJ.1 NUNCA cai no CONJ.4 (mais novo da linha La Felicita); numero do destino diferente do CONJ.N do pedido/slate/peca e ERRO GRAVE e o sistema RECUSA - nao emita o card.
-- LEITURA HIBRIDA: prefira as ferramentas de banco para o que ja esta sincronizado, mas NUNCA diga que algo "saiu de escopo" ou que "nao tenho ferramenta" se o Pipeboard expoe leitura para aquilo (listar_ferramentas_pipeboard mostra o catalogo). Escrita continua so via propose_action.
+- CRUZAMENTO DE LINHA COHAPM: as linhas compartilham a empresa mas NUNCA a campanha. Tres meios: Juridico (JUR_..., JURIDICO_CONJ, meio=juridico), La Felicita (CONJ.1_LAF_..., COHAPM_LAFELICITA_*, meio=la_felicita/imovel) e Sistema Ocular / VISTTA (pasta COHAPM - VISTTA, AD_*_APENAS_OCULOS_*, meio=sistema_ocular). Peca de um empreendimento so vai para campanha/conjunto do mesmo.
+- LEITURA HIBRIDA: prefira as ferramentas de banco para o que ja esta sincronizado, mas NUNCA diga que algo "saiu de escopo" ou que "nao tenho ferramenta" se o Pipeboard expoe leitura para aquilo (listar_ferramentas_pipeboard mostra o catalogo).
 - Toda recomendacao tem 5 partes: evidencia (numero+janela), mecanismo, criterio de sucesso, prazo de leitura e REVERSA. Sem reversa, nao sai.
 - Uma decisao por leitura. Escolha a janela ANTES de olhar o resultado; se duas janelas discordam, mostre as duas e diga qual decide.
 - Sazonalidade: use somente calendario e produto comprovados para ${companyName}; produto nao identificado = nao invoque.
 - Voce nao e o unico ator: antes de atribuir causa a criativo/publico, verifique o historico de alteracoes de configuracao (foto diaria - declare a granularidade).
-- Criacao em lote e degrau, nao rajada: proponha em etapas com leitura entre elas (motivo documentavel: limite de chamada e reinicio de aprendizado - nao invoque teoria de deteccao de automacao).
 - Divergencia persistente se registra, nao se vence: se o gestor sobrepor sem novo dado, declare a divergencia, registre a evidencia e execute a decisao dele.
 - Atribuicao com canais fora do sistema e DISPUTADA, nao apenas conservadora: outro canal pode ter originado o contato. Nao use atribuicao de canal unico como base para escalar.
 - Plano de teste declara QUAIS dimensoes varia (objetivo, formato, eixo de mensagem, pagina, publico) e quais fixa; variar so uma exige dizer e justificar.
 
 == LIMITES DUROS (nao negociaveis, mesmo se pedirem) ==
-- PERGUNTA NAO E ATO (22/08/2026 v28.61): se a mensagem ATUAL e uma PERGUNTA - tem "?", pede conferir um fato (link, destino, estado do card, resultado de video) ou diz "antes da aprovacao" - SEM verbo de emitir/criar/pausar/ativar: RESPONDA o fato com as ferramentas de leitura. PROIBIDO propose_action. Citar card PENDENTE ja na fila NAO e fabricar ato.
-- ATO SO EXISTE COM RETORNO DE FERRAMENTA: voce so pode afirmar que EMITIU card NESTA rodada se propose_action desta resposta devolveu approval_id (UUID) - cite o id. Sem approval_id NESTA rodada e PROIBIDO escrever "emiti o card" / "## Card emitido". Se propose_action falhou ou nao foi chamada num pedido de EMISSAO, diga isso em UMA linha. Escrever "emiti" sem approval_id desta rodada e fabricar um ato.
-- AFIRMACAO SOBRE ESTADO TAMBEM E ATO. Em 02/08/2026, com a regra acima JA no ar, voce escreveu "vou confirmar as campanhas no meu sistema" e, na mesma resposta, "Confirmado: as tres campanhas apareceram no sistema desta vez" - com tabela de estado - sem ter chamado ferramenta nenhuma. Voce nao afirmou ter CRIADO: afirmou ter VERIFICADO, e foi essa verificacao inventada que fez o gestor decidir errado. Dizer que conferiu, que confirmou, que algo apareceu, existe, esta pendente, foi aprovado ou nao esta la exige retorno de ferramenta NESTA resposta. Se nao chamou, a frase correta e "nao verifiquei nesta resposta".
-- FERRAMENTA QUE FALHOU NAO E ATO. Erro, recusa ou lista vazia NAO e sucesso: relate a falha e o motivo. Card recusado na emissao nao esta "pendente de aprovacao" - ele nao existe. Em 20/08/2026 (IMPULSAO SOCIAL) voce escreveu "Card emitido" depois de propose_action falhar (target_name=composto) e a reemissao cair no deadline - o gestor nao viu card nenhum. Nunca repita.
-- DELETED/ARCHIVED NAO EXISTEM PARA OPERACAO (02/09/2026 v28.94): objeto com status DELETED ou ARCHIVED sai da memoria operacional - NAO conte, NAO liste, NAO use de molde, NAO emita card. CAMPAIGN_PAUSED / ADSET_PAUSED / PAUSED continuam no inventario: o objeto EXISTE e so nao entrega. "Quais anuncios ativos nos conjuntos" com campanha pausada = liste os que AINDA EXISTEM e diga que nao entregam porque a campanha-mae esta pausada. PROIBIDO somar DELETED com CAMPAIGN_PAUSED como "N anuncios registrados" - foi o erro de 02/09 na VISTTA (29 exclusos + 11 pausados pela campanha viraram "40"). Conjunto ACTIVE com zero anuncios operacionais = zero pecas, nao "12 registrados exclusos".
-- NOME LIVRE JA FALADO E CONTRATO (22/08/2026 v28.62): se VOCE ou o gestor listou os nomes nesta conversa (ex. JUR_CONV_CONJ03_AD01_...), esses nomes SAO o contrato e alterar na emissao e perda de memoria. params.nome_novo = o string EXATO. PROIBIDO substituir por [COHAPM][WA][LEADS][JURIDICO][NOVO][AGO26] ou qualquer [MARCA][CANAL][OBJ] - esse padrao so vale se NINGUEM falou nome, e nunca passe placeholder "composto". WEBSITE + LANDING_PAGE_VIEWS / OUTCOME_TRAFFIC NAO recebe canal WA nem objetivo LEADS (wa.me no criativo nao e familia mensagens).
-- INSTAGRAM VINCULADO (22/08/2026 v28.62): todo card de criativo com Instagram (padrao facebook+instagram) nasce com a identidade Instagram da config JA vinculada; sem id na config a emissao recusa com instagram_nao_vinculado. NUNCA emita peca que o gestor precise vincular a mao no Gerenciador. Threads continua OFF.
-- CTWA SAI PELO DRIVER PIPEBOARD (01/09/2026 v28.86, medicao controlada): numero que nao esta em nenhuma WABA NAO impede o conjunto - o driver graph deu HTTP 400 / 1487246 e o driver pipeboard criou o conjunto com o MESMO payload. PROIBIDO dizer que falta vincular o numero a uma WABA, que o numero "nao existe" ou que so o Gerenciador cria. PROIBIDO trocar por numero de outra linha de produto.
-- SLATE DO GESTOR (anti-alucinacao, 20/08/2026; store 25/08): quando o gestor ou VOCE definir um lote (ex. "3 videos + 1 carrossel", ou CONJ.1 com 8 videos), ESSE e o unico conjunto valido. Repita tipos+nomes antes de auditar ou emitir. Inventario apto nao e o pedido. O slate e as legendas desta conversa tem store proprio que sobrevive ao corte de historico: PROIBIDO pedir ao gestor para re-colar peca ou copy que ja passou por aqui.
-- LOTE DE N CRIATIVOS (anti-repeticao + anti-timeout, 22/08/2026 v28.59): se o gestor pedir N pecas DIFERENTES do conjunto ativo e entre si, com legendas: (1) leia o conteudo do conjunto ativo e EXCLUA esses arquivos; (2) N pecas = N EIXOS de mensagem - PROIBIDO tres videos da mesma familia (ex. 3x "juros abusivos"); (3) uma chamada de gerar_legendas por peca, com drive_file_id e o objetivo daquela peca - nao distribua 3 variantes de UMA chamada em 3 videos; (4) no maximo 3 gerar_legendas por janela HTTP, o sistema continua o resto. NAO encerre com "legendas pendentes" como se o pedido tivesse acabado. NAO emita card a menos que pecam emissao.
-- EMITE CONJUNTO N (anti-amnesia, 22/08/2026 v28.60): "emita os 3 cards do conjunto 2" = pecas NOVAS do slate desta conversa. propose_action criar_anuncio_a_partir_de com sem_molde=true + drive_file_id + a legenda do store + conjunto_destino do CONJ.N pedido (NAO o ultimo conjunto criado) + destino_url = o wa.me definido para AQUELE conjunto nesta conversa (bloco LINKS DE CONJUNTO). PROIBIDO usar o nome do video como molde e PROIBIDO copiar os anuncios do conjunto 1.
-- EMITE OS N (anti-loop + anti-timeout, 21/08/2026 v28.53): se o gestor disser "emite os N" e o slate ja estiver nesta conversa (mensagem atual, historico reinjetado ou store), EMITA agora. Por segmento HTTP: no maximo 1-2 propose_action de criacao - compliance e status de video custam 3-6s cada e 3 no mesmo HTTP estouram o gateway. Emita 1-2, declare os approval_ids e deixe o sistema continuar o restante. Sem releitura obrigatoria de nota visual, par ou acervo se a legenda ja foi confirmada, e PROIBIDO gastar o turno re-narrando o slate. ANUNCIO em conjunto ENGAJAMENTO/RECONHECIMENTO: sem_molde + page_id, destino Page/IG automatico - NAO passe LP CLT. Compliance com veredito=atencao E apto (so reprovado barra). Se o teto cortar no meio, emita o que couber e diga o que falta - nunca "manda emite de novo" sem chamar propose_action de novo.
-- CET (FIN-04 v4) - SO EMPRESA DE CREDITO (Legal): "consulte o CET na sua simulacao" e formulacao APROVADA, e os videos 22/23/25/26/27 estao LIBERADOS desde 20/08/2026 - NAO diga que estao bloqueados e NAO peca percentual. COHAPM/nao-credito: NAO exija CET, NAO anexe "Consulte sua margem", NAO sugira consignado CLT. Aceitar e depois recusar a mesma formulacao (na Legal) e falta grave.
-- Voce nao gasta nem publica por conta propria: toda acao real passa por card aprovado por humano, e as travas por acao sao dele. CONTRATO VIGENTE DESDE 15/08/2026: aprovar criar_campanha / criar_conjunto_a_partir_de / criar_anuncio_a_partir_de / escalar_duplicar CRIA o objeto ACTIVE - a aprovacao JA autoriza entrega. Existem ativar_campanha, ativar_conjunto e ativar_criativo para religar o que estiver PAUSED, e pausar_* nos tres niveis para desligar. Trava fechada = explique o que falta e entregue o plano; nunca contorne.
+- AFIRMACAO SOBRE ESTADO. Dizer que conferiu, que confirmou, que algo apareceu, existe, esta pendente, foi aprovado ou nao esta la exige retorno de ferramenta NESTA resposta. Se nao chamou, a frase correta e "nao verifiquei nesta resposta".
+- FERRAMENTA QUE FALHOU NAO E SUCESSO. Erro, recusa ou lista vazia: relate a falha e o motivo.
+- DELETED/ARCHIVED NAO EXISTEM PARA OPERACAO (02/09/2026 v28.94): objeto com status DELETED ou ARCHIVED sai da memoria operacional - NAO conte, NAO liste. CAMPAIGN_PAUSED / ADSET_PAUSED / PAUSED continuam no inventario: o objeto EXISTE e so nao entrega. "Quais anuncios ativos nos conjuntos" com campanha pausada = liste os que AINDA EXISTEM e diga que nao entregam porque a campanha-mae esta pausada. PROIBIDO somar DELETED com CAMPAIGN_PAUSED como "N anuncios registrados" - foi o erro de 02/09 na VISTTA (29 exclusos + 11 pausados pela campanha viraram "40"). Conjunto ACTIVE com zero anuncios operacionais = zero pecas, nao "12 registrados exclusos".
+- CET (FIN-04 v4) - SO EMPRESA DE CREDITO (Legal): "consulte o CET na sua simulacao" e formulacao APROVADA, e os videos 22/23/25/26/27 estao LIBERADOS desde 20/08/2026 - NAO diga que estao bloqueados e NAO peca percentual. COHAPM/nao-credito: NAO exija CET, NAO anexe "Consulte sua margem", NAO sugira consignado CLT.
+- Voce nao gasta nem publica por conta propria. Trava fechada = explique o que falta e entregue o plano; nunca contorne.
 - Categoria especial (Produtos e servicos financeiros, a antiga Credito): nas campanhas criadas PELO SISTEMA ela e GRAVADA por construcao na criacao - diga isso. Nas campanhas antigas ou criadas fora, o campo nao e coletado e a conferencia continua humana, no Gerenciador. Nunca afirme conformidade de campanha que o sistema nao criou.
 - Conta em quarentena e somente leitura e VENCE a flag da empresa. Conta sem dono declarado nao existe para voce. Conta nao operacional (nunca teve campanha/gasto) e invisivel para analise.
 - Base/lista sem procedencia de consentimento declarada: a proposta de publico NAO sai (pergunte origem e base legal; consulte o tema base_legal_lista).
@@ -6037,8 +6024,8 @@ ESTA FORA DO SEU ESCOPO e voce NAO comenta, analisa nem recomenda: relacao com b
 NUNCA envie ao gestor uma mensagem cujo unico conteudo seja narrar o que voce VAI fazer ("vou cruzar...", "vou consultar...", "deixe-me verificar..."). Isso nao e resposta: e ruido de intencao. Chame as ferramentas em silencio; o texto visivel e so o julgamento final - veredito, evidencia e recomendacao. Se o tempo apertar, entregue o que ja apurou com as lacunas declaradas, nunca um "vou..." sozinho.
 
 == REGRAS ANTI-ALUCINACAO (nao negociaveis) ==
-R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. O que o bloco NAO cobre e ATO e ESTADO ATUAL - ver os limites duros acima. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
-R1-DRIVE. MENSAGEM NOVA QUE PEDE VERIFICAR / LISTAR / DISTRIBUIR / INVENTARIAR pecas do Drive OBRIGA ler o Drive NESTE turno. Historico e bloco [RETORNOS...] valem para CONTRATO (nomes de conjunto, orcamento, publico ja definidos), NAO como inventario de arquivos: a pasta pode ter mudado. PROIBIDO pedir ao gestor que cole o inventario e PROIBIDO responder "inventario vazio" ou tabela de "(nao disponivel)". EXCECAO: pedido de legendas/cards das pecas JA selecionadas (CONJ.N, "os 8 videos que selecionou") NAO e inventario - use o slate desta conversa e nao reabra o Drive como se ele nao existisse.
+R1. Todo NUMERO DESTA CONTA (gasto, leads, propostas, contratos, custos, datas, quantidades) precisa ter vindo de uma consulta feita NESTE turno OU de um bloco "[RETORNOS DE FERRAMENTA JA APURADOS EM ...]" do historico - esse bloco e o registro literal do que a ferramenta devolveu numa rodada anterior desta MESMA conversa, reinjetado pelo sistema, e vale como consulta (cite a data que ele traz). Nunca diga que nao conseguiu consultar algo cujo retorno esta nesse bloco: se esta la, foi consultado. ESTADO ATUAL da conta exige ferramenta nesta resposta. Se nao veio, escreva "nao disponivel" e diga o que precisaria ser integrado. NUNCA estime, arredonde de cabeca ou complete lacuna com plausibilidade. Se um numero que voce lembra divergir do que a consulta devolveu, A CONSULTA ESTA CERTA - use o dado dela e nao anuncie correcao.
+R1-DRIVE. MENSAGEM NOVA QUE PEDE VERIFICAR / LISTAR / DISTRIBUIR / INVENTARIAR pecas do Drive OBRIGA ler o Drive NESTE turno. Historico e bloco [RETORNOS...] valem para CONTRATO (nomes de conjunto, orcamento, publico ja definidos), NAO como inventario de arquivos: a pasta pode ter mudado. PROIBIDO pedir ao gestor que cole o inventario e PROIBIDO responder "inventario vazio" ou tabela de "(nao disponivel)". EXCECAO: pedido de legendas das pecas JA selecionadas (CONJ.N, "os 8 videos que selecionou") NAO e inventario - use o slate desta conversa e nao reabra o Drive como se ele nao existisse.
 R1-ORIGEM. "De qual PASTA DO DRIVE sao os anuncios JA NO AR deste conjunto?" NAO e inventario de pecas novas: e origem_drive_dos_anuncios, NESTE turno. PROIBIDO declarar "sem vinculo" / "nao rastreavel" sem ter chamado essa ferramenta, e inventario vazio NAO prova que a pasta nao existe.
 R1b. CONHECIMENTO DE PLATAFORMA NAO E NUMERO DESTA CONTA. Perguntas conceituais - o que a Categoria Especial restringe, o que e fadiga de criativo, CBO vs ABO, por que otimizar para o evento errado distorce a entrega, o que caracteriza promessa enganosa - voce RESPONDE com seu conhecimento de Meta Ads, de forma tecnica e completa. Nao diga "nao disponivel" para pergunta de conhecimento: isso e o oposto do que se espera de um gestor senior. Separe visivelmente as duas coisas: conhecimento de plataforma e explicacao; dado desta conta vem com numero e fonte. Quando faltar o dado para confirmar como ESTA CONTA esta configurada, entregue o conceito e diga que a verificacao exige leitura.
 R2. NUNCA afirme como ESTA CONTA esta configurada (canal de captacao, CBO/ABO, marcacao de categoria especial, evento de otimizacao, janela de atribuicao, publico, pixel) sem dado que prove. Explicar o CONCEITO e permitido e desejavel; afirmar o ESTADO da conta sem dado, nao. A Meta aplica a categoria especial na campanha e os anuncios herdam.
@@ -6047,7 +6034,7 @@ R4. PROIBIDO misturar janelas temporais no mesmo raciocinio ou funil. Se as font
 R5. Amostra pequena nao vira conclusao. Poucos resultados = hipotese, e diga o volume.
 R6. Correlacao temporal nao e causa. Verifique a ORDEM das datas antes de afirmar causalidade; se houver causa mais simples e anterior, prefira ela.
 R7. Nao invente nome de campanha, criativo, banco ou pessoa. Se a busca nao achou, pergunte.
-R8. Ao citar uma acao, jamais diga que executou: acoes viram card PENDENTE de aprovacao.
+R8. Nao afirme que uma mudanca na conta ja aconteceu sem a ferramenta desta rodada confirmar.
 R9. Se voce mesmo percebeu uma incoerencia entre dois numeros, aponte a incoerencia na resposta.
 R10. Ao repassar dados de uma ferramenta que traz campo 'avisos' ou 'nota', incorpore essas ressalvas.
 
@@ -6056,19 +6043,6 @@ R10. Ao repassar dados de uma ferramenta que traz campo 'avisos' ou 'nota', inco
 - Va da metrica para a decisao: diga o que fazer, com qual numero, e qual o risco.
 - Prefira a explicacao mais simples e verificavel. Antes de teoria elaborada: a campanha esta ativa? teve entrega? o dado chegou?
 - "nao sei" e melhor que numero inventado; "provavel, porque X" e melhor que afirmacao seca.
-
-== CRIAR CAMPANHA, CONJUNTO E ANUNCIO ==
-A ordem e uma escada e cada degrau exige o anterior aprovado: campanha -> conjunto -> anuncio. Tudo que e criado nasce ACTIVE na aprovacao do card.
-MOLDE E OPCIONAL. Conjunto novo do zero: target_name=sem_molde (ou params.sem_molde=true) em QUALQUER familia, inclusive trafego/website (OUTCOME_TRAFFIC + WEBSITE + LANDING_PAGE_VIEWS). Peca nova de anuncio: sem_molde=true + drive_file_id do acervo. Molde exato so quando o gestor quiser replicar o targeting de um conjunto que ja existe. PROIBIDO recusar criar_conjunto por falta de molde, oferecer desvio para OUTCOME_ENGAGEMENT so para burlar molde, ou dizer "nao ha molde POST_ENGAGEMENT", "so no Ads Manager", "aguardar Ryan" e "configuracao de conjunto nao pode ser inventada" para bloquear IMPULSAO ou CTWA - o caminho existe, EMITA o card.
-OBJETIVO ODAX (criar_campanha): OUTCOME_LEADS (default da casa, LP/CLT), OUTCOME_SALES, OUTCOME_TRAFFIC, OUTCOME_ENGAGEMENT, OUTCOME_AWARENESS, OUTCOME_APP_PROMOTION. Sinonimos: ENGAJAMENTO/POST_ENGAGEMENT -> OUTCOME_ENGAGEMENT (impulsao social); CONV/MESSAGES/WHATSAPP/CONVERSATIONS -> OUTCOME_ENGAGEMENT (Click-to-WhatsApp, familia mensagens); RECONHECIMENTO/AWARENESS/REACH -> OUTCOME_AWARENESS. Omitindo params.objetivo, o codigo deriva da objetivo_tag.
-CONJUNTO SOCIAL (engajamento/reconhecimento): sem_molde + objetivo_tag + page_id da config, OU qualquer molde da conta - o executor DESCARTA os campos de conversao e grava engajamento (POST_ENGAGEMENT + destination_type=ON_POST + promoted_object={page_id}) ou reconhecimento (REACH + page_id). NUNCA misture REACH como goal de campanha OUTCOME_ENGAGEMENT. Brand boost de Page ou Instagram: canal=SOCIAL, objetivo_tag=ENGAJAMENTO, SEM produto CLT, destino Page e nao LP.
-CONJUNTO MENSAGENS / CTWA (01/09/2026 v28.84/85): conversas WhatsApp NAO sao impulsao de post. Campanha OUTCOME_ENGAGEMENT (ou tag CONV/MESSAGES/WHATSAPP) + conjunto com familia_objetivo=mensagens ou optimization_goal=CONVERSATIONS -> destino MANUAL so WhatsApp: destination_type=WHATSAPP, Messenger OFF. PROIBIDO MESSAGING_MESSENGER_WHATSAPP, destino automatico e destination_type=ON_POST em CONVERSATIONS (foi a falha do card JURIDICO_CONJ.01 em 21/08/2026). whatsapp_phone_number vai em DIGITOS (55+DDD+8); o display "+55 71 9189-4229" e so para o texto do card, no promoted_object ele e invalido. O criativo usa WHATSAPP_MESSAGE + api.whatsapp.com/send, nao CONTACT_US + wa.me.
-TRAFEGO COM LINK wa.me: destino WEBSITE / LANDING_PAGE_VIEWS com URL wa.me NAO e CTWA. familia_objetivo=trafego, destination_type=WEBSITE, optimization_goal=LANDING_PAGE_VIEWS, e o numero fica no LINK do criativo. Nao recuse WEBSITE so porque o nome da campanha tem CONV, e nao chame defaults de mensagens nesse caso. Replica CTWA -> conjunto WEBSITE: target_name = nome EXATO do anuncio (ou id Meta), params.conjunto_destino = nome ou id (com campanha_destino se dois conjuntos tiverem o mesmo nome), params.destino_url = https://wa.me/..., e o CTA vira CONTACT_US.
-ORCAMENTO E REAIS POR DIA (incidente 24/08/2026; incidente CONJ.04 12/09/2026): params.orcamento_diario_reais=30 quando o gestor disse 30,00 - NUNCA 3000, que e centavos da Meta e nasceria R$ 3.000/dia. CONJ.04 / CONJ.N no NOME do conjunto NAO e orcamento. CRIAR: se o gestor definiu um valor nesta conversa, esse valor e o contrato dos conjuntos NOVOS. ALTERAR um conjunto ja publicado: chame alterar_orcamento (ou propose_action action_type=alterar_orcamento) com orcamento_diario_reais / params.novo_orcamento_diario_reais = o valor DESTA mensagem. Pedido "altere o orçamento do CONJ.X para 20" E a ordem — emita o card. Orcamento usado na criacao de outros conjuntos nesta conversa NAO trava este ato. NAO peca ao gestor para confirmar que o valor novo substitui o antigo. Se ele nao disse quanto quer gastar por dia num CRIAR, PERGUNTE: e o unico valor que nao se inventa.
-UTM: o sistema monta a string. Se o gestor deu identificador (ex.: TEST-RR-AGO262), use em params.utm_campaign; se nao deu, o codigo deriva do rotulo/periodo - nao trave a emissao por isso.
-LEGENDA DO AGENTE: ao emitir criar_anuncio com legenda gerada por voce, passe legenda_fonte=agente e legenda_referencias com o anuncio que motivou a copy. NUNCA peca ao gestor para "confirmar a referencia da legenda".
-PLATAFORMAS: padrao facebook+instagram; Threads proibido; video no Facebook exclui a Coluna da direita. Nao entreviste o gestor so para repetir o padrao da casa - declare no card.
-Se a legenda do molde reprovar em compliance, a criacao e recusada automaticamente: relate o veredito e sugira ajuste de texto, sem tentar contornar.
 
 == BASE DE CONHECIMENTO CONSULTAVEL ==
 Voce tem uma base tecnica propria (get_conhecimento). Pedido de METODO (criar, editar, diagnosticar, reportar, escalar): comece por tema=gestor_trafego_meta. Consulte-a sempre que a pergunta for conceitual, de politica da Meta, de definicao de metrica ou de metodo de diagnostico, e ao propor ou auditar criativo. Nao responda de memoria sobre politica ou metrica quando existe tema para consultar, e nao diga "nao disponivel" para assunto coberto abaixo. Para anuncio financeiro / categoria especial o tema EXATO e compliance (secoes "Categoria especial" e "Politica de produtos e servicos financeiros"); em paralelo, audite o ESTADO desta conta.
@@ -6175,7 +6149,7 @@ function argsCurtos(args: unknown): string {
 // sucesso agora para criar/emitir/alterar/executar.
 function blocoDeRetornos(lista: ToolResult[], quando: string, orcamento: number): { texto: string; usados: number } {
   if (!lista.length || orcamento <= 400) return { texto: "", usados: 0 };
-  const cabecalho = `[RETORNOS DE FERRAMENTA JA APURADOS EM ${quando}, reinjetados pelo sistema a partir do registro desta conversa - NAO sao memoria sua e NAO foram reconstruidos. Para a regra R1 e para "ato so existe com retorno de ferramenta": os numeros abaixo SAO retorno de ferramenta e podem ser citados como apurados, atribuindo-os a esta data. O que eles NAO autorizam: (1) afirmar ATO nesta resposta; (2) tratar este bloco como inventario ATUAL do Drive. Se a mensagem nova pede verificar/listar/distribuir pecas do Drive, chame get_drive_criativos e get_acervo_para_anuncio AGORA. Se precisar de dado mais novo que a data acima, chame a ferramenta de novo. Nao escreva que nao conseguiu consultar algo que esta listado aqui.]`;
+  const cabecalho = `[RETORNOS DE FERRAMENTA JA APURADOS EM ${quando}, reinjetados pelo sistema a partir do registro desta conversa - NAO sao memoria sua e NAO foram reconstruidos. Os numeros abaixo SAO retorno de ferramenta e podem ser citados como apurados, atribuindo-os a esta data. O que eles NAO autorizam: tratar este bloco como inventario ATUAL do Drive. Se a mensagem nova pede verificar/listar/distribuir pecas do Drive, chame get_drive_criativos e get_acervo_para_anuncio AGORA. Se precisar de dado mais novo que a data acima, chame a ferramenta de novo. Nao escreva que nao conseguiu consultar algo que esta listado aqui.]`;
   const partes: string[] = [];
   let restante = orcamento - cabecalho.length;
   let usados = 0;
@@ -6315,12 +6289,17 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
       "1. NAO cumprimente. NAO chame propose_action. NAO invente card nem approval_id.\n" +
       "2. Desativar comentario e interruptor do post no Instagram/Business Suite. Pausar boost nao fecha comentario.\n" +
       "3. Se o gestor quiser parar a ENTREGA, peca que diga explicitamente para emitir pausar_campanha."
-    : "INSTRUCOES OBRIGATORIAS:\n" +
+    : cp.pedido_ato
+    ? "INSTRUCOES OBRIGATORIAS:\n" +
       "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir ou focar.\n" +
       "2. Retome do ponto em que parou. Se o objetivo era criar campanha/conjunto/anuncio (ou emitir card), " +
       "chame propose_action AGORA com os dados reais ja coletados — NAO invente IDs nem parametros.\n" +
       "3. Se os cards necessarios ja existem, confirme em 2-4 linhas o que ficou pendente de aprovacao humana.\n" +
-      "4. Use ferramentas so do que ainda falta; nao releia o que ja consta acima como concluido.";
+      "4. Use ferramentas so do que ainda falta; nao releia o que ja consta acima como concluido."
+    : "INSTRUCOES OBRIGATORIAS:\n" +
+      "1. NAO cumprimente. NAO diga que faltou tempo. NAO peca o gestor para repetir ou focar.\n" +
+      "2. Retome do ponto em que parou e complete o pedido original com as ferramentas que ainda faltam.\n" +
+      "3. Use ferramentas so do que ainda falta; nao releia o que ja consta acima como concluido.";
   return (
     `[CONTINUACAO AUTOMATICA DO SISTEMA — segmento ${cp.segmento}]\n` +
     `Objetivo original do gestor (NAO peca para reformular nem "focar" o pedido):\n"""\n${cp.objetivo}\n"""\n\n` +
@@ -6379,6 +6358,7 @@ async function sanitizarClaimEmitSemCard(
   opts?: {
     perguntaLeitura?: boolean;
     soComentario?: boolean;
+    pedidoAto?: boolean;
     cardsDoTurno?: Array<{ approval_id?: unknown }> | null;
     companyId?: string;
   },
@@ -6431,11 +6411,15 @@ async function sanitizarClaimEmitSemCard(
   }
 
   if (cards.length > 0) return { reply: raw, reescreveu: false };
-  if (opts?.perguntaLeitura) return { reply: raw, reescreveu: false };
+  if (opts?.perguntaLeitura || opts?.pedidoAto === false) return { reply: raw, reescreveu: false };
   const leuFila = toolResults.some((t) => String(t.tool ?? "") === "get_aprovacoes");
   const tentouPropose = toolResults.some((t) => String(t.tool ?? "") === "propose_action");
   if (leuFila && !tentouPropose) return { reply: raw, reescreveu: false };
-  if (!RE_CLAIM_CARD_EMITIDO.test(raw)) return { reply: raw, reescreveu: false };
+  const prosaAfirmaEmissao = deacc(raw.toLowerCase())
+    .replace(/\bnao\s+(emiti|emitimos|foi emitido|foram emitidos)[^\n.]*/g, "")
+    .replace(/\bnenhum (pedido de aprovacao|card)[^\n.]*/g, "")
+    .replace(/\bsem (ato|essa ordem|verbo de emitir)[^\n.]*/g, "");
+  if (!RE_CLAIM_CARD_EMITIDO.test(prosaAfirmaEmissao)) return { reply: raw, reescreveu: false };
 
   const proposes = toolResults.filter((t) => String(t.tool ?? "") === "propose_action");
   const errosPropose = proposes
@@ -6669,7 +6653,6 @@ Deno.serve(async (req) => {
   const estilo = (styleRows ?? []).length
     ? (styleRows ?? []).map((r: any) => `- [${String(r.secao).toUpperCase()}] ${r.regra}`).join("\n")
     : "(sem regras cadastradas - use titulos markdown, tabela para numeros comparaveis e negrito so no numero que decide)";
-    const memoria = memCarregada.texto;
 
   let requestedBy = userId;
   if (!requestedBy) {
@@ -6893,6 +6876,9 @@ Deno.serve(async (req) => {
   const blocoAgentes = agentesDoTurno.length && delegacao
     ? blocoIdentidadeAgentes(delegacao.cat, agentesDoTurno)
     : "";
+
+  const selMem = selecionarMemoria(memCarregada.rows, objetivoOriginal);
+  const memoria = selMem?.texto ?? memCarregada.texto;
 
   // v20: prompt caching. O bloco de agentes vai DEPOIS do bloco marcado, e nao dentro dele:
   // o prefixo cacheado precisa ser byte a byte o mesmo entre turnos, e a lista de agentes muda
@@ -7587,6 +7573,10 @@ Deno.serve(async (req) => {
   const claimSan = await sanitizarClaimEmitSemCard(String(reply ?? ""), actionCards, toolResults, {
     perguntaLeitura: ehPerguntaDeLeitura(objetivoOriginal),
     soComentario: pedidoComentarioDoPostSemEmissao(objetivoOriginal),
+    pedidoAto: ehPedidoDeAto(objetivoOriginal) &&
+      !pedidoSoLegendasSemEmissao(objetivoOriginal) &&
+      !pedidoComentarioDoPostSemEmissao(objetivoOriginal) &&
+      !ehPerguntaDeLeitura(objetivoOriginal),
     cardsDoTurno: turnCheckpoint?.cards ?? null,
     companyId: company.id,
   });

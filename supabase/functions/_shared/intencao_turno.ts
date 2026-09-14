@@ -6,8 +6,46 @@ function deacc(s: string): string {
 export const RE_PEDIDO_DE_ATO =
   /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
 
+const RE_VERBO_FORTE_ATO =
+  /\b(suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|quero subir|vamos criar)\b/;
+
+/** "monte um ranking" / "crie um relatorio" — o objeto do verbo e entrega de leitura. */
+const RE_VERBO_COM_ENTREGA_ANALITICA =
+  /\b(crie|criar|cria|monte|montar|faca|fazer)\s+(um |uma |o |a |os |as )?(ranking|ranqueamento|relatorio|verificacao|diagnostico|analise|tabela|lista|panorama|comparativo|resumo|parecer)\b/;
+
+/** "altere o orcamento" / "monte os conjuntos" — verbo fraco com objeto de escrita. */
+const RE_VERBO_FRACO_COM_OBJETO_DE_ESCRITA =
+  /\b(crie|criar|cria|criacao|altere|alterar|aumente|aumentar|reduza|reduzir|monte|montar)\s+.{0,50}\b(cards?|aprovacoes?|campanhas?|conjuntos?|anuncios?|criativos?|or[cç]amentos?|publicos?|lances?)\b/;
+
+/**
+ * Leitura de desempenho: o gestor quer numero, ranking ou verificacao — nao card.
+ * "monte um ranking dos conjuntos" tem verbo de ato no regex, mas o objeto e a analise.
+ */
+export function ehLeituraDeDesempenho(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  const temAlvo = /\b(campanhas?|conjuntos?|anuncios?|criativ|ad ?sets?)\b/.test(p);
+  if (!temAlvo) return false;
+  return (
+    /\b(ranking|ranqueamento|ranquear)\b/.test(p) ||
+    /\b(verificacao|verifique|verificar|identifique|identificar)\b/.test(p) ||
+    /\b(gastando mais|mais gast|gasto (por|dos|das|nas|nos)|quais.{0,40}gast)\b/.test(p) ||
+    /\b(desempenho|pior|melhor).{0,40}(conjunto|campanha|anuncio)\b/.test(p)
+  );
+}
+
 export function ehPedidoDeAto(pedido: string): boolean {
-  return RE_PEDIDO_DE_ATO.test(deacc(String(pedido ?? "").toLowerCase()));
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  if (RE_VERBO_FORTE_ATO.test(p)) return true;
+  // "monte um ranking dos conjuntos" nao e criar conjunto: o objeto do verbo e a analise.
+  if (RE_VERBO_COM_ENTREGA_ANALITICA.test(p)) {
+    return RE_VERBO_FRACO_COM_OBJETO_DE_ESCRITA.test(
+      p.replace(RE_VERBO_COM_ENTREGA_ANALITICA, " "),
+    );
+  }
+  if (ehLeituraDeDesempenho(p) && !RE_VERBO_FRACO_COM_OBJETO_DE_ESCRITA.test(p)) return false;
+  return RE_PEDIDO_DE_ATO.test(p);
 }
 
 export function ehPerguntaDeLeitura(pedido: string): boolean {
@@ -15,6 +53,7 @@ export function ehPerguntaDeLeitura(pedido: string): boolean {
   if (!raw || ehPedidoDeAto(raw)) return false;
   const p = deacc(raw.toLowerCase());
   if (/\?/.test(raw)) return true;
+  if (ehLeituraDeDesempenho(p) || RE_VERBO_COM_ENTREGA_ANALITICA.test(p)) return true;
   return /\b(antes da aprova|esta com o mesmo|qual (o |a )?(link|destino|url)|o anuncio esta|o card esta|confere se|verifique se|me diga se|consult(ar|e|a)\b)/.test(
     p,
   );
@@ -92,10 +131,13 @@ export function pedidoComentarioDoPostSemEmissao(pedido: string): boolean {
   return true;
 }
 
-/** "emita os cards dos 2 primeiros conjuntos" — nao e anuncio avulso. */
+/** "emita os cards dos 2 primeiros conjuntos" — nao e anuncio avulso nem ranking de conjuntos. */
 export function ehPedidoEmitirConjunto(pedido: string): boolean {
+  if (!ehPedidoDeAto(pedido) || ehPerguntaDeLeitura(pedido) || ehLeituraDeDesempenho(pedido)) {
+    return false;
+  }
   const t = deacc(String(pedido ?? "").toLowerCase());
-  return ehPedidoDeAto(pedido) && /\bconjuntos?\b/.test(t);
+  return /\bconjuntos?\b/.test(t);
 }
 
 const RE_CONTINUA_ATO_FIO =
@@ -179,6 +221,9 @@ export function ehPedidoDetalhamentoCampanha(pedido: string): boolean {
   if (!p) return false;
   const pedeDetalhe =
     /\b(detalhamento|detalhe|detalha|detalhar|maturacao|serie diaria|desempenho.{0,60}(campanha|anuncio|conjunto|criativ)|por anuncio|por conjunto|ranking por|abertura por (anuncio|peca|criativo))\b/.test(p)
+    || /\b(ranking|ranque).{0,60}(gasto|gastando|conjunto|campanha|anuncio)\b/.test(p)
+    || /\b(conjuntos?|campanhas?).{0,80}(ranking|gastando mais|mais gast)\b/.test(p)
+    || /\bverificacao.{0,80}(conjuntos?|campanhas?).{0,80}(gast|ranking)\b/.test(p)
     || (/\b(campanha|anuncio|conjunto)\b/.test(p) && /\b(id\b|external_id|7 dias|sete dias|janela)\b/.test(p) &&
       /\b(gasto|ctr|formular|engaj|impress|alcance|desempenho|resultado)\b/.test(p))
     || (/\bcampanhas?\b/.test(p) && /\d{8,}/.test(p) &&
