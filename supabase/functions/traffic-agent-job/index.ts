@@ -1,4 +1,8 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.23)
+// supabase/functions/traffic-agent-job/index.ts (v4.24)
+// v4.24 (14/09/2026) - RELATORIO JSON CORTADO: semanal La Felicità (8 campanhas ativas)
+//   estourava max_tokens=6000; lastIndexOf("}") lia chave do markdown e gravava o JSON cru.
+//   Extrator recupera corpo_md; ranking de conjuntos deixa de ser colado na sintese
+//   (o codigo ja injeta); teto da sintese sobe para 12000.
 // v4.23 (14/09/2026) - RELATORIO OPENROUTER 402: a escrita morria no Grok (reserva do
 //   primario; `models` nao entra em 402). Resgate troca o primario da rede e corta
 //   max_tokens. get_waba_status deixa de mandar meio Drive `sistema_ocular` cru para a RPC.
@@ -4219,7 +4223,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.23";
+  tel.versao = "job-v4.24";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -4998,7 +5002,7 @@ LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: no
 
 NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio.
 
-corpo_md: markdown com titulos HUMANOS (Resumo executivo, Status e entrega, Investimento e pacing, Custo versus teto, Funil de midia, Por campanha, Conjuntos, Ranking de criativos, Ranking de conjuntos, Fadiga, Diagnostico de custo, Escala, Alertas, Recomendacoes, Compliance, Comparativo, WhatsApp, Cobertura). NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista, EXCETO os dois rankings: TABELA com TODAS as linhas da base, sem cortar, melhor no topo. Ranking de pecas (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos (use a tabela ja montada em ranking_conjuntos). Nao despeje o relatorio interno: sintetize.
+corpo_md: markdown com titulos HUMANOS (Resumo executivo, Status e entrega, Investimento e pacing, Custo versus teto, Funil de midia, Por campanha, Conjuntos, Ranking de criativos, Ranking de conjuntos, Fadiga, Diagnostico de custo, Escala, Alertas, Recomendacoes, Compliance, Comparativo, WhatsApp, Cobertura). NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Nao despeje o relatorio interno: sintetize. Feche o JSON.
 
 Responda APENAS um JSON valido, sem cerca markdown, com:
 {"corpo_md":"narrativa em markdown para o gestor","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"cobertura":"o que nao foi medido, em portugues"}`;
@@ -5011,7 +5015,7 @@ Responda APENAS um JSON valido, sem cerca markdown, com:
         content: `${args.pergunta}\n\n=== BASE COLETADA (fonte dos numeros) ===\n${args.baseColetada}\n\n=== RELATORIOS INTERNOS ===\n${blocos || "(nenhum especialista extra; use so a base coletada)"}`,
       },
     ],
-    { maxTokens: 6000, reasoning: REASONING_OFF, timeoutMs, tipo: "sintese", faixaForcada: "economia" },
+    { maxTokens: 12000, reasoning: REASONING_OFF, timeoutMs, tipo: "sintese", faixaForcada: "economia" },
   );
   if (r.erro) throw new Error([r.erro, r.detalhe].filter(Boolean).join(": ").slice(0, 400));
   return String(r.parsed?.choices?.[0]?.message?.content ?? "");
@@ -5024,7 +5028,7 @@ async function processarRelatorio(relatorioId: string, mcpKey: string): Promise<
   const companyId = String(row.company_id);
   const t0 = Date.now();
   const prazo = () => JOB_LIMIT_MS - (Date.now() - t0);
-  const tel: Record<string, unknown> = { versao: "relatorio-v2", subagentes: [] };
+  const tel: Record<string, unknown> = { versao: "relatorio-v3", subagentes: [] };
   console.warn(`[relatorio] start id=${relatorioId} company=${companyId}`);
   try {
     const { data: companyRow } = await supa.from("companies").select("name").eq("id", companyId).maybeSingle();

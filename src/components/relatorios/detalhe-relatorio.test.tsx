@@ -53,4 +53,23 @@ describe("DetalheRelatorio", () => {
     expect(screen.getByText("O que não foi medido")).toBeInTheDocument();
     expect(screen.getByText(/status real de conjuntos/i)).toBeInTheDocument();
   });
+
+  it("mostra markdown de dump JSON cortado, não o blob cru", () => {
+    render(
+      <DetalheRelatorio
+        relatorio={{
+          ...base,
+          corpo_md:
+            '{"corpo_md":"## resumo_executivo\\nLa Felicità fechou a janela com o melhor custo.\\n## Ranking de conjuntos\\n| 23 | AD_CONJ.02 |',
+          cobertura:
+            "Lista de campanhas conferida ao vivo. Falhas: nenhuma. síntese não devolveu JSON válido",
+          achados: [],
+        }}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "Resumo executivo" })).toBeInTheDocument();
+    expect(screen.getByText(/melhor custo/i)).toBeInTheDocument();
+    expect(screen.queryByText(/"corpo_md"/)).not.toBeInTheDocument();
+    expect(screen.getByText(/narrativa abaixo foi recuperada/i)).toBeInTheDocument();
+  });
 });

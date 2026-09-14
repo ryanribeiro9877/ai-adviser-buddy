@@ -19,6 +19,9 @@ const TROCAS: readonly [RegExp, string][] = [
   [/\bDISCONNECTED\b/g, "desconectado"],
   [/\bCONNECTED\b/g, "conectado"],
   [/\bIN_ADS\b/g, "no anúncio"],
+  [/\bsíntese não devolveu JSON válido\b/gi, "A escrita da síntese foi cortada no fim; a narrativa abaixo foi recuperada. Os cards de opinião desta rodada não vieram."],
+  [/\bsíntese não devolveu JSON estruturado\b/gi, "A síntese não veio como texto corrido."],
+  [/\bsíntese cortada no fim; narrativa recuperada\b/gi, "A escrita da síntese foi cortada no fim; a narrativa abaixo foi recuperada. Os cards de opinião desta rodada não vieram."],
 ];
 
 export function limparJargaoRelatorio(texto: string): string {

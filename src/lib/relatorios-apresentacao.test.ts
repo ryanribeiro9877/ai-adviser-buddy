@@ -13,6 +13,14 @@ describe("limparJargaoRelatorio", () => {
     expect(t).not.toMatch(/desempenho_campanhas/);
     expect(t).not.toMatch(/openrouter_timeout/);
   });
+
+  it("traduz o aviso de síntese cortada sem falar JSON para o gestor", () => {
+    const t = limparJargaoRelatorio(
+      "Lista conferida ao vivo. Falhas: nenhuma. síntese não devolveu JSON válido",
+    );
+    expect(t).toMatch(/narrativa abaixo foi recuperada/i);
+    expect(t).not.toMatch(/JSON/);
+  });
 });
 
 describe("rotuloSeveridadeRelatorio", () => {

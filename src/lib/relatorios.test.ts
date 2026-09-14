@@ -57,6 +57,15 @@ describe("humanizarMarkdownRelatorio", () => {
     expect(md).not.toMatch(/^## resumo_executivo/m);
   });
 
+  it("desembrulha dump JSON cortado (relatório semanal La Felicità)", () => {
+    const dump =
+      '{"corpo_md":"## resumo_executivo\\nLa Felicità gastou R$ 114.\\n## Ranking de conjuntos\\n| 23 | AD_CONJ.02 | gasto {erro: meio}';
+    const md = humanizarMarkdownRelatorio(dump);
+    expect(md).toContain("## Resumo executivo");
+    expect(md).toContain("La Felicità gastou R$ 114.");
+    expect(md).not.toMatch(/"corpo_md"/);
+  });
+
   it("titulosDasSecoes usa o catálogo, não a chave crua", () => {
     expect(titulosDasSecoes(["custo_vs_teto"])).toEqual(["Custo versus teto vigente"]);
   });
@@ -288,6 +297,17 @@ describe("extrairJsonRelatorio", () => {
     expect(r.corpo_md).toBe("não veio estruturado");
     expect(r.achados).toEqual([]);
     expect(r.cobertura).toMatch(/não devolveu JSON/i);
+  });
+
+  it("JSON cortado no meio de corpo_md devolve o markdown, não o blob", () => {
+    const dump =
+      '{"corpo_md":"## Resumo executivo\\nNa janela 7-13/09 La Felicità teve o melhor custo.\\n## Ranking de conjuntos\\n| 23 | peca com } no texto |';
+    const r = extrairJsonRelatorio(dump);
+    expect(r.corpo_md).toContain("## Resumo executivo");
+    expect(r.corpo_md).toContain("La Felicità teve o melhor custo");
+    expect(r.corpo_md).toContain("| 23 |");
+    expect(r.corpo_md.startsWith("{")).toBe(false);
+    expect(r.cobertura).toMatch(/cortada/i);
   });
 });
 

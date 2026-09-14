@@ -216,8 +216,13 @@ export function titulosDasSecoes(secoes: string[]): string[] {
 }
 
 export function humanizarMarkdownRelatorio(md: string): string {
-  const texto = String(md ?? "");
+  let texto = String(md ?? "");
   if (!texto) return texto;
+  const t = texto.trim();
+  if (t.startsWith("{") && /"(?:corpo_md|narrativa)"\s*:/.test(t)) {
+    const rec = extrairJsonRelatorio(t);
+    if (rec.corpo_md.trim() && rec.corpo_md.trim() !== t) texto = rec.corpo_md;
+  }
   let out = texto;
   for (const s of SECOES_RELATORIO) {
     const re = new RegExp(`^(#{1,4}[ \\t]*)${s.chave}\\b`, "gmi");
@@ -821,6 +826,66 @@ export function normalizarAchados(raw: unknown): AchadoRelatorio[] {
   return out;
 }
 
+/** Lê `"chave":"..."` mesmo se a aspa final nunca veio (síntese cortada no teto de tokens). */
+function lerCampoStringJson(raw: string, chave: string): { valor: string; fechado: boolean } | null {
+  const re = new RegExp(`"${chave.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*:\\s*"`);
+  const m = re.exec(raw);
+  if (!m) return null;
+  let i = m.index + m[0].length;
+  let out = "";
+  while (i < raw.length) {
+    const c = raw.charAt(i);
+    if (c === "\\") {
+      const n = raw.charAt(i + 1);
+      if (!n) return { valor: out, fechado: false };
+      if (n === "u") {
+        const hex = raw.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 6;
+          continue;
+        }
+      }
+      const map: Record<string, string> = {
+        n: "\n",
+        r: "\r",
+        t: "\t",
+        b: "\b",
+        f: "\f",
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+      };
+      out += map[n] ?? n;
+      i += 2;
+      continue;
+    }
+    if (c === '"') return { valor: out, fechado: true };
+    out += c;
+    i += 1;
+  }
+  return { valor: out, fechado: false };
+}
+
+function recuperarJsonRelatorioTruncado(raw: string): {
+  corpo_md: string;
+  achados: AchadoRelatorio[];
+  cobertura: string;
+} | null {
+  const corpo = lerCampoStringJson(raw, "corpo_md") ?? lerCampoStringJson(raw, "narrativa");
+  if (!corpo?.valor.trim()) return null;
+  const cob = lerCampoStringJson(raw, "cobertura");
+  return {
+    corpo_md: corpo.valor.trim(),
+    achados: [],
+    cobertura: cob?.fechado
+      ? cob.valor.trim()
+      : corpo.fechado
+        ? String(cob?.valor ?? "").trim()
+        : "síntese cortada no fim; narrativa recuperada",
+  };
+}
+
 export function extrairJsonRelatorio(texto: string): {
   corpo_md: string;
   achados: AchadoRelatorio[];
@@ -833,28 +898,30 @@ export function extrairJsonRelatorio(texto: string): {
   const fence = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   const raw = fence ? fence[1].trim() : trimmed;
   const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start < 0 || end <= start) {
-    return {
-      corpo_md: trimmed,
-      achados: [],
-      cobertura: "síntese não devolveu JSON estruturado",
-    };
+  if (start >= 0) {
+    const end = raw.lastIndexOf("}");
+    if (end > start) {
+      try {
+        const j = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
+        return {
+          corpo_md: String(j.corpo_md ?? j.narrativa ?? "").trim() || trimmed,
+          achados: normalizarAchados(j.achados),
+          cobertura: String(j.cobertura ?? "").trim(),
+        };
+      } catch {
+        /* JSON cortado no meio da string: lastIndexOf("}") pega chave do markdown. */
+      }
+    }
+    const rec = recuperarJsonRelatorioTruncado(raw.slice(start));
+    if (rec) return rec;
   }
-  try {
-    const j = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
-    return {
-      corpo_md: String(j.corpo_md ?? j.narrativa ?? "").trim() || trimmed,
-      achados: normalizarAchados(j.achados),
-      cobertura: String(j.cobertura ?? "").trim(),
-    };
-  } catch {
-    return {
-      corpo_md: trimmed,
-      achados: [],
-      cobertura: "síntese não devolveu JSON válido",
-    };
-  }
+  return {
+    corpo_md: trimmed,
+    achados: [],
+    cobertura: start < 0
+      ? "síntese não devolveu JSON estruturado"
+      : "síntese não devolveu JSON válido",
+  };
 }
 
 export function presetDiarioOperacional(): {
