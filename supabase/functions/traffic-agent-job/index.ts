@@ -1,4 +1,7 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.24)
+// supabase/functions/traffic-agent-job/index.ts (v4.25)
+// v4.25 (15/09/2026) - RELATORIO OCULAR INCOMPLETO: colheita 31/31 ok, mas o texto da
+//   sintese omitia comparativo/WABA/fadiga/legendas por teto; detalhe de anuncios
+//   parava na pagina 1 (6 de 50); achados caíam no parser; titulos duplicavam.
 // v4.24 (14/09/2026) - RELATORIO JSON CORTADO: semanal La Felicità (8 campanhas ativas)
 //   estourava max_tokens=6000; lastIndexOf("}") lia chave do markdown e gravava o JSON cru.
 //   Extrator recupera corpo_md; ranking de conjuntos deixa de ser colado na sintese
@@ -4648,7 +4651,8 @@ const RELATORIO_RESERVA_SINTESE_MS = 120_000;
 const RELATORIO_MIN_ONDA2_MS = 70_000;
 const RELATORIO_MAX_CAMPANHAS = 4;
 const RELATORIO_TETO_JSON = 6000;
-const RELATORIO_TETO_COLHEITA = 40_000;
+const RELATORIO_TETO_COLHEITA = 56_000;
+const RELATORIO_MAX_PAGINAS_ANUNCIOS = 12;
 
 type PecaColheita = { nome: string; ok: boolean; dado: unknown };
 
@@ -4673,16 +4677,108 @@ function ferramentaColheitaFalhou(v: unknown): boolean {
 }
 
 function prioridadePecaColheita(nome: string): number {
-  if (nome === "ranking_conjuntos") return -1;
-  if (nome.startsWith("get_campaign_detail")) return 0;
-  if (nome.startsWith("get_detalhe_anuncios")) return 1;
+  if (nome === "ranking_conjuntos") return 0;
+  if (nome.startsWith("get_campaign_detail") || nome.startsWith("comparativo_")) return 1;
   if (nome.startsWith("get_ads_ranking")) return 2;
-  if (nome.includes("estrutura") || nome.includes("conjunto")) return 3;
-  if (nome.includes("ao_vivo") || nome.includes("pipeboard") || nome.includes("conta_meta")) return 4;
-  if (nome.includes("teto") || nome.includes("pacing")) return 5;
-  if (nome.includes("alerta") || nome.includes("waba") || nome.includes("recomend")) return 6;
-  if (nome.includes("fadiga") || nome.includes("criativo")) return 7;
+  if (nome.startsWith("get_waba") || nome.includes("teto") || nome.includes("pacing") || nome.includes("alerta") || nome.includes("recomend") || nome.includes("dicas")) return 3;
+  if (nome.startsWith("avaliar_fadiga") || nome.startsWith("get_criativos_conteudo")) return 4;
+  if (nome.includes("estrutura") || nome.includes("conjunto")) return 5;
+  if (nome.startsWith("get_detalhe_anuncios")) return 6;
+  if (nome.includes("ao_vivo") || nome.includes("pipeboard") || nome.includes("conta_meta")) return 7;
   return 8;
+}
+
+function totDeAnuncioColheita(a: Record<string, unknown>): Record<string, unknown> | null {
+  return a.totais_janela && typeof a.totais_janela === "object"
+    ? a.totais_janela as Record<string, unknown>
+    : null;
+}
+
+function compactarAnuncioColheita(item: unknown): Record<string, unknown> {
+  const a = item && typeof item === "object" ? item as Record<string, unknown> : {};
+  const tot = totDeAnuncioColheita(a);
+  const legenda = typeof a.legenda === "string" ? a.legenda.slice(0, 280) : a.legenda ?? null;
+  return {
+    ad_id: a.ad_id ?? null,
+    nome: a.nome ?? a.name ?? null,
+    status: a.status ?? null,
+    conjunto: a.conjunto ?? null,
+    cta: a.cta ?? null,
+    titulo: a.titulo ?? null,
+    legenda,
+    destino: a.destino ?? null,
+    gasto: tot?.gasto ?? null,
+    impressoes: tot?.impressoes ?? null,
+    resultado: tot?.resultados_na_base ?? tot?.conversas ?? tot?.formularios ?? null,
+    custo: tot?.custo_por_resultado ?? null,
+  };
+}
+
+function compactarConjuntoColheita(item: unknown): Record<string, unknown> {
+  const c = item && typeof item === "object" ? item as Record<string, unknown> : {};
+  const tot = totDeAnuncioColheita(c);
+  return {
+    conjunto_id: c.conjunto_id ?? c.adset_id ?? c.id ?? null,
+    nome: c.nome ?? c.name ?? null,
+    status: c.status ?? null,
+    anuncios: c.anuncios ?? c.n ?? null,
+    destination_type: c.destination_type ?? null,
+    optimization_goal: c.optimization_goal ?? null,
+    gasto: tot?.gasto ?? null,
+    impressoes: tot?.impressoes ?? null,
+    resultado: tot?.resultados_na_base ?? tot?.conversas ?? tot?.formularios ?? null,
+    custo: tot?.custo_por_resultado ?? null,
+  };
+}
+
+function compactarDadoColheita(nome: string, dado: unknown): unknown {
+  if (!dado || typeof dado !== "object") return dado;
+  const o = dado as Record<string, unknown>;
+  if (nome === "ranking_conjuntos") {
+    return { total: o.total ?? null, markdown: o.markdown ?? null, nota: o.nota ?? null };
+  }
+  if (nome.startsWith("get_detalhe_anuncios")) {
+    const anuncios = Array.isArray(o.anuncios) ? o.anuncios.map(compactarAnuncioColheita) : [];
+    const conjuntos = Array.isArray(o.conjuntos) ? o.conjuntos.map(compactarConjuntoColheita) : [];
+    return {
+      campanha: o.campanha ?? null,
+      janela: o.janela ?? null,
+      total_anuncios: o.total_anuncios ?? anuncios.length,
+      exibidos: anuncios.length,
+      restantes: o.restantes ?? 0,
+      nota_paginacao: o.nota_paginacao ?? null,
+      totais_campanha_janela: o.totais_campanha_janela ?? null,
+      conjuntos,
+      anuncios,
+    };
+  }
+  if (nome.startsWith("get_criativos_conteudo")) {
+    const lista = Array.isArray(o.criativos)
+      ? o.criativos
+      : Array.isArray(o.anuncios)
+        ? o.anuncios
+        : Array.isArray(o.itens)
+          ? o.itens
+          : [];
+    return {
+      busca: o.busca_nome ?? o.busca ?? null,
+      n: lista.length,
+      restantes: o.restantes ?? 0,
+      pecas: lista.slice(0, 12).map((item) => {
+        const a = item && typeof item === "object" ? item as Record<string, unknown> : {};
+        const body = String(a.body ?? a.legenda ?? a.mensagem ?? "").slice(0, 280);
+        return {
+          nome: a.nome ?? a.name ?? null,
+          status: a.status ?? null,
+          titulo: a.titulo ?? a.title ?? null,
+          cta: a.cta ?? a.call_to_action_type ?? null,
+          destino: a.destino ?? a.destino_url ?? a.destination_url ?? null,
+          legenda: body || null,
+        };
+      }),
+    };
+  }
+  return dado;
 }
 
 function montarTextoColheita(pecas: PecaColheita[]): string {
@@ -4690,16 +4786,22 @@ function montarTextoColheita(pecas: PecaColheita[]): string {
   let usados = 0;
   const linhas: string[] = [];
   for (const p of ord) {
-    const dadoTxt = p.nome === "ranking_conjuntos"
-      ? JSON.stringify(p.dado)
-      : jsonCurtoRelatorio(p.dado);
+    const compacto = compactarDadoColheita(p.nome, p.dado);
+    const dadoTxt = jsonCurtoRelatorio(compacto, p.nome.startsWith("get_detalhe_anuncios") ? 12_000 : RELATORIO_TETO_JSON);
     const chunk = `${p.nome} [${p.ok ? "ok" : "falhou"}]: ${dadoTxt}`;
-    if (usados + chunk.length > RELATORIO_TETO_COLHEITA) {
-      linhas.push(`${p.nome}: omitido do texto por teto (${p.ok ? "ok" : "falhou"}).`);
+    if (usados + chunk.length <= RELATORIO_TETO_COLHEITA) {
+      linhas.push(chunk);
+      usados += chunk.length;
       continue;
     }
-    linhas.push(chunk);
-    usados += chunk.length;
+    const mini = jsonCurtoRelatorio(compacto, 900);
+    const resumo = `${p.nome} [${p.ok ? "ok" : "falhou"}]: ${mini}`;
+    if (usados + resumo.length <= RELATORIO_TETO_COLHEITA) {
+      linhas.push(resumo);
+      usados += resumo.length;
+    } else {
+      linhas.push(`${p.nome} [${p.ok ? "ok" : "falhou"}]: lido nesta rodada; texto compactado por teto — NAO trate como nao coletado.`);
+    }
   }
   return linhas.join("\n\n");
 }
@@ -4777,6 +4879,48 @@ function fontesConjuntoComCampanha(raw: unknown, campanha: string): unknown[] {
     const item = c as Record<string, unknown>;
     return { ...item, campanha: String(item.campanha ?? campanha) };
   });
+}
+
+async function colherDetalheAnunciosPaginado(
+  ctx: { companyId: string; mcpKey: string; pedido: string },
+  id: string,
+  periodo: { inicio: string; fim: string },
+): Promise<unknown> {
+  let pagina = 1;
+  let restantes = 1;
+  let base: Record<string, unknown> | null = null;
+  const anuncios: unknown[] = [];
+  while (pagina <= RELATORIO_MAX_PAGINAS_ANUNCIOS && restantes > 0) {
+    const ads = await runTool("get_detalhe_anuncios", {
+      campaign_id: id,
+      date_from: periodo.inicio,
+      date_to: periodo.fim,
+      pagina,
+      incluir_serie_diaria: pagina === 1,
+    }, ctx);
+    if (ferramentaColheitaFalhou(ads)) {
+      if (pagina === 1) return ads;
+      break;
+    }
+    const o = ads && typeof ads === "object" ? ads as Record<string, unknown> : {};
+    if (!base) base = { ...o };
+    if (Array.isArray(o.anuncios)) anuncios.push(...o.anuncios);
+    restantes = Number(o.restantes ?? 0) || 0;
+    pagina += 1;
+  }
+  if (!base) return { erro: "detalhe_anuncios_vazio" };
+  const total = Number(base.total_anuncios ?? anuncios.length) || anuncios.length;
+  const ainda = Math.max(0, total - anuncios.length);
+  return {
+    ...base,
+    pagina: 1,
+    exibidos: anuncios.length,
+    restantes: ainda,
+    anuncios,
+    nota_paginacao: ainda > 0
+      ? `Leu ${anuncios.length} de ${total} anuncios (${pagina - 1} paginas). O restante EXISTE.`
+      : `Leu os ${anuncios.length} anuncios operacionais desta campanha.`,
+  };
 }
 
 async function colherBaseRelatorio(args: {
@@ -4865,10 +5009,7 @@ async function colherBaseRelatorio(args: {
         campaign_id: id, date_from: args.periodo.inicio, date_to: args.periodo.fim,
         somente_ativas: true, ordenar_por: "gasto",
       }, ctx),
-      runTool("get_detalhe_anuncios", {
-        campaign_id: id, date_from: args.periodo.inicio, date_to: args.periodo.fim,
-        pagina: 1, incluir_serie_diaria: true,
-      }, ctx),
+      colherDetalheAnunciosPaginado(ctx, id, args.periodo),
     ]);
     return { id, det, rank, ads };
   }));
@@ -4895,7 +5036,7 @@ async function colherBaseRelatorio(args: {
   for (const nomeCamp of nomes) {
     for (const bit of nomeCamp.split(/[_\s-]+/).filter((b) => b.length >= 5).slice(0, 2)) buscas.add(bit);
   }
-  const buscasLista = [...buscas].slice(0, 8);
+  const buscasLista = [...buscas].slice(0, 12);
   if (buscasLista.length) {
     const copies = await Promise.all(buscasLista.map((busca) =>
       runTool("get_criativos_conteudo", { busca_nome: busca, somente_ativas: false, pagina: 1 }, ctx)
@@ -5000,12 +5141,13 @@ async function sintetizarRelatorioAutonomo(args: {
 
 LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: nome de ferramenta/especialista (desempenho_campanhas, estrutura_conta, get_ads_ranking), codigo interno (openrouter_timeout), chave JSON (amostra_pequena=true, budget_remaining=0, effective_status). Traduza: "a leitura de desempenho desta campanha falhou por tempo esgotado"; "amostra pequena"; "orcamento restante da campanha zerado"; "status real". ID numerico da Meta so entre parenteses no fim do nome, se precisar.
 
-NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio.
+NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio. Peca marcada [ok] na BASE foi lida: nao diga que nao foi coletada.
 
-corpo_md: markdown com titulos HUMANOS (Resumo executivo, Status e entrega, Investimento e pacing, Custo versus teto, Funil de midia, Por campanha, Conjuntos, Ranking de criativos, Ranking de conjuntos, Fadiga, Diagnostico de custo, Escala, Alertas, Recomendacoes, Compliance, Comparativo, WhatsApp, Cobertura). NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Nao despeje o relatorio interno: sintetize. Feche o JSON.
+corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
 
-Responda APENAS um JSON valido, sem cerca markdown, com:
-{"corpo_md":"narrativa em markdown para o gestor","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"cobertura":"o que nao foi medido, em portugues"}`;
+Responda APENAS um JSON valido, sem cerca markdown, NESTA ORDEM de chaves:
+{"cobertura":"o que nao foi medido, em portugues","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"corpo_md":"narrativa em markdown para o gestor"}
+Escreva cobertura e achados ANTES de corpo_md. Array achados vazio so quando nao houver opiniao com as 5 partes; estouro de orcamento, custo versus teto e concentracao de resultado SAO achados.`;
   const timeoutMs = Math.min(150_000, Math.max(args.prazo() - 8_000, 8_000));
   const r = await chamarLLM(
     [

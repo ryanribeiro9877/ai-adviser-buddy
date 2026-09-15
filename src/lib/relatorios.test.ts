@@ -57,6 +57,18 @@ describe("humanizarMarkdownRelatorio", () => {
     expect(md).not.toMatch(/^## resumo_executivo/m);
   });
 
+  it("não duplica título humano já escrito (Fadiga de criativo de criativo)", () => {
+    const md = humanizarMarkdownRelatorio(
+      "## Fadiga de criativo\nFrequência 1,1.\n## Alertas ativos\nUm alerta.\n## WhatsApp / WABA\nDestino WhatsApp.",
+    );
+    expect(md).toContain("## Fadiga de criativo\n");
+    expect(md).not.toContain("de criativo de criativo");
+    expect(md).toContain("## Alertas ativos\n");
+    expect(md).not.toContain("ativos ativos");
+    expect(md).toContain("## WhatsApp / WABA\n");
+    expect(md).not.toContain("/ WABA / WABA");
+  });
+
   it("desembrulha dump JSON cortado (relatório semanal La Felicità)", () => {
     const dump =
       '{"corpo_md":"## resumo_executivo\\nLa Felicità gastou R$ 114.\\n## Ranking de conjuntos\\n| 23 | AD_CONJ.02 | gasto {erro: meio}';
@@ -91,6 +103,27 @@ describe("rankingConjuntosRelatorio", () => {
     expect(r.total).toBe(4);
     expect(r.linhas.map((l) => l.nome)).toEqual(["Barato", "Caro", "Zerado", "So estrutura"]);
     expect(r.markdown).toContain("| 4 | So estrutura |");
+  });
+
+  it("funde objeto ao vivo sem métrica com o conjunto da janela (não duplica linha)", () => {
+    const r = rankingConjuntosRelatorio([
+      {
+        nome: "CONJ.1_GEO_RMS", campanha: "VISTTA", conjunto_id: "1201",
+        status: "ACTIVE", anuncios: 6,
+        totais_janela: { gasto: "R$ 51,31", impressoes: 1018, cliques_no_link: 14, resultados_na_base: 8, custo_por_resultado: "R$ 6,41" },
+      },
+      { id: "999", name: "CONJ.1_GEO_RMS", campanha: "VISTTA", status: "ACTIVE", n: 0 },
+      {
+        nome: "CONJ.1", campanha: "VISTTA", conjunto_id: "1202",
+        status: "PAUSED", anuncios: 6,
+        totais_janela: { gasto: "R$ 0,00", impressoes: 0, cliques_no_link: 0, resultados_na_base: 0 },
+      },
+      { id: "888", name: "CONJ.1", campanha: "VISTTA", status: "PAUSED", n: 0 },
+    ]);
+    expect(r.total).toBe(2);
+    expect(r.linhas.map((l) => l.nome)).toEqual(["CONJ.1_GEO_RMS", "CONJ.1"]);
+    expect(r.linhas[0].gasto).toBeCloseTo(51.31);
+    expect(r.linhas[0].anuncios).toBe(6);
   });
 });
 
@@ -308,6 +341,26 @@ describe("extrairJsonRelatorio", () => {
     expect(r.corpo_md).toContain("| 23 |");
     expect(r.corpo_md.startsWith("{")).toBe(false);
     expect(r.cobertura).toMatch(/cortada/i);
+  });
+
+  it("JSON cortado depois dos achados não zera as opiniões", () => {
+    const dump =
+      '{"cobertura":"nada faltou","achados":[{"tipo":"teto","evidencia":"R$ 181 vs R$ 120 no dia 14/09","alvo_nome":"VISTTA","acao":"alinhar orçamento","mecanismo":"ABO","metrica_sucesso":"gasto ≤ 120","janela_leitura":"próximo dia","reversa":"se o teto mudou, ignorar"}],"corpo_md":"## Resumo executivo\\nCampanha gastou';
+    const r = extrairJsonRelatorio(dump);
+    expect(r.achados).toHaveLength(1);
+    expect(r.achados[0].tipo).toBe("teto");
+    expect(r.achados[0].evidencia).toContain("181");
+    expect(r.corpo_md).toContain("## Resumo executivo");
+  });
+
+  it("JSON válido com } no markdown não descarta achados", () => {
+    const r = extrairJsonRelatorio(JSON.stringify({
+      cobertura: "ok",
+      achados: [{ tipo: "escala", evidencia: "CPR R$ 4,91 no CONJ.2", alvo_nome: "CONJ.2" }],
+      corpo_md: "## Escala\nNão subir {verba} hoje.",
+    }));
+    expect(r.achados).toHaveLength(1);
+    expect(r.corpo_md).toContain("Não subir {verba} hoje.");
   });
 });
 

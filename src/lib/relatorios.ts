@@ -224,7 +224,7 @@ export function humanizarMarkdownRelatorio(md: string): string {
   }
   let out = texto;
   for (const s of SECOES_RELATORIO) {
-    const re = new RegExp(`^(#{1,4}[ \\t]*)${s.chave}\\b`, "gmi");
+    const re = new RegExp(`^(#{1,4}[ \\t]*)${s.chave}\\s*$`, "gmi");
     out = out.replace(re, `$1${s.titulo}`);
   }
   return out;
@@ -642,6 +642,40 @@ function chaveConjuntoRanking(l: Omit<LinhaRankingConjunto, "posicao">): string 
   return `nome:${l.campanha.toLowerCase()}|${l.nome.toLowerCase()}`;
 }
 
+function conjuntoSemJanela(l: Omit<LinhaRankingConjunto, "posicao">): boolean {
+  return l.custo_txt === "sem entrega na janela" && l.gasto === 0 && l.impressoes === 0;
+}
+
+function mesmoNomeCampanhaRanking(
+  a: Omit<LinhaRankingConjunto, "posicao">,
+  b: Omit<LinhaRankingConjunto, "posicao">,
+): boolean {
+  return a.campanha.toLowerCase() === b.campanha.toLowerCase()
+    && a.nome.toLowerCase() === b.nome.toLowerCase();
+}
+
+function colapsarFantasmasRanking(
+  mapa: Map<string, Omit<LinhaRankingConjunto, "posicao">>,
+): Map<string, Omit<LinhaRankingConjunto, "posicao">> {
+  const out = new Map<string, Omit<LinhaRankingConjunto, "posicao">>();
+  for (const n of mapa.values()) {
+    let achou = false;
+    for (const [ek, ev] of out) {
+      const mesmoId = !!(ev.conjunto_id && n.conjunto_id && ev.conjunto_id === n.conjunto_id);
+      const mesmoNome = mesmoNomeCampanhaRanking(ev, n);
+      if (!mesmoId && !mesmoNome) continue;
+      const umFantasma = conjuntoSemJanela(ev) || conjuntoSemJanela(n);
+      if (mesmoId || umFantasma) {
+        out.set(ek, fundirConjuntoRanking(ev, n));
+        achou = true;
+        break;
+      }
+    }
+    if (!achou) out.set(chaveConjuntoRanking(n), n);
+  }
+  return out;
+}
+
 function fundirConjuntoRanking(
   a: Omit<LinhaRankingConjunto, "posicao">,
   b: Omit<LinhaRankingConjunto, "posicao">,
@@ -655,7 +689,7 @@ function fundirConjuntoRanking(
     conjunto_id: base.conjunto_id || outro.conjunto_id,
     nome: base.nome !== "(sem nome)" ? base.nome : outro.nome,
     campanha: base.campanha || outro.campanha,
-    status: outro.status || base.status,
+    status: base.status || outro.status,
     anuncios: Math.max(base.anuncios, outro.anuncios),
   };
 }
@@ -688,7 +722,7 @@ export function rankingConjuntosRelatorio(fonte: unknown): {
     const prev = mapa.get(k);
     mapa.set(k, prev ? fundirConjuntoRanking(prev, n) : n);
   }
-  const linhas = [...mapa.values()]
+  const linhas = [...colapsarFantasmasRanking(mapa).values()]
     .sort((a, b) => compararConjuntoMelhorPior(a as LinhaRankingConjunto, b as LinhaRankingConjunto))
     .map((l, i) => ({ ...l, posicao: i + 1 }));
   if (!linhas.length) {
@@ -866,22 +900,100 @@ function lerCampoStringJson(raw: string, chave: string): { valor: string; fechad
   return { valor: out, fechado: false };
 }
 
+function andarJsonIgnorandoString(
+  raw: string,
+  start: number,
+  abrir: string,
+  fechar: string,
+): number {
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < raw.length; i++) {
+    const c = raw.charAt(i);
+    if (inStr) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (c === "\\") {
+        esc = true;
+        continue;
+      }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') {
+      inStr = true;
+      continue;
+    }
+    if (c === abrir) depth += 1;
+    if (c === fechar) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function fatiaJsonObjeto(raw: string, start: number): string | null {
+  if (raw.charAt(start) !== "{") return null;
+  const end = andarJsonIgnorandoString(raw, start, "{", "}");
+  return end >= 0 ? raw.slice(start, end + 1) : null;
+}
+
+function objetosJsonCompletos(inner: string): unknown[] {
+  const out: unknown[] = [];
+  let i = 0;
+  while (i < inner.length) {
+    while (i < inner.length && ", \n\r\t".includes(inner.charAt(i))) i += 1;
+    if (i >= inner.length || inner.charAt(i) !== "{") break;
+    const end = andarJsonIgnorandoString(inner, i, "{", "}");
+    if (end < 0) break;
+    try {
+      out.push(JSON.parse(inner.slice(i, end + 1)));
+    } catch {
+      break;
+    }
+    i = end + 1;
+  }
+  return out;
+}
+
+function lerCampoArrayJson(raw: string, chave: string): unknown[] {
+  const re = new RegExp(`"${chave.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\s*:\\s*\\[`);
+  const m = re.exec(raw);
+  if (!m) return [];
+  const start = m.index + m[0].length - 1;
+  const end = andarJsonIgnorandoString(raw, start, "[", "]");
+  if (end >= 0) {
+    try {
+      const parsed = JSON.parse(raw.slice(start, end + 1));
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      /* array com objeto cortado: pega só os completos */
+    }
+  }
+  return objetosJsonCompletos(raw.slice(start + 1));
+}
+
 function recuperarJsonRelatorioTruncado(raw: string): {
   corpo_md: string;
   achados: AchadoRelatorio[];
   cobertura: string;
 } | null {
   const corpo = lerCampoStringJson(raw, "corpo_md") ?? lerCampoStringJson(raw, "narrativa");
-  if (!corpo?.valor.trim()) return null;
+  const achados = normalizarAchados(lerCampoArrayJson(raw, "achados"));
   const cob = lerCampoStringJson(raw, "cobertura");
+  if (!corpo?.valor.trim() && !achados.length && !cob?.valor.trim()) return null;
   return {
-    corpo_md: corpo.valor.trim(),
-    achados: [],
+    corpo_md: String(corpo?.valor ?? "").trim(),
+    achados,
     cobertura: cob?.fechado
       ? cob.valor.trim()
-      : corpo.fechado
+      : corpo?.fechado
         ? String(cob?.valor ?? "").trim()
-        : "síntese cortada no fim; narrativa recuperada",
+        : (cob?.valor.trim() || "síntese cortada no fim; narrativa recuperada"),
   };
 }
 
@@ -898,21 +1010,21 @@ export function extrairJsonRelatorio(texto: string): {
   const raw = fence ? fence[1].trim() : trimmed;
   const start = raw.indexOf("{");
   if (start >= 0) {
-    const end = raw.lastIndexOf("}");
-    if (end > start) {
+    const fatia = fatiaJsonObjeto(raw, start);
+    if (fatia) {
       try {
-        const j = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
+        const j = JSON.parse(fatia) as Record<string, unknown>;
         return {
           corpo_md: String(j.corpo_md ?? j.narrativa ?? "").trim() || trimmed,
           achados: normalizarAchados(j.achados),
           cobertura: String(j.cobertura ?? "").trim(),
         };
       } catch {
-        /* JSON cortado no meio da string: lastIndexOf("}") pega chave do markdown. */
+        /* objeto com chave inválida: cai na recuperação campo a campo */
       }
     }
     const rec = recuperarJsonRelatorioTruncado(raw.slice(start));
-    if (rec) return rec;
+    if (rec && (rec.corpo_md || rec.achados.length || rec.cobertura)) return rec;
   }
   return {
     corpo_md: trimmed,
