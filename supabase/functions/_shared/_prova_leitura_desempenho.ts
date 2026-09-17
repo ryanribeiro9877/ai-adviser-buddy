@@ -6,7 +6,7 @@ import {
   janelaDetalhe,
 } from "./leitura_desempenho.ts";
 import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
-import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha } from "./intencao_turno.ts";
+import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha, ehPedidoRelacaoNumerica } from "./intencao_turno.ts";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -46,6 +46,16 @@ assert(
   "pedido com ID Meta e janela",
 );
 assert(!ehPedidoDetalhamentoCampanha("qual o status da conta?"), "status simples nao e detalhamento");
+assert(
+  ehPedidoRelacaoNumerica(
+    "gera uma relação mostrando os gastos, conversas geradas, impressões e orçamento por conjuntos e por criativos",
+  ),
+  "pedido de relacao numerica",
+);
+assert(
+  !(FERRAMENTAS_BASE.get_estrutura_conjuntos.omitidos?.job ?? []).includes("pagina"),
+  "pagina da estrutura nao e omitida no job",
+);
 
 const prosaIncompleta = `
 A configuração das campanhas e dos conjuntos foi lida; o detalhamento de desempenho diário por conjunto e anúncio não foi retornado nesta rodada.

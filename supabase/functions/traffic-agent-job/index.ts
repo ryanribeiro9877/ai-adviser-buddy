@@ -1,4 +1,9 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.25)
+// supabase/functions/traffic-agent-job/index.ts (v4.26)
+// v4.26 (17/09/2026) - RELACAO NUMERICA NAO CHEGAVA: job dc46c40d (Juridico) coletou
+//   ferramentas, mas pagina omitida no job, cortarLista tirou conjuntos/anuncios e dois
+//   especialistas competiram pela parede — a sintese recebeu relatorio vazio. Compacta
+//   e esgota a lista no handler; pagina volta no job; relacao numerica usa 1 especialista
+//   e colheita deterministica (tabela por conjunto e por criativo). Sem mudanca de prompt.
 // v4.25 (15/09/2026) - RELATORIO OCULAR INCOMPLETO: colheita 31/31 ok, mas o texto da
 //   sintese omitia comparativo/WABA/fadiga/legendas por teto; detalhe de anuncios
 //   parava na pagina 1 (6 de 50); achados caíam no parser; titulos duplicavam.
@@ -303,7 +308,7 @@ import {
   extrairJsonRitmo,
 } from "../_shared/ritmo.ts";
 import { COMPANY_COHAPM } from "../_shared/meta_company_tokens.ts";
-import { recusarConjuntoErrado, recusarCruzamentoLinhaProduto, statusObjetoOperacional } from "../_shared/memoria_conjunto.ts";
+import { classificarLinhaProdutoCohapm, recusarConjuntoErrado, recusarCruzamentoLinhaProduto, statusObjetoOperacional } from "../_shared/memoria_conjunto.ts";
 import { carregarMemoriaInstitucional, type FatoMemoria } from "../_shared/agent_memory.ts";
 import { selecionarMemoria } from "../_shared/memoria_relevante.ts";
 import {
@@ -327,7 +332,6 @@ import {
   aplicarRecorteAcervo,
   aplicarRecorteAnalisesDrive,
   compactarInventarioDriveParaAgente,
-  conjuntoNomeDoMeioLaFelicita,
   inferirMeioDeProduto,
   inferirMeioDrive,
   normalizarMeioWaba,
@@ -339,7 +343,14 @@ import {
   recorteDriveDoPedido,
   serieCarrosselDrive,
 } from "../_shared/pedido_drive_criativos.ts";
-import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, ehPedidoRelacaoNumerica, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import {
+  aplicarCompactacaoCriativos,
+  aplicarCompactacaoEstrutura,
+  esgotarPaginasRpc,
+  montarRelacaoDeDetalhe,
+  soAtivosDoPedido,
+} from "../_shared/coleta_completa.ts";
 import {
   tDetalheAnuncios,
   casarCampanhas,
@@ -1147,6 +1158,19 @@ function classificarCapacidade(pergunta: string): Capacidade {
     || len >= 1400
     || (len >= 900 && (perguntas >= 3 || linhas >= 8))
     || (perguntas >= 4 && len >= 500);
+  if (ehPedidoRelacaoNumerica(raw)) {
+    return {
+      tier: deepHit ? "deep" : "standard",
+      motivo: "relacao numerica por conjunto e criativo",
+      maxEspecialistas: 1,
+      devolucoesMax: 0,
+      permitirCheckpoint: true,
+      openRouterTimeoutMs: deepHit ? OPENROUTER_TIMEOUT_MS : STANDARD_OPENROUTER_TIMEOUT_MS,
+      forcarPlano: [
+        { nome: "desempenho_campanhas", foco: FOCO_DESEMPENHO_OVERVIEW },
+      ],
+    };
+  }
   if (origemAnuncios) {
     return {
       tier: deepHit ? "deep" : "standard",
@@ -1531,7 +1555,7 @@ function cortarLista(obj: Record<string, unknown>, campo: string, teto = TETO_TO
   }
   return out;
 }
-async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, pagina = 1, buscaNome = "") {
+async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, pagina = 1, buscaNome = "", pedido = "") {
   // v2: p_company_id obrigatorio (isolamento). v2.1: paginacao - cada pagina de 20 cabe no
   // teto de payload da ferramenta; restantes>0 diz ao subagente que a lista continua.
   // v2.10: p_busca_nome na sobrecarga de 5 args (mesma da traffic-chat) para achar molde sem folhear.
@@ -1544,20 +1568,29 @@ async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, p
     });
     if (error) return { erro: `falha ao buscar criativo por nome: ${error.message}` };
     if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo (busca)" };
-    const obj = data as Record<string, unknown>;
-    const cortado = cortarLista(obj, "anuncios", 9000) as Record<string, unknown>;
-    const nadaCasou = Number(obj.total_que_casam_com_a_busca ?? 0) === 0;
+    const obj = aplicarCompactacaoCriativos(data as Record<string, unknown>, pedido, pagina);
+    const nadaCasou = Number((data as Record<string, unknown>).total_que_casam_com_a_busca ?? 0) === 0;
     const avisoUniverso = nadaCasou && somenteAtivas
       ? "ATENCAO: zero aqui significa 'nenhum anuncio ATIVO com esse nome', NAO 'o anuncio nao existe'. Repita com somente_ativas=false antes de concluir ausencia."
       : undefined;
-    return { ...cortado, somente_campanhas_ativas: somenteAtivas, pagina,
+    return { ...obj, somente_campanhas_ativas: somenteAtivas, pagina,
       ...(avisoUniverso ? { aviso_universo_da_busca: avisoUniverso } : {}),
       nota_busca: "Recorte por NOME (campo anuncios). Sem busca_nome a listagem usa criativos + legendas_unicas." };
   }
-  const { data, error } = await supa.rpc("get_criativos_conteudo", { p_somente_ativas: somenteAtivas, p_company_id: companyId, p_offset: off, p_limit: TAM_PAGINA });
-  if (error) return { erro: `falha ao ler conteudo dos criativos: ${error.message}` };
-  if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo" };
-  const obj = data as Record<string, unknown>;
+  const bruto = await esgotarPaginasRpc(
+    async (offset, limit) => {
+      const { data, error } = await supa.rpc("get_criativos_conteudo", {
+        p_somente_ativas: somenteAtivas, p_company_id: companyId, p_offset: offset, p_limit: limit,
+      });
+      if (error) return { erro: `falha ao ler conteudo dos criativos: ${error.message}` };
+      if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_criativos_conteudo" };
+      return data as Record<string, unknown>;
+    },
+    "criativos",
+    { tam: 40, max: 200 },
+  );
+  if (typeof bruto.erro === "string") return bruto;
+  const obj = bruto;
   const lista = Array.isArray(obj.criativos) ? (obj.criativos as Record<string, unknown>[]) : [];
   const grupos = new Map<string, Record<string, unknown>>();
   for (const c of lista) {
@@ -1581,22 +1614,12 @@ async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, p
   // v29 (14/08): lista peca-por-peca COMPACTA (legenda_resumo ~180) com campos estruturais
   // (object_type/cta/destino/destino_url) SEMPRE presentes, para os ativos caberem inteiros.
   // legendas_unicas segue com o texto INTEGRAL (compliance).
-  const compactos = lista.map((c) => ({
-    anuncio: c.anuncio ?? null,
-    campanha: c.campanha ?? null,
-    campanha_ativa: c.campanha_ativa === true,
-    status_anuncio: c.status_anuncio ?? null,
-    object_type: c.object_type ?? null,
-    cta: c.cta ?? null,
-    destino: c.destino ?? null,
-    destino_url: c.destino_url ?? null,
-    tem_imagem: c.tem_imagem ?? null,
-    gasto_acumulado: c.gasto_acumulado ?? null,
-    formularios: c.formularios ?? null,
-    legenda_resumo: String(c.legenda ?? "").slice(0, 300),
-    legenda_foi_cortada: String(c.legenda ?? "").length > 300,
-  }));
-  const cortado = cortarLista({ ...obj, criativos: compactos }, "criativos", 11000) as Record<string, unknown>;
+  const compactos = aplicarCompactacaoCriativos(
+    { ...obj, criativos: lista },
+    pedido,
+    pagina,
+  );
+  const cortado = compactos;
   const comUnicas = cortarLista({ ...cortado, legendas_unicas: unicas,
     total_legendas_distintas: unicas.length,
     nota_legendas: "legendas_unicas traz o texto INTEGRAL de cada legenda distinta e e a UNICA fonte valida para compliance - audite por aqui, nunca por legenda_resumo. legenda_foi_cortada=true apenas indica que o recorte de ~300 chars nao cobre a peca; o texto inteiro esta em legendas_unicas.",
@@ -1670,24 +1693,95 @@ async function t_ler_pipeboard(companyId: string, ferramenta: string, argumentos
   return cut.data;
 }
 
-async function t_estrutura_conjuntos(companyId: string, pedido?: string) {
-  const { data, error } = await supa.rpc("get_estrutura_conjuntos", {
-    p_company_id: companyId,
-    p_offset: 0,
-    p_limit: 100,
-  });
-  if (error) return { erro: `falha ao ler estrutura dos conjuntos: ${error.message}` };
-  if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
-  const obj = data as Record<string, unknown>;
-  if (pedido && inferirMeioDrive(pedido) === "la_felicita" && Array.isArray(obj.conjuntos)) {
-    const filtrados = (obj.conjuntos as Record<string, unknown>[]).filter((c) =>
-      conjuntoNomeDoMeioLaFelicita(String(c.nome ?? c.name ?? "")),
-    );
-    if (filtrados.length) {
-      return { ...obj, conjuntos: filtrados, recorte: "la_felicita", exibidos: filtrados.length };
-    }
+async function t_estrutura_conjuntos(companyId: string, pedido?: string, pagina = 1) {
+  const bruto = await esgotarPaginasRpc(
+    async (offset, limit) => {
+      const { data, error } = await supa.rpc("get_estrutura_conjuntos", {
+        p_company_id: companyId,
+        p_offset: offset,
+        p_limit: limit,
+      });
+      if (error) return { erro: `falha ao ler estrutura dos conjuntos: ${error.message}` };
+      if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
+      return data as Record<string, unknown>;
+    },
+    "conjuntos",
+    { tam: 100, max: 400 },
+  );
+  if (typeof bruto.erro === "string") return bruto;
+  return aplicarCompactacaoEstrutura(bruto, String(pedido ?? ""), pagina);
+}
+
+async function colherRelacaoNumerica(args: {
+  companyId: string;
+  pedido: string;
+}): Promise<{ ok: boolean; markdown: string; cobertura: string; campanhas: number }> {
+  const pedido = args.pedido;
+  const janelaP = parseJanelaDatasPedido(pedido);
+  const { from, to } = janelaDetalhe(janelaP.date_from, janelaP.date_to, 14);
+  const { data: camps, error } = await supa.from("campaigns")
+    .select("id,name,status,external_id")
+    .eq("company_id", args.companyId);
+  if (error) {
+    return { ok: false, markdown: "", cobertura: `campanhas: ${error.message}`, campanhas: 0 };
   }
-  return cortarLista(obj, "conjuntos");
+  const operacionais = ((camps ?? []) as Array<{ name?: string; status?: unknown; external_id?: string }>)
+    .filter((c) => statusObjetoOperacional(c.status));
+  const meio = inferirMeioDrive(pedido);
+  let alvos = meio
+    ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
+    : [];
+  if (!alvos.length && meio) {
+    const needle = meio === "juridico" ? "juridico" : meio === "la_felicita" ? "felicita" : "ocular";
+    alvos = casarCampanhas(operacionais, needle);
+  }
+  if (soAtivosDoPedido(pedido)) {
+    alvos = alvos.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
+  }
+  if (!alvos.length) {
+    return { ok: false, markdown: "", cobertura: "nenhuma campanha da linha no recorte", campanhas: 0 };
+  }
+  const blocos: string[] = [];
+  const falhas: string[] = [];
+  for (const camp of alvos.slice(0, 6)) {
+    const id = String(camp.external_id ?? "");
+    if (!id) continue;
+    let pagina = 1;
+    let restantes = 1;
+    let base: Record<string, unknown> | null = null;
+    const anuncios: unknown[] = [];
+    while (pagina <= 8 && restantes > 0) {
+      const det = await tDetalheAnuncios(supa, args.companyId, {
+        campaign_id: id,
+        date_from: from,
+        date_to: to,
+        pagina,
+        incluir_serie_diaria: true,
+      });
+      if (typeof det.erro === "string") {
+        falhas.push(`${camp.name}: ${det.erro}`);
+        break;
+      }
+      if (!base) base = det;
+      if (Array.isArray(det.anuncios)) anuncios.push(...det.anuncios);
+      restantes = Number(det.restantes ?? 0) || 0;
+      pagina += 1;
+    }
+    if (!base) continue;
+    const md = montarRelacaoDeDetalhe(
+      { ...base, anuncios, restantes: 0, exibidos: anuncios.length },
+      soAtivosDoPedido(pedido),
+    );
+    if (md) blocos.push(md);
+    else falhas.push(`${camp.name}: sem conjuntos/anuncios no recorte`);
+  }
+  const markdown = blocos.join("\n\n");
+  return {
+    ok: blocos.length > 0,
+    markdown,
+    cobertura: `${blocos.length} campanha(s); falhas=${falhas.length}; janela ${from}→${to}`,
+    campanhas: blocos.length,
+  };
 }
 function recusaCruzamentoJob(companyId: string, args: Record<string, unknown> | null | undefined, pedido?: string) {
   if (companyId !== COMPANY_COHAPM) return null;
@@ -1932,9 +2026,11 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
         const buscaNome = String(args?.busca_nome ?? "").trim();
         const informouAtivas = typeof args?.somente_ativas === "boolean";
         const somenteAtivas = informouAtivas ? args.somente_ativas === true : !buscaNome;
-        return await t_criativos_conteudo(somenteAtivas, ctx.companyId, Number(args?.pagina ?? 1), buscaNome);
+        return await t_criativos_conteudo(
+          somenteAtivas, ctx.companyId, Number(args?.pagina ?? 1), buscaNome, String(ctx.pedido ?? ""),
+        );
       }
-      case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId, ctx.pedido);
+      case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId, ctx.pedido, Number(args?.pagina ?? 1));
       case "listar_ferramentas_pipeboard": return await t_listar_ferramentas_pipeboard();
       case "ler_pipeboard":
         return await t_ler_pipeboard(
@@ -2471,8 +2567,8 @@ async function catalogoFerramentas(): Promise<CatalogoFerramentas> {
 // escolhido rodam.
 const PRIORIDADE_DENTRO_DO_AGENTE = [
   "desempenho_campanhas",
-  "criativos_drive",
   "criativos",
+  "criativos_drive",
   "alertas_recomendacoes",
   "compliance",
   "whatsapp_waba",
@@ -3960,12 +4056,31 @@ async function executarLote(
   ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number, tel: any,
   reservaColetaMs: number,
 ): Promise<{ nome: string; relatorio: string; completo: boolean; erro?: string | null }[]> {
-  const resultados = await Promise.allSettled(lote.map((p) =>
+  const runUm = (p: { nome: string; foco: string }) =>
     p.nome === "analise_visual_drive"
-      // `rodarAnaliseVisual` e pipeline codificado: nao tem laco de chamadas de LLM para orcar, e
-      // ja tem o proprio freio em `VISAO_MIN_PRAZO_MS`.
       ? rodarAnaliseVisual(p.foco, ctx, prazo, tel)
-      : rodarSubagente(p.nome, p.foco, pergunta, ctx, prazo, reservaColetaMs)));
+      : rodarSubagente(p.nome, p.foco, pergunta, ctx, prazo, reservaColetaMs);
+  const sequential = lote.length > 1 && ehPedidoRelacaoNumerica(pergunta);
+  const resultados: PromiseSettledResult<Awaited<ReturnType<typeof runUm>>>[] = sequential
+    ? await (async () => {
+      const acc: PromiseSettledResult<Awaited<ReturnType<typeof runUm>>>[] = [];
+      for (const p of lote) {
+        if (prazo() < reservaColetaMs + 20_000) {
+          acc.push({
+            status: "rejected",
+            reason: new Error("orcamento_insuficiente_para_especialista"),
+          });
+          continue;
+        }
+        try {
+          acc.push({ status: "fulfilled", value: await runUm(p) });
+        } catch (e) {
+          acc.push({ status: "rejected", reason: e });
+        }
+      }
+      return acc;
+    })()
+    : await Promise.allSettled(lote.map(runUm));
   const saida: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
   for (let i = 0; i < resultados.length; i++) {
     const res = resultados[i];
@@ -4229,7 +4344,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.24";
+  tel.versao = "job-v4.26";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -4379,14 +4494,38 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     const rotuloTier = cap.tier === "lite" ? "leve" : cap.tier === "deep" ? "profunda" : "padrao";
     await pushProgresso(jobId, "planner", `contrato do pedido: ${escopo.resumo}${escopo.date_from ? ` (${escopo.date_from}→${escopo.date_to})` : ""}`);
     await pushProgresso(jobId, "planner", `capacidade ${rotuloTier} (${cap.motivo}): escolhendo especialistas`);
-    const { plano, degradado } = await planejar(pergunta, tel, cap, escopo);
-    tel.plano = plano.map((p) => p.nome);
-    tel.planner_degradado = degradado;
-    await pushProgresso(jobId, "planner", `especialistas: ${plano.map((p) => p.nome).join(", ")}${degradado ? " (plano padrao - planejador nao devolveu JSON valido)" : ""} [${cap.tier}]`);
-
-    // FASE 2 - subagentes em paralelo
-    await pushProgresso(jobId, "subagentes", `executando ${plano.length} em paralelo`);
-    let relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs);
+    let plano: { nome: string; foco: string }[] = [];
+    let degradado = false;
+    let relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
+    let colheitaRelacao: { ok: boolean; markdown: string; cobertura: string } | null = null;
+    if (ehPedidoRelacaoNumerica(pergunta)) {
+      await pushProgresso(jobId, "subagentes", "colheita deterministica da relacao (conjunto + criativo)");
+      colheitaRelacao = await colherRelacaoNumerica({ companyId, pedido: pergunta });
+      tel.colheita_relacao = { ok: colheitaRelacao.ok, cobertura: colheitaRelacao.cobertura };
+      if (colheitaRelacao.ok) {
+        plano = [{ nome: "base_coletada", foco: "relacao por conjunto e por criativo" }];
+        tel.plano = ["base_coletada"];
+        tel.planner = { tokens_in: 0, tokens_out: 0, forcado: true, motivo: cap.motivo, tier: cap.tier };
+        relatorios = [{
+          nome: "base_coletada",
+          relatorio: `${colheitaRelacao.markdown}\n\nLACUNAS: nenhuma da relacao pedida — numeros da colheita deterministica (get_detalhe_anuncios).`,
+          completo: true,
+        }];
+        await pushProgresso(jobId, "planner", `colheita ok (${colheitaRelacao.cobertura}) — sem especialistas LLM`);
+      }
+    }
+    if (!relatorios.length) {
+      const planejado = await planejar(pergunta, tel, cap, escopo);
+      plano = planejado.plano;
+      degradado = planejado.degradado;
+      tel.plano = plano.map((p) => p.nome);
+      tel.planner_degradado = degradado;
+      await pushProgresso(jobId, "planner", `especialistas: ${plano.map((p) => p.nome).join(", ")}${degradado ? " (plano padrao - planejador nao devolveu JSON valido)" : ""} [${cap.tier}]`);
+      await pushProgresso(jobId, "subagentes", ehPedidoRelacaoNumerica(pergunta)
+        ? `executando ${plano.length} em sequencia`
+        : `executando ${plano.length} em paralelo`);
+      relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs);
+    }
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
     /**
      * PAREDE NO FIM DA COLETA — o numero que faltava para responder "qual recurso apertou".
@@ -4480,8 +4619,9 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     tel.rodadas_devolucao = rodada;
     tel.segmento = segmento;
 
-    // Checkpoint/segmentos so em tiers que permitem (lite nunca)
-    if (cap.permitirCheckpoint && valeSegmentar() && segmento < MAX_SEGMENTOS) {
+    // Checkpoint/segmentos so em tiers que permitem (lite nunca).
+    // Relacao numerica ja veio da colheita: entregar agora, sem segmento de sintese.
+    if (!colheitaRelacao?.ok && cap.permitirCheckpoint && valeSegmentar() && segmento < MAX_SEGMENTOS) {
       await gravarCheckpointEReinvocar(jobId, convId, companyId, mcpKey, {
         pergunta, plano, relatorios, devolver: [], rodada, tel_parcial: tel,
         segmento: segmento + 1, direto_para_sintese: true, escopo });
@@ -4491,14 +4631,21 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     // Memoria escolhida so AQUI: o plano ja existe e entra no gatilho de relevancia.
     const memoria = memoriaDaSintese(memCarregada, pergunta, escopo, tel, plano);
 
-    // FASE 3 - sintese (com resgate 429)
-    const texto = await sintetizarComResgate({
-      jobId, convId, companyId, mcpKey, companyName, pergunta, plano, relatorios,
-      estilo, memoria, prazo, tel, segmento, rodada,
-      timeoutMs: sintTimeoutMs,
-      jaRetentouSintese: false,
-      escopo,
-    });
+    // FASE 3 - sintese (com resgate 429). Colheita de relacao ja e a resposta.
+    let texto: string | null = null;
+    if (colheitaRelacao?.ok) {
+      texto = colheitaRelacao.markdown;
+      tel.sintese = { pulada: "colheita_relacao", tokens_in: 0, tokens_out: 0, finish_reason: "stop" };
+      await pushProgresso(jobId, "sintese", "resposta da colheita deterministica (sem LLM de sintese)");
+    } else {
+      texto = await sintetizarComResgate({
+        jobId, convId, companyId, mcpKey, companyName, pergunta, plano, relatorios,
+        estilo, memoria, prazo, tel, segmento, rodada,
+        timeoutMs: sintTimeoutMs,
+        jaRetentouSintese: false,
+        escopo,
+      });
+    }
     if (texto === null) return;
 
     /**

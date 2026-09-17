@@ -1,4 +1,6 @@
-// supabase/functions/traffic-chat/index.ts (v29.02)
+// supabase/functions/traffic-chat/index.ts (v29.03)
+// v29.03 (17/09/2026) - Estrutura/criativos compactam e esgotam a lista no handler
+//   (recorte por linha + ativos) para a relacao numerica caber numa chamada.
 // v29.02 (14/09/2026) - Leitura de ranking/gasto nao e emissao de card. "monte um ranking"
 //   dos conjuntos do sistema ocular era classificado como ato (verbo monte) e o turno
 //   forçava propose_action, sanitizava a prosa e auto-continuava falando de card.
@@ -826,6 +828,11 @@ import {
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
 import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, pedidoComentarioDoPostSemEmissao, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
+import {
+  aplicarCompactacaoCriativos,
+  aplicarCompactacaoEstrutura,
+  esgotarPaginasRpc,
+} from "../_shared/coleta_completa.ts";
 import { tDetalheAnuncios, casarCampanhas, escolherCampanhaUnica, janelaDetalhe, somarSnaps, totaisDe, custosDaContaPorBase, NOTA_OVERVIEW } from "../_shared/leitura_desempenho.ts";
 import { baseDoObjetivo } from "../_shared/metrica_canonica.ts";
 import { tOrigemDriveDosAnuncios, tCasarCriativoPerformance } from "../_shared/origem_drive_anuncios.ts";
@@ -1896,7 +1903,7 @@ function compactarAcervoParaAgente(data: unknown, filtroAtivo: boolean, recorte?
 // busca. Por isso cada ramo nomeia o campo que ele realmente recebe.
 // O ramo SEM busca segue byte a byte como estava: caminho que funciona nao se mexe de carona.
 const LIMITE_BUSCA_CRIATIVOS = 20;
-async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, buscaNome = "", pagina = 1) {
+async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, buscaNome = "", pagina = 1, pedido = "") {
   if (buscaNome) {
     const p = Math.max(1, Math.floor(Number(pagina) || 1));
     const { data, error } = await supa.rpc("get_criativos_conteudo", {
@@ -1909,7 +1916,7 @@ async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, b
     const obj = data as Record<string, unknown>;
     // A propria RPC devolve total_que_casam_com_a_busca, restantes e como_usar - inclusive a
     // instrucao de que ZERO significa que o anuncio nao existe. Nao reescrevo nada disso aqui.
-    const cortado = cortarLista(obj, "anuncios", 9000) as Record<string, unknown>;
+    const cortado = aplicarCompactacaoCriativos(obj, pedido, pagina) as Record<string, unknown>;
     // ZERO NAO E A MESMA COISA NOS DOIS UNIVERSOS. A instrucao da RPC ("zero = o anuncio nao
     // existe") esta certa no universo dela; aplicada a um recorte de campanhas ativas ela vira
     // negativa falsa. Se o gestor pediu ativas e nao casou nada, isto e dito com todas as letras.
@@ -1956,22 +1963,8 @@ async function t_criativos_conteudo(somenteAtivas: boolean, companyId: string, b
   // "numero nao confirmado" a partir de item cortado). Aqui cada item leva legenda_resumo
   // (~180 chars) e SEMPRE os campos estruturais (object_type/cta/destino/destino_url), entao
   // os ativos cabem inteiros. legendas_unicas continua com o texto INTEGRAL para compliance.
-  const compactos = lista.map((c) => ({
-    anuncio: c.anuncio ?? null,
-    campanha: c.campanha ?? null,
-    campanha_ativa: c.campanha_ativa === true,
-    status_anuncio: c.status_anuncio ?? null,
-    object_type: c.object_type ?? null,
-    cta: c.cta ?? null,
-    destino: c.destino ?? null,
-    destino_url: c.destino_url ?? null,
-    tem_imagem: c.tem_imagem ?? null,
-    gasto_acumulado: c.gasto_acumulado ?? null,
-    formularios: c.formularios ?? null,
-    legenda_resumo: String(c.legenda ?? "").slice(0, 300),
-    legenda_foi_cortada: String(c.legenda ?? "").length > 300,
-  }));
-  const cortado = cortarLista({ ...obj, criativos: compactos }, "criativos", 11000) as Record<string, unknown>;
+  const compactos = aplicarCompactacaoCriativos({ ...obj, criativos: lista }, pedido, pagina);
+  const cortado = compactos;
   const comUnicas = cortarLista({ ...cortado, legendas_unicas: unicas,
     total_legendas_distintas: unicas.length,
     nota_legendas: "legendas_unicas traz o texto INTEGRAL de cada legenda distinta e e a UNICA fonte valida para compliance - audite por aqui, nunca por legenda_resumo. Na lista 'criativos', legenda_resumo e um recorte de ~300 chars para identificar a peca; legenda_foi_cortada=true diz que ha texto alem do recorte, e nesse caso o texto inteiro esta aqui em legendas_unicas (nao declare a peca 'nao auditada' por causa do recorte).",
@@ -2126,39 +2119,30 @@ async function t_buscar_geolocalizacao(companyId: string, args: any) {
 // envio ao modelo, que corta JSON no meio sem avisar - a falha silenciosa que o v18 existe para
 // impedir.
 async function t_estrutura_conjuntos(companyId: string, pagina: number, pedido = "") {
-  const tamanho = 20;
-  const { data, error } = await supa.rpc("get_estrutura_conjuntos", {
-    p_company_id: companyId,
-    p_offset: Math.max(0, (Math.max(1, pagina) - 1) * tamanho),
-    p_limit: tamanho,
-  });
-  if (error) return { erro: `falha ao ler estrutura de conjuntos: ${error.message}` };
-  if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
-  const raw = cortarLista(data as Record<string, unknown>, "conjuntos") as Record<string, unknown>;
-  if (companyId === COMPANY_COHAPM && Array.isArray(raw.conjuntos)) {
-    const conjuntos = (raw.conjuntos as Record<string, unknown>[]).map((c) => ({
-      ...c,
-      meio: classificarLinhaProdutoCohapm(
-        String(c.conjunto ?? c.nome ?? c.name ?? ""),
-        String(c.campanha ?? ""),
-      ),
-    }));
-    const pedidoLf = inferirMeioDrive(pedido) === "la_felicita";
-    const ordenados = pedidoLf
-      ? [...conjuntos].sort((a, b) => {
-        const ma = a.meio === "la_felicita" ? 0 : 1;
-        const mb = b.meio === "la_felicita" ? 0 : 1;
-        return ma - mb;
-      })
-      : conjuntos;
+  const bruto = await esgotarPaginasRpc(
+    async (offset, limit) => {
+      const { data, error } = await supa.rpc("get_estrutura_conjuntos", {
+        p_company_id: companyId,
+        p_offset: offset,
+        p_limit: limit,
+      });
+      if (error) return { erro: `falha ao ler estrutura de conjuntos: ${error.message}` };
+      if (!data || typeof data !== "object") return { erro: "retorno inesperado de get_estrutura_conjuntos" };
+      return data as Record<string, unknown>;
+    },
+    "conjuntos",
+    { tam: 100, max: 400 },
+  );
+  if (typeof bruto.erro === "string") return bruto;
+  const compacto = aplicarCompactacaoEstrutura(bruto, pedido, pagina);
+  if (companyId === COMPANY_COHAPM) {
     return {
-      ...raw,
-      conjuntos: ordenados,
+      ...compacto,
       aviso_cruzamento:
         "ERRO GRAVE misturar linhas COHAPM: peca de um empreendimento (Juridico, La Felicità ou Sistema Ocular/VISTTA) NUNCA em campanha/conjunto de outro. O card e recusado.",
     };
   }
-  return raw;
+  return compacto;
 }
 
 type CardInfo = { approval_id: string; action: string; entity_type: string; target_name: string; summary: string; params: any; status: string };
@@ -5819,7 +5803,7 @@ async function runTool(name: string, args: any, ctx: any) {
         // esta entregando hoje. Passar somente_ativas explicitamente continua valendo.
         const informouAtivas = typeof args?.somente_ativas === "boolean";
         const somenteAtivas = informouAtivas ? args.somente_ativas === true : !buscaNome;
-        return await t_criativos_conteudo(somenteAtivas, ctx.companyId, buscaNome, Number(args?.pagina ?? 1));
+        return await t_criativos_conteudo(somenteAtivas, ctx.companyId, buscaNome, Number(args?.pagina ?? 1), String(ctx.pedido ?? ""));
       }
       case "get_drive_criativos": {
         const pedido = String(ctx.pedido ?? "");

@@ -4,6 +4,7 @@
 
 import { statusObjetoOperacional } from "./memoria_conjunto.ts";
 import { type BaseDeResultado, baseDoObjetivo, custoPorResultado, rotuloDaBase } from "./metrica_canonica.ts";
+import { jsonCabeNoTeto, reaisDeOrcamentoMeta, serieDiariaEnxuta } from "./coleta_completa.ts";
 
 export type CampanhaRef = {
   id?: string;
@@ -21,6 +22,7 @@ export type DetalheAnunciosArgs = {
 };
 
 const ADS_POR_PAGINA = 6;
+const ADS_POR_PAGINA_SEM_SERIE = 30;
 const DIGITOS_ID_MIN = 8;
 
 export const deaccLeitura = (s: string) =>
@@ -396,11 +398,8 @@ export async function tDetalheAnuncios(
     return sb - sa;
   });
   const totalAnuncios = ranked.length;
-  const offset = (pagina - 1) * ADS_POR_PAGINA;
-  const fatia = ranked.slice(offset, offset + ADS_POR_PAGINA);
-  const restantes = Math.max(0, totalAnuncios - offset - fatia.length);
 
-  const anuncios = fatia.map((a) => {
+  const montarAnuncio = (a: Record<string, unknown>) => {
     const id = String(a.external_id);
     const tot = aggAd.get(id) ?? somarSnaps([]);
     const set = setMap.get(String(a.adset_external_id ?? ""));
@@ -408,6 +407,11 @@ export async function tDetalheAnuncios(
     const dias = (snapsPorAd.get(id) ?? [])
       .slice()
       .sort((x, y) => String(x.snapshot_date).localeCompare(String(y.snapshot_date)));
+    const serieCheia = dias.map((d) => {
+      const { gasto_num: _g, ...linha } = linhaMetrica(d, hoje);
+      void _g;
+      return linha;
+    });
     return {
       ad_id: id,
       nome: a.name,
@@ -417,21 +421,13 @@ export async function tDetalheAnuncios(
       conjunto_status: set?.status ?? null,
       cta: a.call_to_action_type ?? null,
       titulo: a.title ?? null,
-      legenda: typeof a.body === "string" && a.body.trim() ? String(a.body).slice(0, 500) : null,
       formato: a.object_type ?? null,
       destino: dest,
-      // O anuncio herda a base do conjunto que o entrega; o conjunto refina a da campanha pelo
-      // proprio optimization_goal, que e onde a Meta declara o que aquele conjunto otimiza.
       totais_janela: totaisDe(tot, baseDoObjetivo(camp.category, set?.optimization_goal as string | null, camp.objective)),
-      ...(comSerie
-        ? { serie_diaria: dias.map((d) => {
-          const { gasto_num: _g, ...linha } = linhaMetrica(d, hoje);
-          void _g;
-          return linha;
-        }) }
-        : {}),
+      ...(comSerie ? { serie_diaria: serieDiariaEnxuta(serieCheia) } : {}),
     };
-  });
+  };
+  const todosAnuncios = ranked.map(montarAnuncio);
 
   const porConjunto = new Map<string, {
     nome: unknown; status: unknown; n: number; tot: Agg; dias: Map<string, Record<string, unknown>[]>;
@@ -472,7 +468,7 @@ export async function tDetalheAnuncios(
 
   const conjuntos = [...porConjunto.entries()].map(([sid, c]) => {
     const set = setMap.get(sid);
-    const serie = [...c.dias.entries()]
+    const serie = serieDiariaEnxuta([...c.dias.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([dia, rows]) => {
         const { gasto_num: _g, ...linha } = linhaMetrica({
@@ -488,13 +484,14 @@ export async function tDetalheAnuncios(
         }, hoje);
         void _g;
         return linha;
-      });
+      }));
     return {
       conjunto_id: sid === "sem_conjunto" ? null : sid,
       nome: c.nome,
       status: c.status,
       anuncios: c.n,
       orcamento_diario_centavos: set?.daily_budget ?? null,
+      orcamento_diario_reais: reaisDeOrcamentoMeta(set?.daily_budget),
       optimization_goal: set?.optimization_goal ?? null,
       destination_type: set?.destination_type ?? null,
       publico: resumoTargeting(set?.targeting),
@@ -504,7 +501,7 @@ export async function tDetalheAnuncios(
   });
 
   const totCamp = somarSnaps(snaps);
-  return {
+  const cabeca = {
     campanha: {
       nome: camp.name,
       campaign_id: camp.external_id,
@@ -513,14 +510,8 @@ export async function tDetalheAnuncios(
       special_ad_categories: Array.isArray(camp.special_ad_categories) ? camp.special_ad_categories : [],
     },
     janela: { date_from: from, date_to: to },
-    pagina,
-    anuncios_por_pagina: ADS_POR_PAGINA,
-    total_anuncios: totalAnuncios,
-    exibidos: fatia.length,
-    restantes,
     totais_campanha_janela: totaisDe(totCamp, baseCamp),
     conjuntos,
-    anuncios,
     nota:
       "Fonte: ads + ad_metric_snapshots (D-1). Aceita campaign_id Meta ou name_like. " +
       "total_anuncios e a lista IGNORAM DELETED/ARCHIVED — esses objetos sairam da memoria operacional. " +
@@ -530,6 +521,32 @@ export async function tDetalheAnuncios(
       "Alcance na série é soma diária (não pessoas únicas). " +
       "Engajamento de post (POST_ENGAGEMENT) não vive neste espelho; use cliques_todos/impressões/alcance aqui e, se precisar do evento de otimização ao vivo, ler_pipeboard insights. " +
       "Dia sem linha = coleta ainda não chegou, não é entrega zero.",
+  };
+  const todos = {
+    ...cabeca,
+    pagina: 1,
+    anuncios_por_pagina: todosAnuncios.length,
+    total_anuncios: totalAnuncios,
+    exibidos: todosAnuncios.length,
+    restantes: 0,
+    anuncios: todosAnuncios,
+  };
+  // Uma chamada devolve a campanha inteira quando o compacto cabe. Pagina>1 continua
+  // existindo para contas enormes / pedido explícito de folha.
+  if (pagina === 1 && jsonCabeNoTeto(todos, 12_000)) return todos;
+
+  const porPagina = comSerie ? ADS_POR_PAGINA : ADS_POR_PAGINA_SEM_SERIE;
+  const offset = (pagina - 1) * porPagina;
+  const fatia = todosAnuncios.slice(offset, offset + porPagina);
+  const restantes = Math.max(0, totalAnuncios - offset - fatia.length);
+  return {
+    ...cabeca,
+    pagina,
+    anuncios_por_pagina: porPagina,
+    total_anuncios: totalAnuncios,
+    exibidos: fatia.length,
+    restantes,
+    anuncios: fatia,
   };
 }
 

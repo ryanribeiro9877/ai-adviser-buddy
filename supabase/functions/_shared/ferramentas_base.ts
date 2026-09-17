@@ -259,7 +259,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
     descricao:
       "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha estao ACTIVE), estrategia de lance, orcamento, segmentacao (paises, cidades, regioes, bairros_qtd), gasto e destination_type (WEBSITE vs WHATSAPP). PAGINADO de 20: use a pagina seguinte enquanto restantes for maior que zero. Cidades do targeting VEM NESTA TOOL — nao diga que filtragem por cidade nao e visivel.",
     parametros: {"type":"object","properties":{"pagina":{"type":"number","description":"Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero."}}},
-    superficies: ["chat","job"], omitidos: {"job":["pagina"]},
+    superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Desempenho e estrutura de midia",
   },

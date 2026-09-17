@@ -30,8 +30,22 @@ export function ehLeituraDeDesempenho(pedido: string): boolean {
     /\b(ranking|ranqueamento|ranquear)\b/.test(p) ||
     /\b(verificacao|verifique|verificar|identifique|identificar)\b/.test(p) ||
     /\b(gastando mais|mais gast|gasto (por|dos|das|nas|nos)|quais.{0,40}gast)\b/.test(p) ||
-    /\b(desempenho|pior|melhor).{0,40}(conjunto|campanha|anuncio)\b/.test(p)
+    /\b(desempenho|pior|melhor).{0,40}(conjunto|campanha|anuncio)\b/.test(p) ||
+    ehPedidoRelacaoNumerica(p)
   );
+}
+
+/** Relação/tabela de gasto, conversa, impressão e orçamento por conjunto e por criativo. */
+export function ehPedidoRelacaoNumerica(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  const nivel = /\bconjuntos?\b/.test(p) || /\bcriativ/.test(p) || /\banuncios?\b/.test(p);
+  if (!nivel) return false;
+  const tabela =
+    /\b(relacao|tabela|liste|lista)\b/.test(p) ||
+    /\bmostrando os gastos\b/.test(p) ||
+    (/\bgastos?\b/.test(p) && /\b(conversas?|impressoes|orcamento)\b/.test(p));
+  return tabela;
 }
 
 export function ehPedidoDeAto(pedido: string): boolean {
@@ -229,7 +243,7 @@ export function ehPedidoDetalhamentoCampanha(pedido: string): boolean {
     || (/\bcampanhas?\b/.test(p) && /\d{8,}/.test(p) &&
       /\b(janela|\d+\s*dias|anuncio|conjunto|desempenho|analise|detalh)\b/.test(p));
   const temAlvo = /\b(campanhas?|anuncios?|conjuntos?|criativ|ad set|adset)\b/.test(p);
-  return pedeDetalhe && temAlvo;
+  return (pedeDetalhe && temAlvo) || ehPedidoRelacaoNumerica(p);
 }
 
 /**

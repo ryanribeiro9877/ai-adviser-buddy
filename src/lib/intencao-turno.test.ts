@@ -6,6 +6,7 @@ import {
   ehPedidoLeituraCruzada,
   ehPerguntaDeLeitura,
   ehLeituraDeDesempenho,
+  ehPedidoRelacaoNumerica,
   recusaFalsaMoldeTrafego,
   ehPedidoUploadLote,
   ehUploadLoteCurto,
@@ -83,6 +84,16 @@ describe("ehPerguntaDeLeitura", () => {
     expect(ehPedidoDeAto("monte um ranking dos conjuntos por gasto")).toBe(false);
     expect(ehPedidoDeAto("monte os conjuntos da campanha nova")).toBe(true);
     expect(ehPedidoDeAto("altere o orçamento do conjunto que mais gasta")).toBe(true);
+  });
+
+  it("relacao numerica de conjuntos e criativos e leitura, nao emissao", () => {
+    const pedido =
+      "preciso que você verifique a campanha do jurídico e, apenas dos conjuntos e criativos ativos hoje, você gera pra mim uma relação mostrando os gastos, conversas geradas, impressões, preços por conversa gerada e orçamento por conjuntos e por criativos.";
+    expect(ehPedidoRelacaoNumerica(pedido)).toBe(true);
+    expect(ehLeituraDeDesempenho(pedido)).toBe(true);
+    expect(ehPedidoDetalhamentoCampanha(pedido)).toBe(true);
+    expect(ehPedidoDeAto(pedido)).toBe(false);
+    expect(ehPerguntaDeLeitura(pedido)).toBe(true);
   });
 });
 

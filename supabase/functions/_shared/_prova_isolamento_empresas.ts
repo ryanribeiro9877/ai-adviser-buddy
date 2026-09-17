@@ -47,7 +47,7 @@ assert(
 );
 assert(
   job.includes('p_company_id: companyId') &&
-    job.includes('case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId, ctx.pedido)'),
+    job.includes('case "get_estrutura_conjuntos": return await t_estrutura_conjuntos(ctx.companyId, ctx.pedido'),
   "job: estrutura deve ser escopada pela empresa",
 );
 assert(
