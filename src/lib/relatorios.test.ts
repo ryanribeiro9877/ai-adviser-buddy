@@ -1,17 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
   campanhaEstaAtiva,
+  campanhaEhCascaMeta,
+  filtrarCampanhasAtivasDoRecorte,
   CHAVES_SECAO_RELATORIO,
   especialistasPorSecoes,
   extrairJsonRelatorio,
   flattenCampanhasPipeboard,
   humanizarMarkdownRelatorio,
   filtrarConjuntosDoRecorte,
+  injetarRankingCampanhasNoMarkdown,
   injetarRankingConjuntosNoMarkdown,
   janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   normalizarAchados,
+  ordenarCampanhasRelatorioPorGasto,
   periodoDaJanela,
+  rankingCampanhasRelatorio,
   rankingConjuntosRelatorio,
   recortarAlertasDoRecorte,
   presetDiarioOperacional,
@@ -136,6 +141,64 @@ describe("injetarRankingConjuntosNoMarkdown", () => {
     expect(md.indexOf("Ranking de criativos")).toBeLessThan(md.indexOf("Ranking de conjuntos"));
     expect(md.indexOf("Ranking de conjuntos")).toBeLessThan(md.indexOf("Fadiga"));
     expect(md).toContain("| 1 | A |");
+  });
+});
+
+describe("recorte todas_ativas ignora cascas Meta", () => {
+  const base = (over: Partial<CampanhaRelatorio>): CampanhaRelatorio => ({
+    external_id: "x",
+    nome: "Post",
+    status: "ACTIVE",
+    objective: "LINK_CLICKS",
+    tipo: "trafego",
+    gasto: 0,
+    last_synced_at: null,
+    fonte: "ao_vivo",
+    ...over,
+  });
+
+  it("reconhece Traffic/Sales/MM_LITE e não mistura com postagem ativa", () => {
+    expect(campanhaEhCascaMeta("Traffic Campaign")).toBe(true);
+    expect(campanhaEhCascaMeta("Sales Campaign")).toBe(true);
+    expect(campanhaEhCascaMeta("MM_LITE_DEFAULT_AD_CAMPAIGN_GROUP")).toBe(true);
+    expect(campanhaEhCascaMeta("Post do Instagram: Recebeu uma mensagem")).toBe(false);
+    const r = filtrarCampanhasAtivasDoRecorte([
+      base({ external_id: "1", nome: "Post do Instagram: A", gasto: 17 }),
+      base({ external_id: "2", nome: "Traffic Campaign" }),
+      base({ external_id: "3", nome: "Sales Campaign" }),
+      base({ external_id: "4", nome: "MM_LITE_DEFAULT_AD_CAMPAIGN_GROUP" }),
+      base({ external_id: "5", nome: "Post do Instagram: B", status: "paused", gasto: 10 }),
+      base({ external_id: "6", nome: "Post do Instagram: C", gasto: 20 }),
+    ]);
+    expect(r.cascas).toBe(3);
+    expect(r.escolhidas.map((c) => c.external_id)).toEqual(["1", "6"]);
+  });
+
+  it("ordena pelo gasto da janela, não pela ordem do Pipeboard", () => {
+    const ord = ordenarCampanhasRelatorioPorGasto(
+      [
+        base({ external_id: "a", nome: "Primeira na lista", gasto: 1 }),
+        base({ external_id: "b", nome: "Maior gasto", gasto: 20 }),
+      ],
+      { b: 20.44, a: 17 },
+    );
+    expect(ord.map((c) => c.external_id)).toEqual(["b", "a"]);
+  });
+
+  it("ranking de campanhas lista todas, da maior gasto, e injeta na quebra", () => {
+    const r = rankingCampanhasRelatorio([
+      { campaign_id: "1", nome: "Post A", status: "ACTIVE", gasto: 17, impressoes: 900, cliques_link: 50, formularios: 0, conversas: 0 },
+      { campaign_id: "2", nome: "Post B", status: "ACTIVE", gasto: 20.44, impressoes: 573, cliques_link: 23, formularios: 0, conversas: 0 },
+    ]);
+    expect(r.total).toBe(2);
+    expect(r.linhas[0].nome).toBe("Post B");
+    expect(r.markdown).toContain("Todas as 2 campanha(s)");
+    const md = injetarRankingCampanhasNoMarkdown({
+      md: "## Resumo executivo\nok\n\n## Quebra por campanha\nso quatro\n\n## Fadiga\nx",
+      tabela: r.markdown,
+    });
+    expect(md).toContain("Post B");
+    expect(md).not.toContain("so quatro");
   });
 });
 

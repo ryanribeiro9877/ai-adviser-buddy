@@ -259,6 +259,56 @@ export function campanhaEstaAtiva(status: string): boolean {
   return s === "active" || s === "ativa";
 }
 
+/**
+ * Cascas que a Graph/Pipeboard lista como ACTIVE em toda ad account (Advantage / MM Lite)
+ * e que não são linha de mídia da casa. "Todas as ativas" não pode misturá-las com postagens
+ * que realmente entregam.
+ */
+export function campanhaEhCascaMeta(nome: string): boolean {
+  const n = String(nome ?? "")
+    .trim()
+    .toLowerCase();
+  if (!n) return false;
+  if (n === "traffic campaign" || n === "sales campaign") return true;
+  if (n === "mm_lite_default_ad_campaign_group") return true;
+  return false;
+}
+
+export function filtrarCampanhasAtivasDoRecorte(campanhas: CampanhaRelatorio[]): {
+  escolhidas: CampanhaRelatorio[];
+  cascas: number;
+} {
+  if (!Array.isArray(campanhas)) return { escolhidas: [], cascas: 0 };
+  const ativas = campanhas.filter((c) => campanhaEstaAtiva(String(c?.status ?? "")));
+  const escolhidas = ativas.filter((c) => !campanhaEhCascaMeta(String(c?.nome ?? "")));
+  return { escolhidas, cascas: ativas.length - escolhidas.length };
+}
+
+export function ordenarCampanhasRelatorioPorGasto(
+  campanhas: CampanhaRelatorio[],
+  gastoPorId?: unknown,
+): CampanhaRelatorio[] {
+  const lista = Array.isArray(campanhas) ? campanhas.slice() : [];
+  const extra = (id: string, fallback: number): number => {
+    if (gastoPorId instanceof Map) {
+      const v = gastoPorId.get(id);
+      return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+    }
+    if (gastoPorId && typeof gastoPorId === "object" && !Array.isArray(gastoPorId)) {
+      const v = (gastoPorId as Record<string, unknown>)[id];
+      return typeof v === "number" && Number.isFinite(v) ? v : fallback;
+    }
+    return fallback;
+  };
+  lista.sort((a, b) => {
+    const ga = extra(String(a?.external_id ?? ""), Number(a?.gasto ?? 0) || 0);
+    const gb = extra(String(b?.external_id ?? ""), Number(b?.gasto ?? 0) || 0);
+    if (gb !== ga) return gb - ga;
+    return String(a?.nome ?? "").localeCompare(String(b?.nome ?? ""), "pt-BR");
+  });
+  return lista;
+}
+
 export function rotuloStatusCampanha(status: string): string {
   const k = String(status ?? "")
     .trim()
@@ -798,6 +848,88 @@ export function injetarRankingConjuntosNoMarkdown(args: unknown): string {
   const md = String(o.md ?? o.corpo_md ?? "");
   const tabela = String(o.tabela ?? "");
   return injetarSecaoMarkdownRelatorio(md, "Ranking de conjuntos", tabela);
+}
+
+export type LinhaRankingCampanha = {
+  posicao: number;
+  campaign_id: string;
+  nome: string;
+  status: string;
+  gasto: number;
+  impressoes: number;
+  cliques_link: number;
+  formularios: number;
+  conversas: number;
+};
+
+function listaCampanhasRanking(fonte: unknown): Record<string, unknown>[] {
+  if (fonte == null) return [];
+  if (Array.isArray(fonte)) {
+    return fonte.flatMap((x) =>
+      x && typeof x === "object" && !Array.isArray(x) ? [x as Record<string, unknown>] : [],
+    );
+  }
+  if (typeof fonte !== "object") return [];
+  const o = fonte as Record<string, unknown>;
+  if (Array.isArray(o.linhas)) return listaCampanhasRanking(o.linhas);
+  return [];
+}
+
+/** Todas as campanhas do recorte, da maior para a menor gasto na janela. Sem cortar. */
+export function rankingCampanhasRelatorio(fonte: unknown): {
+  linhas: LinhaRankingCampanha[];
+  markdown: string;
+  total: number;
+} {
+  const brutas: Omit<LinhaRankingCampanha, "posicao">[] = [];
+  for (const item of listaCampanhasRanking(fonte)) {
+    const id = String(item.campaign_id ?? item.external_id ?? item.id ?? "").trim();
+    const nome = String(item.nome ?? item.name ?? "").trim() || "(sem nome)";
+    if (!id && nome === "(sem nome)") continue;
+    brutas.push({
+      campaign_id: id,
+      nome,
+      status: String(item.status ?? "").trim(),
+      gasto: reaisDeRelatorio(item.gasto),
+      impressoes: Number(item.impressoes ?? 0) || 0,
+      cliques_link: Number(item.cliques_link ?? item.cliques_no_link ?? 0) || 0,
+      formularios: Number(item.formularios ?? item.form_leads ?? 0) || 0,
+      conversas: Number(item.conversas ?? item.messaging_started ?? 0) || 0,
+    });
+  }
+  const linhas = brutas
+    .sort((a, b) => (b.gasto !== a.gasto ? b.gasto - a.gasto : a.nome.localeCompare(b.nome, "pt-BR")))
+    .map((l, i) => ({ ...l, posicao: i + 1 }));
+  if (!linhas.length) {
+    return { linhas, total: 0, markdown: "Nenhuma campanha no recorte desta janela." };
+  }
+  const header = "| # | Campanha | Status | Gasto | Impressões | Cliques no link | Formulários | Conversas |";
+  const sep = "|---|---|---|---|---|---|---|---|";
+  const rows = linhas.map(
+    (l) =>
+      `| ${l.posicao} | ${l.nome} | ${l.status || "—"} | ${fmtReaisRelatorio(l.gasto)} | ${l.impressoes} | ${l.cliques_link} | ${l.formularios} | ${l.conversas} |`,
+  );
+  return {
+    linhas,
+    total: linhas.length,
+    markdown: [
+      `Todas as ${linhas.length} campanha(s) do recorte, da maior para a menor gasto na janela. Cascas Traffic/Sales/MM_LITE não entram.`,
+      "",
+      header,
+      sep,
+      ...rows,
+    ].join("\n"),
+  };
+}
+
+export function injetarRankingCampanhasNoMarkdown(args: unknown): string {
+  if (args == null || typeof args !== "object" || Array.isArray(args)) {
+    return String(args ?? "");
+  }
+  const o = args as { md?: unknown; tabela?: unknown; corpo_md?: unknown };
+  const md = String(o.md ?? o.corpo_md ?? "");
+  const tabela = String(o.tabela ?? "");
+  return injetarSecaoMarkdownRelatorio(md, "Quebra por campanha", tabela);
 }
 
 export type AchadoRelatorio = {

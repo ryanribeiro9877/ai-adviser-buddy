@@ -13,7 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import {
   SECOES_RELATORIO,
-  campanhaEstaAtiva,
+  filtrarCampanhasAtivasDoRecorte,
   presetDiarioOperacional,
   rotuloStatusCampanha,
   type CampanhaRelatorio,
@@ -70,7 +70,10 @@ export function FormularioAgendamento({
   isAdmin: boolean;
 }) {
   const set = (patch: Partial<FormAgendamento>) => onChange({ ...form, ...patch });
-  const ativas = useMemo(() => campanhas.filter((c) => campanhaEstaAtiva(c.status)), [campanhas]);
+  const ativas = useMemo(
+    () => filtrarCampanhasAtivasDoRecorte(campanhas).escolhidas,
+    [campanhas],
+  );
 
   const toggleSecao = (chave: ChaveSecaoRelatorio, ligada: boolean) => {
     if (ligada) {

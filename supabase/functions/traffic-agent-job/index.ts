@@ -274,17 +274,20 @@ import {
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import {
   addDaysYmd,
-  campanhaEstaAtiva,
   especialistasPorSecoes,
   extrairJsonRelatorio,
+  filtrarCampanhasAtivasDoRecorte,
   filtrarConjuntosDoRecorte,
   flattenCampanhasPipeboard,
   hojeYmdBrasilia,
   humanizarMarkdownRelatorio,
+  injetarRankingCampanhasNoMarkdown,
   injetarRankingConjuntosNoMarkdown,
   janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
+  ordenarCampanhasRelatorioPorGasto,
   periodoDaJanela,
+  rankingCampanhasRelatorio,
   rankingConjuntosRelatorio,
   recortarAlertasDoRecorte,
   titulosDasSecoes,
@@ -4565,6 +4568,96 @@ function emBackground(p: Promise<unknown>) {
   else void p;
 }
 
+async function gastoNaJanelaPorCampanha(
+  companyId: string,
+  ids: string[],
+  periodo: { inicio: string; fim: string },
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  const lista = ids.map((x) => String(x ?? "").trim()).filter(Boolean);
+  if (!lista.length) return out;
+  const { data: camps } = await supa
+    .from("campaigns")
+    .select("id,external_id")
+    .eq("company_id", companyId)
+    .in("external_id", lista);
+  const extPorUuid = new Map<string, string>();
+  for (const c of camps ?? []) {
+    const ext = String(c.external_id ?? "").trim();
+    const uuid = String(c.id ?? "").trim();
+    if (ext && uuid) extPorUuid.set(uuid, ext);
+  }
+  const uuids = [...extPorUuid.keys()];
+  if (!uuids.length) return out;
+  const { data: snaps } = await supa
+    .from("metric_snapshots")
+    .select("campaign_id,spend")
+    .eq("company_id", companyId)
+    .in("campaign_id", uuids)
+    .gte("snapshot_date", periodo.inicio)
+    .lte("snapshot_date", periodo.fim);
+  for (const s of snaps ?? []) {
+    const ext = extPorUuid.get(String(s.campaign_id ?? ""));
+    if (!ext) continue;
+    out.set(ext, (out.get(ext) ?? 0) + Number(s.spend ?? 0));
+  }
+  return out;
+}
+
+async function metricasNaJanelaPorCampanha(
+  companyId: string,
+  ids: string[],
+  periodo: { inicio: string; fim: string },
+): Promise<Map<string, {
+  gasto: number;
+  impressoes: number;
+  cliques_link: number;
+  formularios: number;
+  conversas: number;
+}>> {
+  const out = new Map<string, {
+    gasto: number;
+    impressoes: number;
+    cliques_link: number;
+    formularios: number;
+    conversas: number;
+  }>();
+  const lista = ids.map((x) => String(x ?? "").trim()).filter(Boolean);
+  if (!lista.length) return out;
+  const { data: camps } = await supa
+    .from("campaigns")
+    .select("id,external_id")
+    .eq("company_id", companyId)
+    .in("external_id", lista);
+  const extPorUuid = new Map<string, string>();
+  for (const c of camps ?? []) {
+    const ext = String(c.external_id ?? "").trim();
+    const uuid = String(c.id ?? "").trim();
+    if (ext && uuid) extPorUuid.set(uuid, ext);
+  }
+  const uuids = [...extPorUuid.keys()];
+  if (!uuids.length) return out;
+  const { data: snaps } = await supa
+    .from("metric_snapshots")
+    .select("campaign_id,spend,impressions,link_clicks,form_leads,messaging_started")
+    .eq("company_id", companyId)
+    .in("campaign_id", uuids)
+    .gte("snapshot_date", periodo.inicio)
+    .lte("snapshot_date", periodo.fim);
+  for (const s of snaps ?? []) {
+    const ext = extPorUuid.get(String(s.campaign_id ?? ""));
+    if (!ext) continue;
+    const cur = out.get(ext) ?? { gasto: 0, impressoes: 0, cliques_link: 0, formularios: 0, conversas: 0 };
+    cur.gasto += Number(s.spend ?? 0);
+    cur.impressoes += Number(s.impressions ?? 0);
+    cur.cliques_link += Number(s.link_clicks ?? 0);
+    cur.formularios += Number(s.form_leads ?? 0);
+    cur.conversas += Number(s.messaging_started ?? 0);
+    out.set(ext, cur);
+  }
+  return out;
+}
+
 async function campanhasAoVivoDaEmpresa(companyId: string): Promise<{
   itens: CampanhaAoVivoBruta[];
   erro?: string;
@@ -4622,8 +4715,11 @@ async function resolverCampanhasDoRelatorio(row: {
   const merge = mergeCampanhasRelatorio(espelho, vivo.itens);
   const fonte = vivo.erro && !vivo.itens.length ? "espelho" : merge.fonte;
   let escolhidas = merge.campanhas;
+  let cascas = 0;
   if (row.recorte_campanhas === "todas_ativas") {
-    escolhidas = escolhidas.filter((c) => campanhaEstaAtiva(c.status));
+    const recorte = filtrarCampanhasAtivasDoRecorte(escolhidas);
+    escolhidas = recorte.escolhidas;
+    cascas = recorte.cascas;
   } else {
     const pedidas = new Set((row.campaign_ids ?? []).map((x) => String(x)));
     escolhidas = escolhidas.filter((c) => pedidas.has(c.external_id));
@@ -4635,7 +4731,11 @@ async function resolverCampanhasDoRelatorio(row: {
         ? "Lista de campanhas conferida ao vivo no Pipeboard."
         : "Lista de campanhas do espelho local.",
     row.recorte_campanhas === "todas_ativas"
-      ? `Recorte: ativas agora (${escolhidas.length}).`
+      ? `Recorte: ativas agora (${escolhidas.length})${
+        cascas
+          ? `, sem ${cascas} casca(s) padrão da Meta (Traffic/Sales/MM_LITE) que o Pipeboard ainda lista como ativas.`
+          : "."
+      }`
       : `Recorte: ${escolhidas.length} campanha(s) fixa(s).`,
   ].join(" ");
   return {
@@ -4649,9 +4749,11 @@ async function resolverCampanhasDoRelatorio(row: {
 
 const RELATORIO_RESERVA_SINTESE_MS = 120_000;
 const RELATORIO_MIN_ONDA2_MS = 70_000;
-const RELATORIO_MAX_CAMPANHAS = 4;
-const RELATORIO_TETO_JSON = 6000;
-const RELATORIO_TETO_COLHEITA = 56_000;
+// Teto de segurança depois do recorte (cascas Traffic/Sales/MM_LITE já saíram).
+// 4 era pouco: a Legal é Viver tem 14 posts ativos na mesma janela.
+const RELATORIO_MAX_CAMPANHAS = 30;
+const RELATORIO_TETO_JSON = 4000;
+const RELATORIO_TETO_COLHEITA = 72_000;
 const RELATORIO_MAX_PAGINAS_ANUNCIOS = 12;
 
 type PecaColheita = { nome: string; ok: boolean; dado: unknown };
@@ -4677,8 +4779,8 @@ function ferramentaColheitaFalhou(v: unknown): boolean {
 }
 
 function prioridadePecaColheita(nome: string): number {
-  if (nome === "ranking_conjuntos") return 0;
-  if (nome.startsWith("get_campaign_detail") || nome.startsWith("comparativo_")) return 1;
+  if (nome === "ranking_campanhas" || nome === "ranking_conjuntos") return 0;
+  if (nome.startsWith("get_campaign_detail") || nome.startsWith("comparativo_") || nome === "get_funnel_janela") return 1;
   if (nome.startsWith("get_ads_ranking")) return 2;
   if (nome.startsWith("get_waba") || nome.includes("teto") || nome.includes("pacing") || nome.includes("alerta") || nome.includes("recomend") || nome.includes("dicas")) return 3;
   if (nome.startsWith("avaliar_fadiga") || nome.startsWith("get_criativos_conteudo")) return 4;
@@ -4734,8 +4836,19 @@ function compactarConjuntoColheita(item: unknown): Record<string, unknown> {
 function compactarDadoColheita(nome: string, dado: unknown): unknown {
   if (!dado || typeof dado !== "object") return dado;
   const o = dado as Record<string, unknown>;
-  if (nome === "ranking_conjuntos") {
+  if (nome === "ranking_conjuntos" || nome === "ranking_campanhas") {
     return { total: o.total ?? null, markdown: o.markdown ?? null, nota: o.nota ?? null };
+  }
+  if (nome.startsWith("get_campaign_detail") || nome.startsWith("comparativo_")) {
+    const src = nome.startsWith("comparativo_") && o.dado && typeof o.dado === "object"
+      ? o.dado as Record<string, unknown>
+      : o;
+    const compacto = {
+      campanha: src.campanha ?? null,
+      janela: src.janela ?? o.janela ?? null,
+      totais_periodo: src.totais_periodo ?? src.totais_janela ?? null,
+    };
+    return nome.startsWith("comparativo_") ? { janela: o.janela ?? null, dado: compacto } : compacto;
   }
   if (nome.startsWith("get_detalhe_anuncios")) {
     const anuncios = Array.isArray(o.anuncios) ? o.anuncios.map(compactarAnuncioColheita) : [];
@@ -4942,12 +5055,15 @@ async function colherBaseRelatorio(args: {
   temEstrutura: boolean;
   temWaba: boolean;
   markdownConjuntos: string;
+  markdownCampanhas: string;
   ms: number;
 }> {
   const t0 = Date.now();
   const ctx = { companyId: args.companyId, mcpKey: args.mcpKey, pedido: args.pedido };
-  const ids = args.ids.slice(0, RELATORIO_MAX_CAMPANHAS);
-  const nomes = args.nomes.slice(0, RELATORIO_MAX_CAMPANHAS);
+  const recorteIds = args.ids;
+  const recorteNomes = args.nomes;
+  const ids = recorteIds.slice(0, RELATORIO_MAX_CAMPANHAS);
+  const nomes = recorteNomes.slice(0, RELATORIO_MAX_CAMPANHAS);
   const pecas: PecaColheita[] = [];
   const marcar = (nome: string, dado: unknown) => {
     pecas.push({ nome, ok: !ferramentaColheitaFalhou(dado), dado });
@@ -4957,7 +5073,7 @@ async function colherBaseRelatorio(args: {
     .from("campaigns")
     .select("external_id,name,status,objective,special_ad_categories,spend,external_account_id")
     .eq("company_id", args.companyId)
-    .in("external_id", ids);
+    .in("external_id", recorteIds.length ? recorteIds : ids);
   marcar("campanhas_espelho", {
     linhas: campRows ?? [],
     status_ao_vivo: args.campanhas.map((c) => ({
@@ -4974,7 +5090,7 @@ async function colherBaseRelatorio(args: {
 
   const meio = normalizarMeioWaba(inferirMeioDrive(`${args.pedido} ${nomes.join(" ")}`));
   const [
-    overview, tetoConv, tetoForm, pacing, alerts, recos, dicas, estrutura, waba, saude,
+    overview, tetoConv, tetoForm, pacing, alerts, recos, dicas, estrutura, waba, saude, funnel,
   ] = await Promise.all([
     runTool("get_overview", {}, ctx),
     runTool("teto_vigente", { metric: "custo_por_conversa" }, ctx),
@@ -4986,6 +5102,7 @@ async function colherBaseRelatorio(args: {
     runTool("get_estrutura_conjuntos", {}, ctx),
     runTool("get_waba_status", meio ? { meio } : {}, ctx),
     runTool("saude_das_integracoes", { dias_tolerancia: 3 }, ctx),
+    runTool("get_funnel", { date_from: args.periodo.inicio, date_to: args.periodo.fim }, ctx),
   ]);
   marcar("get_overview", {
     ...(overview && typeof overview === "object" ? overview as Record<string, unknown> : { valor: overview }),
@@ -5001,6 +5118,10 @@ async function colherBaseRelatorio(args: {
   marcar("estrutura_conjuntos_recorte", ferramentaColheitaFalhou(estrutura) ? estrutura : estruturaRecorte);
   marcar("get_waba_status", waba);
   marcar("saude_das_integracoes", saude);
+  marcar("get_funnel_janela", {
+    ...(funnel && typeof funnel === "object" ? funnel as Record<string, unknown> : { valor: funnel }),
+    nota_janela: "Funil da CONTA na janela fechada do relatorio. Nao substitui a quebra por campanha.",
+  });
 
   const porCampanha = await Promise.all(ids.map(async (id) => {
     const [det, rank, ads] = await Promise.all([
@@ -5052,7 +5173,7 @@ async function colherBaseRelatorio(args: {
       if (!idsAd.includes(id)) idsAd.push(id);
     }
   }
-  const fadigaIds = idsAd.slice(0, 3);
+  const fadigaIds = idsAd.slice(0, 8);
   if (fadigaIds.length) {
     const fads = await Promise.all(fadigaIds.map((id) => runTool("avaliar_fadiga", { ad_external_id: id }, ctx)));
     for (let i = 0; i < fadigaIds.length; i++) marcar(`avaliar_fadiga:${fadigaIds[i]}`, fads[i]);
@@ -5103,6 +5224,28 @@ async function colherBaseRelatorio(args: {
     nota: "Lista completa, do melhor para o pior. Nao cortar. Custo da janela, nao gasto acumulado da conta.",
   });
 
+  const metricasJanela = await metricasNaJanelaPorCampanha(args.companyId, recorteIds, args.periodo);
+  const rankingCampanhas = rankingCampanhasRelatorio(
+    recorteIds.map((id, i) => {
+      const m = metricasJanela.get(id) ?? {
+        gasto: 0, impressoes: 0, cliques_link: 0, formularios: 0, conversas: 0,
+      };
+      const camp = args.campanhas.find((c) => c.external_id === id);
+      return {
+        campaign_id: id,
+        nome: recorteNomes[i] ?? camp?.nome ?? id,
+        status: camp?.status ?? "",
+        ...m,
+      };
+    }),
+  );
+  marcar("ranking_campanhas", {
+    total: rankingCampanhas.total,
+    linhas: rankingCampanhas.linhas,
+    markdown: rankingCampanhas.markdown,
+    nota: "Todas as campanhas do recorte na janela fechada. Nao cortar. Cascas Traffic/Sales/MM_LITE ja sairam.",
+  });
+
   const falhas = pecas.filter((p) => !p.ok).map((p) => p.nome);
   const ok = pecas.filter((p) => p.ok).length;
   const temDesempenho = ids.every((id) =>
@@ -5111,7 +5254,10 @@ async function colherBaseRelatorio(args: {
   );
   const pecaEstrutura = pecas.find((p) => p.nome === "estrutura_conjuntos_recorte");
   const pecaWaba = pecas.find((p) => p.nome === "get_waba_status");
-  const cobertura = `Colheita deterministica: ${ok}/${pecas.length} leituras ok em ${Date.now() - t0}ms. Falhas: ${falhas.join(", ") || "nenhuma"}.`;
+  const detalheTxt = recorteIds.length === ids.length
+    ? `Detalhe profundo nas ${ids.length} campanha(s) do recorte.`
+    : `Detalhe profundo nas ${ids.length} de ${recorteIds.length} campanha(s) do recorte (as de maior gasto na janela).`;
+  const cobertura = `Colheita deterministica: ${ok}/${pecas.length} leituras ok em ${Date.now() - t0}ms. Falhas: ${falhas.join(", ") || "nenhuma"}. ${detalheTxt}`;
   console.warn(`[relatorio_colheita] ${cobertura}`);
   return {
     texto: montarTextoColheita(pecas),
@@ -5123,6 +5269,7 @@ async function colherBaseRelatorio(args: {
     temEstrutura: !!pecaEstrutura?.ok,
     temWaba: !!pecaWaba?.ok,
     markdownConjuntos: rankingConjuntos.markdown,
+    markdownCampanhas: rankingCampanhas.markdown,
     ms: Date.now() - t0,
   };
 }
@@ -5143,7 +5290,7 @@ LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: no
 
 NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio. Peca marcada [ok] na BASE foi lida: nao diga que nao foi coletada.
 
-corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
+corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Quebra por campanha: NAO cole a tabela — so o titulo ## Quebra por campanha; o sistema injeta as linhas da base (todas as ativas do recorte). Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
 
 Responda APENAS um JSON valido, sem cerca markdown, NESTA ORDEM de chaves:
 {"cobertura":"o que nao foi medido, em portugues","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"corpo_md":"narrativa em markdown para o gestor"}
@@ -5191,6 +5338,11 @@ async function processarRelatorio(relatorioId: string, mcpKey: string): Promise<
       recorte_campanhas: String(row.recorte_campanhas ?? "todas_ativas"),
       campaign_ids: Array.isArray(row.campaign_ids) ? (row.campaign_ids as string[]) : [],
     });
+    const gastosJanela = await gastoNaJanelaPorCampanha(companyId, resolvidas.ids, periodo);
+    const ordenadas = ordenarCampanhasRelatorioPorGasto(resolvidas.campanhas, gastosJanela);
+    resolvidas.campanhas = ordenadas;
+    resolvidas.ids = ordenadas.map((c) => c.external_id);
+    resolvidas.nomes = ordenadas.map((c) => c.nome);
 
     if (!resolvidas.ids.length) {
       await supa.from("relatorio_gerados").update({
@@ -5299,12 +5451,22 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
     const querRankingConjuntos = secoes.includes("conjuntos_ranking")
       || secoes.includes("criativos_ranking")
       || secoes.includes("por_conjunto");
-    const corpo = querRankingConjuntos
-      ? injetarRankingConjuntosNoMarkdown({
-        md: humanizarMarkdownRelatorio(extraido.corpo_md),
+    const querQuebraCampanha = secoes.includes("por_campanha")
+      || secoes.includes("resumo_executivo")
+      || secoes.includes("funil_midia");
+    let corpo = humanizarMarkdownRelatorio(extraido.corpo_md);
+    if (querQuebraCampanha) {
+      corpo = injetarRankingCampanhasNoMarkdown({
+        md: corpo,
+        tabela: colheita.markdownCampanhas,
+      });
+    }
+    if (querRankingConjuntos) {
+      corpo = injetarRankingConjuntosNoMarkdown({
+        md: corpo,
         tabela: colheita.markdownConjuntos,
-      })
-      : humanizarMarkdownRelatorio(extraido.corpo_md);
+      });
+    }
     await supa.from("relatorio_gerados").update({
       status: "done",
       fonte_campanhas: resolvidas.fonte,
