@@ -587,6 +587,7 @@ const ROTULOS_ACAO_RITMO: Record<string, string> = {
   ajustar_posicionamentos_do_conjunto: "Ajustar posicionamentos",
   alterar_geo_do_conjunto: "Alterar geo",
   alterar_publico_do_conjunto: "Alterar público",
+  alterar_idade_do_conjunto: "Alterar idade",
   vincular_instagram_dos_anuncios: "Vincular Instagram",
   criar_conjunto_a_partir_de: "Criar conjunto",
   criar_anuncio_a_partir_de: "Criar anúncio",

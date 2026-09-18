@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v29.05)
+// supabase/functions/traffic-chat/index.ts (v29.06)
+// v29.06 (18/09/2026) - IDADE DE CONJUNTO PUBLICADO. O gestor perguntou se da
+//   para alterar idade min/max em conjunto ACTIVE ja criado. Graph/Pipeboard
+//   ja aceitam update_adset(targeting.age_min/age_max). Entra
+//   alterar_idade_do_conjunto (mesmo transporte de geo/publico). Advantage+
+//   so aceita min 18–25 sem age_max (erro 1870188); faixa estreita desliga
+//   A+ por padrao. Em credito o gate recusa estreitamento. Duplicar so se a
+//   Graph recusar o PATCH.
 // v29.05 (18/09/2026) - PUBLICO DE CONJUNTO PUBLICADO. O gestor pediu filtrar
 //   interesses nos CONJ.1-4 La Felicita ACTIVE e o chat recusou ("nao ha ato
 //   de alterar interesses no objeto vivo") — so existia geo/orcamento/pause/criar.
@@ -919,6 +926,7 @@ import {
   buscarInteressesMeta,
   validarPublicoDoPedido,
 } from "../_shared/interesse_targeting.ts";
+import { validarIdadeDoPedido } from "../_shared/idade_targeting.ts";
 import {
   aplicarGateGeoCriarConjunto,
   companyElegivelPresetGeoJuridico,
@@ -966,6 +974,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   vincular_instagram_dos_anuncios: 2,
   alterar_geo_do_conjunto: 8,
   alterar_publico_do_conjunto: 8,
+  alterar_idade_do_conjunto: 8,
   alterar_orcamento: 8,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
@@ -994,7 +1003,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.05";
+const VERSAO = "chat-v29.06";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -2396,6 +2405,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     "ajustar_posicionamentos_do_conjunto",
     "alterar_geo_do_conjunto",
     "alterar_publico_do_conjunto",
+    "alterar_idade_do_conjunto",
     "vincular_instagram_dos_anuncios",
   ];
   if (!VALID.includes(action)) return { erro: `action_type invalido; use: ${VALID.join(", ")}` };
@@ -2437,6 +2447,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     action === "ajustar_posicionamentos_do_conjunto" ||
     action === "alterar_geo_do_conjunto" ||
     action === "alterar_publico_do_conjunto" ||
+    action === "alterar_idade_do_conjunto" ||
     action === "pausar_conjunto" ||
     action === "ativar_conjunto" ||
     action === "renomear_conjunto";
@@ -2521,6 +2532,21 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     params.publico_resumo = pubOk.resumo;
   }
 
+  if (action === "alterar_idade_do_conjunto") {
+    const idadeOk = validarIdadeDoPedido(params as Record<string, unknown>);
+    if (!idadeOk.ok) return { erro: idadeOk.erro, detalhe: idadeOk.detalhe };
+    Object.assign(params, {
+      idade_min: idadeOk.params.age_min,
+      idade_max: idadeOk.params.age_max,
+      age_min: idadeOk.params.age_min,
+      age_max: idadeOk.params.age_max,
+      idade_resumo: idadeOk.resumo,
+    });
+    if (idadeOk.params.advantage_audience !== undefined) {
+      params.advantage_audience = idadeOk.params.advantage_audience;
+    }
+  }
+
   // ESP-24: guarda do unico conjunto entregando — se pausar este zera entrega, nao emite card.
   let avisoGuardaConjunto: string | null = null;
   if (action === "pausar_conjunto" && alvo.external_id) {
@@ -2583,6 +2609,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     : (action === "ajustar_posicionamentos_do_conjunto" ||
         action === "alterar_geo_do_conjunto" ||
         action === "alterar_publico_do_conjunto" ||
+        action === "alterar_idade_do_conjunto" ||
         action === "pausar_conjunto" ||
         action === "ativar_conjunto" ||
         action === "renomear_conjunto")
@@ -2613,6 +2640,8 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
       `Alterar geo de "${alvo.name}" para ${String(params?.geo_resumo ?? "recorte informado")} (mesmo conjunto; nao cria objeto novo)`,
     alterar_publico_do_conjunto:
       `Alterar publico de "${alvo.name}" para ${String(params?.publico_resumo ?? "interesses informados")} (Advantage+ ${Number(params?.advantage_audience) === 1 ? "ligado" : "desligado"}; mesmo conjunto; nao cria objeto novo)`,
+    alterar_idade_do_conjunto:
+      `Alterar idade de "${alvo.name}" para ${String(params?.idade_resumo ?? "faixa informada")} (mesmo conjunto; nao cria objeto novo)`,
     vincular_instagram_dos_anuncios: (() => {
       const n = Array.isArray(params?.anuncios) ? (params.anuncios as unknown[]).length : 0;
       const h = String(params?.instagram_destino_handle ?? "@cohapm");
@@ -2850,6 +2879,59 @@ async function t_alterar_publico_do_conjunto(
       ...pubOk.params,
       alvo_external_id: params.alvo_external_id,
       publico_resumo: pubOk.resumo,
+    },
+  }, cards);
+}
+
+async function t_alterar_idade_do_conjunto(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+) {
+  const conjunto = String(args?.conjunto ?? args?.target_name ?? "").trim();
+  if (!conjunto) return { erro: "conjunto obrigatorio (nome atual do conjunto)" };
+  const params: Record<string, unknown> = {
+    ...(args?.params && typeof args.params === "object" ? args.params : {}),
+    alvo_external_id: args?.alvo_external_id ?? args?.target_external_id ?? args?.external_id,
+  };
+  if (args?.idade_min != null || args?.age_min != null) {
+    params.idade_min = args?.idade_min ?? args?.age_min;
+  }
+  if (args?.idade_max != null || args?.age_max != null) {
+    params.idade_max = args?.idade_max ?? args?.age_max;
+  }
+  if (args?.advantage_audience != null || args?.advantage_plus != null || args?.advantage != null) {
+    params.advantage_audience = args?.advantage_audience ?? args?.advantage_plus ?? args?.advantage;
+  }
+  const idadeOk = validarIdadeDoPedido(params);
+  if (!idadeOk.ok) return { erro: idadeOk.erro, detalhe: idadeOk.detalhe };
+  const desligaAPlus = idadeOk.params.advantage_audience === 0;
+  return await t_propose_action(companyId, convId, requestedBy, {
+    action_type: "alterar_idade_do_conjunto",
+    target_name: conjunto,
+    justificativa: String(args?.justificativa ?? "").trim() ||
+      `Trocar idade do conjunto publicado "${conjunto}" para ${idadeOk.resumo} sem criar conjunto novo nem somar orcamento.`,
+    reversa: String(args?.reversa ?? "").trim() ||
+      "Restaurar targeting.age_min, age_max e targeting_automation.advantage_audience anteriores (gravados no audit_log e no card) com a mesma acao alterar_idade_do_conjunto.",
+    metrica_sucesso: String(args?.metrica_sucesso ?? "").trim() ||
+      `A Graph devolver ${idadeOk.resumo} na reconciliacao; geo, interesses, plataformas e WhatsApp permanecem.`,
+    risco:
+      "Edicao de targeting pode resetar aprendizado. Advantage+ ligado so aceita min 18–25 e nao envia age_max (teto 65). Em credito a faixa 18–65 nao pode ser estreitada. A Meta pode recusar o PATCH; nesse caso o card falha e o caminho e conjunto novo + pausa do antigo — nao invente sucesso.",
+    mecanismo: desligaAPlus
+      ? "Graph POST /{adset_id} targeting (ou Pipeboard update_adset): troca age_min/age_max e desliga targeting_automation.advantage_audience no conjunto vivo."
+      : "Graph POST /{adset_id} targeting (ou Pipeboard update_adset): troca age_min (e age_max se Advantage+ estiver desligado) no targeting atual do conjunto.",
+    params: {
+      idade_min: idadeOk.params.age_min,
+      idade_max: idadeOk.params.age_max,
+      age_min: idadeOk.params.age_min,
+      age_max: idadeOk.params.age_max,
+      ...(idadeOk.params.advantage_audience !== undefined
+        ? { advantage_audience: idadeOk.params.advantage_audience }
+        : {}),
+      alvo_external_id: params.alvo_external_id,
+      idade_resumo: idadeOk.resumo,
     },
   }, cards);
 }
@@ -5364,6 +5446,7 @@ const ORDEM_TOOLS = [
   "alterar_categoria_especial",
   "alterar_geo_do_conjunto",
   "alterar_publico_do_conjunto",
+  "alterar_idade_do_conjunto",
   "alterar_orcamento",
   "get_instagram_dos_anuncios",
   "vincular_instagram_dos_anuncios",
@@ -5485,7 +5568,7 @@ function prioridadeTool(nome: string, pedido: string): number {
     nome === "propose_action" || nome === "gerar_legendas" ||
     nome === "upload_midia" || nome === "registrar_legenda_da_conversa" ||
     nome === "alterar_orcamento" || nome === "alterar_geo_do_conjunto" ||
-    nome === "alterar_publico_do_conjunto"
+    nome === "alterar_publico_do_conjunto" || nome === "alterar_idade_do_conjunto"
   )) return 99;
   if (pedidoUsaSlateExistente(pedido)) {
     if (
@@ -5849,6 +5932,7 @@ async function runTool(name: string, args: any, ctx: any) {
       case "alterar_categoria_especial": return await t_alterar_categoria_especial(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_geo_do_conjunto": return await t_alterar_geo_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_publico_do_conjunto": return await t_alterar_publico_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "alterar_idade_do_conjunto": return await t_alterar_idade_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_orcamento": {
         if (ctx.perguntaLeitura) {
           return {
@@ -6423,6 +6507,7 @@ function toolsIncluemPropose(tools: { tool?: string }[]): boolean {
       nome === "propose_action" ||
       nome === "alterar_geo_do_conjunto" ||
       nome === "alterar_publico_do_conjunto" ||
+      nome === "alterar_idade_do_conjunto" ||
       nome === "alterar_orcamento" ||
       nome === "renomear_campanha" ||
       nome === "alterar_categoria_especial" ||

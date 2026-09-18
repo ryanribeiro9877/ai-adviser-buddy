@@ -22,6 +22,7 @@ const TITULO_POR_ACAO: Record<string, string> = {
   ajustar_posicionamentos_do_conjunto: "Card de ajustar posicionamentos",
   alterar_geo_do_conjunto: "Card de alterar geo do conjunto",
   alterar_publico_do_conjunto: "Card de alterar público do conjunto",
+  alterar_idade_do_conjunto: "Card de alterar idade do conjunto",
   vincular_instagram_dos_anuncios: "Card de vincular Instagram",
   registrar_veredito_peca: "Card de veredito de compliance",
 };

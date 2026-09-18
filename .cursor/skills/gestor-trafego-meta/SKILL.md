@@ -69,6 +69,7 @@ Neste repositório isso vive no Super Gestor: a skill mestra é o tema `gestor_t
 3. Registrar estado anterior no card. Janela mínima 3-4 dias fora de learning antes de julgar.
 4. Geo de conjunto já publicado: `alterar_geo_do_conjunto` (não criar conjunto novo).
 5. Interesses/detalhamento de conjunto já publicado: `buscar_interesses` + `alterar_publico_do_conjunto` (não criar conjunto novo). A Meta aceita POST targeting no objeto vivo. Não existe filtro de renda familiar nem "pesquisou nos últimos dias" — interesse é afinidade. Advantage+ ligado dilui o recorte (a ação desliga por padrão). Lugar (Lauro de Freitas, Praia do Forte, Linha Verde) é geo, não interesse.
+6. Idade de conjunto já publicado: `alterar_idade_do_conjunto` (não criar conjunto novo). `age_min`/`age_max` 18–65 no objeto vivo. Advantage+ ligado: só min 18–25 e sem `age_max` no payload (teto 65, erro 1870188) — faixa estreita desliga Advantage+ por padrão. Em crédito o gate recusa estreitamento (18–65).
 
 ### Criar anúncio (criativo)
 1. Tema `criacao` + temas `criativo_*`. 3-5 variações com diversidade real (formato × ângulo × persona).

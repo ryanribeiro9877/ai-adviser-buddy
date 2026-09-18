@@ -1,4 +1,12 @@
-// supabase/functions/meta-actions/index.ts (v5.64)
+// supabase/functions/meta-actions/index.ts (v5.65)
+// v5.65 (18/09/2026) - ALTERAR IDADE DO CONJUNTO PUBLICADO. O gestor perguntou
+//   se da para mudar age_min/age_max em conjunto ACTIVE ja criado. A Meta aceita
+//   POST /{adset_id} targeting (mesmo update_adset da geo/publico). Entra
+//   alterar_idade_do_conjunto: le o targeting atual, troca age_min/age_max,
+//   preserva geo/interesses/plataformas/WhatsApp. Advantage+ ligado recusa
+//   age_max e so aceita min 18–25 (1870188); faixa estreita exige A+ 0.
+//   Em credito checar_segmentacao recusa estreitamento. Se a Graph recusar,
+//   o card FALHA; duplicar fica de reserva.
 // v5.64 (18/09/2026) - ALTERAR PUBLICO DO CONJUNTO PUBLICADO. O gestor pediu
 //   filtrar interesses nos CONJ.1-4 La Felicita e o chat disse que nao ha ato
 //   de editar detalhamento no objeto vivo — so existia geo/orcamento/pause/criar.
@@ -471,6 +479,11 @@ import {
   aplicarPublicoNoTargeting,
   validarPublicoDoPedido,
 } from "../_shared/interesse_targeting.ts";
+import {
+  aplicarIdadeNoTargeting,
+  validarIdadeContraTargetingAtual,
+  validarIdadeDoPedido,
+} from "../_shared/idade_targeting.ts";
 import { aplicarGateGeoCriarConjunto } from "../_shared/geo_preset_juridico.ts";
 import {
   resolverObjetivoOdax,
@@ -531,6 +544,7 @@ const EXECUTAVEIS = [
   "ajustar_posicionamentos_do_conjunto",
   "alterar_geo_do_conjunto",
   "alterar_publico_do_conjunto",
+  "alterar_idade_do_conjunto",
 ];
 /** Renomear e a mesma escrita nos tres niveis: o campo `name` do objeto que ja existe. */
 const RENOMEACOES = ["renomear_campanha", "renomear_conjunto", "renomear_criativo"];
@@ -832,6 +846,7 @@ async function escreverUpdate(
     acao === "ajustar_posicionamentos_do_conjunto" ||
     acao === "alterar_geo_do_conjunto" ||
     acao === "alterar_publico_do_conjunto" ||
+    acao === "alterar_idade_do_conjunto" ||
     acao === "pausar_conjunto" ||
     acao === "ativar_conjunto" ||
     acao === "renomear_conjunto"
@@ -3304,7 +3319,8 @@ async function espelhar(
     if (
       acao === "ajustar_posicionamentos_do_conjunto" ||
       acao === "alterar_geo_do_conjunto" ||
-      acao === "alterar_publico_do_conjunto"
+      acao === "alterar_publico_do_conjunto" ||
+      acao === "alterar_idade_do_conjunto"
     ) {
       const { error } = await supa
         .from("ad_sets")
@@ -5364,6 +5380,94 @@ Deno.serve(async (req) => {
       r.payload.advantage_audience = pubOk.advantage_audience;
       r.payload.targeting_antes = tgtAtual;
     }
+    if (acao === "alterar_idade_do_conjunto") {
+      if (antes.status !== 200 || !antes.body || typeof antes.body !== "object") {
+        const motivo = "estado_atual_do_conjunto_nao_pode_ser_lido";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          acao,
+          driver_escrita: driver,
+          leitura_graph: antes,
+        });
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+      }
+      const idadeOk = validarIdadeDoPedido((r.payload ?? {}) as Record<string, unknown>);
+      if (!idadeOk.ok) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: idadeOk.erro,
+          detalhe: idadeOk.detalhe,
+          acao,
+          driver_escrita: driver,
+        });
+        return ({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo: idadeOk.erro,
+          detalhe: idadeOk.detalhe,
+          driver_escrita: driver,
+        });
+      }
+      const tgtAtual = ((antes.body as any)?.targeting ?? {}) as Record<string, unknown>;
+      const contra = validarIdadeContraTargetingAtual(
+        tgtAtual && typeof tgtAtual === "object" ? tgtAtual : {},
+        idadeOk.params,
+      );
+      if (!contra.ok) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: contra.erro,
+          detalhe: contra.detalhe,
+          acao,
+          driver_escrita: driver,
+        });
+        return ({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo: contra.erro,
+          detalhe: contra.detalhe,
+          driver_escrita: driver,
+        });
+      }
+      const { data: segIdade } = await supa.rpc("checar_segmentacao", {
+        p_company_id: r.company_id,
+        p_targeting: { age_min: idadeOk.params.age_min, age_max: idadeOk.params.age_max },
+      });
+      if (
+        segIdade && typeof segIdade === "object" &&
+        (segIdade as any).aplica === true && (segIdade as any).permitido === false
+      ) {
+        const motivo = "segmentacao_recusada_pelo_gate";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          detalhe: (segIdade as any).mensagem_para_o_gestor ?? (segIdade as any).motivo,
+          segmentacao: segIdade,
+          acao,
+          driver_escrita: driver,
+        });
+        return ({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo,
+          detalhe: String((segIdade as any).mensagem_para_o_gestor ?? (segIdade as any).motivo ?? ""),
+          driver_escrita: driver,
+        });
+      }
+      const tgtNovo = aplicarIdadeNoTargeting(
+        tgtAtual && typeof tgtAtual === "object" ? tgtAtual : {},
+        idadeOk.params,
+      );
+      post = { targeting: JSON.stringify(tgtNovo) };
+      r.payload.targeting_aprovado = tgtNovo;
+      r.payload.idade_resumo = idadeOk.resumo;
+      r.payload.idade_min = idadeOk.params.age_min;
+      r.payload.idade_max = idadeOk.params.age_max;
+      if (idadeOk.params.advantage_audience !== undefined) {
+        r.payload.advantage_audience = idadeOk.params.advantage_audience;
+      }
+      r.payload.targeting_antes = tgtAtual;
+    }
 
     if (conf.dry_run) {
       let ensaioPipeboard: ResultadoEscrita | null = null;
@@ -5591,7 +5695,8 @@ Deno.serve(async (req) => {
       if (
         acao === "ajustar_posicionamentos_do_conjunto" ||
         acao === "alterar_geo_do_conjunto" ||
-        acao === "alterar_publico_do_conjunto"
+        acao === "alterar_publico_do_conjunto" ||
+        acao === "alterar_idade_do_conjunto"
       ) {
         const esp = await espelhar(
           acao,
@@ -5607,11 +5712,15 @@ Deno.serve(async (req) => {
         );
         const auditOk = acao === "alterar_publico_do_conjunto"
           ? "meta_action_espelho_publico"
+          : acao === "alterar_idade_do_conjunto"
+          ? "meta_action_espelho_idade"
           : acao === "alterar_geo_do_conjunto"
           ? "meta_action_espelho_geo"
           : "meta_action_espelho_posicionamentos";
         const auditFail = acao === "alterar_publico_do_conjunto"
           ? "meta_action_espelho_publico_falhou"
+          : acao === "alterar_idade_do_conjunto"
+          ? "meta_action_espelho_idade_falhou"
           : acao === "alterar_geo_do_conjunto"
           ? "meta_action_espelho_geo_falhou"
           : "meta_action_espelho_posicionamentos_falhou";

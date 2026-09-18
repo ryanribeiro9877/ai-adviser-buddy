@@ -28,6 +28,11 @@ describe("tituloDoCardAprovacao", () => {
       "Card de alterar público do conjunto",
     );
   });
+  it("alterar idade do conjunto", () => {
+    expect(tituloDoCardAprovacao("alterar_idade_do_conjunto")).toBe(
+      "Card de alterar idade do conjunto",
+    );
+  });
   it("nao despeja o ensaio do summary como titulo", () => {
     const ensaio =
       'Criar anuncio "X" com PECA NOVA do acervo — compliance atencao, nasce ACTIVE\nCompliance (atencao): LGL-03';

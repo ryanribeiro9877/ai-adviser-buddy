@@ -539,6 +539,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
     case "ajustar_posicionamentos_do_conjunto":
     case "alterar_geo_do_conjunto":
     case "alterar_publico_do_conjunto":
+    case "alterar_idade_do_conjunto":
     case "pausar_conjunto":
     case "ativar_conjunto":
     case "renomear_conjunto":
