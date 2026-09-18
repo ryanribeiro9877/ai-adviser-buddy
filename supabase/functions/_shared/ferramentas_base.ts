@@ -257,7 +257,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_estrutura_conjuntos: {
     descricao:
-      "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha estao ACTIVE), estrategia de lance, orcamento, segmentacao (paises, cidades, regioes, bairros_qtd), gasto e destination_type (WEBSITE vs WHATSAPP). PAGINADO de 20: use a pagina seguinte enquanto restantes for maior que zero. Cidades do targeting VEM NESTA TOOL — nao diga que filtragem por cidade nao e visivel.",
+      "ESTRUTURA DOS CONJUNTOS desta empresa: nome, status, campanha_status, entregando (true so se conjunto E campanha estao ACTIVE), estrategia de lance, orcamento, segmentacao (paises, cidades, regioes, bairros com NOME, idade, genero, Advantage+, interesses resumidos, publicos personalizados) e destination_type. PAGINADO de 20: use a pagina seguinte enquanto restantes for maior que zero. Geo do targeting VEM NESTA TOOL (cidade OU bairro — Salvador as vezes vem em neighborhoods com a key da cidade). Pergunta de relacao geografica / publico-alvo usa ESTA tool, nao get_detalhe_anuncios.",
     parametros: {"type":"object","properties":{"pagina":{"type":"number","description":"Pagina, comecando em 1. Use a seguinte enquanto 'restantes' for maior que zero."}}},
     superficies: ["chat","job"],
     efeito: "leitura",

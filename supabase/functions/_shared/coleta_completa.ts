@@ -19,24 +19,97 @@ export function reaisDeOrcamentoMeta(v: unknown): number | null {
   return n;
 }
 
-function nomesDeGeo(v: unknown): string[] | null {
+function nomesDeGeo(v: unknown, max = 16): string[] | null {
   if (!Array.isArray(v)) return null;
   const nomes = v
     .map((c) => {
       if (typeof c === "string") return c.trim();
       if (c && typeof c === "object") {
         const o = c as Record<string, unknown>;
-        return String(o.name ?? o.key ?? "").trim();
+        const nome = String(o.name ?? o.key ?? "").trim();
+        const extra = o.radius != null
+          ? ` raio ${o.radius}${o.distance_unit === "kilometer" ? "km" : o.distance_unit ? ` ${o.distance_unit}` : ""}`
+          : "";
+        return (nome + extra).trim();
       }
       return "";
     })
     .filter(Boolean);
-  return nomes.length ? nomes.slice(0, 16) : null;
+  if (!nomes.length) return null;
+  const uniq = [...new Set(nomes)];
+  return uniq.length > max ? [...uniq.slice(0, max), `+${uniq.length - max}`] : uniq;
 }
 
-/** Conjunto da RPC get_estrutura_conjuntos sem targeting gordo (interesses/públicos/cidades objeto). */
+function geoDoItem(c: Record<string, unknown>): Record<string, unknown> | null {
+  const t = c.targeting && typeof c.targeting === "object"
+    ? c.targeting as Record<string, unknown>
+    : null;
+  const g = (t?.geo_locations ?? c.geo_locations ?? c.geo);
+  return g && typeof g === "object" && !Array.isArray(g) ? g as Record<string, unknown> : null;
+}
+
+function nomesDePublicos(v: unknown, max = 8): string[] | null {
+  if (!Array.isArray(v) || !v.length) return null;
+  const nomes = v
+    .map((x) => {
+      if (typeof x === "string") return x.trim();
+      if (x && typeof x === "object") {
+        const o = x as Record<string, unknown>;
+        return String(o.name ?? o.id ?? "").trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
+  return nomes.length ? nomes.slice(0, max) : null;
+}
+
+function nomesDeInteresses(flex: unknown, max = 12): string[] | null {
+  if (!Array.isArray(flex) || !flex.length) return null;
+  const names: string[] = [];
+  for (const spec of flex) {
+    if (!spec || typeof spec !== "object") continue;
+    const o = spec as Record<string, unknown>;
+    for (const key of ["interests", "behaviors", "life_events", "family_statuses", "industries", "work_positions"]) {
+      const arr = o[key];
+      if (!Array.isArray(arr)) continue;
+      for (const x of arr) {
+        const n = typeof x === "string"
+          ? x
+          : (x && typeof x === "object" ? String((x as Record<string, unknown>).name ?? "") : "");
+        if (n.trim()) names.push(n.trim());
+      }
+    }
+  }
+  const uniq = [...new Set(names)];
+  return uniq.length ? uniq.slice(0, max) : null;
+}
+
+function rotuloGenero(v: unknown): string | null {
+  if (v == null) return null;
+  const arr = Array.isArray(v) ? v : [v];
+  if (!arr.length) return null;
+  const map: Record<string, string> = { "1": "homens", "2": "mulheres" };
+  const labels = arr.map((x) => map[String(x)] ?? (String(x) === "0" ? null : String(x))).filter(Boolean);
+  return labels.length ? labels.join(" + ") : "sem recorte de gênero";
+}
+
+function advantageDoTargeting(t: Record<string, unknown> | null, c: Record<string, unknown>): boolean {
+  const auto = (t?.targeting_automation ?? c.targeting_automation);
+  if (auto && typeof auto === "object") {
+    const a = auto as Record<string, unknown>;
+    return a.advantage_audience === 1 || a.advantage_audience === true || a.advantage_audience === "1";
+  }
+  return t?.advantage_audience === true || c.advantage_audience === true;
+}
+
+/** Conjunto da RPC get_estrutura_conjuntos sem targeting gordo (objetos de raio/interesse). */
 export function compactarConjuntoEstrutura(item: unknown): Record<string, unknown> {
   const c = item && typeof item === "object" ? item as Record<string, unknown> : {};
+  const targeting = c.targeting && typeof c.targeting === "object"
+    ? c.targeting as Record<string, unknown>
+    : null;
+  const geo = geoDoItem(c);
+  const bairros = nomesDeGeo(c.bairros ?? geo?.neighborhoods);
   return {
     conjunto: c.conjunto ?? c.nome ?? c.name ?? null,
     status: c.status ?? null,
@@ -50,11 +123,20 @@ export function compactarConjuntoEstrutura(item: unknown): Record<string, unknow
     pegada: c.pegada ?? null,
     gasto: c.gasto ?? null,
     form_leads: c.form_leads ?? null,
-    idade_min: c.idade_min ?? null,
-    idade_max: c.idade_max ?? null,
-    bairros_qtd: c.bairros_qtd ?? null,
-    paises: c.paises ?? null,
-    cidades: nomesDeGeo(c.cidades),
+    idade_min: c.idade_min ?? targeting?.age_min ?? null,
+    idade_max: c.idade_max ?? targeting?.age_max ?? null,
+    bairros_qtd: c.bairros_qtd ?? (Array.isArray(geo?.neighborhoods) ? (geo!.neighborhoods as unknown[]).length : null),
+    paises: c.paises ?? geo?.countries ?? null,
+    cidades: nomesDeGeo(c.cidades ?? geo?.cities),
+    regioes: nomesDeGeo(c.regioes ?? geo?.regions),
+    bairros,
+    tipos_localizacao: c.tipos_localizacao ?? geo?.location_types ?? null,
+    genders: rotuloGenero(c.genders ?? targeting?.genders),
+    advantage_plus: advantageDoTargeting(targeting, c),
+    publicos: nomesDePublicos(c.publicos_personalizados ?? targeting?.custom_audiences),
+    publicos_excluidos: nomesDePublicos(c.publicos_excluidos ?? targeting?.excluded_custom_audiences),
+    interesses_nomes: nomesDeInteresses(c.interesses ?? targeting?.flexible_spec),
+    plataformas: c.plataformas ?? targeting?.publisher_platforms ?? null,
     meio: classificarLinhaProdutoCohapm(
       String(c.conjunto ?? c.nome ?? c.name ?? ""),
       String(c.campanha ?? ""),
@@ -99,8 +181,8 @@ export function recortarCriativosPorPedido(
 }
 
 export function soAtivosDoPedido(pedido: string): boolean {
-  const p = String(pedido ?? "").toLowerCase();
-  return /\bativos?\b/.test(p) && !/\b(pausad|historico|todas? as campanhas)\b/.test(p);
+  const p = String(pedido ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return /\bativ[oa]s?\b/.test(p) && !/\b(pausad|historico|todas? as campanhas)\b/.test(p);
 }
 
 export function statusEhAtivo(status: unknown): boolean {
@@ -413,4 +495,104 @@ export function markdownRelacaoPorConjunto(args: {
     "## Criativos por conjunto",
     ...blocosAds,
   ].join("\n");
+}
+
+function txtOuTraco(v: unknown): string {
+  if (v == null || v === "") return "—";
+  if (Array.isArray(v)) return v.length ? v.join(", ") : "—";
+  if (typeof v === "boolean") return v ? "sim" : "não";
+  return String(v);
+}
+
+function textoGeoDoCompacto(c: Record<string, unknown>): string {
+  const partes: string[] = [];
+  const paises = c.paises;
+  if (Array.isArray(paises) && paises.length) partes.push(`país ${paises.join(", ")}`);
+  const cidades = c.cidades;
+  if (Array.isArray(cidades) && cidades.length) partes.push(`cidade ${cidades.join(", ")}`);
+  const regioes = c.regioes;
+  if (Array.isArray(regioes) && regioes.length) partes.push(`região ${regioes.join(", ")}`);
+  const bairros = c.bairros;
+  if (Array.isArray(bairros) && bairros.length) partes.push(`bairro ${bairros.join(", ")}`);
+  else if (Number(c.bairros_qtd) > 0) partes.push(`${c.bairros_qtd} bairro(s)`);
+  const tipos = c.tipos_localizacao;
+  if (Array.isArray(tipos) && tipos.length) {
+    const rotulo = tipos.map((t) => t === "home" ? "moram" : t === "recent" ? "estiveram" : String(t)).join(" ou ");
+    partes.push(`quem ${rotulo}`);
+  }
+  return partes.length ? partes.join(" · ") : "geo não coletado";
+}
+
+function textoPublicoDoCompacto(c: Record<string, unknown>): string {
+  const idadeMin = c.idade_min ?? "—";
+  const idadeMax = c.idade_max ?? "—";
+  const partes = [`idade ${idadeMin}–${idadeMax}`];
+  partes.push(`gênero ${txtOuTraco(c.genders)}`);
+  partes.push(c.advantage_plus === true
+    ? "Advantage+ audience ligado (idade/geo são ponto de partida; a Meta pode expandir)"
+    : "Advantage+ audience desligado");
+  const ints = c.interesses_nomes;
+  partes.push(Array.isArray(ints) && ints.length ? `interesses ${ints.join(", ")}` : "sem interesses manuais");
+  const pubs = c.publicos;
+  partes.push(Array.isArray(pubs) && pubs.length ? `públicos ${pubs.join(", ")}` : "sem público personalizado/LAL");
+  const excl = c.publicos_excluidos;
+  if (Array.isArray(excl) && excl.length) partes.push(`exclui ${excl.join(", ")}`);
+  const plat = c.plataformas;
+  if (Array.isArray(plat) && plat.length) partes.push(`plataformas ${plat.join(", ")}`);
+  return partes.join(" · ");
+}
+
+/** Tabela pronta: geo + definição de público por conjunto. Sem criativo, sem CPL. */
+export function markdownRelacaoGeo(args: {
+  campanha: string;
+  campanha_status?: string;
+  conjuntos: Record<string, unknown>[];
+}): string {
+  const linhas = [
+    "| Conjunto | Status | Geo | Público-alvo | Destino |",
+    "|---|---|---|---|---|",
+  ];
+  const detalhes: string[] = [];
+  for (const bruto of args.conjuntos) {
+    const c = compactarConjuntoEstrutura(bruto);
+    const geo = textoGeoDoCompacto(c);
+    const pub = textoPublicoDoCompacto(c);
+    linhas.push(
+      `| ${c.conjunto ?? "—"} | ${c.status ?? "—"} | ${geo} | ${pub} | ${c.destination_type ?? "—"} |`,
+    );
+    detalhes.push(
+      `### ${c.conjunto ?? "conjunto"}`,
+      `- Status: ${c.status ?? "—"} · campanha ${args.campanha_status ?? "—"} · entregando ${c.entregando === true ? "sim" : "não"}`,
+      `- Geo: ${geo}`,
+      `- Público: ${pub}`,
+      `- Otimização: ${c.optimization_goal ?? "—"} · destino ${c.destination_type ?? "—"}`,
+      "",
+    );
+  }
+  return [
+    `Campanha: **${args.campanha}**${args.campanha_status ? ` (${args.campanha_status})` : ""}.`,
+    "",
+    "## Relação geográfica e público-alvo por conjunto",
+    ...linhas,
+    "",
+    ...detalhes,
+  ].join("\n");
+}
+
+export function montarRelacaoGeoDeCampanha(
+  campanha: { nome?: unknown; status?: unknown },
+  conjuntos: Record<string, unknown>[],
+  soAtivos: boolean,
+): string | null {
+  let lista = conjuntos.filter((c) => {
+    const st = String(c.status ?? "").toUpperCase();
+    return st !== "DELETED" && st !== "ARCHIVED";
+  });
+  if (soAtivos) lista = lista.filter((c) => statusEhAtivo(c.status));
+  if (!lista.length) return null;
+  return markdownRelacaoGeo({
+        campanha: String(campanha.nome ?? "campanha"),
+    campanha_status: campanha.status != null ? String(campanha.status) : undefined,
+    conjuntos: lista,
+  });
 }

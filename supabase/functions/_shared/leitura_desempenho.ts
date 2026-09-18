@@ -273,14 +273,28 @@ function resumoTargeting(t: unknown): Record<string, unknown> | null {
     : null;
   const custom = Array.isArray(o.custom_audiences) ? o.custom_audiences : [];
   const excluded = Array.isArray(o.excluded_custom_audiences) ? o.excluded_custom_audiences : [];
+  const auto = o.targeting_automation && typeof o.targeting_automation === "object"
+    ? o.targeting_automation as Record<string, unknown>
+    : null;
+  const nomes = (v: unknown) =>
+    Array.isArray(v)
+      ? v.map((x) => typeof x === "string" ? x : String((x as Record<string, unknown>)?.name ?? (x as Record<string, unknown>)?.key ?? "")).filter(Boolean)
+      : null;
   return {
     age_min: o.age_min ?? null,
     age_max: o.age_max ?? null,
     genders: o.genders ?? null,
-    advantage_plus: o.targeting_automation != null || o.advantage_audience === true,
+    advantage_plus: auto != null || o.advantage_audience === true,
+    advantage_audience: auto?.advantage_audience ?? o.advantage_audience ?? null,
     paises: Array.isArray(geo?.countries) ? geo!.countries : null,
+    cidades: nomes(geo?.cities),
+    regioes: nomes(geo?.regions),
+    bairros: nomes(geo?.neighborhoods),
+    tipos_localizacao: Array.isArray(geo?.location_types) ? geo!.location_types : null,
     custom_audiences: custom.length,
+    custom_audiences_nomes: nomes(custom),
     excluded_custom_audiences: excluded.length,
+    plataformas: o.publisher_platforms ?? null,
   };
 }
 

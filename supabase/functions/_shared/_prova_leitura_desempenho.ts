@@ -6,7 +6,7 @@ import {
   janelaDetalhe,
 } from "./leitura_desempenho.ts";
 import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
-import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha, ehPedidoRelacaoNumerica } from "./intencao_turno.ts";
+import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica } from "./intencao_turno.ts";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -51,6 +51,24 @@ assert(
     "gera uma relação mostrando os gastos, conversas geradas, impressões e orçamento por conjuntos e por criativos",
   ),
   "pedido de relacao numerica",
+);
+assert(
+  ehPedidoRelacaoGeoPublico(
+    "relação geográfica de cada um dos conjuntos da campanha ativa e como foi definido o público-alvo",
+  ),
+  "pedido geo",
+);
+assert(
+  !ehPedidoRelacaoNumerica(
+    "relação geográfica de cada um dos conjuntos da campanha ativa e como foi definido o público-alvo",
+  ),
+  "geo nao dispara colheita numerica",
+);
+assert(
+  !ehPedidoDetalhamentoCampanha(
+    "relação geográfica de cada um dos conjuntos da campanha ativa e como foi definido o público-alvo",
+  ),
+  "geo nao e detalhamento de criativo",
 );
 assert(
   !(FERRAMENTAS_BASE.get_estrutura_conjuntos.omitidos?.job ?? []).includes("pagina"),

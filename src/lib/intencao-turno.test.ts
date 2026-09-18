@@ -7,6 +7,7 @@ import {
   ehPerguntaDeLeitura,
   ehLeituraDeDesempenho,
   ehPedidoRelacaoNumerica,
+  ehPedidoRelacaoGeoPublico,
   recusaFalsaMoldeTrafego,
   ehPedidoUploadLote,
   ehUploadLoteCurto,
@@ -92,6 +93,16 @@ describe("ehPerguntaDeLeitura", () => {
     expect(ehPedidoRelacaoNumerica(pedido)).toBe(true);
     expect(ehLeituraDeDesempenho(pedido)).toBe(true);
     expect(ehPedidoDetalhamentoCampanha(pedido)).toBe(true);
+    expect(ehPedidoDeAto(pedido)).toBe(false);
+    expect(ehPerguntaDeLeitura(pedido)).toBe(true);
+  });
+
+  it("relacao geografica e publico-alvo nao e tabela de gasto", () => {
+    const pedido =
+      "preciso que você traga pra mim uma relação geográfica de cada um dos conjuntos referentes a campanha ativa do lafelicità.\ntraga de cada um dos conjuntos especificando como foi definido o público-alvo em que essa campanha abrange";
+    expect(ehPedidoRelacaoGeoPublico(pedido)).toBe(true);
+    expect(ehPedidoRelacaoNumerica(pedido)).toBe(false);
+    expect(ehPedidoDetalhamentoCampanha(pedido)).toBe(false);
     expect(ehPedidoDeAto(pedido)).toBe(false);
     expect(ehPerguntaDeLeitura(pedido)).toBe(true);
   });

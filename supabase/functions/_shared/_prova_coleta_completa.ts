@@ -3,13 +3,14 @@ import {
   aplicarCompactacaoEstrutura,
   compactarConjuntoEstrutura,
   filtrarRelacaoAtivos,
+  markdownRelacaoGeo,
   markdownRelacaoPorConjunto,
   montarRelacaoDeDetalhe,
   recortarConjuntosPorPedido,
   soAtivosDoPedido,
 } from "./coleta_completa.ts";
 import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
-import { ehPedidoRelacaoNumerica } from "./intencao_turno.ts";
+import { ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica } from "./intencao_turno.ts";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -20,6 +21,13 @@ const pedidoJuridico =
 
 assert(ehPedidoRelacaoNumerica(pedidoJuridico), "pedido do gestor e relacao numerica");
 assert(soAtivosDoPedido(pedidoJuridico), "ativos hoje restringe status");
+assert(soAtivosDoPedido("campanha ativa do lafelicita"), "ativa no feminino tambem restringe");
+
+const pedidoGeo =
+  "preciso que você traga pra mim uma relação geográfica de cada um dos conjuntos referentes a campanha ativa do lafelicità. traga de cada um dos conjuntos especificando como foi definido o público-alvo";
+assert(ehPedidoRelacaoGeoPublico(pedidoGeo), "pedido geo/publico");
+assert(!ehPedidoRelacaoNumerica(pedidoGeo), "geo nao e relacao de gasto/criativo");
+assert(soAtivosDoPedido(pedidoGeo), "campanha ativa no pedido geo");
 
 const gordos = Array.from({ length: 24 }, (_, i) => ({
   conjunto: i < 8 ? `JURIDICO_CONJ.${i + 1}` : `LAFELICITA_CONJ.${i}`,
@@ -39,7 +47,9 @@ assert(Number(compacto.restantes ?? 0) === 0, "lista compacta do recorte cabe nu
 assert(Number(compacto.omitidos ?? 0) === 0, "nao pode omitir conjuntos do recorte");
 const item = compactarConjuntoEstrutura(gordos[0]);
 assert(!("interesses" in item), "targeting gordo nao entra no compacto");
+assert(!("targeting" in item), "objeto targeting cru nao entra no compacto");
 assert(item.orcamento_diario_reais === 30, `orcamento em reais, veio ${item.orcamento_diario_reais}`);
+assert(Array.isArray(item.cidades) && String(item.cidades[0]).includes("Salvador"), "cidade sai como nome");
 
 const recorteLf = recortarConjuntosPorPedido(
   gordos.map(compactarConjuntoEstrutura),
@@ -81,6 +91,33 @@ const rel = montarRelacaoDeDetalhe({
 }, true);
 assert(!!rel && rel.includes("JURIDICO_CONJ.1"), "montar relacao a partir do detalhe");
 
+const geoMd = markdownRelacaoGeo({
+  campanha: "COHAPM_LAFELICITA_CONV_WA_2026-08",
+  campanha_status: "ACTIVE",
+  conjuntos: [{
+    conjunto: "LAF_WA_CONJ.1_9213-6179",
+    status: "ACTIVE",
+    destination_type: "WHATSAPP",
+    idade_min: "18",
+    idade_max: "65",
+    targeting: {
+      age_min: 18,
+      age_max: 65,
+      targeting_automation: { advantage_audience: 1 },
+      publisher_platforms: ["facebook", "instagram"],
+      geo_locations: {
+        neighborhoods: [{ key: "267730", name: "Salvador", region: "Bahia", country: "BR" }],
+        location_types: ["home", "recent"],
+      },
+    },
+  }],
+});
+assert(geoMd.includes("relação geográfica") || geoMd.includes("Relação geográfica"), "titulo geo");
+assert(geoMd.includes("Salvador"), "nome da geo");
+assert(geoMd.includes("Advantage+"), "advantage no publico");
+assert(!geoMd.includes("Preço/conversa"), "geo nao despeja CPL");
+assert(!geoMd.includes("## Criativos por conjunto"), "geo nao lista criativo");
+
 const est = FERRAMENTAS_BASE.get_estrutura_conjuntos;
 assert(!!est.parametros.properties && "pagina" in (est.parametros.properties as object), "pagina existe no schema");
 assert(!(est.omitidos?.job ?? []).includes("pagina"), "pagina nao pode ser omitida no job");
@@ -93,6 +130,7 @@ assert(
   /"criativos",\s*\n\s*"criativos_drive"/.test(job),
   "pecas no ar entram antes do inventario Drive",
 );
-assert(job.includes("job-v4.26"), "versao da telemetria andou");
+assert(job.includes("job-v4.27"), "versao da telemetria andou");
+assert(job.includes("colherRelacaoGeo"), "colheita geo no job");
 
 console.log("ok coleta_completa");

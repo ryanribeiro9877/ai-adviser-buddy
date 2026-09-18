@@ -1,4 +1,7 @@
-// supabase/functions/traffic-chat/index.ts (v29.03)
+// supabase/functions/traffic-chat/index.ts (v29.04)
+// v29.04 (18/09/2026) - RELACAO GEO/PUBLICO: compactacao de get_estrutura_conjuntos
+//   passa a trazer nomes de cidade/bairro, Advantage+ e publico resumido. O job
+//   deixa de tratar "relação geográfica" como tabela de gasto/criativo.
 // v29.03 (17/09/2026) - Estrutura/criativos compactam e esgotam a lista no handler
 //   (recorte por linha + ativos) para a relacao numerica caber numa chamada.
 // v29.02 (14/09/2026) - Leitura de ranking/gasto nao e emissao de card. "monte um ranking"

@@ -1,4 +1,9 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.26)
+// supabase/functions/traffic-agent-job/index.ts (v4.27)
+// v4.27 (18/09/2026) - RELACAO GEO/PUBLICO: "relação geográfica de cada conjunto" +
+//   "como foi definido o público-alvo" caía em ehPedidoRelacaoNumerica só pela palavra
+//   "relação" e a colheita despejava criativos/CPL. Classificador separado; colheita
+//   lê targeting (geo, idade, Advantage+, interesses, públicos); "campanha ativa"
+//   passa a restringir status. Sem LLM de síntese quando a colheita fecha.
 // v4.26 (17/09/2026) - RELACAO NUMERICA NAO CHEGAVA: job dc46c40d (Juridico) coletou
 //   ferramentas, mas pagina omitida no job, cortarLista tirou conjuntos/anuncios e dois
 //   especialistas competiram pela parede — a sintese recebeu relatorio vazio. Compacta
@@ -343,12 +348,13 @@ import {
   recorteDriveDoPedido,
   serieCarrosselDrive,
 } from "../_shared/pedido_drive_criativos.ts";
-import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, ehPedidoRelacaoNumerica, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
 import {
   aplicarCompactacaoCriativos,
   aplicarCompactacaoEstrutura,
   esgotarPaginasRpc,
   montarRelacaoDeDetalhe,
+  montarRelacaoGeoDeCampanha,
   soAtivosDoPedido,
 } from "../_shared/coleta_completa.ts";
 import {
@@ -938,6 +944,8 @@ const FOCO_CRIATIVOS_OVERVIEW =
   "Respeite o CONTRATO DO PEDIDO. Conteudo + ranking dos criativos do universo (get_criativos_conteudo + get_ads_ranking por gasto/alcance/conversas). Responda explicitamente: melhor por conversao, maior alcance, mais conversas. Se zero, diga zero — nunca 'indisponivel'.";
 const FOCO_ALERTAS_OVERVIEW =
   "Alertas ativos, recomendacoes internas e dicas Meta. So o que o pedido toca; veredito curto do que exige acao agora.";
+const FOCO_ESTRUTURA_GEO =
+  "Relacao GEOGRAFICA e PUBLICO-ALVO por conjunto. Use get_estrutura_conjuntos (esgote paginas). Para cada conjunto: paises/cidades/bairros/raios, idade, genero, Advantage+, interesses, publicos personalizados, exclusoes, destination_type. PROIBIDO responder com gasto/impressao/criativo. PROIBIDO misturar campanha pausada se o pedido for campanha ativa.";
 
 /** Escopo literal do pedido — interpretacao fria, sem expandir o brief. */
 type EscopoPedido = {
@@ -997,6 +1005,10 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
   }
   const pedeDrive = pedidoExigeInventarioDrive(raw);
   const pedeOrigem = ehPedidoOrigemDriveDosAnuncios(raw);
+  if (ehPedidoRelacaoGeoPublico(raw)) {
+    perguntas_obrigatorias.push("Geo de CADA conjunto da campanha do universo (paises, cidades, bairros/raios, tipos home/recent).");
+    perguntas_obrigatorias.push("Como o publico-alvo de CADA conjunto foi definido (idade, genero, Advantage+, interesses, publicos personalizados/LAL, exclusoes). PROIBIDO substituir por ranking de criativo ou gasto.");
+  }
   if (pedeOrigem) {
     perguntas_obrigatorias.push("Pasta do Drive de CADA anuncio do conjunto (origem_drive_dos_anuncios): pasta + peca_nome + drive_file_id. PROIBIDO mapear AD_…_N para N.mp4. PROIBIDO 'sem vinculo' se a tool trouxe o id.");
   } else if (pedeDrive) {
@@ -1009,6 +1021,7 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
   }
   if (
     !pedeOrigem
+    && !ehPedidoRelacaoGeoPublico(raw)
     && (ehPedidoDetalhamentoCampanha(raw) || (/\banuncio/.test(p) && /\b(diario|diaria|conjunto|campanha)/.test(p)))
   ) {
     perguntas_obrigatorias.push("Quantos anuncios em cada conjunto, status, gasto, impressoes, alcance, cliques, CTR, formularios/engajamento, custo e destino (get_detalhe_anuncios; pagine se restantes>0).");
@@ -1158,6 +1171,19 @@ function classificarCapacidade(pergunta: string): Capacidade {
     || len >= 1400
     || (len >= 900 && (perguntas >= 3 || linhas >= 8))
     || (perguntas >= 4 && len >= 500);
+  if (ehPedidoRelacaoGeoPublico(raw)) {
+    return {
+      tier: deepHit ? "deep" : "standard",
+      motivo: "relacao geografica e publico-alvo por conjunto",
+      maxEspecialistas: 1,
+      devolucoesMax: 0,
+      permitirCheckpoint: true,
+      openRouterTimeoutMs: deepHit ? OPENROUTER_TIMEOUT_MS : STANDARD_OPENROUTER_TIMEOUT_MS,
+      forcarPlano: [
+        { nome: "estrutura_conta", foco: FOCO_ESTRUTURA_GEO },
+      ],
+    };
+  }
   if (ehPedidoRelacaoNumerica(raw)) {
     return {
       tier: deepHit ? "deep" : "standard",
@@ -1780,6 +1806,86 @@ async function colherRelacaoNumerica(args: {
     ok: blocos.length > 0,
     markdown,
     cobertura: `${blocos.length} campanha(s); falhas=${falhas.length}; janela ${from}→${to}`,
+    campanhas: blocos.length,
+  };
+}
+
+async function colherRelacaoGeo(args: {
+  companyId: string;
+  pedido: string;
+}): Promise<{ ok: boolean; markdown: string; cobertura: string; campanhas: number }> {
+  const pedido = args.pedido;
+  const { data: camps, error } = await supa.from("campaigns")
+    .select("id,name,status,external_id")
+    .eq("company_id", args.companyId);
+  if (error) {
+    return { ok: false, markdown: "", cobertura: `campanhas: ${error.message}`, campanhas: 0 };
+  }
+  const operacionais = ((camps ?? []) as Array<{ id?: string; name?: string; status?: unknown; external_id?: string }>)
+    .filter((c) => statusObjetoOperacional(c.status));
+  const meio = inferirMeioDrive(pedido);
+  let alvos = meio
+    ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
+    : [];
+  if (!alvos.length && meio) {
+    const needle = meio === "juridico" ? "juridico" : meio === "la_felicita" ? "felicita" : "ocular";
+    alvos = casarCampanhas(operacionais, needle);
+  }
+  if (!alvos.length) alvos = operacionais;
+  const p = deacc(pedido.toLowerCase());
+  if (!/\binstagr/.test(p)) {
+    alvos = alvos.filter((c) => !/publicacao do instagram|post do instagram/i.test(String(c.name ?? "")));
+  }
+  if (!/\bsalt\b/.test(p)) {
+    alvos = alvos.filter((c) => !/\[salt\]/i.test(String(c.name ?? "")));
+  }
+  if (soAtivosDoPedido(pedido)) {
+    alvos = alvos.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
+  }
+  if (!alvos.length) {
+    return { ok: false, markdown: "", cobertura: "nenhuma campanha da linha no recorte de geo", campanhas: 0 };
+  }
+  const blocos: string[] = [];
+  const falhas: string[] = [];
+  for (const camp of alvos.slice(0, 6)) {
+    const cid = String(camp.id ?? "");
+    if (!cid) continue;
+    const { data: sets, error: eSets } = await supa.from("ad_sets")
+      .select("name,status,daily_budget,optimization_goal,destination_type,targeting")
+      .eq("company_id", args.companyId)
+      .eq("campaign_id", cid);
+    if (eSets) {
+      falhas.push(`${camp.name}: ${eSets.message}`);
+      continue;
+    }
+    const conjuntos = ((sets ?? []) as Record<string, unknown>[])
+      .filter((s) => statusObjetoOperacional(s.status))
+      .map((s) => ({
+        conjunto: s.name,
+        nome: s.name,
+        status: s.status,
+        campanha: camp.name,
+        campanha_status: camp.status,
+        entregando: String(s.status ?? "").toUpperCase() === "ACTIVE"
+          && String(camp.status ?? "").toUpperCase() === "ACTIVE",
+        daily_budget: s.daily_budget,
+        optimization_goal: s.optimization_goal,
+        destination_type: s.destination_type,
+        targeting: s.targeting,
+      }));
+    const md = montarRelacaoGeoDeCampanha(
+      { nome: camp.name, status: camp.status },
+      conjuntos,
+      soAtivosDoPedido(pedido),
+    );
+    if (md) blocos.push(md);
+    else falhas.push(`${camp.name}: sem conjuntos no recorte de geo`);
+  }
+  const markdown = blocos.join("\n\n");
+  return {
+    ok: blocos.length > 0,
+    markdown,
+    cobertura: `${blocos.length} campanha(s) geo; falhas=${falhas.length}`,
     campanhas: blocos.length,
   };
 }
@@ -2509,6 +2615,12 @@ function planoFallbackSeguro(
 ): { nome: string; foco: string }[] {
   const maxEsp = Math.max(1, Math.min(cap?.maxEspecialistas ?? nomes.length, nomes.length));
   const p = deacc(pergunta.toLowerCase());
+  if (ehPedidoRelacaoGeoPublico(pergunta)) {
+    const geo = [
+      { nome: "estrutura_conta", foco: FOCO_ESTRUTURA_GEO },
+    ].filter((x) => nomes.includes(x.nome));
+    if (geo.length) return geo.slice(0, maxEsp);
+  }
   if (pedidoExigeInventarioDrive(pergunta)) {
     const drive = [
       { nome: "criativos_drive", foco: FOCO_CRIATIVOS_DRIVE },
@@ -4344,7 +4456,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.26";
+  tel.versao = "job-v4.27";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -4498,10 +4610,25 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     let degradado = false;
     let relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
     let colheitaRelacao: { ok: boolean; markdown: string; cobertura: string } | null = null;
-    if (ehPedidoRelacaoNumerica(pergunta)) {
+    if (ehPedidoRelacaoGeoPublico(pergunta)) {
+      await pushProgresso(jobId, "subagentes", "colheita deterministica da geo e do publico-alvo por conjunto");
+      colheitaRelacao = await colherRelacaoGeo({ companyId, pedido: pergunta });
+      tel.colheita_relacao = { ok: colheitaRelacao.ok, cobertura: colheitaRelacao.cobertura, tipo: "geo_publico" };
+      if (colheitaRelacao.ok) {
+        plano = [{ nome: "base_coletada", foco: "relacao geografica e publico-alvo por conjunto" }];
+        tel.plano = ["base_coletada"];
+        tel.planner = { tokens_in: 0, tokens_out: 0, forcado: true, motivo: cap.motivo, tier: cap.tier };
+        relatorios = [{
+          nome: "base_coletada",
+          relatorio: `${colheitaRelacao.markdown}\n\nLACUNAS: nenhuma da relacao geografica pedida — targeting da colheita deterministica (ad_sets.targeting).`,
+          completo: true,
+        }];
+        await pushProgresso(jobId, "planner", `colheita geo ok (${colheitaRelacao.cobertura}) — sem especialistas LLM`);
+      }
+    } else if (ehPedidoRelacaoNumerica(pergunta)) {
       await pushProgresso(jobId, "subagentes", "colheita deterministica da relacao (conjunto + criativo)");
       colheitaRelacao = await colherRelacaoNumerica({ companyId, pedido: pergunta });
-      tel.colheita_relacao = { ok: colheitaRelacao.ok, cobertura: colheitaRelacao.cobertura };
+      tel.colheita_relacao = { ok: colheitaRelacao.ok, cobertura: colheitaRelacao.cobertura, tipo: "numerica" };
       if (colheitaRelacao.ok) {
         plano = [{ nome: "base_coletada", foco: "relacao por conjunto e por criativo" }];
         tel.plano = ["base_coletada"];

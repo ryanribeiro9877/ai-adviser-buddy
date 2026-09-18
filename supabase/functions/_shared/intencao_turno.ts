@@ -35,17 +35,44 @@ export function ehLeituraDeDesempenho(pedido: string): boolean {
   );
 }
 
+/**
+ * Relação geográfica / público-alvo por conjunto. NÃO é tabela de gasto.
+ * Medido 18/09/2026: "relação geográfica de cada conjunto" caía em
+ * ehPedidoRelacaoNumerica só pela palavra "relação" e o job despejava
+ * criativos/CPL no lugar do targeting.
+ */
+export function ehPedidoRelacaoGeoPublico(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  const nivel =
+    /\bconjuntos?\b/.test(p) ||
+    /\bcampanhas?\b/.test(p) ||
+    /\bad ?sets?\b/.test(p);
+  if (!nivel) return false;
+  const geo =
+    /\bgeo\w*\b/.test(p) ||
+    /\b(bairro|cidades?|regioes?|localizac\w*|segmentac\w*)\b/.test(p);
+  const publico =
+    /\bpublico[- ]alvo\b/.test(p) ||
+    (/\bpublico\b/.test(p) && /\b(definid|abrang|alvo|targeting|segment)\b/.test(p)) ||
+    /\btargeting\b/.test(p);
+  return geo || publico;
+}
+
 /** Relação/tabela de gasto, conversa, impressão e orçamento por conjunto e por criativo. */
 export function ehPedidoRelacaoNumerica(pedido: string): boolean {
   const p = deacc(String(pedido ?? "").toLowerCase());
   if (!p) return false;
+  if (ehPedidoRelacaoGeoPublico(p)) return false;
   const nivel = /\bconjuntos?\b/.test(p) || /\bcriativ/.test(p) || /\banuncios?\b/.test(p);
   if (!nivel) return false;
+  const metrica =
+    /\b(gastos?|conversas?|impressoes|orcamento|preco|cpl|cpa|ctr|alcance|frequencia)\b/.test(p);
   const tabela =
     /\b(relacao|tabela|liste|lista)\b/.test(p) ||
     /\bmostrando os gastos\b/.test(p) ||
     (/\bgastos?\b/.test(p) && /\b(conversas?|impressoes|orcamento)\b/.test(p));
-  return tabela;
+  return tabela && metrica;
 }
 
 export function ehPedidoDeAto(pedido: string): boolean {
@@ -67,7 +94,7 @@ export function ehPerguntaDeLeitura(pedido: string): boolean {
   if (!raw || ehPedidoDeAto(raw)) return false;
   const p = deacc(raw.toLowerCase());
   if (/\?/.test(raw)) return true;
-  if (ehLeituraDeDesempenho(p) || RE_VERBO_COM_ENTREGA_ANALITICA.test(p)) return true;
+  if (ehPedidoRelacaoGeoPublico(p) || ehLeituraDeDesempenho(p) || RE_VERBO_COM_ENTREGA_ANALITICA.test(p)) return true;
   return /\b(antes da aprova|esta com o mesmo|qual (o |a )?(link|destino|url)|o anuncio esta|o card esta|confere se|verifique se|me diga se|consult(ar|e|a)\b)/.test(
     p,
   );

@@ -98,6 +98,8 @@ const FALAS = [
   "desative os comentarios e pause as 14 turbinagens",
   "emita os cards do conjunto 2",
   "monte um ranking dos conjuntos da campanha do sistema ocular por gasto",
+  "preciso que você traga pra mim uma relação geográfica de cada um dos conjuntos referentes a campanha ativa do lafelicità",
+  "gera uma relação mostrando os gastos, conversas geradas, impressões e orçamento por conjuntos e por criativos",
   "sobe os videos para a biblioteca da meta",
   "suba os restantes para a biblioteca",
   "detalha a campanha JUR_CONV e mostra os conjuntos e anuncios",
