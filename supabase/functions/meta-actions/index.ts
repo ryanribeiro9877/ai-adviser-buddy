@@ -1,4 +1,11 @@
-// supabase/functions/meta-actions/index.ts (v5.63)
+// supabase/functions/meta-actions/index.ts (v5.64)
+// v5.64 (18/09/2026) - ALTERAR PUBLICO DO CONJUNTO PUBLICADO. O gestor pediu
+//   filtrar interesses nos CONJ.1-4 La Felicita e o chat disse que nao ha ato
+//   de editar detalhamento no objeto vivo — so existia geo/orcamento/pause/criar.
+//   A Meta aceita POST /{adset_id} targeting (o mesmo update_adset da geo).
+//   Entra alterar_publico_do_conjunto: le o targeting atual, troca flexible_spec
+//   + advantage_audience, preserva geo/idade/plataformas/WhatsApp. Se a Graph
+//   recusar, o card FALHA; duplicar fica de reserva.
 // v5.63 (12/09/2026) - ALTERAR ORCAMENTO aceita alias orcamento_diario_reais no payload
 //   (o chat passou a emitir com os dois nomes apos o incidente CONJ.04 / R$ 20).
 // v5.62 (10/09/2026) - ALTERAR GEO DO CONJUNTO PUBLICADO. O gestor pediu recorte RMS
@@ -460,6 +467,10 @@ import {
   normalizarGeoDoPedido,
   paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
+import {
+  aplicarPublicoNoTargeting,
+  validarPublicoDoPedido,
+} from "../_shared/interesse_targeting.ts";
 import { aplicarGateGeoCriarConjunto } from "../_shared/geo_preset_juridico.ts";
 import {
   resolverObjetivoOdax,
@@ -519,6 +530,7 @@ const EXECUTAVEIS = [
   "alterar_categoria_especial_campanha",
   "ajustar_posicionamentos_do_conjunto",
   "alterar_geo_do_conjunto",
+  "alterar_publico_do_conjunto",
 ];
 /** Renomear e a mesma escrita nos tres niveis: o campo `name` do objeto que ja existe. */
 const RENOMEACOES = ["renomear_campanha", "renomear_conjunto", "renomear_criativo"];
@@ -819,6 +831,7 @@ async function escreverUpdate(
     acao === "alterar_orcamento" ||
     acao === "ajustar_posicionamentos_do_conjunto" ||
     acao === "alterar_geo_do_conjunto" ||
+    acao === "alterar_publico_do_conjunto" ||
     acao === "pausar_conjunto" ||
     acao === "ativar_conjunto" ||
     acao === "renomear_conjunto"
@@ -3288,7 +3301,11 @@ async function espelhar(
         : { ok: true, tabela: "ads" };
     }
 
-    if (acao === "ajustar_posicionamentos_do_conjunto" || acao === "alterar_geo_do_conjunto") {
+    if (
+      acao === "ajustar_posicionamentos_do_conjunto" ||
+      acao === "alterar_geo_do_conjunto" ||
+      acao === "alterar_publico_do_conjunto"
+    ) {
       const { error } = await supa
         .from("ad_sets")
         .update({
@@ -5305,6 +5322,48 @@ Deno.serve(async (req) => {
       r.payload.geo_resumo = (gateGeo as any).resumo ?? geoNorm.resumo ?? null;
       r.payload.geo_contagem = (gateGeo as any).contagem ?? geoNorm.contagem ?? null;
     }
+    if (acao === "alterar_publico_do_conjunto") {
+      if (antes.status !== 200 || !antes.body || typeof antes.body !== "object") {
+        const motivo = "estado_atual_do_conjunto_nao_pode_ser_lido";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          acao,
+          driver_escrita: driver,
+          leitura_graph: antes,
+        });
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+      }
+      const pubOk = validarPublicoDoPedido((r.payload ?? {}) as Record<string, unknown>);
+      if (!pubOk.ok) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: pubOk.erro,
+          detalhe: pubOk.detalhe,
+          acao,
+          driver_escrita: driver,
+        });
+        return ({
+          id: r.id,
+          acao,
+          resultado: "bloqueado",
+          motivo: pubOk.erro,
+          detalhe: pubOk.detalhe,
+          driver_escrita: driver,
+        });
+      }
+      const tgtAtual = ((antes.body as any)?.targeting ?? {}) as Record<string, unknown>;
+      const tgtNovo = aplicarPublicoNoTargeting(
+        tgtAtual && typeof tgtAtual === "object" ? tgtAtual : {},
+        {
+          interesses: pubOk.params.interesses as { id: string; name: string }[],
+          advantage_audience: pubOk.advantage_audience,
+        },
+      );
+      post = { targeting: JSON.stringify(tgtNovo) };
+      r.payload.targeting_aprovado = tgtNovo;
+      r.payload.publico_resumo = pubOk.resumo;
+      r.payload.advantage_audience = pubOk.advantage_audience;
+      r.payload.targeting_antes = tgtAtual;
+    }
 
     if (conf.dry_run) {
       let ensaioPipeboard: ResultadoEscrita | null = null;
@@ -5529,7 +5588,11 @@ Deno.serve(async (req) => {
           );
         }
       }
-      if (acao === "ajustar_posicionamentos_do_conjunto" || acao === "alterar_geo_do_conjunto") {
+      if (
+        acao === "ajustar_posicionamentos_do_conjunto" ||
+        acao === "alterar_geo_do_conjunto" ||
+        acao === "alterar_publico_do_conjunto"
+      ) {
         const esp = await espelhar(
           acao,
           alvoExt,
@@ -5542,12 +5605,20 @@ Deno.serve(async (req) => {
           null,
           String((alvoLido as any)?.status ?? (antes.body as any)?.status ?? "PAUSED"),
         );
+        const auditOk = acao === "alterar_publico_do_conjunto"
+          ? "meta_action_espelho_publico"
+          : acao === "alterar_geo_do_conjunto"
+          ? "meta_action_espelho_geo"
+          : "meta_action_espelho_posicionamentos";
+        const auditFail = acao === "alterar_publico_do_conjunto"
+          ? "meta_action_espelho_publico_falhou"
+          : acao === "alterar_geo_do_conjunto"
+          ? "meta_action_espelho_geo_falhou"
+          : "meta_action_espelho_posicionamentos_falhou";
         await audit(
           r.company_id,
           sistema,
-          esp.ok
-            ? (acao === "alterar_geo_do_conjunto" ? "meta_action_espelho_geo" : "meta_action_espelho_posicionamentos")
-            : (acao === "alterar_geo_do_conjunto" ? "meta_action_espelho_geo_falhou" : "meta_action_espelho_posicionamentos_falhou"),
+          esp.ok ? auditOk : auditFail,
           r.id,
           {
             acao,

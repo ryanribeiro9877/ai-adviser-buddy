@@ -1,4 +1,10 @@
-// supabase/functions/traffic-chat/index.ts (v29.04)
+// supabase/functions/traffic-chat/index.ts (v29.05)
+// v29.05 (18/09/2026) - PUBLICO DE CONJUNTO PUBLICADO. O gestor pediu filtrar
+//   interesses nos CONJ.1-4 La Felicita ACTIVE e o chat recusou ("nao ha ato
+//   de alterar interesses no objeto vivo") — so existia geo/orcamento/pause/criar.
+//   Graph/Pipeboard ja aceitam update_adset(targeting). Entram buscar_interesses
+//   + alterar_publico_do_conjunto (mesmo transporte de alterar_geo). Duplicar
+//   so se a Graph recusar o PATCH. Interesse nao e renda nem historico de busca.
 // v29.04 (18/09/2026) - RELACAO GEO/PUBLICO: compactacao de get_estrutura_conjuntos
 //   passa a trazer nomes de cidade/bairro, Advantage+ e publico resumido. O job
 //   deixa de tratar "relação geográfica" como tabela de gasto/criativo.
@@ -910,6 +916,10 @@ import {
   paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
 import {
+  buscarInteressesMeta,
+  validarPublicoDoPedido,
+} from "../_shared/interesse_targeting.ts";
+import {
   aplicarGateGeoCriarConjunto,
   companyElegivelPresetGeoJuridico,
   MEIO_JURIDICO,
@@ -955,11 +965,13 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   get_ads_ranking: 4,
   vincular_instagram_dos_anuncios: 2,
   alterar_geo_do_conjunto: 8,
+  alterar_publico_do_conjunto: 8,
   alterar_orcamento: 8,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
   get_seguidores_instagram_ads: 2,
   buscar_geolocalizacao: 6,
+  buscar_interesses: 6,
   propose_action: 10,
   get_acervo_para_anuncio: 3,
   nota_visual_da_peca: 6,
@@ -982,7 +994,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.02";
+const VERSAO = "chat-v29.05";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -2112,6 +2124,27 @@ async function t_buscar_geolocalizacao(companyId: string, args: any) {
   });
 }
 
+async function t_buscar_interesses(companyId: string, args: any) {
+  const tok = tokenAdsPorCompanyId(companyId);
+  if (!tok) {
+    return {
+      erro: "token_ads_ausente_para_empresa",
+      detalhe:
+        "Sem META_ADS_TOKEN desta empresa no runtime nao busco adinterest. Confirme o secret da empresa.",
+    };
+  }
+  const nomesRaw = args?.nomes ?? args?.interesses ?? args?.names;
+  const nomes = Array.isArray(nomesRaw)
+    ? nomesRaw.map((n: unknown) => String(n ?? "").trim()).filter(Boolean)
+    : [];
+  return await buscarInteressesMeta({
+    token: tok.token,
+    nomes,
+    limit_por_query: args?.limit_por_query != null ? Number(args.limit_por_query) : undefined,
+    locale: args?.locale != null ? String(args.locale) : undefined,
+  });
+}
+
 // v28.7 (04/08/2026): a RPC ganhou empresa e paginacao. Sem p_company_id ela devolve lista vazia
 // com AVISO_CRITICO de proposito - a sobrecarga antiga e alarme, nao compatibilidade. Antes disso
 // a funcao nao tinha filtro de empresa NENHUM: devolvia os 46 conjuntos da Legal misturados com os
@@ -2362,6 +2395,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     "alterar_categoria_especial_campanha",
     "ajustar_posicionamentos_do_conjunto",
     "alterar_geo_do_conjunto",
+    "alterar_publico_do_conjunto",
     "vincular_instagram_dos_anuncios",
   ];
   if (!VALID.includes(action)) return { erro: `action_type invalido; use: ${VALID.join(", ")}` };
@@ -2402,6 +2436,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     action === "alterar_orcamento" ||
     action === "ajustar_posicionamentos_do_conjunto" ||
     action === "alterar_geo_do_conjunto" ||
+    action === "alterar_publico_do_conjunto" ||
     action === "pausar_conjunto" ||
     action === "ativar_conjunto" ||
     action === "renomear_conjunto";
@@ -2479,6 +2514,13 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     params.geo_resumo = geoOk.resumo;
   }
 
+  if (action === "alterar_publico_do_conjunto") {
+    const pubOk = validarPublicoDoPedido(params as Record<string, unknown>);
+    if (!pubOk.ok) return { erro: pubOk.erro, detalhe: pubOk.detalhe };
+    Object.assign(params, pubOk.params);
+    params.publico_resumo = pubOk.resumo;
+  }
+
   // ESP-24: guarda do unico conjunto entregando — se pausar este zera entrega, nao emite card.
   let avisoGuardaConjunto: string | null = null;
   if (action === "pausar_conjunto" && alvo.external_id) {
@@ -2540,6 +2582,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     ? "budget"
     : (action === "ajustar_posicionamentos_do_conjunto" ||
         action === "alterar_geo_do_conjunto" ||
+        action === "alterar_publico_do_conjunto" ||
         action === "pausar_conjunto" ||
         action === "ativar_conjunto" ||
         action === "renomear_conjunto")
@@ -2568,6 +2611,8 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
       `Ajustar posicionamentos de "${alvo.name}" para ${String(params?.formato_midia).toUpperCase()}: excluir Facebook Coluna da direita quando incompatível, preservar Instagram/Threads e demais posicionamentos compatíveis`,
     alterar_geo_do_conjunto:
       `Alterar geo de "${alvo.name}" para ${String(params?.geo_resumo ?? "recorte informado")} (mesmo conjunto; nao cria objeto novo)`,
+    alterar_publico_do_conjunto:
+      `Alterar publico de "${alvo.name}" para ${String(params?.publico_resumo ?? "interesses informados")} (Advantage+ ${Number(params?.advantage_audience) === 1 ? "ligado" : "desligado"}; mesmo conjunto; nao cria objeto novo)`,
     vincular_instagram_dos_anuncios: (() => {
       const n = Array.isArray(params?.anuncios) ? (params.anuncios as unknown[]).length : 0;
       const h = String(params?.instagram_destino_handle ?? "@cohapm");
@@ -2760,6 +2805,51 @@ async function t_alterar_geo_do_conjunto(
     params: {
       ...geoOk.params,
       alvo_external_id: params.alvo_external_id,
+    },
+  }, cards);
+}
+
+async function t_alterar_publico_do_conjunto(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+) {
+  const conjunto = String(args?.conjunto ?? args?.target_name ?? "").trim();
+  if (!conjunto) return { erro: "conjunto obrigatorio (nome atual do conjunto)" };
+  const params: Record<string, unknown> = {
+    ...(args?.params && typeof args.params === "object" ? args.params : {}),
+    alvo_external_id: args?.alvo_external_id ?? args?.target_external_id ?? args?.external_id,
+  };
+  if (args?.interesses != null || args?.interests != null) {
+    params.interesses = args?.interesses ?? args?.interests;
+  }
+  if (args?.advantage_audience != null || args?.advantage_plus != null || args?.advantage != null) {
+    params.advantage_audience = args?.advantage_audience ?? args?.advantage_plus ?? args?.advantage;
+  }
+  const pubOk = validarPublicoDoPedido(params);
+  if (!pubOk.ok) return { erro: pubOk.erro, detalhe: pubOk.detalhe };
+  const aPlus = pubOk.advantage_audience === 1;
+  return await t_propose_action(companyId, convId, requestedBy, {
+    action_type: "alterar_publico_do_conjunto",
+    target_name: conjunto,
+    justificativa: String(args?.justificativa ?? "").trim() ||
+      `Trocar detalhamento do conjunto publicado "${conjunto}" para ${pubOk.resumo} sem criar conjunto novo nem somar orcamento. Interesse e afinidade, nao renda R$ 8 mil nem historico de busca.`,
+    reversa: String(args?.reversa ?? "").trim() ||
+      "Restaurar targeting.flexible_spec e targeting_automation.advantage_audience anteriores (gravados no audit_log e no card) com a mesma acao alterar_publico_do_conjunto.",
+    metrica_sucesso: String(args?.metrica_sucesso ?? "").trim() ||
+      `A Graph devolver flexible_spec com ${pubOk.resumo} e advantage_audience=${pubOk.advantage_audience} na reconciliacao; geo, idade, plataformas e WhatsApp permanecem.`,
+    risco:
+      "Edicao de targeting pode resetar aprendizado. Advantage+ ligado dilui o recorte (padrao desta acao e desligar). A Meta pode recusar o PATCH; nesse caso o card falha e o caminho e conjunto novo + pausa do antigo — nao invente sucesso. O recorte nao prova renda familiar.",
+    mecanismo:
+      aPlus
+        ? "Graph POST /{adset_id} targeting (ou Pipeboard update_adset): troca flexible_spec no targeting atual; Advantage+ permanece ligado — o detalhamento vira sugestao, nao filtro."
+        : "Graph POST /{adset_id} targeting (ou Pipeboard update_adset): troca flexible_spec e desliga targeting_automation.advantage_audience no conjunto vivo.",
+    params: {
+      ...pubOk.params,
+      alvo_external_id: params.alvo_external_id,
+      publico_resumo: pubOk.resumo,
     },
   }, cards);
 }
@@ -5273,6 +5363,7 @@ const ORDEM_TOOLS = [
   "renomear_campanha",
   "alterar_categoria_especial",
   "alterar_geo_do_conjunto",
+  "alterar_publico_do_conjunto",
   "alterar_orcamento",
   "get_instagram_dos_anuncios",
   "vincular_instagram_dos_anuncios",
@@ -5291,6 +5382,7 @@ const ORDEM_TOOLS = [
   "listar_ferramentas_pipeboard",
   "ler_pipeboard",
   "buscar_geolocalizacao",
+  "buscar_interesses",
   "get_aprovacoes"
 ];
 
@@ -5392,7 +5484,8 @@ function prioridadeTool(nome: string, pedido: string): number {
   if (perguntaLeitura && (
     nome === "propose_action" || nome === "gerar_legendas" ||
     nome === "upload_midia" || nome === "registrar_legenda_da_conversa" ||
-    nome === "alterar_orcamento" || nome === "alterar_geo_do_conjunto"
+    nome === "alterar_orcamento" || nome === "alterar_geo_do_conjunto" ||
+    nome === "alterar_publico_do_conjunto"
   )) return 99;
   if (pedidoUsaSlateExistente(pedido)) {
     if (
@@ -5755,6 +5848,7 @@ async function runTool(name: string, args: any, ctx: any) {
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_categoria_especial": return await t_alterar_categoria_especial(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_geo_do_conjunto": return await t_alterar_geo_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "alterar_publico_do_conjunto": return await t_alterar_publico_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_orcamento": {
         if (ctx.perguntaLeitura) {
           return {
@@ -5927,6 +6021,8 @@ async function runTool(name: string, args: any, ctx: any) {
         );
       case "buscar_geolocalizacao":
         return await t_buscar_geolocalizacao(ctx.companyId, args);
+      case "buscar_interesses":
+        return await t_buscar_interesses(ctx.companyId, args);
       case "get_aprovacoes": return await t_aprovacoes(ctx.companyId, args?.apenas_abertos === false ? false : true);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       default: return { erro: `tool desconhecida: ${name}` };
@@ -6326,6 +6422,7 @@ function toolsIncluemPropose(tools: { tool?: string }[]): boolean {
     return (
       nome === "propose_action" ||
       nome === "alterar_geo_do_conjunto" ||
+      nome === "alterar_publico_do_conjunto" ||
       nome === "alterar_orcamento" ||
       nome === "renomear_campanha" ||
       nome === "alterar_categoria_especial" ||

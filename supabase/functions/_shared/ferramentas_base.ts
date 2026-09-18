@@ -63,6 +63,14 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
     efeito: "escrita",
     setor: "Atos na conta Meta",
   },
+  alterar_publico_do_conjunto: {
+    descricao:
+      "Emite CARD DE APROVACAO para trocar o DETALHAMENTO (interesses / flexible_spec) de UM conjunto JA PUBLICADO (ACTIVE ou PAUSED), sem criar conjunto novo e sem recorte global. POST targeting no objeto vivo — o mesmo caminho de alterar_geo. Passe interesses com {id,name} de buscar_interesses. Advantage+ desliga por padrao (senao o recorte vira sugestao). NAO diga que publico nao se edita em conjunto publicado nem que so da para duplicar. NAO afirma que o recorte prova renda R$ 8 mil.",
+    parametros: {"type":"object","properties":{"conjunto":{"type":"string","description":"Nome atual do conjunto."},"alvo_external_id":{"type":"string","description":"Id Meta do conjunto quando o nome nao for unico."},"interesses":{"type":"array","description":"Array {id,name} da buscar_interesses. OR no mesmo grupo."},"advantage_audience":{"type":"integer","description":"0 (padrao, recorte vale) ou 1 (Advantage+ dilui)."},"justificativa":{"type":"string"},"reversa":{"type":"string"},"metrica_sucesso":{"type":"string"}},"required":["conjunto","interesses"]},
+    superficies: ["chat"],
+    efeito: "escrita",
+    setor: "Atos na conta Meta",
+  },
   alterar_orcamento: {
     descricao:
       "Emite CARD DE APROVACAO para alterar o ORCAMENTO DIARIO de UM conjunto JA PUBLICADO. Passe conjunto (nome atual) e orcamento_diario_reais em REAIS por dia (20 = R$ 20,00 — NUNCA 2000). CONJ.04 no nome NAO e dinheiro. Pedido 'altere o orçamento do CONJ.X para 20' E a ordem desta mensagem: emita o card. Orcamento de criacao anterior nesta conversa NAO trava. NAO peca confirmacao de que o valor novo substitui o antigo.",
@@ -107,6 +115,14 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
     descricao:
       "Resolve NOMES de bairro, cidade ou regiao para KEYS da Meta (Graph /search type=adgeolocation). Chame ANTES de criar_conjunto ou alterar_geo_do_conjunto. Para cidades da RMS use tipo=city (nao neighborhood). Lote maximo de 40 nomes por chamada. Default tipo=neighborhood, country_code=BR. NAO cria conjunto e NUNCA diga que falta campo de bairros ou de cidades.",
     parametros: {"type":"object","properties":{"nomes":{"type":"array","items":{"type":"string"},"description":"Lista de nomes (ate 40 por chamada)."},"tipo":{"type":"string","description":"neighborhood|city|region|zip (default neighborhood)."},"country_code":{"type":"string","description":"Default BR."},"cidade_contexto":{"type":"string","description":"Opcional: filtra ambiguidade (ex. Salvador)."}},"required":["nomes"]},
+    superficies: ["chat"],
+    efeito: "leitura",
+    setor: "Atos na conta Meta",
+  },
+  buscar_interesses: {
+    descricao:
+      "Resolve NOMES de interesse/detalhamento para IDs da Meta (Graph /search type=adinterest). Chame ANTES de alterar_publico_do_conjunto. Lote maximo de 20 termos. Default locale=pt_BR. NAO cria conjunto e NUNCA invente id. Lauro de Freitas, Praia do Forte e Linha Verde SAO GEO (use buscar_geolocalizacao). Aluguel de casa costuma devolver aluguel de carro: nao use.",
+    parametros: {"type":"object","properties":{"nomes":{"type":"array","items":{"type":"string"},"description":"Lista de termos (ate 20 por chamada)."},"limit_por_query":{"type":"integer","description":"Default 8."},"locale":{"type":"string","description":"Default pt_BR."}},"required":["nomes"]},
     superficies: ["chat"],
     efeito: "leitura",
     setor: "Atos na conta Meta",
@@ -434,7 +450,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   propose_action: {
     descricao:
       "Cria PEDIDO DE APROVACAO (ActionCard) para todo ato na conta Meta. NAO executa: o card fica PENDENTE, so um administrador aprova, e expira em 24h. SO use quando o gestor pedir o ato com verbo explicito (emitir, criar, subir, pausar, ativar, escalar, duplicar, renomear, alterar, vincular). PERGUNTA sem verbo de ato — inclusive 'antes da aprovacao' e 'o anuncio esta com o mesmo link' — se responde com get_aprovacoes, get_estrutura_conjuntos ou get_criativos_conteudo, NAO com esta tool. Desativar comentario do post Instagram NAO e action_type: nao emita card (o interruptor e no Instagram/Business Suite; pausar boost nao fecha comentario). Exige justificativa, metrica_sucesso e reversa. target_name e o nome ATUAL do objeto; quando o nome nao for unico, mande params.alvo_external_id com o id da Meta. EXCLUIR nao existe em nenhum nivel: para tirar do ar use pausar_*. Sem approval_id no retorno, o card NAO existe.",
-    parametros: {"type":"object","properties":{"action_type":{"type":"string","enum":["pausar_criativo","ativar_criativo","escalar_criativo","pausar_campanha","ativar_campanha","pausar_conjunto","ativar_conjunto","alterar_orcamento","renomear_campanha","renomear_conjunto","renomear_criativo","alterar_categoria_especial_campanha","ajustar_posicionamentos_do_conjunto","alterar_geo_do_conjunto","vincular_instagram_dos_anuncios","criar_campanha","criar_conjunto_a_partir_de","criar_anuncio_a_partir_de","escalar_duplicar"]},"target_name":{"type":"string"},"justificativa":{"type":"string"},"mecanismo":{"type":"string"},"metrica_sucesso":{"type":"string"},"janela_leitura":{"type":"string"},"reversa":{"type":"string"},"risco":{"type":"string"},"params":{"type":"object","description":"Campos da acao. alvo_external_id: id da Meta do objeto alvo, quando o nome nao for unico. Nome livre em nome / nome_novo / novo_nome. GEO no criar_conjunto E no alterar_geo_do_conjunto: params.cidades, params.bairros ou params.geo_locations, com as keys de buscar_geolocalizacao. alterar_orcamento: params.novo_orcamento_diario_reais em REAIS/dia (alias: orcamento_diario_reais). CONJ.N no nome nao e dinheiro. Preferir a tool dedicada alterar_orcamento."}},"required":["action_type","target_name","justificativa","metrica_sucesso","reversa"]},
+    parametros: {"type":"object","properties":{"action_type":{"type":"string","enum":["pausar_criativo","ativar_criativo","escalar_criativo","pausar_campanha","ativar_campanha","pausar_conjunto","ativar_conjunto","alterar_orcamento","renomear_campanha","renomear_conjunto","renomear_criativo","alterar_categoria_especial_campanha","ajustar_posicionamentos_do_conjunto","alterar_geo_do_conjunto","alterar_publico_do_conjunto","vincular_instagram_dos_anuncios","criar_campanha","criar_conjunto_a_partir_de","criar_anuncio_a_partir_de","escalar_duplicar"]},"target_name":{"type":"string"},"justificativa":{"type":"string"},"mecanismo":{"type":"string"},"metrica_sucesso":{"type":"string"},"janela_leitura":{"type":"string"},"reversa":{"type":"string"},"risco":{"type":"string"},"params":{"type":"object","description":"Campos da acao. alvo_external_id: id da Meta do objeto alvo, quando o nome nao for unico. Nome livre em nome / nome_novo / novo_nome. GEO no criar_conjunto E no alterar_geo_do_conjunto: params.cidades, params.bairros ou params.geo_locations, com as keys de buscar_geolocalizacao. PUBLICO no alterar_publico_do_conjunto: params.interesses [{id,name}] de buscar_interesses; params.advantage_audience 0|1 (padrao 0). alterar_orcamento: params.novo_orcamento_diario_reais em REAIS/dia (alias: orcamento_diario_reais). CONJ.N no nome nao e dinheiro. Preferir a tool dedicada."}},"required":["action_type","target_name","justificativa","metrica_sucesso","reversa"]},
     superficies: ["chat"],
     efeito: "escrita",
     setor: "Atos na conta Meta",
