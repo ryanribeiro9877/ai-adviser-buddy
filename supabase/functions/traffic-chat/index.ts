@@ -1,4 +1,11 @@
-// supabase/functions/traffic-chat/index.ts (v29.06)
+// supabase/functions/traffic-chat/index.ts (v29.07)
+// v29.07 (22/09/2026) - GROK 4.7 + RESGATE DE TIMEOUT. O padrao da casa passa a
+//   x-ai/grok-4.7. No painel, a campanha La Felicita ativa abortou: 1a ida coletou
+//   (estrutura/overview/conhecimento) e a 2a voltou choices vazio; a continuacao e
+//   o reenvio penduraram 70s em grok-4.6 (openrouter_timeout) sem token. O array
+//   `models` da OpenRouter nao dispara em hang. Agora: troca client-side do
+//   primario (luna/gemini), sort=latency no chat/planner, AG-01 tenta fallback
+//   dentro do teto, e o turno NAO auto-continua um stub vazio apos falha de modelo.
 // v29.06 (18/09/2026) - IDADE DE CONJUNTO PUBLICADO. O gestor perguntou se da
 //   para alterar idade min/max em conjunto ACTIVE ja criado. Graph/Pipeboard
 //   ja aceitam update_adset(targeting.age_min/age_max). Entra
@@ -886,9 +893,11 @@ import {
 } from "../_shared/openrouter_auto.ts";
 import {
   aplicarResgate402,
+  aplicarResgateTimeout,
   bodyOpenRouter,
   diagnosticoRota,
   resolverChamadaLlm,
+  respostaLlmUtil,
 } from "../_shared/llm_roteador.ts";
 import { COMPANY_COHAPM, businessIdPorCompanyId, tokenAdsPorCompanyId, tokenWabaPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import {
@@ -1003,7 +1012,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.06";
+const VERSAO = "chat-v29.07";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -7207,13 +7216,19 @@ Deno.serve(async (req) => {
     });
   }
 
-  async function chamar(comTools: boolean, maxTokens = MAX_TOKENS, semRaciocinio = false, retry429 = 0): Promise<any> {
+  async function chamar(
+    comTools: boolean,
+    maxTokens = MAX_TOKENS,
+    semRaciocinio = false,
+    retry429 = 0,
+    payloadForcado?: Record<string, unknown>,
+  ): Promise<any> {
     const restanteMs = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
     if (restanteMs < 8_000) {
       return { erro: "orcamento_tempo_esgotado", detalhe: `restam ${restanteMs}ms — sem tempo util para nova geracao` };
     }
     const usarCache = !cacheDesativado;
-    let payload: any = bodyOpenRouter(rotaLlm, {
+    let payload: any = payloadForcado ?? bodyOpenRouter(rotaLlm, {
       messages: usarCache ? messages : semCache(messages),
       max_tokens: maxTokens,
       // 03/09/2026: quem decide o esforco de raciocinio e o roteador (modo padrao = high,
@@ -7222,8 +7237,19 @@ Deno.serve(async (req) => {
       // sintese ainda pode desligar o raciocinio para dar todo o orcamento ao texto.
       reasoning: semRaciocinio ? REASONING_SINTESE : REASONING_LOOP,
     });
-    if (comTools) { payload.tools = toolsDoTurno; payload.tool_choice = "auto"; }
-    if (reasoningDesativado) delete payload.reasoning;
+    if (!payloadForcado) {
+      if (comTools) { payload.tools = toolsDoTurno; payload.tool_choice = "auto"; }
+      if (reasoningDesativado) delete payload.reasoning;
+    }
+    async function resgatarHang(capUsado: number, detalhe: string) {
+      const plano = aplicarResgateTimeout(payload);
+      const sobra = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
+      if (plano && sobra > 12_000) {
+        console.warn(`[openrouter] ${plano.motivo} apos ${capUsado}ms`);
+        return await chamar(comTools, maxTokens, semRaciocinio, retry429, plano.payload);
+      }
+      return { erro: "openrouter_timeout", detalhe };
+    }
     // v28.32: AbortSignal — sem isso uma unica geracao com contexto grande segura o HTTP
     // alem dos ~150s do gateway (ms_total=170s medido em 20/08 com 504 no cliente).
     const capMs = Math.min(OPENROUTER_CALL_CAP_MS, restanteMs);
@@ -7243,7 +7269,7 @@ Deno.serve(async (req) => {
     } catch (e) {
       const nome = String((e as any)?.name ?? "");
       if (nome === "AbortError" || /abort/i.test(String((e as any)?.message ?? e))) {
-        return { erro: "openrouter_timeout", detalhe: `chamada abortada apos ${capMs}ms (orcamento de parede)` };
+        return await resgatarHang(capMs, `chamada abortada apos ${capMs}ms (orcamento de parede)`);
       }
       return { erro: "openrouter_fetch_failed", detalhe: String((e as any)?.message ?? e).slice(0, 200) };
     } finally {
@@ -7274,7 +7300,7 @@ Deno.serve(async (req) => {
             Math.min(8_000, sobra - 8_000),
           );
           if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
-          return await chamar(comTools, maxTokens, semRaciocinio, retry429 + 1);
+          return await chamar(comTools, maxTokens, semRaciocinio, retry429 + 1, payloadForcado);
         }
       }
       if (resp.status === 402) {
@@ -7301,7 +7327,7 @@ Deno.serve(async (req) => {
           } catch (e) {
             const nome = String((e as any)?.name ?? "");
             if (nome === "AbortError" || /abort/i.test(String((e as any)?.message ?? e))) {
-              return { erro: "openrouter_timeout", detalhe: `chamada abortada apos ${cap402}ms (resgate 402)` };
+              return await resgatarHang(cap402, `chamada abortada apos ${cap402}ms (resgate 402)`);
             }
             return { erro: "openrouter_fetch_failed", detalhe: String((e as any)?.message ?? e).slice(0, 200) };
           } finally {
@@ -7310,12 +7336,24 @@ Deno.serve(async (req) => {
           }
         }
         if (resp.ok) {
-          try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
+          try {
+            const parsed402 = JSON.parse(text);
+            if (!respostaLlmUtil(parsed402)) {
+              return await resgatarHang(0, "402 ok mas choices vazio");
+            }
+            return { parsed: parsed402 };
+          } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
         }
       }
       return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };
     }
-    try { return { parsed: JSON.parse(text) }; } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
+    try {
+      const parsed = JSON.parse(text);
+      if (!respostaLlmUtil(parsed)) {
+        return await resgatarHang(capMs, "HTTP 200 sem mensagem util (openrouter_empty)");
+      }
+      return { parsed };
+    } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
   }
 
   // v28.32/v28.34: atalho para pergunta de dicas da Meta — sync Opportunity Score ao vivo,
@@ -7700,7 +7738,7 @@ Deno.serve(async (req) => {
     break;
   }
 
-  if (!reply && !atalhoMetaDicas && !/openrouter/.test(String(finishReason))) {
+  if (!reply && !atalhoMetaDicas && !( /openrouter/.test(String(finishReason)) && toolsUsed.length === 0 )) {
     // v28.96: sintese CEGA (sem tools) no pedido de emitir inventa approval_id — CONJ.4 02/09.
     // Nao peca prosa de ato sem propose_action; o turno continua com tools no proximo bloco.
     if (precisaProposeAto()) {
@@ -7867,8 +7905,8 @@ Deno.serve(async (req) => {
       ? uploadIncompleto
       : (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas || leituraIncompleta || detalheSemTool || origemSemTool)
   );
-  const falhaModeloSemColeta = /openrouter/.test(String(finishReason)) && toolsUsed.length === 0;
-  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && !falhaModeloSemColeta && (
+  const falhaModelo = /openrouter/.test(String(finishReason));
+  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && !falhaModelo && (
     deadlineSemConteudo ||
     (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas)) ||
     uploadIncompleto ||

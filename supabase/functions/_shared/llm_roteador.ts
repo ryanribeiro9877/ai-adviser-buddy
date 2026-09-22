@@ -1,6 +1,7 @@
 // Roteador de MODELO e de ESFORCO DE RACIOCINIO. Decide os dois antes da chamada.
 //
-// 03/09/2026 — UM modelo para todo agente e toda tarefa: x-ai/grok-4.6.
+// 22/09/2026 — UM modelo para todo agente e toda tarefa: x-ai/grok-4.7.
+// 03/09/2026 — o padrao unico nasceu no x-ai/grok-4.6; a troca e de slug, nao de doutrina.
 // A escolha por tarefa (Haiku no planner, Luna no loop, Gemini na visao, Sonnet na sintese)
 // resolvia custo e resolvia mal a comparacao: cada bloco do turno respondia com um modelo
 // diferente, entao "a resposta piorou" nunca tinha uma causa unica para investigar. O padrao
@@ -70,7 +71,7 @@ export type TipoTarefaLlm =
   | "waba";
 
 /** Modelo unico da casa. Trocar aqui troca em todo agente e toda tarefa. */
-export const MODELO_PADRAO = "x-ai/grok-4.6";
+export const MODELO_PADRAO = "x-ai/grok-4.7";
 
 /** Valores aceitos pela OpenRouter para o padrao da casa (supported_efforts). */
 export type EsforcoRaciocinio = "low" | "medium" | "high" | "xhigh";
@@ -527,7 +528,12 @@ export function resolverChamadaLlm(opts: {
     esforco,
     padraoDaCasa,
     sessionId,
-    provider: faixa === "economia" ? { sort: "price" } : undefined,
+    // Chat e triagem: o gestor espera. sort=price no Grok 4.6 escolhia o endpoint
+    // mais barato, que em 22/09/2026 pendurou 70s sem token (openrouter_timeout).
+    // Jobs assincronos continuam no preco.
+    provider: faixa === "economia"
+      ? { sort: (ehTarefaInterativa(tipo) || ehTarefaDeTriagem(tipo)) ? "latency" : "price" }
+      : undefined,
   };
 }
 
@@ -622,15 +628,9 @@ export function aplicarResgate402(
       motivo: `402 corta max_tokens ${maxAtual}→${teto}`,
     };
   }
-  const models = Array.isArray(payload.models)
-    ? payload.models.map((m) => String(m ?? "").trim()).filter(Boolean)
-    : [];
-  if (models.length) {
-    const [proximo, ...resto] = models;
-    return {
-      payload: { ...payload, model: proximo, models: resto },
-      motivo: `402 troca ${String(payload.model ?? "")}→${proximo}`,
-    };
+  const troca = trocarPrimarioDaRede(payload);
+  if (troca) {
+    return { payload: troca.payload, motivo: `402 ${troca.motivo}` };
   }
   if (Number.isFinite(maxAtual) && maxAtual > 1024) {
     const novo = Math.max(1024, Math.floor(maxAtual / 2));
@@ -640,6 +640,46 @@ export function aplicarResgate402(
     };
   }
   return null;
+}
+
+/**
+ * O array `models` da OpenRouter so entra quando o primario DEVOLVE ERRO.
+ * Hang (AbortSignal no cliente) e HTTP 200 com choices vazio NAO disparam essa
+ * rede — medido 22/09/2026 no chat da La Felicita: Grok 4.6 pendurou 70s
+ * (`openrouter_timeout`) e um turno anterior voltou `choices[0].message` ausente
+ * (`openrouter_empty`). Sem troca client-side do primario, o turno morre com a
+ * prosa de falha temporaria e os dados ja lidos pelas tools nao viram resposta.
+ */
+export function trocarPrimarioDaRede(
+  payload: Record<string, unknown>,
+): { payload: Record<string, unknown>; motivo: string } | null {
+  const models = Array.isArray(payload.models)
+    ? payload.models.map((m) => String(m ?? "").trim()).filter(Boolean)
+    : [];
+  if (!models.length) return null;
+  const [proximo, ...resto] = models;
+  return {
+    payload: { ...payload, model: proximo, models: resto },
+    motivo: `troca ${String(payload.model ?? "")}→${proximo}`,
+  };
+}
+
+export function aplicarResgateTimeout(
+  payload: Record<string, unknown>,
+): { payload: Record<string, unknown>; motivo: string } | null {
+  const troca = trocarPrimarioDaRede(payload);
+  if (!troca) return null;
+  return { payload: troca.payload, motivo: `timeout/vazio ${troca.motivo}` };
+}
+
+/** Tem texto visivel ou tool_call? HTTP 200 com choices vazio nao conta. */
+export function respostaLlmUtil(parsed: unknown): boolean {
+  const msg = (parsed as { choices?: { message?: { content?: unknown; tool_calls?: unknown } }[] })
+    ?.choices?.[0]?.message;
+  if (!msg || typeof msg !== "object") return false;
+  const content = String(msg.content ?? "").trim();
+  const tools = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+  return content.length > 0 || tools.length > 0;
 }
 
 export function diagnosticoRota(rota: RotaLlm): Record<string, unknown> {

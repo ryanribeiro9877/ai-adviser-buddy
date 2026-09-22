@@ -276,6 +276,7 @@ import {
 } from "../_shared/openrouter_auto.ts";
 import {
   aplicarResgate402,
+  aplicarResgateTimeout,
   bodyOpenRouter,
   resolverChamadaLlm,
   type FaixaLlm,
@@ -2551,7 +2552,19 @@ async function chamarLLM(messages: any[], opts: {
     }
   }
   let { resp, text, aborted } = await postOnce(payload);
-  if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
+  if (aborted) {
+    const planoHang = aplicarResgateTimeout(payload);
+    if (planoHang) {
+      console.warn(`[openrouter] ${planoHang.motivo}`);
+      payload = planoHang.payload;
+      JOB_LLM_ROTAS.push({
+        tipo: rota.tipo, model: String(payload.model ?? ""), faixa: rota.faixa,
+        motivo: planoHang.motivo, esforco: rota.esforco,
+      });
+      ({ resp, text, aborted } = await postOnce(payload));
+    }
+    if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
+  }
   if (!resp.ok && (resp.status === 400 || resp.status === 422) && payload.reasoning) {
     // Degradacao: remove reasoning e retenta (mesmo padrao do traffic-chat v21).
     delete payload.reasoning;

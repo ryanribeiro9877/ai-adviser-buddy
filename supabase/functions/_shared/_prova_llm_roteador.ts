@@ -4,6 +4,7 @@
 import { acharModelo, atendeCapacidade, CATALOGO_ECONOMIA, CATALOGO_PREMIUM, CATALOGO_TODOS } from "./llm_catalogo.ts";
 import {
   aplicarResgate402,
+  aplicarResgateTimeout,
   bodyOpenRouter,
   diagnosticoRota,
   ehTarefaDeFusao,
@@ -13,6 +14,7 @@ import {
   MAX_TOKENS_PISO_RACIOCINIO,
   maxTokensDo402,
   MODELO_PADRAO,
+  respostaLlmUtil,
   type ModoRaciocinio,
   resolverChamadaLlm,
   tetoDeSaida,
@@ -29,6 +31,7 @@ const slugs = CATALOGO_TODOS.map((m) => m.slug);
 assert(new Set(slugs).size === 30, "slugs duplicados no catalogo");
 assert(CATALOGO_ECONOMIA.every((m) => m.faixa === "economia" && m.tools), "economia deve ter tools");
 assert(CATALOGO_PREMIUM.every((m) => m.faixa === "premium"), "premium mal marcado");
+assert(MODELO_PADRAO === "x-ai/grok-4.7", `padrao vigente inesperado: ${MODELO_PADRAO}`);
 assert(!!acharModelo(MODELO_PADRAO), `${MODELO_PADRAO} precisa estar no catalogo`);
 // O padrao da casa so pode ser universal se declarar TODAS as capacidades — a de visao
 // inclusive, senao o pipeline de peca do Drive cairia em excecao.
@@ -180,7 +183,11 @@ assert(
   `body.reasoning=${JSON.stringify(body.reasoning)} deveria carregar effort=${chat.esforco} da rota`,
 );
 assert(Array.isArray(body.models) && (body.models as string[]).includes(chat.fallbacks[0]), "fallbacks no body");
-assert((body.provider as { sort: string }).sort === "price", "provider no body");
+assert((body.provider as { sort: string }).sort === "latency", "chat/planner ordena por latencia, nao por preco");
+const plannerBody = bodyOpenRouter(resolverChamadaLlm({ tipo: "planner" }));
+assert((plannerBody.provider as { sort: string }).sort === "latency", "triagem tambem e latencia");
+const subBody = bodyOpenRouter(resolverChamadaLlm({ tipo: "subagente" }));
+assert((subBody.provider as { sort: string }).sort === "price", "subagente assincrono continua no preco");
 
 // Sintese e tipo neutro, entao tier deep a promove. O modo esperado sai de modoNatural em vez
 // de "profundo" escrito a mao: ha medicao de faixa em curso e a sintese do tier profundo e
@@ -302,15 +309,32 @@ assert(tetoDeSaida(900) === MAX_TOKENS_PISO_RACIOCINIO, "fora do legado, o piso 
   const detalhe =
     "This request requires more credits, or fewer max_tokens. You requested up to 8000 tokens, but can only afford 2000.";
   assert(maxTokensDo402(detalhe, 8000) === 1700, `affordable 2000 * 0.85 = 1700, veio ${maxTokensDo402(detalhe, 8000)}`);
-  const corte = aplicarResgate402({ model: "x-ai/grok-4.6", models: ["openai/gpt-5.6-luna"], max_tokens: 8000 }, detalhe);
+  const corte = aplicarResgate402({ model: MODELO_PADRAO, models: ["openai/gpt-5.6-luna"], max_tokens: 8000 }, detalhe);
   assert(corte != null && corte.payload.max_tokens === 1700, "402 com affordable corta teto, nao troca modelo ainda");
   const troca = aplicarResgate402(
-    { model: "x-ai/grok-4.6", models: ["openai/gpt-5.6-luna", "google/gemini-2.5-flash"], max_tokens: 6000 },
+    { model: MODELO_PADRAO, models: ["openai/gpt-5.6-luna", "google/gemini-2.5-flash"], max_tokens: 6000 },
     "Insufficient credits. Add more using https://openrouter.ai/credits",
   );
   assert(troca != null && troca.payload.model === "openai/gpt-5.6-luna", "402 generico troca o primario");
   assert(JSON.stringify(troca.payload.models) === JSON.stringify(["google/gemini-2.5-flash"]), "402 consome o primeiro fallback");
-  assert(aplicarResgate402({ model: "x-ai/grok-4.6", max_tokens: 800 }, "Insufficient credits") == null, "sem rede e sem teto para cortar, nao ha resgate");
+  assert(aplicarResgate402({ model: MODELO_PADRAO, max_tokens: 800 }, "Insufficient credits") == null, "sem rede e sem teto para cortar, nao ha resgate");
+}
+
+// 22/09/2026: hang e choices vazio NAO acionam o array `models` da OpenRouter.
+{
+  const hang = aplicarResgateTimeout({
+    model: MODELO_PADRAO,
+    models: ["openai/gpt-5.6-luna", "google/gemini-3.7-flash"],
+    max_tokens: 8000,
+  });
+  assert(hang != null && hang.payload.model === "openai/gpt-5.6-luna", "timeout troca o primario");
+  assert(JSON.stringify(hang.payload.models) === JSON.stringify(["google/gemini-3.7-flash"]), "timeout consome o primeiro fallback");
+  assert(aplicarResgateTimeout({ model: MODELO_PADRAO, max_tokens: 8000 }) == null, "sem rede, timeout nao inventa fallback");
+  assert(respostaLlmUtil({ choices: [{ message: { content: "ok", tool_calls: [] } }] }), "texto visivel e util");
+  assert(respostaLlmUtil({ choices: [{ message: { content: "", tool_calls: [{ id: "1" }] } }] }), "tool_call e util");
+  assert(!respostaLlmUtil({ choices: [] }), "choices vazio nao e util");
+  assert(!respostaLlmUtil({ choices: [{ message: { content: "  ", tool_calls: [] } }] }), "prosa em branco nao e util");
+  assert(!respostaLlmUtil({}), "sem choices nao e util");
 }
 
 // Os dois rotulos antigos (`esforco_padrao`/`esforco_profundo`) mentiam depois que as naturezas

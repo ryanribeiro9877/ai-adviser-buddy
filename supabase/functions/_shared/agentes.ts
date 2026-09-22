@@ -423,49 +423,79 @@ COMO ESCOLHER
 Responda APENAS com JSON valido, sem markdown:
 {"agentes":["AG-02"],"motivo":"uma frase curta"}`;
 
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? 8_000);
-  try {
-    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${opts.chaveOpenRouter}` },
-      body: JSON.stringify(opts.montarBody(opts.rota, {
+  const extra = {
         messages: [{ role: "system", content: sys }, { role: "user", content: pergunta.slice(0, 4000) }],
         // 03/09/2026: 300 nao serve mais. max_tokens cobre raciocinio + texto, e o padrao da
-        // casa (Grok 4.6) raciocina em TODA chamada — nao ha como desligar. Com 300 o modelo
+        // casa raciocina em TODA chamada — nao ha como desligar. Com 300 o modelo
         // gastaria o teto pensando e devolveria content vazio, o que aqui significa turno com
         // as 56 ferramentas em vez das do setor. O JSON de resposta continua tendo ~40 tokens.
         max_tokens: ROTEADOR_MAX_TOKENS,
-      })),
-      signal: ac.signal,
-    });
-    if (!resp.ok) return vazio(`http ${resp.status}`);
-    const j = await resp.json();
-    const raciocinio = Number(j?.usage?.completion_tokens_details?.reasoning_tokens ?? 0);
-    const finish = String(j?.choices?.[0]?.finish_reason ?? "");
-    const bruto = jsonDoTexto(String(j?.choices?.[0]?.message?.content ?? ""));
-    const lista = Array.isArray(bruto?.agentes) ? bruto.agentes : null;
-    // O motivo carrega finish_reason e raciocinio: `length` aqui significa TETO CURTO, e nao
-    // modelo confuso. Sem essa distincao os dois defeitos parecem o mesmo no banco.
-    if (!lista?.length) return vazio(`resposta sem lista de agentes (finish ${finish || "?"}, raciocinio ${raciocinio})`);
-    const validos: string[] = [];
-    for (const ref of lista) {
-      const ag = acharAgente(opts.catalogo, String(ref));
-      if (ag && ag.roteavel && !validos.includes(ag.codigo)) validos.push(ag.codigo);
-    }
-    if (!validos.length) return vazio("nenhum agente do catalogo foi reconhecido");
-    return {
-      agentes: validos,
-      degradado: false,
-      motivo: String(bruto?.motivo ?? "").slice(0, 200),
-      tokensIn: Number(j?.usage?.prompt_tokens ?? 0),
-      tokensOut: Number(j?.usage?.completion_tokens ?? 0),
-      ms: Date.now() - t0,
-      reasoningTokens: raciocinio,
+      };
+  const cadeia = [
+    String(opts.rota.model ?? "").trim(),
+    ...(Array.isArray(opts.rota.fallbacks) ? opts.rota.fallbacks.map((s) => String(s ?? "").trim()) : []),
+  ].filter((s, i, a) => s && a.indexOf(s) === i).slice(0, 3);
+  const orcamento = opts.timeoutMs ?? 8_000;
+  let ultimoMotivo = "timeout";
+  for (let i = 0; i < cadeia.length; i++) {
+    const leftover = orcamento - (Date.now() - t0);
+    if (leftover < 2_500) break;
+    const restam = cadeia.length - i;
+    const fatia = i === cadeia.length - 1
+      ? leftover
+      : Math.min(leftover, Math.max(3_000, Math.floor(leftover / restam)));
+    const rotaTentativa = {
+      ...opts.rota,
+      model: cadeia[i],
+      fallbacks: cadeia.slice(i + 1),
     };
-  } catch (e) {
-    return vazio(String((e as any)?.name === "AbortError" ? "timeout" : (e as any)?.message ?? e));
-  } finally {
-    clearTimeout(timer);
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), fatia);
+    try {
+      const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${opts.chaveOpenRouter}` },
+        body: JSON.stringify(opts.montarBody(rotaTentativa, extra)),
+        signal: ac.signal,
+      });
+      if (!resp.ok) {
+        ultimoMotivo = `http ${resp.status}`;
+        continue;
+      }
+      const j = await resp.json();
+      const raciocinio = Number(j?.usage?.completion_tokens_details?.reasoning_tokens ?? 0);
+      const finish = String(j?.choices?.[0]?.finish_reason ?? "");
+      const bruto = jsonDoTexto(String(j?.choices?.[0]?.message?.content ?? ""));
+      const lista = Array.isArray(bruto?.agentes) ? bruto.agentes : null;
+      // O motivo carrega finish_reason e raciocinio: `length` aqui significa TETO CURTO, e nao
+      // modelo confuso. Sem essa distincao os dois defeitos parecem o mesmo no banco.
+      if (!lista?.length) {
+        ultimoMotivo = `resposta sem lista de agentes (finish ${finish || "?"}, raciocinio ${raciocinio})`;
+        continue;
+      }
+      const validos: string[] = [];
+      for (const ref of lista) {
+        const ag = acharAgente(opts.catalogo, String(ref));
+        if (ag && ag.roteavel && !validos.includes(ag.codigo)) validos.push(ag.codigo);
+      }
+      if (!validos.length) {
+        ultimoMotivo = "nenhum agente do catalogo foi reconhecido";
+        continue;
+      }
+      return {
+        agentes: validos,
+        degradado: false,
+        motivo: String(bruto?.motivo ?? "").slice(0, 200),
+        tokensIn: Number(j?.usage?.prompt_tokens ?? 0),
+        tokensOut: Number(j?.usage?.completion_tokens ?? 0),
+        ms: Date.now() - t0,
+        reasoningTokens: raciocinio,
+      };
+    } catch (e) {
+      ultimoMotivo = String((e as any)?.name === "AbortError" ? "timeout" : (e as any)?.message ?? e);
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  return vazio(ultimoMotivo);
 }
