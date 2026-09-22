@@ -5,7 +5,9 @@ import {
   filtrarRelacaoAtivos,
   markdownRelacaoGeo,
   markdownRelacaoPorConjunto,
+  markdownTabelaConjuntos,
   montarRelacaoDeDetalhe,
+  anexarTabelaMarkdownDetalhe,
   recortarConjuntosPorPedido,
   soAtivosDoPedido,
 } from "./coleta_completa.ts";
@@ -73,6 +75,25 @@ assert(md.includes("## Conjuntos"), "tabela de conjuntos");
 assert(md.includes("## Criativos por conjunto"), "criativos agrupados por conjunto");
 assert(md.includes("### JURIDICO_CONJ.1"), "anuncios debaixo do conjunto");
 assert(md.includes("R$ 12.00"), "gasto visivel");
+
+const soConj = markdownTabelaConjuntos({
+  campanha: "COHAPM_VISTTA_CONV_WA_SET26",
+  janela: "2026-09-01 → 2026-09-21",
+  conjuntos: [{
+    nome: "CONJ.1_VISTTA", status: "ACTIVE", orcamento_diario_reais: 60,
+    totais_janela: { gasto: "R$ 498.64", impressoes: 14096, conversas: 73, custo_por_resultado: "R$ 6.83" },
+  }],
+});
+assert(soConj.includes("R$ 6.83"), "custo por conjunto na tabela curta");
+assert(!soConj.includes("## Criativos por conjunto"), "tabela curta nao lista criativo");
+
+const comTabela = anexarTabelaMarkdownDetalhe({
+  campanha: { nome: "COHAPM_VISTTA_CONV_WA_SET26" },
+  janela: { date_from: "2026-09-01", date_to: "2026-09-21" },
+  conjuntos: [{ nome: "CONJ.1_VISTTA", totais_janela: { custo_por_resultado: "R$ 6.83" } }],
+});
+assert(typeof comTabela.tabela_markdown === "string", "tabela_markdown na frente do detalhe");
+assert(String(comTabela.tabela_markdown).includes("R$ 6.83"), "custo no prefixo");
 
 const filtrado = filtrarRelacaoAtivos(
   [{ nome: "A", status: "ACTIVE", conjunto_id: "1" }, { nome: "B", status: "PAUSED", conjunto_id: "2" }],

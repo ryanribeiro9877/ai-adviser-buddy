@@ -13,6 +13,7 @@ import {
   ehPedidoDeAto,
   ehPedidoLeituraCruzada,
   ehPedidoUploadLote,
+  pedidoAtoPrecisaMetrica,
   pedidoSoLegendasSemEmissao,
   pedidoComentarioDoPostSemEmissao,
 } from "./intencao_turno.ts";
@@ -293,6 +294,10 @@ export function reforcarPorIntencao(agentes: string[], pergunta: string): string
     const i = out.indexOf("AG-06");
     if (i >= 0) out.splice(i, 1);
   }
+  // Alterar orcamento por cor/desempenho precisa de get_detalhe_anuncios no mesmo
+  // turno. Medido 22/09/2026: so AG-06 (17 tools, sem leitura) recusou emitir
+  // "porque faltou custo por conversa" com a metrica ja no fio.
+  if (pedidoAtoPrecisaMetrica(p)) juntar("AG-02");
   return out;
 }
 

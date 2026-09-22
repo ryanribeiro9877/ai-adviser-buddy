@@ -31,6 +31,7 @@ export function ehLeituraDeDesempenho(pedido: string): boolean {
     /\b(verificacao|verifique|verificar|identifique|identificar)\b/.test(p) ||
     /\b(gastando mais|mais gast|gasto (por|dos|das|nas|nos)|quais.{0,40}gast)\b/.test(p) ||
     /\b(desempenho|pior|melhor).{0,40}(conjunto|campanha|anuncio)\b/.test(p) ||
+    /\b(mesmas? informacoes|todos os valores|valores dos conjuntos)\b/.test(p) ||
     ehPedidoRelacaoNumerica(p)
   );
 }
@@ -67,11 +68,12 @@ export function ehPedidoRelacaoNumerica(pedido: string): boolean {
   const nivel = /\bconjuntos?\b/.test(p) || /\bcriativ/.test(p) || /\banuncios?\b/.test(p);
   if (!nivel) return false;
   const metrica =
-    /\b(gastos?|conversas?|impressoes|orcamento|preco|cpl|cpa|ctr|alcance|frequencia)\b/.test(p);
+    /\b(gastos?|conversas?|impressoes|orcamento|preco|cpl|cpa|ctr|alcance|frequencia|valores?)\b/.test(p);
   const tabela =
-    /\b(relacao|tabela|liste|lista)\b/.test(p) ||
+    /\b(relacao|tabela|liste|lista|informacoes)\b/.test(p) ||
     /\bmostrando os gastos\b/.test(p) ||
-    (/\bgastos?\b/.test(p) && /\b(conversas?|impressoes|orcamento)\b/.test(p));
+    /\b(traga|traz|trazer|mostre|mostrar)\b/.test(p) ||
+    (/\b(gastos?|valores?)\b/.test(p) && /\b(conversas?|impressoes|orcamento|conjuntos?)\b/.test(p));
   return tabela && metrica;
 }
 
@@ -197,11 +199,15 @@ const RE_CONTINUA_ATO_FIO =
 /**
  * Follow-up sem verbo de ato ("serão 4 conjuntos, números…") continua o criar/emitir
  * do turno anterior. Sem isto o sincrono trata a fala como Q&A curto.
+ *
+ * Medido 22/09/2026 (Ocular): "traga as mesmas informações / valores dos conjuntos"
+ * NÃO é follow-up do "altere vermelho e amarelo" — é leitura nova. Sem esta guarda
+ * o composto herdava o ato, o Executor entrava e a prosa virava "nenhum card".
  */
 export function objetivoDoFio(atual: string, anteriores: string[]): string {
   const cur = String(atual ?? "").trim();
   if (!cur) return cur;
-  if (ehPedidoDeAto(cur) || ehPerguntaDeLeitura(cur)) return cur;
+  if (ehPedidoDeAto(cur) || ehPerguntaDeLeitura(cur) || ehLeituraDeDesempenho(cur)) return cur;
   const prev = (anteriores ?? [])
     .map((s) => String(s ?? "").trim())
     .filter(Boolean)
@@ -239,6 +245,66 @@ export function recusaFalsaMoldeTrafego(texto: string): boolean {
     /crie em engajamento/.test(t) ||
     /alter(ar|em) manualmente no gerenciador/.test(t);
   return recusa && (pedeMolde || desvioEng);
+}
+
+/**
+ * Recusa de emitir alterar_orcamento porque "faltou custo por conversa" /
+ * "não dá para separar vermelho e amarelo". Medido 22/09/2026 (Ocular):
+ * get_detalhe_anuncios JÁ tinha custo_por_resultado por conjunto; vermelho/
+ * amarelo/verde neste fio é a classificação do turno do Jurídico, não um
+ * status da Meta. Fechar o turno aqui impede o card.
+ */
+export function recusaFalsaClassificacaoSemMetrica(texto: string): boolean {
+  const t = deacc(String(texto ?? "").toLowerCase());
+  if (!t) return false;
+  const recusa =
+    /nenhum card foi emitido/.test(t) ||
+    /nao ha como separar/.test(t) ||
+    /sem (a )?classificacao/.test(t) ||
+    /nao (vou|posso|consigo) (emitir|alterar)/.test(t);
+  const metrica =
+    /custo por conversa/.test(t) ||
+    /separar vermelho e amarelo/.test(t) ||
+    /conjunto errado/.test(t);
+  return recusa && metrica;
+}
+
+/**
+ * Alterar orçamento por cor/desempenho precisa da tool de métrica no mesmo
+ * turno (AG-02). Sem isso o Executor só tem propose_action e recusa.
+ */
+export function pedidoAtoPrecisaMetrica(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p || !ehPedidoDeAto(p)) return false;
+  if (pedidoSoLegendasSemEmissao(p) || pedidoComentarioDoPostSemEmissao(p)) return false;
+  const cor = /\b(vermelho|amarelo|verde)\b/.test(p);
+  const orc =
+    /\b(or[cç]amento|valores?)\b/.test(p) ||
+    /\b\d+[.,]\d{2}\b/.test(p);
+  const conj = /\bconjuntos?\b/.test(p);
+  return (cor && /\b(altere|alterar|reduza|reduzir|aumente|aumentar)\b/.test(p)) ||
+    (conj && orc && /\b(altere|alterar|reduza|reduzir|aumente|aumentar)\b/.test(p));
+}
+
+/**
+ * Pedido de valores/tabela dos conjuntos em que a prosa só falou de card
+ * (ou não montou tabela). As tools podem ter o número; a resposta não.
+ */
+export function replyOmitiuValoresDosConjuntos(texto: string, pedido: string): boolean {
+  if (!ehPedidoRelacaoNumerica(pedido) && !ehLeituraDeDesempenho(pedido)) return false;
+  if (ehPedidoDeAto(pedido)) return false;
+  const raw = String(texto ?? "").trim();
+  const t = deacc(raw.toLowerCase());
+  if (!t) return true;
+  const pipes = (raw.match(/\|/g) || []).length;
+  const temTabela = pipes >= 8 && /conjunto/i.test(raw);
+  const temNumeros =
+    /\bconj\b/i.test(raw) &&
+    /r\$\s*\d/.test(t) &&
+    /\b(gasto|conversa|impress)/.test(t);
+  if (temTabela || temNumeros) return false;
+  return /nenhum card|nao houve verbo|nao sera inventado|pedido de aprovacao/.test(t) ||
+    raw.length < 500;
 }
 
 /**

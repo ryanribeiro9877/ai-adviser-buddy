@@ -134,6 +134,12 @@ for (
     intencao.includes("pedidoSoLegendasSemEmissao"),
     "legendas nao podem ser tratadas como emissao de card",
   );
+  assert(
+    intencao.includes("recusaFalsaClassificacaoSemMetrica") &&
+      intencao.includes("replyOmitiuValoresDosConjuntos") &&
+      intencao.includes("pedidoAtoPrecisaMetrica"),
+    "intencao: recusa falsa de metrica + leitura de valores + AG-02 no alterar por cor",
+  );
 }
 // 02/09/2026: leitura do Drive Juridico voltou vazia por recorte de formato e a resposta pediu
 // a pasta ao gestor. O chat precisa reler sem o recorte, avisar o descarte e auto-continuar.
@@ -175,6 +181,10 @@ assert(
     chat.includes("instagram_nao_vinculado") &&
     chat.includes("nome_trocado_pelo_padrao_estruturado") &&
     chat.includes("recusaFalsaMoldeTrafego") &&
+    chat.includes("recusaFalsaClassificacaoSemMetrica") &&
+    chat.includes("replyOmitiuValoresDosConjuntos") &&
+    chat.includes("MSG_NUDGE_TABELA_VALORES") &&
+    chat.includes("MSG_NUDGE_CLASSIFICACAO_JA_LIDA") &&
     chat.includes("orcamento_parece_centavos") &&
     /instagram vincul/i.test(chat),
   "traffic-chat: Instagram + molde + orcamento em reais + Sistema Ocular",

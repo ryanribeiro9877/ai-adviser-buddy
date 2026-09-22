@@ -4,7 +4,7 @@
 
 import { statusObjetoOperacional } from "./memoria_conjunto.ts";
 import { type BaseDeResultado, baseDoObjetivo, custoPorResultado, rotuloDaBase } from "./metrica_canonica.ts";
-import { jsonCabeNoTeto, reaisDeOrcamentoMeta, serieDiariaEnxuta } from "./coleta_completa.ts";
+import { anexarTabelaMarkdownDetalhe, jsonCabeNoTeto, reaisDeOrcamentoMeta, serieDiariaEnxuta } from "./coleta_completa.ts";
 
 export type CampanhaRef = {
   id?: string;
@@ -547,21 +547,37 @@ export async function tDetalheAnuncios(
   };
   // Uma chamada devolve a campanha inteira quando o compacto cabe. Pagina>1 continua
   // existindo para contas enormes / pedido explícito de folha.
-  if (pagina === 1 && jsonCabeNoTeto(todos, 12_000)) return todos;
+  if (pagina === 1 && jsonCabeNoTeto(todos, 12_000)) {
+    return anexarTabelaMarkdownDetalhe(todos);
+  }
+
+  // Série diária por conjunto infla o JSON (41k no Ocular 22/09) e o slice de 14k
+  // quebrava o payload. Totais da janela bastam para a tabela; a série fica no anúncio.
+  const conjSemSerie = conjuntos.map((c) => {
+    const { serie_diaria: _ignored, ...rest } = c as Record<string, unknown> & {
+      serie_diaria?: unknown;
+    };
+    return rest;
+  });
+  const cabecaLeve = { ...cabeca, conjuntos: conjSemSerie };
+  const leve = { ...todos, ...cabecaLeve };
+  if (pagina === 1 && jsonCabeNoTeto(leve, 12_000)) {
+    return anexarTabelaMarkdownDetalhe(leve);
+  }
 
   const porPagina = comSerie ? ADS_POR_PAGINA : ADS_POR_PAGINA_SEM_SERIE;
   const offset = (pagina - 1) * porPagina;
   const fatia = todosAnuncios.slice(offset, offset + porPagina);
   const restantes = Math.max(0, totalAnuncios - offset - fatia.length);
-  return {
-    ...cabeca,
+  return anexarTabelaMarkdownDetalhe({
+    ...cabecaLeve,
     pagina,
     anuncios_por_pagina: porPagina,
     total_anuncios: totalAnuncios,
     exibidos: fatia.length,
     restantes,
     anuncios: fatia,
-  };
+  });
 }
 
 // A definicao desta ferramenta (nome, descricao e schema) mora em public.agent_ferramentas,

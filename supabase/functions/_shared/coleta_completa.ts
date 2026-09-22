@@ -437,10 +437,62 @@ export function montarRelacaoDeDetalhe(
   });
 }
 
+/** Prefixa tabela_markdown para o corte bruto de 14k nao comer os totais dos conjuntos. */
+export function anexarTabelaMarkdownDetalhe(det: Record<string, unknown>): Record<string, unknown> {
+  if (!det || typeof det !== "object") return det;
+  if (typeof det.erro === "string" || det.ambiguo === true) return det;
+  const camp = det.campanha && typeof det.campanha === "object"
+    ? det.campanha as Record<string, unknown>
+    : {};
+  const jan = det.janela && typeof det.janela === "object"
+    ? det.janela as Record<string, unknown>
+    : {};
+  const conjuntos = Array.isArray(det.conjuntos) ? det.conjuntos as Record<string, unknown>[] : [];
+  if (!conjuntos.length) return det;
+  const md = markdownTabelaConjuntos({
+    campanha: String(camp.nome ?? camp.name ?? "campanha"),
+    janela: jan.date_from && jan.date_to
+      ? `${jan.date_from} → ${jan.date_to}`
+      : String(jan.date_to ?? ""),
+    conjuntos,
+  });
+  return { tabela_markdown: md, ...det };
+}
+
 function txtOrcamento(v: unknown): string {
   const n = reaisDeOrcamentoMeta(v);
   if (n == null) return "—";
   return `R$ ${n.toFixed(2)}`;
+}
+
+function markdownLinhasConjuntos(conjuntos: Record<string, unknown>[]): string[] {
+  const linhas = [
+    "| Conjunto | Status | Orçamento/dia | Gasto | Impressões | Conversas | Preço/conversa | Destino |",
+    "|---|---|---:|---:|---:|---:|---:|---|",
+  ];
+  for (const c of conjuntos) {
+    const tot = c.totais_janela && typeof c.totais_janela === "object"
+      ? c.totais_janela as Record<string, unknown>
+      : null;
+    linhas.push(
+      `| ${c.nome ?? c.conjunto ?? "—"} | ${c.status ?? "—"} | ${txtOrcamento(c.orcamento_diario_reais ?? c.orcamento_diario_centavos ?? c.daily_budget)} | ${tot?.gasto ?? c.gasto ?? "—"} | ${tot?.impressoes ?? "—"} | ${tot?.conversas ?? tot?.resultados_na_base ?? "—"} | ${tot?.custo_por_resultado ?? "—"} | ${c.destination_type ?? "—"} |`,
+    );
+  }
+  return linhas;
+}
+
+/** Só a tabela de conjuntos — cabe na frente do JSON e sobrevive ao corte de 14k. */
+export function markdownTabelaConjuntos(args: {
+  campanha: string;
+  janela: string;
+  conjuntos: Record<string, unknown>[];
+}): string {
+  return [
+    `Campanha: **${args.campanha}**. Janela: **${args.janela}**.`,
+    "",
+    "## Conjuntos",
+    ...markdownLinhasConjuntos(args.conjuntos),
+  ].join("\n");
 }
 
 /** Tabela pronta para a síntese: conjuntos, depois criativos dentro de cada conjunto. */
@@ -450,18 +502,7 @@ export function markdownRelacaoPorConjunto(args: {
   conjuntos: Record<string, unknown>[];
   anuncios: Record<string, unknown>[];
 }): string {
-  const linhasConj = [
-    "| Conjunto | Status | Orçamento/dia | Gasto | Impressões | Conversas | Preço/conversa | Destino |",
-    "|---|---|---:|---:|---:|---:|---:|---|",
-  ];
-  for (const c of args.conjuntos) {
-    const tot = c.totais_janela && typeof c.totais_janela === "object"
-      ? c.totais_janela as Record<string, unknown>
-      : null;
-    linhasConj.push(
-      `| ${c.nome ?? c.conjunto ?? "—"} | ${c.status ?? "—"} | ${txtOrcamento(c.orcamento_diario_reais ?? c.orcamento_diario_centavos ?? c.daily_budget)} | ${tot?.gasto ?? c.gasto ?? "—"} | ${tot?.impressoes ?? "—"} | ${tot?.conversas ?? tot?.resultados_na_base ?? "—"} | ${tot?.custo_por_resultado ?? "—"} | ${c.destination_type ?? "—"} |`,
-    );
-  }
+  const linhasConj = markdownLinhasConjuntos(args.conjuntos);
 
   const porConj = new Map<string, Record<string, unknown>[]>();
   for (const a of args.anuncios) {

@@ -6,7 +6,7 @@ import {
   janelaDetalhe,
 } from "./leitura_desempenho.ts";
 import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
-import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica } from "./intencao_turno.ts";
+import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, ehPedidoDeAto, ehPerguntaDeLeitura } from "./intencao_turno.ts";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -74,6 +74,13 @@ assert(
   !(FERRAMENTAS_BASE.get_estrutura_conjuntos.omitidos?.job ?? []).includes("pagina"),
   "pagina da estrutura nao e omitida no job",
 );
+
+const ocularValores =
+  "agora traga as mesmas informações referentes a campanha ativa hoje do ocular com todos os valores dos conjuntos ativos";
+assert(ehPedidoRelacaoNumerica(ocularValores), "valores dos conjuntos e relacao numerica");
+assert(!ehPedidoDeAto(ocularValores), "traga valores nao e ato");
+assert(ehPerguntaDeLeitura(ocularValores), "traga valores e leitura");
+assert(ehPedidoDetalhamentoCampanha(ocularValores), "valores por conjunto e detalhamento");
 
 const prosaIncompleta = `
 A configuração das campanhas e dos conjuntos foi lida; o detalhamento de desempenho diário por conjunto e anúncio não foi retornado nesta rodada.

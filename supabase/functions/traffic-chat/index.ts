@@ -1,4 +1,12 @@
-// supabase/functions/traffic-chat/index.ts (v29.07)
+// supabase/functions/traffic-chat/index.ts (v29.08)
+// v29.08 (22/09/2026) - LEITURA DE VALORES NAO E ATO. "traga as mesmas informacoes
+//   / valores dos conjuntos ativos" do Ocular foi composto com o "altere vermelho
+//   e amarelo" do Juridico (objetivoDoFio). pedido_ato=true, AG-06 no turno, prosa
+//   de "nenhum card" no lugar da tabela. get_detalhe_anuncios JA tinha
+//   custo_por_resultado por conjunto (14k de 41k). Confirmacao "altere para 40"
+//   so tinha as 17 tools do Executor — sem get_detalhe — e recusou por "falta de
+//   custo". Agora: classifica como leitura; tabela_markdown na frente do JSON;
+//   AG-02 entra junto no alterar por cor; recusa falsa nao fecha o turno.
 // v29.07 (22/09/2026) - GROK 4.7 + RESGATE DE TIMEOUT. O padrao da casa passa a
 //   x-ai/grok-4.7. No painel, a campanha La Felicita ativa abortou: 1a ida coletou
 //   (estrutura/overview/conhecimento) e a 2a voltou choices vazio; a continuacao e
@@ -850,7 +858,7 @@ import {
   idInstagramDeParams,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
-import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, recusaFalsaMoldeTrafego, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, pedidoComentarioDoPostSemEmissao, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
+import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, ehLeituraDeDesempenho, ehPedidoRelacaoNumerica, recusaFalsaMoldeTrafego, recusaFalsaClassificacaoSemMetrica, replyOmitiuValoresDosConjuntos, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, pedidoComentarioDoPostSemEmissao, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
 import {
   aplicarCompactacaoCriativos,
   aplicarCompactacaoEstrutura,
@@ -1012,7 +1020,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.07";
+const VERSAO = "chat-v29.08";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -1079,6 +1087,19 @@ const MSG_NUDGE_EMITIR_DE_FATO =
   "Para desligar anuncio publicado a acao e pausar_criativo (target_name = nome do anuncio); " +
   "excluir nao existe. Se algum item nao puder virar card, emita os que podem e diga em UMA " +
   "linha, sem tabela, qual ficou de fora e por que.";
+const MSG_NUDGE_TABELA_VALORES =
+  "[CORRECAO DO SISTEMA — nao e o gestor] O gestor pediu os VALORES dos conjuntos (gasto, " +
+  "orcamento, conversas, custo por resultado). As tools DESTE turno ja devolveram — copie " +
+  "tabela_markdown / totais_janela. Este turno e LEITURA: escreva a tabela agora. PROIBIDO " +
+  "falar de card, PROIBIDO pedir confirmacao de alterar, PROIBIDO 'nenhum card foi emitido'.";
+const MSG_NUDGE_CLASSIFICACAO_JA_LIDA =
+  "[CORRECAO DO SISTEMA — nao e o gestor] Recusar emitir porque 'faltou custo por conversa' " +
+  "e FALSO se get_detalhe_anuncios (neste turno ou no fio) devolveu totais_janela / " +
+  "tabela_markdown com custo_por_resultado por conjunto. Vermelho/amarelo/verde neste fio e " +
+  "a classificacao que VOCE ja fez na campanha anterior, pelo custo por resultado — NAO e " +
+  "status da Meta. CHAME get_detalhe_anuncios da campanha do recorte se ainda nao chamou " +
+  "NESTE turno; depois emita propose_action ou alterar_orcamento nos conjuntos vermelho e " +
+  "amarelo. PROIBIDO fechar sem a tool de metrica OU sem o card.";
 const AVISO_COMENTARIO_DO_POST =
   "Desativar comentario e interruptor do post no Instagram/Business Suite, nao card de anuncio. " +
   "Pipeboard nao tem essa escrita. Pausar campanha/conjunto/anuncio NAO fecha comentario. " +
@@ -6655,6 +6676,7 @@ function replyFechaTurno(texto: string): boolean {
   const t = deacc(raw.toLowerCase());
   if (RE_INTENCAO.test(raw)) return false;
   if (recusaFalsaMoldeTrafego(raw)) return false;
+  if (recusaFalsaClassificacaoSemMetrica(raw)) return false;
   if (RE_CONTINUAR_AUTO.test(t) || /continuando automaticamente/.test(t)) return false;
   const perguntaOuDecisao =
     (/\?/.test(raw) && !/envie (novamente|de novo)|nova pergunta|peca de novo/.test(t)) ||
@@ -7152,6 +7174,8 @@ Deno.serve(async (req) => {
   let nudgesLegendas = 0;
   let nudgesEmitir = 0;
   let nudgesDriveVazio = 0;
+  let nudgesTabelaValores = 0;
+  let nudgesClassificacao = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
   const pedidoUploadTurno = ehPedidoUploadLote(objetivoOriginal);
   const nPendentesCp = (turnCheckpoint?.pendentes_upload ?? []).length;
@@ -7629,6 +7653,36 @@ Deno.serve(async (req) => {
       finishReason = String(finishReason || "stop") + "+nudge_sem_molde";
       continue;
     }
+    if (
+      (ehPedidoRelacaoNumerica(objetivoOriginal) || ehLeituraDeDesempenho(objetivoOriginal)) &&
+      !ehPedidoDeAto(objetivoOriginal) &&
+      replyOmitiuValoresDosConjuntos(String(reply), objetivoOriginal) &&
+      toolResults.some((t) =>
+        t.tool === "get_detalhe_anuncios" || t.tool === "get_estrutura_conjuntos" ||
+        t.tool === "get_campaign_detail"
+      ) &&
+      nudgesTabelaValores < 1 &&
+      aindaCabeFerramenta()
+    ) {
+      nudgesTabelaValores++;
+      messages.push({ role: "assistant", content: reply || "(sem texto)" });
+      messages.push({ role: "user", content: MSG_NUDGE_TABELA_VALORES });
+      finishReason = String(finishReason || "stop") + "+nudge_tabela_valores";
+      continue;
+    }
+    if (
+      ehPedidoDeAto(objetivoOriginal) &&
+      recusaFalsaClassificacaoSemMetrica(String(reply)) &&
+      actionCards.length === 0 &&
+      nudgesClassificacao < 1 &&
+      aindaCabePropose()
+    ) {
+      nudgesClassificacao++;
+      messages.push({ role: "assistant", content: reply || "(sem texto)" });
+      messages.push({ role: "user", content: MSG_NUDGE_CLASSIFICACAO_JA_LIDA });
+      finishReason = String(finishReason || "stop") + "+nudge_classificacao";
+      continue;
+    }
     const coletouDrive = toolsUsed.some((t) =>
       t.tool === "get_drive_criativos" || t.tool === "get_acervo_para_anuncio" || t.tool === "get_analise_visual_drive",
     );
@@ -7726,7 +7780,7 @@ Deno.serve(async (req) => {
         chamouPropose: toolsIncluemPropose(toolsUsed),
         cardsEmitidos: actionCards.length,
         semTempo: !aindaCabePropose(),
-        jaInsistiu: nudgesEmitir > 0,
+        jaInsistiu: nudgesEmitir > 0 || nudgesClassificacao > 0,
       })
     ) {
       nudgesEmitir++;
@@ -7891,7 +7945,8 @@ Deno.serve(async (req) => {
   );
   const chamouDetalheOkNeste = toolResults.some((t) =>
     String(t.tool ?? "") === "get_detalhe_anuncios" && !t.erro);
-  const leituraIncompleta = replyLeituraIncompleta(replyTrim);
+  const leituraIncompleta = replyLeituraIncompleta(replyTrim) ||
+    replyOmitiuValoresDosConjuntos(replyTrim, objetivoOriginal);
   const detalheSemTool = pedidoDetalhe && !chamouDetalhe && !pedidoAtoCards && !pedidoUploadTurno;
   const origemSemTool = pedidoOrigem && !chamouOrigem && !pedidoAtoCards && !pedidoUploadTurno;
   const leituraComTeto = tetoTools && ehPerguntaDeLeitura(objetivoOriginal) && !pedidoAtoCards && !pedidoUploadTurno;

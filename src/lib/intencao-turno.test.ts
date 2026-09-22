@@ -9,6 +9,9 @@ import {
   ehPedidoRelacaoNumerica,
   ehPedidoRelacaoGeoPublico,
   recusaFalsaMoldeTrafego,
+  recusaFalsaClassificacaoSemMetrica,
+  replyOmitiuValoresDosConjuntos,
+  pedidoAtoPrecisaMetrica,
   ehPedidoUploadLote,
   ehUploadLoteCurto,
   ehPedidoDetalhamentoCampanha,
@@ -105,6 +108,19 @@ describe("ehPerguntaDeLeitura", () => {
     expect(ehPedidoDetalhamentoCampanha(pedido)).toBe(false);
     expect(ehPedidoDeAto(pedido)).toBe(false);
     expect(ehPerguntaDeLeitura(pedido)).toBe(true);
+  });
+
+  it("traga as mesmas informacoes / valores dos conjuntos e leitura, nao ato", () => {
+    const ocular =
+      "agora traga as mesmas informações referentes a campanha ativa hoje do ocular com todos os valores dos conjuntos ativos";
+    expect(ehPedidoRelacaoNumerica(ocular)).toBe(true);
+    expect(ehLeituraDeDesempenho(ocular)).toBe(true);
+    expect(ehPedidoDeAto(ocular)).toBe(false);
+    expect(ehPerguntaDeLeitura(ocular)).toBe(true);
+    expect(ehPedidoDetalhamentoCampanha(ocular)).toBe(true);
+    expect(
+      deveForcarEmissao({ pedido: ocular, chamouPropose: false, cardsEmitidos: 0 }),
+    ).toBe(false);
   });
 });
 
@@ -264,6 +280,15 @@ describe("objetivoDoFio", () => {
       "os numeros sao esses",
     );
   });
+
+  it("nao junta leitura de valores do ocular ao alterar do juridico", () => {
+    const alterar =
+      "altere os valores dos conjuntos em status vermelho e amarelo para 40,00 e mantenha os de status verde com o mesmo valor";
+    const ocular =
+      "agora traga as mesmas informações referentes a campanha ativa hoje do ocular com todos os valores dos conjuntos ativos";
+    expect(objetivoDoFio(ocular, [alterar])).toBe(ocular);
+    expect(ehPedidoDeAto(objetivoDoFio(ocular, [alterar]))).toBe(false);
+  });
 });
 
 describe("deveForcarEmissao", () => {
@@ -345,5 +370,41 @@ describe("ehPedidoLeituraCruzada", () => {
 
   it("pergunta de desempenho solta nao e leitura cruzada", () => {
     expect(ehPedidoLeituraCruzada("qual o gasto de ontem?")).toBe(false);
+  });
+});
+
+describe("incidente ocular 22/09 — classificacao e recusa falsa", () => {
+  const confirmar =
+    "isso, vermelho e amarelo altere para 40,00 e verde mantenha";
+  const prosaLeitura =
+    "O último pedido foi só a leitura da campanha ativa do Sistema Ocular. Não houve verbo de alterar, pausar ou criar, então nenhum card foi emitido e nenhum será inventado agora.\n\nOs quatro conjuntos ativos continuam em R$ 60,00. Se a ordem for a mesma do Jurídico — vermelho e amarelo para R$ 40,00 e verde mantido —, diga isso e os pedidos saem na hora.";
+  const prosaRecusa =
+    "Nenhum card foi emitido. A leitura da campanha ativa do Ocular não trouxe o custo por conversa de cada conjunto, então não há como separar vermelho e amarelo de verde sem risco de alterar o conjunto errado.";
+
+  it("confirmacao de cor e ato que precisa de metrica", () => {
+    expect(ehPedidoDeAto(confirmar)).toBe(true);
+    expect(pedidoAtoPrecisaMetrica(confirmar)).toBe(true);
+    expect(
+      deveForcarEmissao({ pedido: confirmar, chamouPropose: false, cardsEmitidos: 0 }),
+    ).toBe(true);
+  });
+
+  it("prosa de nenhum card no pedido de valores e leitura omitida", () => {
+    const pedido =
+      "agora traga as mesmas informações referentes a campanha ativa hoje do ocular com todos os valores dos conjuntos ativos";
+    expect(replyOmitiuValoresDosConjuntos(prosaLeitura, pedido)).toBe(true);
+    expect(
+      replyOmitiuValoresDosConjuntos(
+        "Hoje é 22/09.\n\n| Conjunto | Gasto | Conversas |\n|---|---|---|\n| CONJ.1 | R$ 10 | 2 |",
+        pedido,
+      ),
+    ).toBe(false);
+  });
+
+  it("recusa por falta de custo por conversa e falsa quando a tool ja leu", () => {
+    expect(recusaFalsaClassificacaoSemMetrica(prosaRecusa)).toBe(true);
+    expect(recusaFalsaClassificacaoSemMetrica("Os três pedidos estão pendentes de aprovação.")).toBe(
+      false,
+    );
   });
 });
