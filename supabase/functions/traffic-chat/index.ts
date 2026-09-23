@@ -878,6 +878,7 @@ import {
   normalizarMeioWaba,
   parseMeioDriveArg,
   injetarArgsDrive,
+  pastaContemDoPedido,
   deveDescerPastaDrive,
   leituraDriveVoltouVazia,
   pedidoExigeInventarioDrive,
@@ -1025,7 +1026,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.09";
+const VERSAO = "chat-v29.10";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -1092,11 +1093,16 @@ const MSG_NUDGE_EMITIR_DE_FATO =
   "Para desligar anuncio publicado a acao e pausar_criativo (target_name = nome do anuncio); " +
   "excluir nao existe. Se algum item nao puder virar card, emita os que podem e diga em UMA " +
   "linha, sem tabela, qual ficou de fora e por que.";
+const MSG_NUDGE_LOTE_CARDS_INICIO =
+  "[CORRECAO DO SISTEMA — nao e o gestor] Pedido de VARIOS cards. Slate vazio NAO e pasta vazia. " +
+  "A primeira ferramenta desta rodada e get_acervo_para_anuncio (pasta e meio do contexto do fio; sem produto). " +
+  "Na resposta seguinte, propose_action criar_anuncio_a_partir_de para as pecas dessa pasta que ainda nao tem card nem anuncio no ar. " +
+  "Minimo 3 chamadas juntas, teto 4, uma por peca, com o drive_file_id que o acervo devolver NESTA rodada. " +
+  "PROIBIDO fechar com 1 card dizendo que o registro da conversa nao traz o arquivo.";
 const MSG_NUDGE_LOTE_CARDS =
-  "[CORRECAO DO SISTEMA — nao e o gestor] O pedido e de VARIOS cards e este bloco fechou com menos de 3. " +
-  "Chame propose_action AGORA para as proximas pecas ja prontas no slate (drive_file_id e legenda reais), " +
-  "varias chamadas na mesma resposta: minimo 3 neste bloco, teto 4. " +
-  "PROIBIDO encerrar dizendo que o proximo card 'nao foi lido nesta janela'. " +
+  "[CORRECAO DO SISTEMA — nao e o gestor] O acervo desta rodada ja voltou e o bloco ainda tem menos de 3 cards. " +
+  "Chame propose_action AGORA, varias na mesma resposta (minimo 3, teto 4), uma por peca ainda sem card, " +
+  "com o drive_file_id do acervo. PROIBIDO responder que o registro da conversa nao traz o arquivo. " +
   "Se so restar 1 peca sem card, emita essa. Nao invente peca nem approval_id.";
 const MSG_NUDGE_TABELA_VALORES =
   "[CORRECAO DO SISTEMA — nao e o gestor] O gestor pediu os VALORES dos conjuntos (gasto, " +
@@ -7039,11 +7045,18 @@ Deno.serve(async (req) => {
       .filter((m: { role?: string }) => m.role === "user")
       .map((m: { content?: string }) => String(m.content ?? ""));
     objetivoOriginal = objetivoDoFio(message, usersPrev);
-    if (pedidoSoLegendasSemEmissao(objetivoOriginal) && !inferirMeioDrive(objetivoOriginal)) {
-      const meio = inferirMeioDrive(usersPrev.slice(-6).join("\n"));
-      if (meio === "sistema_ocular") objetivoOriginal += "\n[contexto do fio: sistema ocular]";
-      else if (meio === "la_felicita") objetivoOriginal += "\n[contexto do fio: la felicita]";
-      else if (meio === "juridico") objetivoOriginal += "\n[contexto do fio: juridico]";
+    if (pedidoSoLegendasSemEmissao(objetivoOriginal) || pedidoPedeVariosCards(objetivoOriginal)) {
+      const blobFio = usersPrev.slice(-8).join("\n");
+      if (!inferirMeioDrive(objetivoOriginal)) {
+        const meio = inferirMeioDrive(blobFio);
+        if (meio === "sistema_ocular") objetivoOriginal += "\n[contexto do fio: sistema ocular]";
+        else if (meio === "la_felicita") objetivoOriginal += "\n[contexto do fio: la felicita]";
+        else if (meio === "juridico") objetivoOriginal += "\n[contexto do fio: juridico]";
+      }
+      if (!pastaContemDoPedido(objetivoOriginal)) {
+        const pasta = pastaContemDoPedido(blobFio);
+        if (pasta) objetivoOriginal += `\n[contexto do fio: pasta ${pasta}]`;
+      }
     }
   }
   let ultimoAssistantIdx = -1, ultimoUserIdx = -1;
@@ -7226,6 +7239,7 @@ Deno.serve(async (req) => {
     precisaNudgeOrigem ? MSG_NUDGE_ORIGEM : "",
     precisaNudgeSlate ? MSG_NUDGE_SLATE : "",
     precisaNudgeLegendas ? MSG_NUDGE_LEGENDAS : "",
+    pedidoPedeVariosCards(objetivoOriginal) ? MSG_NUDGE_LOTE_CARDS_INICIO : "",
   ].filter(Boolean);
   const textoLlm = extrasNudge.length ? `${msgText}\n\n${extrasNudge.join("\n\n")}` : msgText;
   if (extrasNudge.length && Array.isArray(userContent) && userContent[0]?.type === "text") {
@@ -7374,6 +7388,7 @@ Deno.serve(async (req) => {
     semRaciocinio = false,
     retry429 = 0,
     payloadForcado?: Record<string, unknown>,
+    toolChoice?: { type: "function"; function: { name: string } } | null,
   ): Promise<any> {
     const restanteMs = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
     if (restanteMs < 8_000) {
@@ -7390,7 +7405,10 @@ Deno.serve(async (req) => {
       reasoning: semRaciocinio ? REASONING_SINTESE : REASONING_LOOP,
     });
     if (!payloadForcado) {
-      if (comTools) { payload.tools = toolsDoTurno; payload.tool_choice = "auto"; }
+      if (comTools) {
+        payload.tools = toolsDoTurno;
+        payload.tool_choice = toolChoice ?? "auto";
+      }
       if (reasoningDesativado) delete payload.reasoning;
     }
     async function resgatarHang(capUsado: number, detalhe: string) {
@@ -7604,7 +7622,19 @@ Deno.serve(async (req) => {
     }
     iteracoes = iter + 1;
     // v27: orcamento dimensionado pelo tempo restante, nao fixo.
-    const r = await chamar(true, tokensDisponiveis());
+    const acervoJaLido = toolsUsed.some((t) => t.tool === "get_acervo_para_anuncio") ||
+      (turnCheckpoint?.tools_resumo ?? []).some((t) => t.tool === "get_acervo_para_anuncio" && !t.erro);
+    const faltaAcervoLote = pedidoPedeVariosCards(objetivoOriginal) && !acervoJaLido;
+    const forcarAcervo = faltaAcervoLote && toolsDoTurno.some((t: { function?: { name?: string } }) =>
+      t?.function?.name === "get_acervo_para_anuncio");
+    const r = await chamar(
+      true,
+      tokensDisponiveis(),
+      false,
+      0,
+      undefined,
+      forcarAcervo ? { type: "function", function: { name: "get_acervo_para_anuncio" } } : null,
+    );
     if (r.erro === "orcamento_tempo_esgotado" || r.erro === "openrouter_timeout") {
       deadlineTools = true;
       finishReason = String(r.erro);
@@ -7774,6 +7804,17 @@ Deno.serve(async (req) => {
         messages.push({ role: "tool", tool_call_id: tc.id,
           content: retornoComDoutrina(catFerr, nomeTc, bruto.slice(0, TOOLRES_TETO_PERSIST)) });
       }
+      if (
+        pedidoPedeVariosCards(objetivoOriginal) &&
+        actionCards.length < MIN_PROPOSE_ANUNCIO_POR_BLOCO &&
+        nudgesLoteCards < 1 &&
+        toolsUsed.some((t) => t.tool === "get_acervo_para_anuncio") &&
+        HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS > 28_000
+      ) {
+        nudgesLoteCards++;
+        messages.push({ role: "user", content: MSG_NUDGE_LOTE_CARDS });
+        finishReason = String(finishReason || "stop") + "+nudge_lote_apos_acervo";
+      }
       continue;
     }
     reply = msg.content ?? "";
@@ -7933,7 +7974,12 @@ Deno.serve(async (req) => {
     ) {
       nudgesLoteCards++;
       messages.push({ role: "assistant", content: reply || "(sem texto)" });
-      messages.push({ role: "user", content: MSG_NUDGE_LOTE_CARDS });
+      messages.push({
+        role: "user",
+        content: toolsUsed.some((t) => t.tool === "get_acervo_para_anuncio")
+          ? MSG_NUDGE_LOTE_CARDS
+          : MSG_NUDGE_LOTE_CARDS_INICIO,
+      });
       finishReason = String(finishReason || "stop") + "+nudge_lote_cards";
       continue;
     }
