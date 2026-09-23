@@ -1026,7 +1026,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.10";
+const VERSAO = "chat-v29.11";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -4146,6 +4146,22 @@ async function t_propose_criacao(
       };
     }
 
+    async function resolverDrivePeloNomeDaPeca(company: string, nomePeca: string): Promise<string | null> {
+      const base = norm(nomePeca).replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[^a-z0-9]+/g, " ").trim();
+      if (base.length < 3) return null;
+      const { data } = await supa.from("drive_midia_analises")
+        .select("drive_file_id,nome,caminho")
+        .eq("company_id", company)
+        .ilike("nome", `${nomePeca.replace(/[%_]/g, "")}%`)
+        .limit(12);
+      const iguais = (data ?? []).filter((r: { nome?: string }) =>
+        norm(String(r.nome ?? "")).replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[^a-z0-9]+/g, " ").trim() === base);
+      if (iguais.length === 1) return String(iguais[0].drive_file_id ?? "") || null;
+      const deSetembro = iguais.filter((r: { caminho?: string }) => /setembro/.test(norm(String(r.caminho ?? ""))));
+      if (deSetembro.length === 1) return String(deSetembro[0].drive_file_id ?? "") || null;
+      return null;
+    }
+
     let molde: any = null;
     if (!semMolde) {
       const { data: anunciosRaw } = await supa.from("ads").select("id,name,external_id,creative_id,body,title,account_id,adset_external_id,status").eq("company_id", companyId);
@@ -4159,6 +4175,29 @@ async function t_propose_criacao(
         // para a biblioteca (meta_video_id) — antes so drive_file_id salvava daqui.
         semMolde = true;
       } else if (!molde) {
+        const nomePeca = String(params?.nome_novo ?? params?.nome ?? "").trim();
+        const nomeConj = String(params?.conjunto_destino ?? params?.conjunto_destino_nome ?? "").trim();
+        const alvoEhOConjunto = !!nomeConj && norm(nomeAlvo) === norm(nomeConj);
+        if (alvoEhOConjunto && nomePeca && !driveFileId) {
+          const achado = await resolverDrivePeloNomeDaPeca(companyId, nomePeca);
+          if (achado) {
+            driveFileId = achado;
+            params.drive_file_id = achado;
+            params.sem_molde = true;
+            semMolde = true;
+          } else {
+            return {
+              erro: "peca_sem_drive_file_id",
+              detalhe:
+                `target_name '${nomeAlvo}' e o CONJUNTO, nao um anuncio molde. A peca '${nomePeca}' nao teve drive_file_id. ` +
+                `Chame get_acervo_para_anuncio da pasta de setembro e reenvie com params.drive_file_id e sem_molde=true.`,
+              instrucao: "Nao repita o nome do conjunto em target_name. target_name=sem_molde e o arquivo vem do acervo.",
+            };
+          }
+        }
+        if (semMolde) {
+          /* peca resolvida pelo nome no acervo; segue sem molde */
+        } else {
         const pareceIdMeta = /^\d{10,}$/.test(String(nomeAlvo));
         const pareceInventado = !pareceIdMeta && (String(nomeAlvo).includes("[") || /LEV|LP|LEADS|TESTE|ESCALA|AGO\d{2}/i.test(String(nomeAlvo)));
         const candidatos = anuncios
@@ -4179,6 +4218,7 @@ async function t_propose_criacao(
           candidatos_no_conjunto: noConjunto,
           instrucao: "Corrija target_name com um anuncio REAL listado em candidatos_no_conjunto, ou use sem_molde=true com drive_file_id. Nao peca ao gestor para inventar o molde — leia o espelho.",
         };
+        }
       }
       if (molde && !molde.creative_id) return { erro: `o anuncio molde '${molde.name}' nao tem criativo sincronizado (creative_id ausente) - sem ele nao e possivel copiar page_id/link/CTA. Escolha outro molde ou use sem_molde=true com page_id/CTA/destino na config.` };
     }

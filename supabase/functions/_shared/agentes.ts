@@ -16,6 +16,7 @@ import {
   pedidoAtoPrecisaMetrica,
   pedidoSoLegendasSemEmissao,
   pedidoComentarioDoPostSemEmissao,
+  pedidoPedeVariosCards,
 } from "./intencao_turno.ts";
 
 export type AgenteRegistro = {
@@ -285,6 +286,9 @@ export function reforcarPorIntencao(agentes: string[], pergunta: string): string
   if (ehPedidoLeituraCruzada(p)) juntar("AG-02", "AG-03");
   if (pedidoSoLegendasSemEmissao(p)) juntar("AG-03");
   if (ehPedidoUploadLote(p)) juntar("AG-03");
+  // "emita os proximos cards" sem o Estudio nao tem get_acervo. O executor
+  // entao manda o conjunto como molde e o card morre sem drive_file_id.
+  if (pedidoPedeVariosCards(p)) juntar("AG-03", "AG-06");
   const precisaExecutor =
     ehPedidoDeAto(p) &&
     !pedidoSoLegendasSemEmissao(p) &&
