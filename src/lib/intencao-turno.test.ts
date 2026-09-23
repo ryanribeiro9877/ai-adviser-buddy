@@ -16,6 +16,7 @@ import {
   ehUploadLoteCurto,
   ehPedidoDetalhamentoCampanha,
   ehPedidoOrigemDriveDosAnuncios,
+  pedidoPedeVariosCards,
   pedidoSoLegendasSemEmissao,
   pedidoComentarioDoPostSemEmissao,
   replyLeituraIncompleta,
@@ -234,6 +235,14 @@ describe("ehPedidoOrigemDriveDosAnuncios", () => {
         "verifique na pasta Apenas oculos do drive e selecione um video que ainda nao esta no conj 1",
       ),
     ).toBe(false);
+  });
+});
+
+describe("pedidoPedeVariosCards", () => {
+  it("lote no plural e peca unica no singular", () => {
+    expect(pedidoPedeVariosCards("emita os próximos cards")).toBe(true);
+    expect(pedidoPedeVariosCards("emita o card do Rayban 2")).toBe(false);
+    expect(pedidoPedeVariosCards("somente um card do conjunto 1")).toBe(false);
   });
 });
 

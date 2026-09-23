@@ -858,7 +858,7 @@ import {
   idInstagramDeParams,
   type IdentidadeInstagramResolvida,
 } from "../_shared/identidade_instagram.ts";
-import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, ehLeituraDeDesempenho, ehPedidoRelacaoNumerica, recusaFalsaMoldeTrafego, recusaFalsaClassificacaoSemMetrica, replyOmitiuValoresDosConjuntos, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, pedidoComentarioDoPostSemEmissao, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
+import { deveForcarEmissao, ehPedidoDeAto, ehPedidoEmitirConjunto, ehPerguntaDeLeitura, ehLeituraDeDesempenho, ehPedidoRelacaoNumerica, recusaFalsaMoldeTrafego, recusaFalsaClassificacaoSemMetrica, replyOmitiuValoresDosConjuntos, ehPedidoUploadLote, ehUploadLoteCurto, ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, pedidoSoLegendasSemEmissao, pedidoComentarioDoPostSemEmissao, pedidoPedeVariosCards, replyLeituraIncompleta, objetivoDoFio } from "../_shared/intencao_turno.ts";
 import {
   aplicarCompactacaoCriativos,
   aplicarCompactacaoEstrutura,
@@ -1009,9 +1009,12 @@ const MAX_POR_FERRAMENTA_DEFAULT = 2;
 // propose_action de criacao nao consome o teto global do turno (so o teto por ferramenta).
 // Assim releituras opcionais nao "roubam" as vagas dos cards quando o slate ja esta no chat.
 const ACOES_CRIACAO_NO_TETO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
-// v28.53: 3× compliance + status_video no mesmo HTTP estoura gateway → Erro de conexao.
-// Emite no max 2 criar_anuncio por segmento; o restante via continuar=true.
-const MAX_PROPOSE_ANUNCIO_POR_SEGMENTO = 2;
+// v29.09 (23/09/2026): teto 2 + o carve-out so do PRIMEIRO card faziam
+// "emita os proximos cards" sair um por janela. O segundo propose morria
+// em "nao foi lido nesta janela" assim que o primeiro nascia (deadline 55s
+// e precisaProposeAto exigia zero cards). Lote: minimo 3, teto 4 por segmento.
+const MAX_PROPOSE_ANUNCIO_POR_SEGMENTO = 4;
+const MIN_PROPOSE_ANUNCIO_POR_BLOCO = 3;
 const MAX_TOKENS = 12000;
 // v21: orcamento de raciocinio. max_tokens cobre raciocinio + texto; sem teto, o modelo
 // gastava os 6000 pensando e devolvia content vazio. 2000 preserva o protocolo de 5 passos
@@ -1022,7 +1025,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.08";
+const VERSAO = "chat-v29.09";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -1084,11 +1087,17 @@ const MSG_NUDGE_EMITIR_DE_FATO =
   "voce escreveu descreve um ato que nao aconteceu. Tabela de cards, approval_id, 'pendente', " +
   "'em emissao' e 'continuando automaticamente' sao FALSOS enquanto a ferramenta nao devolver " +
   "o identificador — approval_id voce NUNCA escreve de cabeca, so copia do retorno da tool. " +
-  "AGORA, nesta rodada: chame propose_action de verdade, uma chamada por item pedido, ate 2 por " +
-  "bloco, com os dados ja levantados nesta conversa (conjunto, criativo, legenda, numero). " +
+  "AGORA, nesta rodada: chame propose_action de verdade, uma chamada por item, VARIAS na mesma " +
+  "resposta (minimo 3, teto 4 por bloco), com os dados ja levantados (conjunto, criativo, legenda, numero). " +
   "Para desligar anuncio publicado a acao e pausar_criativo (target_name = nome do anuncio); " +
   "excluir nao existe. Se algum item nao puder virar card, emita os que podem e diga em UMA " +
   "linha, sem tabela, qual ficou de fora e por que.";
+const MSG_NUDGE_LOTE_CARDS =
+  "[CORRECAO DO SISTEMA — nao e o gestor] O pedido e de VARIOS cards e este bloco fechou com menos de 3. " +
+  "Chame propose_action AGORA para as proximas pecas ja prontas no slate (drive_file_id e legenda reais), " +
+  "varias chamadas na mesma resposta: minimo 3 neste bloco, teto 4. " +
+  "PROIBIDO encerrar dizendo que o proximo card 'nao foi lido nesta janela'. " +
+  "Se so restar 1 peca sem card, emita essa. Nao invente peca nem approval_id.";
 const MSG_NUDGE_TABELA_VALORES =
   "[CORRECAO DO SISTEMA — nao e o gestor] O gestor pediu os VALORES dos conjuntos (gasto, " +
   "orcamento, conversas, custo por resultado). As tools DESTE turno ja devolveram — copie " +
@@ -5683,6 +5692,7 @@ async function t_waba_status(companyId: string, meio?: string) {
 function prioridadeTool(nome: string, pedido: string): number {
   const p = norm(pedido);
   const perguntaLeitura = ehPerguntaDeLeitura(pedido);
+  if (pedidoPedeVariosCards(pedido) && !perguntaLeitura && nome === "propose_action") return -1;
   if (pedidoSoLegendasSemEmissao(pedido) || (pedidoLoteCriativo(pedido) && /legend/.test(p))) {
     if (nome === "gerar_legendas" || nome === "get_acervo_para_anuncio" || nome === "get_legendas_da_conversa") return 0;
     if (nome === "get_drive_criativos") return 1;
@@ -6550,7 +6560,7 @@ function montarPromptRetomada(cp: TurnCheckpoint): string {
     ? "INSTRUCOES OBRIGATORIAS (LOTE + EMISSAO):\n" +
       "1. NAO cumprimente. NAO peca o gestor para repetir. NAO invente approval_id.\n" +
       "2. Se ja ha peca+legenda e NENHUM card neste pedido, chame propose_action AGORA " +
-      "(criar_anuncio_a_partir_de, ate 2 por bloco) com drive_file_id e legenda REAIS desta conversa.\n" +
+      "(criar_anuncio_a_partir_de, varias chamadas juntas: minimo 3 e teto 4 por bloco) com drive_file_id e legenda REAIS desta conversa.\n" +
       "3. So depois gere legendas que ainda faltam (gerar_legendas, no maximo 3). " +
       "PROIBIDO escrever 'card emitido' sem o UUID devolvido pela tool.\n" +
       "4. Use ferramentas so do que falta; nao releia acervo inteiro se ja consta acima."
@@ -7278,6 +7288,7 @@ Deno.serve(async (req) => {
   let nudgesDriveVazio = 0;
   let nudgesTabelaValores = 0;
   let nudgesClassificacao = 0;
+  let nudgesLoteCards = 0;
   const pedidoLoteTurno = pedidoLoteCriativo(objetivoOriginal);
   const pedidoUploadTurno = ehPedidoUploadLote(objetivoOriginal);
   const nPendentesCp = (turnCheckpoint?.pendentes_upload ?? []).length;
@@ -7320,6 +7331,21 @@ Deno.serve(async (req) => {
       !toolsIncluemPropose(toolsUsed) &&
       !pedidoSoLegendasSemEmissao(objetivoOriginal) &&
       !pedidoComentarioDoPostSemEmissao(objetivoOriginal);
+  }
+  function nAnunciosPropostos(): number {
+    return toolsUsed.filter((t) =>
+      t.tool === "propose_action" &&
+      String((t.args as { action_type?: string })?.action_type ?? "") === "criar_anuncio_a_partir_de"
+    ).length;
+  }
+  /** Depois do primeiro card a coleta ja estourou 55s. Os proximos propose ainda rodam. */
+  function cabeMaisCardNoBloco(): boolean {
+    if (!pedidoPedeVariosCards(objetivoOriginal)) return false;
+    if (!ehPedidoDeAto(objetivoOriginal) || pedidoUploadTurno) return false;
+    if (pedidoSoLegendasSemEmissao(objetivoOriginal) || pedidoComentarioDoPostSemEmissao(objetivoOriginal)) return false;
+    if (nAnunciosPropostos() >= MAX_PROPOSE_ANUNCIO_POR_SEGMENTO) return false;
+    const restante = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
+    return restante > (nAnunciosPropostos() === 0 ? 18_000 : 12_000);
   }
 
   // v20: fallback de cache. Nao esta confirmado que o OpenRouter aceita cache_control para
@@ -7570,7 +7596,7 @@ Deno.serve(async (req) => {
     // tools): sem isso o loop consumia os 150s coletando e o gateway devolvia 504.
     if (decorrido() > toolsDeadlineMs && (iter > 0 || toolsUsed.length > 0)) {
       deadlineTools = true;
-      if (!(precisaProposeAto() && aindaCabePropose())) break;
+      if (!(precisaProposeAto() && aindaCabePropose()) && !cabeMaisCardNoBloco()) break;
     }
     if (decorrido() > HARD_LIMIT_MS - RESERVA_GRAVACAO_MS - 12_000) {
       deadlineTools = true;
@@ -7631,7 +7657,9 @@ Deno.serve(async (req) => {
         if (decorrido() > toolsDeadlineMs || flushUpload) {
           const nomeSkip = String(tc.function?.name ?? "");
           const executarProposeAposColeta =
-            nomeSkip === "propose_action" && precisaProposeAto() && aindaCabePropose() && !flushUpload;
+            nomeSkip === "propose_action" && !flushUpload && (
+              (precisaProposeAto() && aindaCabePropose()) || cabeMaisCardNoBloco()
+            );
           const executarLegendaAposColeta =
             nomeSkip === "gerar_legendas" &&
             (pedidoSoLegendasSemEmissao(objetivoOriginal) || pedidoLoteTurno) &&
@@ -7894,6 +7922,19 @@ Deno.serve(async (req) => {
       messages.push({ role: "assistant", content: reply || "(sem texto)" });
       messages.push({ role: "user", content: MSG_NUDGE_EMITIR_DE_FATO });
       finishReason = String(finishReason || "stop") + "+nudge_emitir";
+      continue;
+    }
+    if (
+      pedidoPedeVariosCards(objetivoOriginal) &&
+      actionCards.length > 0 &&
+      actionCards.length < MIN_PROPOSE_ANUNCIO_POR_BLOCO &&
+      nudgesLoteCards < 1 &&
+      cabeMaisCardNoBloco()
+    ) {
+      nudgesLoteCards++;
+      messages.push({ role: "assistant", content: reply || "(sem texto)" });
+      messages.push({ role: "user", content: MSG_NUDGE_LOTE_CARDS });
+      finishReason = String(finishReason || "stop") + "+nudge_lote_cards";
       continue;
     }
     break;

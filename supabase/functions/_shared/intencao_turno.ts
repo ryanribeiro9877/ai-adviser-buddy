@@ -183,6 +183,18 @@ export function ehPedidoEmitirConjunto(pedido: string): boolean {
   return /\bconjuntos?\b/.test(t);
 }
 
+/**
+ * "emita os proximos cards" pede um lote na mesma janela.
+ * "emita o card do Rayban" pede uma peca so.
+ */
+export function pedidoPedeVariosCards(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  if (/\b(so|apenas|somente)\s+(um|1)\s+card\b/.test(p)) return false;
+  if (/\b(o|esse|este|um|1)\s+card\b/.test(p) && !/\bcards\b/.test(p)) return false;
+  return /\bcards\b/.test(p);
+}
+
 const RE_CONTINUA_ATO_FIO =
   /\b(conjunto|campanha|anuncio|numeros?|whatsapp|waba|telefone|wa\.me)\b/;
 
