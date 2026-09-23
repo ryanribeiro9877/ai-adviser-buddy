@@ -44,6 +44,18 @@ function assert(cond: boolean, msg: string) {
 }
 
 {
+  const incidenteIdade =
+    "emita cards de criacao de 4 conjuntos com orçamento de 30,00 e idade de público 35-75 anos. " +
+    "coloque os mesmos numeros de whatsapp da campanha ativa.";
+  assert(
+    extrairOrcamentoDiarioDaFala(incidenteIdade) === 30,
+    `idade 35-75 nao pode virar contrato 75, veio ${extrairOrcamentoDiarioDaFala(incidenteIdade)}`,
+  );
+  const soIdade = "publico com idade de 35-75 anos, sem falar de dinheiro";
+  assert(extrairOrcamentoDiarioDaFala(soIdade) === null, "faixa de idade sozinha nao e orcamento");
+}
+
+{
   const r = conferirOrcamentoReais({ reais: 20, contrato: 20 });
   assert(r.ok === true && r.ok && r.reais === 20, "20 contra contrato 20 passa");
   const recusa = conferirOrcamentoReais({ reais: 20, contrato: 4 });

@@ -936,14 +936,16 @@ import {
 } from "../_shared/ferramentas.ts";
 import {
   buscarGeolocalizacoesMeta,
+  geocodificarRaios,
   normalizarGeoDoPedido,
+  normalizarRaioKm,
   paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
 import {
   buscarInteressesMeta,
   validarPublicoDoPedido,
 } from "../_shared/interesse_targeting.ts";
-import { validarIdadeDoPedido } from "../_shared/idade_targeting.ts";
+import { prepararIdadeParaCriacao, validarIdadeDoPedido } from "../_shared/idade_targeting.ts";
 import {
   aplicarGateGeoCriarConjunto,
   companyElegivelPresetGeoJuridico,
@@ -2143,24 +2145,76 @@ async function t_buscar_geolocalizacao(companyId: string, args: any) {
       args?.exigir_salvador_ba === true ||
       String(args?.cidade_contexto ?? "").toLowerCase().includes("salvador"));
 
-  return await buscarGeolocalizacoesMeta({
+  const raioInformado = args?.raio_km ?? args?.radius_km ?? args?.raio;
+  const raioKm = normalizarRaioKm(raioInformado);
+  if (raioInformado != null && raioInformado !== "" && raioKm == null) {
+    return {
+      erro: "raio_km_invalido",
+      detalhe: "raio_km e quilometros, minimo 1 e maximo 80. Ex.: 1 para o circulo de 1 km. Key de bairro nao substitui o raio.",
+    };
+  }
+  const cidadeGeo = forcarJuridicoSsa
+    ? "Salvador"
+    : args?.cidade_contexto != null
+    ? String(args.cidade_contexto)
+    : undefined;
+  const regiaoGeo = forcarJuridicoSsa
+    ? "Bahia"
+    : args?.regiao_contexto != null
+    ? String(args.regiao_contexto)
+    : undefined;
+  const base = await buscarGeolocalizacoesMeta({
     token: tok.token,
     nomes,
     tipo: args?.tipo != null ? String(args.tipo) : "neighborhood",
     country_code: args?.country_code != null ? String(args.country_code) : "BR",
-    cidade_contexto: forcarJuridicoSsa
-      ? "Salvador"
-      : args?.cidade_contexto != null
-      ? String(args.cidade_contexto)
-      : undefined,
-    regiao_contexto: forcarJuridicoSsa
-      ? "Bahia"
-      : args?.regiao_contexto != null
-      ? String(args.regiao_contexto)
-      : undefined,
+    cidade_contexto: cidadeGeo,
+    regiao_contexto: regiaoGeo,
     exigir_salvador_ba: forcarJuridicoSsa,
     limit_por_query: args?.limit_por_query != null ? Number(args.limit_por_query) : undefined,
   });
+  if (raioKm == null) return base;
+  const pinos = await geocodificarRaios({
+    nomes,
+    raio_km: raioKm,
+    cidade: cidadeGeo,
+    regiao: regiaoGeo,
+  });
+  if (!pinos.ok) {
+    return {
+      ...base,
+      ok: false,
+      erro: pinos.erro,
+      detalhe: pinos.detalhe,
+      geo_locations_sugerido: null,
+      nota:
+        "Sem coordenada nao ha raio. A key em resolvidos cobre o bairro inteiro e NAO entra no card como circulo.",
+    };
+  }
+  const custom = pinos.pinos.map((p) => ({
+    latitude: p.latitude,
+    longitude: p.longitude,
+    radius: p.radius,
+    distance_unit: p.distance_unit,
+    name: p.nome,
+  }));
+  return {
+    ...base,
+    ok: true,
+    raio_km: raioKm,
+    pinos: pinos.pinos,
+    raio_ambiguo: pinos.ambiguo,
+    geo_locations_sugerido: {
+      custom_locations: custom,
+      location_types: ["home", "recent"],
+    },
+    nota:
+      "Isto e o CIRCULO. No criar_conjunto use params.geo_locations = geo_locations_sugerido (custom_locations). " +
+      "A key de neighborhood em resolvidos NAO e o raio: ela cobre o bairro inteiro. " +
+      (pinos.ambiguo
+        ? "Mais de um pino distinto: escolha UM antes de emitir, nao junte circulos distantes no mesmo conjunto."
+        : "Um pino. Copie o objeto inteiro."),
+  };
 }
 
 async function t_buscar_interesses(companyId: string, args: any) {
@@ -3590,6 +3644,24 @@ async function t_propose_criacao(
       familiaEfetiva = "trafego";
     }
 
+    const idadeCri = prepararIdadeParaCriacao(params as Record<string, unknown>);
+    if (!idadeCri.ok) {
+      return { erro: idadeCri.erro, detalhe: idadeCri.detalhe };
+    }
+    if (idadeCri.aplica) {
+      const { data: segIdade } = await supa.rpc("checar_segmentacao", {
+        p_company_id: companyId,
+        p_targeting: { age_min: idadeCri.params.age_min, age_max: idadeCri.params.age_max },
+      });
+      if (segIdade && typeof segIdade === "object" && (segIdade as any).aplica === true && (segIdade as any).permitido === false) {
+        return {
+          erro: "segmentacao_recusada_pelo_gate",
+          detalhe: String((segIdade as any).mensagem_para_o_gestor ?? (segIdade as any).motivo ?? "checar_segmentacao recusou a idade."),
+          segmentacao: segIdade,
+        };
+      }
+    }
+
     // v28.56: o cartao mostra so nomes. Avisos de orcamento/redes/geo ficam no payload
     // (e na resposta da tool, para o agente falar no chat se precisar).
     let waCanon = String(params?.whatsapp_phone_number ?? "").trim();
@@ -3669,6 +3741,16 @@ async function t_propose_criacao(
         coluna_direita_excluida: true,
         origem: "3_conjuntos_video_active_observados_11_08",
       } : null,
+      ...(idadeCri.aplica
+        ? {
+          idade_min: idadeCri.params.age_min,
+          idade_max: idadeCri.params.age_max,
+          age_min: idadeCri.params.age_min,
+          age_max: idadeCri.params.age_max,
+          advantage_audience: idadeCri.params.advantage_audience ?? 0,
+          aviso_idade: idadeCri.aviso,
+        }
+        : {}),
       aviso_orcamento: avisoOrcamento || null,
       orcamento_media_por_dia: orc?.media_por_dia ?? null,
       orcamento_teto_real_do_dia: orc?.teto_real_do_dia ?? null,
@@ -3679,8 +3761,15 @@ async function t_propose_criacao(
     }, cards);
     // Devolve o aviso na resposta da tool tambem: o agente precisa repassar ao gestor ANTES de ele
     // decidir, e o texto vem inteiro da RPC - sem frase composta aqui, o dono do texto e um so.
-    return avisoOrcamento && card && typeof card === "object" && !(card as any).erro
-      ? { ...(card as any), aviso_orcamento: avisoOrcamento }
+    const avisosCard: Record<string, unknown> = {};
+    if (avisoOrcamento && card && typeof card === "object" && !(card as any).erro) {
+      avisosCard.aviso_orcamento = avisoOrcamento;
+    }
+    if (idadeCri.aplica && idadeCri.aviso && card && typeof card === "object" && !(card as any).erro) {
+      avisosCard.aviso_idade = idadeCri.aviso;
+    }
+    return Object.keys(avisosCard).length && card && typeof card === "object" && !(card as any).erro
+      ? { ...(card as any), ...avisosCard }
       : card;
   }
 

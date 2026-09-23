@@ -41,8 +41,27 @@ export function ehIdentificadorNaoOrcamento(texto: string, idx: number, trechoIn
 }
 
 /**
+ * "35-75 anos" e "idade de 30 à 65" nao sao diaria.
+ * Incidente 23/09/2026: "orçamento de 30,00 e idade de público 35-75 anos"
+ * lia 75 como contrato e recusava o card de R$ 30 com orcamento_diferente_do_contrato.
+ */
+function ehFaixaDeIdade(texto: string, idx: number, trechoInt: string): boolean {
+  const before = String(texto ?? "").slice(Math.max(0, idx - 60), idx);
+  const after = String(texto ?? "").slice(
+    idx + String(trechoInt).length,
+    idx + String(trechoInt).length + 24,
+  );
+  if (/\bidade\b[^.\n]{0,60}$/i.test(before)) return true;
+  if (/\d{1,3}\s*[-–—]\s*$/.test(before) && /anos?\b/i.test(after)) return true;
+  if (/^\s*[-–—aà]\s*\d{1,3}/i.test(after) && /\b(idade|p[uú]blico|faixa|anos?)\b/i.test(before + after)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Ultimo orcamento diario falado pelo gestor.
- * Pega "o orçamento será o mesmo nos 4 (30,00)" e ignora idade "30 à 65".
+ * Pega "o orçamento será o mesmo nos 4 (30,00)" e ignora idade "30 à 65" e "35-75 anos".
  * CONJ.N / telefone no nome do conjunto nao contam.
  */
 export function extrairOrcamentoDiarioDaFala(texto: string): number | null {
@@ -53,6 +72,7 @@ export function extrairOrcamentoDiarioDaFala(texto: string): number | null {
     const n = parseParte(intP, dec);
     if (n == null) return;
     if (ehIdentificadorNaoOrcamento(t, idx, intP)) return;
+    if (ehFaixaDeIdade(t, idx, intP)) return;
     hits.push({ idx, val: n });
   };
 
@@ -77,7 +97,9 @@ export function extrairOrcamentoDiarioDaFala(texto: string): number | null {
   while ((mOrc = reOrc.exec(t))) {
     const start = mOrc.index + mOrc[0].length;
     const end = Math.min(t.length, start + 120);
-    const janela = t.slice(start, end);
+    let janela = t.slice(start, end);
+    const corteIdade = janela.search(/\bidade\b/i);
+    if (corteIdade >= 0) janela = janela.slice(0, corteIdade);
     const numRe = /(\d{1,4})(?:[.,](\d{2}))?/g;
     let n: RegExpExecArray | null;
     while ((n = numRe.exec(janela))) {

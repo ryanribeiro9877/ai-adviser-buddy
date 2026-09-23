@@ -481,6 +481,7 @@ import {
 } from "../_shared/interesse_targeting.ts";
 import {
   aplicarIdadeNoTargeting,
+  prepararIdadeParaCriacao,
   validarIdadeContraTargetingAtual,
   validarIdadeDoPedido,
 } from "../_shared/idade_targeting.ts";
@@ -2303,6 +2304,44 @@ export async function montarCriacao(
         }
       } catch {
         /* targeting invalido — Graph vai recusar com outro erro */
+      }
+    }
+
+    if (acao === "criar_conjunto_a_partir_de") {
+      const idadeCri = prepararIdadeParaCriacao((p ?? {}) as Record<string, unknown>);
+      if (!idadeCri.ok) return { erro: idadeCri.erro, detalhe: idadeCri.detalhe };
+      if (idadeCri.aplica) {
+        let tgtIdade: Record<string, unknown> = {};
+        if (body.targeting) {
+          try {
+            const parsed = JSON.parse(String(body.targeting));
+            if (parsed && typeof parsed === "object") tgtIdade = parsed as Record<string, unknown>;
+          } catch {
+            tgtIdade = {};
+          }
+        }
+        if (companyId) {
+          const { data: segIdade } = await supa.rpc("checar_segmentacao", {
+            p_company_id: companyId,
+            p_targeting: { age_min: idadeCri.params.age_min, age_max: idadeCri.params.age_max },
+          });
+          if (
+            segIdade && typeof segIdade === "object" &&
+            (segIdade as any).aplica === true && (segIdade as any).permitido === false
+          ) {
+            return {
+              erro: "segmentacao_recusada_pelo_gate",
+              detalhe: String((segIdade as any).mensagem_para_o_gestor ?? (segIdade as any).motivo ?? "checar_segmentacao recusou a idade."),
+              segmentacao: segIdade,
+            };
+          }
+        }
+        body.targeting = JSON.stringify(aplicarIdadeNoTargeting(tgtIdade, idadeCri.params));
+        if (posicionamento && typeof posicionamento === "object") {
+          (posicionamento as any).idade = idadeCri.resumo;
+          (posicionamento as any).aviso_idade = idadeCri.aviso;
+          (posicionamento as any).advantage_audience = idadeCri.params.advantage_audience ?? 0;
+        }
       }
     }
 

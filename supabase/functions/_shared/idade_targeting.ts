@@ -166,3 +166,44 @@ export function aplicarIdadeNoTargeting(
   next.targeting_automation = auto;
   return next;
 }
+
+/**
+ * Idade na CRIACAO de conjunto. Ausente = nao mexe no targeting herdado.
+ * Acima de 65 nao recusa o card: a Meta nao tem esse teto, entao entra 65 e o aviso volta na tool.
+ * Incidente 23/09/2026: pedido 35-75 morria na prosa ("idade 75 nao existe") e nenhum card saia.
+ */
+export function prepararIdadeParaCriacao(params: Record<string, unknown> | null | undefined):
+  | { ok: true; aplica: false }
+  | { ok: true; aplica: true; params: IdadePedido; resumo: string; aviso: string | null }
+  | { ok: false; erro: string; detalhe?: string } {
+  const p = isPlainObject(params) ? params : {};
+  const minRaw = p.idade_min ?? p.age_min;
+  const maxRaw = p.idade_max ?? p.age_max;
+  if ((minRaw == null || minRaw === "") && (maxRaw == null || maxRaw === "")) {
+    return { ok: true, aplica: false };
+  }
+  let min = parseIdade(minRaw);
+  let max = parseIdade(maxRaw);
+  const avisos: string[] = [];
+  if (max != null && max > IDADE_TETO) {
+    avisos.push(`Teto da Meta e ${IDADE_TETO}. idade_max ${max} entrou no card como ${IDADE_TETO}.`);
+    max = IDADE_TETO;
+  }
+  if (min != null && min > IDADE_TETO) {
+    avisos.push(`Teto da Meta e ${IDADE_TETO}. idade_min ${min} entrou no card como ${IDADE_TETO}.`);
+    min = IDADE_TETO;
+  }
+  const v = validarIdadeDoPedido({
+    ...p,
+    idade_min: min ?? minRaw,
+    idade_max: max ?? maxRaw,
+  });
+  if (!v.ok) return v;
+  return {
+    ok: true,
+    aplica: true,
+    params: v.params,
+    resumo: v.resumo,
+    aviso: avisos.length ? avisos.join(" ") : null,
+  };
+}

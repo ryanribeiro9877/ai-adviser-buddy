@@ -4,6 +4,7 @@ import {
   aplicarIdadeNoTargeting,
   faixaCompativelComAdvantagePlus,
   parseIdade,
+  prepararIdadeParaCriacao,
   validarIdadeContraTargetingAtual,
   validarIdadeDoPedido,
 } from "./idade_targeting.ts";
@@ -30,7 +31,17 @@ const menor = validarIdadeDoPedido({ idade_min: 13, idade_max: 65 });
 assert(!menor.ok && (menor as { erro: string }).erro === "idade_abaixo_de_18", "piso 18");
 
 const maior = validarIdadeDoPedido({ idade_min: 18, idade_max: 70 });
-assert(!maior.ok && (maior as { erro: string }).erro === "idade_acima_de_65", "teto 65");
+assert(!maior.ok && (maior as { erro: string }).erro === "idade_acima_de_65", "teto 65 na edicao");
+
+const criacao75 = prepararIdadeParaCriacao({ idade_min: 35, idade_max: 75 });
+assert(criacao75.ok && criacao75.ok && criacao75.aplica, "criacao 35-75 aplica");
+if (criacao75.ok && criacao75.aplica) {
+  assert(criacao75.params.age_min === 35 && criacao75.params.age_max === 65, "teto clamp 65");
+  assert(criacao75.params.advantage_audience === 0, "faixa estreita desliga A+");
+  assert(!!criacao75.aviso && /65/.test(criacao75.aviso), "aviso do teto");
+}
+const criacaoAusente = prepararIdadeParaCriacao({});
+assert(criacaoAusente.ok && criacaoAusente.ok && criacaoAusente.aplica === false, "sem idade nao mexe");
 
 const okFaixa = validarIdadeDoPedido({ idade_min: 25, idade_max: 54 });
 assert(okFaixa.ok, "25-54 ok");

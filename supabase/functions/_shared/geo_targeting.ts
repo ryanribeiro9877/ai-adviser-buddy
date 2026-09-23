@@ -169,15 +169,29 @@ export function normalizarGeoDoPedido(params: Record<string, unknown> | null | u
       if (!Array.isArray(val)) {
         return {
           erro: "custom_locations_invalido",
-          detalhe: "custom_locations deve ser array de {latitude,longitude,radius,…}.",
+          detalhe: "custom_locations deve ser array de {latitude,longitude,radius,distance_unit}.",
         };
       }
       if (val.length > MAX_LOCAIS) {
         return { erro: "geo_acima_do_limite", detalhe: `custom_locations > ${MAX_LOCAIS}.` };
       }
-      geo.custom_locations = val;
-      contagem.custom_locations = val.length;
-      totalLocais += val.length;
+      const pinos: Record<string, unknown>[] = [];
+      for (const item of val) {
+        const pino = normalizarPinoRaio(item);
+        if (!pino) {
+          return {
+            erro: "custom_locations_invalido",
+            detalhe:
+              "Cada item do raio precisa de latitude, longitude e radius em km (minimo 1, maximo 80). " +
+              "Ex.: {latitude:-12.949141,longitude:-38.431034,radius:1,distance_unit:\"kilometer\"}. " +
+              "Key de bairro nao e circulo. Resolva com buscar_geolocalizacao e raio_km.",
+          };
+        }
+        pinos.push(pino);
+      }
+      geo.custom_locations = pinos;
+      contagem.custom_locations = pinos.length;
+      totalLocais += pinos.length;
       continue;
     }
     if (!Array.isArray(val)) {
@@ -659,6 +673,187 @@ export async function buscarGeolocalizacoesMeta(opts: {
       `Ambiguos: revise escolhido vs encontrados antes de emitir o card.` +
       (rejeitados_fora_salvador_ba.length
         ? ` Rejeitados fora Salvador–BA: ${rejeitados_fora_salvador_ba.length}.`
-        : ""),
+        : "") +
+      ` Key de bairro ou cidade NAO e raio. Para circulo, chame de novo com raio_km.`,
   };
+}
+
+/** Raio em km. Minimo da Meta neste pais e 1; acima de 80 nao entra. */
+export function normalizarRaioKm(v: unknown): number | null {
+  if (v == null || v === "") return null;
+  const n = typeof v === "number" ? v : Number(String(v).trim().replace(",", "."));
+  if (!Number.isFinite(n) || n < 1 || n > 80) return null;
+  return Math.round(n * 100) / 100;
+}
+
+export function normalizarPinoRaio(item: unknown): Record<string, unknown> | null {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  const o = item as Record<string, unknown>;
+  const lat = Number(o.latitude);
+  const lng = Number(o.longitude);
+  const radius = Number(o.radius);
+  if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null;
+  if (!Number.isFinite(lng) || lng < -180 || lng > 180) return null;
+  if (!Number.isFinite(radius) || radius < 1 || radius > 80) return null;
+  const unit = String(o.distance_unit ?? "kilometer").trim().toLowerCase();
+  if (unit !== "kilometer" && unit !== "mile") return null;
+  const nome = o.name != null ? String(o.name).trim().slice(0, 80) : "";
+  return {
+    latitude: Math.round(lat * 1e6) / 1e6,
+    longitude: Math.round(lng * 1e6) / 1e6,
+    radius: Math.round(radius * 100) / 100,
+    distance_unit: unit,
+    ...(nome ? { name: nome } : {}),
+  };
+}
+
+export type LinhaGeocode = {
+  lat?: string;
+  lon?: string;
+  name?: string;
+  display_name?: string;
+  category?: string;
+  type?: string;
+  addresstype?: string;
+};
+
+const TIPOS_PINO = new Set([
+  "suburb",
+  "neighbourhood",
+  "quarter",
+  "city",
+  "town",
+  "village",
+  "administrative",
+  "hamlet",
+  "municipality",
+]);
+
+/** Prefere bairro/subúrbio a estação ou via. "CAB" em Salvador casa no Centro Administrativo, nao em Cabula. */
+export function escolherPinoGeocode(rows: LinhaGeocode[], cidade?: string): LinhaGeocode | null {
+  const lista = (rows ?? []).filter((r) => r && r.lat && r.lon);
+  if (!lista.length) return null;
+  const cidadeNorm = cidade ? cidade.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() : "";
+  const naCidade = cidadeNorm
+    ? lista.filter((r) =>
+      String(r.display_name ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().includes(cidadeNorm)
+    )
+    : lista;
+  const pool = naCidade.length ? naCidade : lista;
+  const lugar = pool.filter((r) => r.category !== "railway" && r.category !== "highway" && r.category !== "shop");
+  const base = lugar.length ? lugar : pool;
+  return base.find((r) =>
+    TIPOS_PINO.has(String(r.addresstype ?? "")) ||
+    TIPOS_PINO.has(String(r.type ?? "")) ||
+    r.category === "place" ||
+    r.category === "boundary"
+  ) ?? base[0];
+}
+
+export type PinoRaioResolvido = {
+  query: string;
+  nome: string;
+  latitude: number;
+  longitude: number;
+  radius: number;
+  distance_unit: "kilometer";
+};
+
+const NOMINATIM = "https://nominatim.openstreetmap.org/search";
+const UA_GEO = "SuperGestor/1.0 (geo-raio; conjunto Meta custom_locations)";
+
+function chavePino(lat: number, lng: number): string {
+  return `${lat.toFixed(3)}|${lng.toFixed(3)}`;
+}
+
+/**
+ * Coordenada + raio para params.geo_locations.custom_locations.
+ * A Graph adgeolocation devolve key de bairro, nao latitude. O circulo vem daqui.
+ */
+export async function geocodificarRaios(opts: {
+  nomes: string[];
+  raio_km: number;
+  cidade?: string;
+  regiao?: string;
+}): Promise<
+  | { ok: true; pinos: PinoRaioResolvido[]; ambiguo: boolean }
+  | { ok: false; erro: string; detalhe: string }
+> {
+  const vistos = new Set<string>();
+  const nomes: string[] = [];
+  for (const raw of opts.nomes ?? []) {
+    const s = String(raw ?? "").trim();
+    const k = s.toLowerCase();
+    if (!s || vistos.has(k)) continue;
+    vistos.add(k);
+    nomes.push(s);
+  }
+  if (!nomes.length) {
+    return { ok: false, erro: "nomes_obrigatorios", detalhe: "Informe nomes[] junto com raio_km." };
+  }
+  if (nomes.length > 8) {
+    return {
+      ok: false,
+      erro: "lote_de_raio_acima_do_limite",
+      detalhe: "No maximo 8 nomes quando ha raio_km. O circulo e um pino, nao um lote de bairros.",
+    };
+  }
+  const pinos: PinoRaioResolvido[] = [];
+  const falhas: string[] = [];
+  for (let i = 0; i < nomes.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 1100));
+    const nome = nomes[i];
+    const q = [nome, opts.cidade, opts.regiao, "Brasil"].filter((x) => String(x ?? "").trim()).join(", ");
+    const url = new URL(NOMINATIM);
+    url.searchParams.set("format", "jsonv2");
+    url.searchParams.set("limit", "5");
+    url.searchParams.set("countrycodes", "br");
+    url.searchParams.set("q", q);
+    try {
+      const r = await fetch(url.toString(), {
+        headers: { "user-agent": UA_GEO, accept: "application/json" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!r.ok) {
+        falhas.push(`${nome}: http_${r.status}`);
+        continue;
+      }
+      const body = await r.json();
+      const rows = Array.isArray(body) ? body as LinhaGeocode[] : [];
+      const escolhido = escolherPinoGeocode(rows, opts.cidade);
+      if (!escolhido) {
+        falhas.push(nome);
+        continue;
+      }
+      const latitude = Math.round(Number(escolhido.lat) * 1e6) / 1e6;
+      const longitude = Math.round(Number(escolhido.lon) * 1e6) / 1e6;
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        falhas.push(nome);
+        continue;
+      }
+      pinos.push({
+        query: nome,
+        nome: String(escolhido.name ?? nome).slice(0, 80),
+        latitude,
+        longitude,
+        radius: opts.raio_km,
+        distance_unit: "kilometer",
+      });
+    } catch (e) {
+      falhas.push(`${nome}: ${String((e as Error)?.message ?? e).slice(0, 80)}`);
+    }
+  }
+  const uniq = new Map<string, PinoRaioResolvido>();
+  for (const p of pinos) uniq.set(chavePino(p.latitude, p.longitude), p);
+  const finais = [...uniq.values()];
+  if (!finais.length) {
+    return {
+      ok: false,
+      erro: "coordenada_do_raio_indisponivel",
+      detalhe:
+        `Nao achei coordenada para o raio de ${opts.raio_km} km (${falhas.join("; ") || "sem resultado"}). ` +
+        "Nao use a key de bairro no lugar do circulo.",
+    };
+  }
+  return { ok: true, pinos: finais, ambiguo: finais.length > 1 };
 }
