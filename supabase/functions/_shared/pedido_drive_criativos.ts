@@ -45,6 +45,8 @@ export function textoTemSistemaOcular(p: string): boolean {
 export type RecorteDrive = {
   meio?: MeioDrive | null;
   soReelsVideos?: boolean;
+  /** Trecho do caminho (ex.: "setembro"). Sem isto o acervo inteiro estoura o payload. */
+  pastaContem?: string | null;
 };
 
 export function deaccPedido(s: string): string {
@@ -120,6 +122,30 @@ export function pedidoQualquerPastaDrive(pedido: string): boolean {
     /\bdentro dessa pasta raiz\b/.test(p);
 }
 
+const MESES_PASTA =
+  "janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro";
+
+/**
+ * "pasta de setembro" / pasta=09. Setembro. O token que casa no caminho e o mes,
+ * porque a pasta real se chama "09. Setembro".
+ */
+export function pastaContemDoPedido(pedido: string, args?: Record<string, unknown> | null): string | null {
+  const explicita = deaccPedido(String(args?.pasta ?? args?.pasta_contem ?? "")).trim();
+  if (explicita) {
+    const mes = explicita.match(new RegExp(`(${MESES_PASTA})`));
+    if (mes) return mes[1];
+    return explicita.slice(0, 80);
+  }
+  const p = deaccPedido(pedido);
+  const comPasta = p.match(new RegExp(
+    `\\bpasta\\s+(?:de\\s+|do\\s+|da\\s+)?(?:\\d{1,2}\\s*[.\\-]?\\s*)?(${MESES_PASTA})\\b`,
+  ));
+  if (comPasta) return comPasta[1];
+  const numerada = p.match(new RegExp(`\\b(?:0?[1-9]|1[0-2])\\s*[.\\-]\\s*(${MESES_PASTA})\\b`));
+  if (numerada) return numerada[1];
+  return null;
+}
+
 export function recorteDriveDoPedido(pedido: string, args?: Record<string, unknown> | null): RecorteDrive {
   const meio: MeioDrive | null = parseMeioDriveArg(args?.meio) ?? inferirMeioDrive(pedido);
   const formatos = args?.formatos ?? args?.pastas_formato;
@@ -129,7 +155,17 @@ export function recorteDriveDoPedido(pedido: string, args?: Record<string, unkno
   const soReelsVideos = pedidoSoReelsVideos(pedido)
     ? true
     : (pedidoQualquerPastaDrive(pedido) ? false : soPorArg);
-  return { meio, soReelsVideos };
+  const pastaContem = pastaContemDoPedido(pedido, args);
+  return { meio, soReelsVideos, pastaContem };
+}
+
+function itemNaPastaPedida(item: Record<string, unknown>, token: string): boolean {
+  const blob = deaccPedido(
+    [item.caminho, item.nome, item.pasta, item.arquivo, item.pasta_monitorada, item.formato_pasta]
+      .map((x) => String(x ?? ""))
+      .join(" "),
+  );
+  return blob.includes(deaccPedido(token));
 }
 
 export function caminhoEhReelsOuVideos(caminho: string): boolean {
@@ -179,16 +215,19 @@ export function itemDriveDoMeio(
 export function recortarItensDriveComAviso<T extends Record<string, unknown>>(
   itens: T[],
   recorte: RecorteDrive,
-): { itens: T[]; formatoIgnorado: boolean } {
+): { itens: T[]; formatoIgnorado: boolean; pastaSemItem: boolean } {
   const doMeio = (itens ?? []).filter((it) => itemDriveDoMeio(it, recorte.meio));
-  if (!recorte.soReelsVideos) return { itens: doMeio, formatoIgnorado: false };
-  const doFormato = doMeio.filter((it) => {
+  const token = String(recorte.pastaContem ?? "").trim();
+  const naPasta = token ? doMeio.filter((it) => itemNaPastaPedida(it, token)) : doMeio;
+  const pastaSemItem = !!token && doMeio.length > 0 && naPasta.length === 0;
+  if (!recorte.soReelsVideos) return { itens: naPasta, formatoIgnorado: false, pastaSemItem };
+  const doFormato = naPasta.filter((it) => {
     const caminho = String(it.caminho ?? it.arquivo ?? it.pasta ?? it.pasta_monitorada ?? "");
     const nome = String(it.nome ?? it.formato_pasta ?? "");
     return caminhoEhReelsOuVideos(`${caminho}/${nome}`);
   });
-  if (!doFormato.length && doMeio.length) return { itens: doMeio, formatoIgnorado: true };
-  return { itens: doFormato, formatoIgnorado: false };
+  if (!doFormato.length && naPasta.length) return { itens: naPasta, formatoIgnorado: true, pastaSemItem };
+  return { itens: doFormato, formatoIgnorado: false, pastaSemItem };
 }
 
 export function recortarItensDrive<T extends Record<string, unknown>>(itens: T[], recorte: RecorteDrive): T[] {
@@ -276,6 +315,7 @@ export function injetarArgsDrive(
   const a: Record<string, unknown> = { ...(args ?? {}) };
   const r = recorteDriveDoPedido(pedido, a);
   if (r.meio && !String(a.meio ?? "").trim()) a.meio = r.meio;
+  if (r.pastaContem && !String(a.pasta ?? "").trim()) a.pasta = r.pastaContem;
   if (r.soReelsVideos && a.formatos == null && a.pastas_formato == null) {
     a.formatos = ["Reels", "Videos"];
   }
@@ -339,7 +379,7 @@ export function compactarInventarioDriveParaAgente(
     porFormato[f] = (porFormato[f] ?? 0) + 1;
     if (a.eixo_pasta) porEixo[String(a.eixo_pasta)] = (porEixo[String(a.eixo_pasta)] ?? 0) + 1;
   }
-  const recortou = !!(recorte.meio || recorte.soReelsVideos);
+  const recortou = !!(recorte.meio || recorte.soReelsVideos || recorte.pastaContem);
   return {
     ...out,
     total_arquivos: filtrados.length,
@@ -349,18 +389,27 @@ export function compactarInventarioDriveParaAgente(
     arquivos: filtrados,
     ...(recortou
       ? {
-        aviso_recorte:
-          "Inventario recortado pelo pedido (meio e/ou so Reels/Videos). O total da empresa NAO e este recorte.",
+        aviso_recorte: avisoRecorteDrive(recorte, corte.pastaSemItem),
       }
       : {}),
     ...(corte.formatoIgnorado ? { recorte_formato_ignorado: AVISO_FORMATO_IGNORADO } : {}),
   };
 }
 
+function avisoRecorteDrive(recorte: RecorteDrive, pastaSemItem: boolean): string {
+  if (pastaSemItem && recorte.pastaContem) {
+    return `Nenhum arquivo com "${recorte.pastaContem}" no caminho. O acervo inteiro NAO foi devolvido. Confira o nome da pasta (ex.: 09. Setembro).`;
+  }
+  if (recorte.pastaContem) {
+    return `Recorte da pasta "${recorte.pastaContem}": so estes arquivos. Cada um entra em um unico conjunto, sem repetir. O total da empresa NAO e este recorte.`;
+  }
+  return "Inventario recortado pelo pedido (meio e/ou so Reels/Videos). O total da empresa NAO e este recorte.";
+}
+
 export function aplicarRecorteAcervo(data: unknown, recorte: RecorteDrive): unknown {
   if (!data || typeof data !== "object") return data;
   const obj = { ...(data as Record<string, unknown>) };
-  if (!recorte.meio && !recorte.soReelsVideos) return obj;
+  if (!recorte.meio && !recorte.soReelsVideos && !recorte.pastaContem) return obj;
   const itensIn = Array.isArray(obj.itens) ? (obj.itens as Record<string, unknown>[]) : [];
   const corte = recortarItensDriveComAviso(itensIn, recorte);
   const itens = corte.itens;
@@ -373,8 +422,9 @@ export function aplicarRecorteAcervo(data: unknown, recorte: RecorteDrive): unkn
     inventario_global_empresa: obj.inventario_global ?? null,
     inventario_global: recorteCount,
     inventario_recorte: recorteCount,
-    aviso_recorte:
-      "itens recortados pelo pedido. inventario_global e o RECORTE. O total da empresa ficou em inventario_global_empresa — NAO cite esse total como videos La Felicita.",
+    aviso_recorte: recorte.pastaContem
+      ? avisoRecorteDrive(recorte, corte.pastaSemItem)
+      : "itens recortados pelo pedido. inventario_global e o RECORTE. O total da empresa ficou em inventario_global_empresa — NAO cite esse total como videos La Felicita.",
     ...(corte.formatoIgnorado ? { recorte_formato_ignorado: AVISO_FORMATO_IGNORADO } : {}),
   };
 }
@@ -382,7 +432,7 @@ export function aplicarRecorteAcervo(data: unknown, recorte: RecorteDrive): unkn
 export function aplicarRecorteAnalisesDrive(data: unknown, recorte: RecorteDrive): unknown {
   if (!data || typeof data !== "object") return data;
   const obj = { ...(data as Record<string, unknown>) };
-  if (!recorte.meio && !recorte.soReelsVideos) return obj;
+  if (!recorte.meio && !recorte.soReelsVideos && !recorte.pastaContem) return obj;
   const itensIn = Array.isArray(obj.itens) ? (obj.itens as Record<string, unknown>[]) : [];
   const corte = recortarItensDriveComAviso(itensIn, recorte);
   const itens = corte.itens;
@@ -391,7 +441,7 @@ export function aplicarRecorteAnalisesDrive(data: unknown, recorte: RecorteDrive
     itens,
     recorte: corte.formatoIgnorado ? { ...recorte, soReelsVideos: false } : recorte,
     total_analisados: itens.length,
-    aviso_recorte: "analises recortadas pelo pedido (meio e/ou so Reels/Videos).",
+    aviso_recorte: avisoRecorteDrive(recorte, corte.pastaSemItem),
     ...(corte.formatoIgnorado ? { recorte_formato_ignorado: AVISO_FORMATO_IGNORADO } : {}),
   };
 }

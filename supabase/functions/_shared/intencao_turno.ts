@@ -197,6 +197,10 @@ const RE_CONTINUA_ATO_FIO =
 export function objetivoDoFio(atual: string, anteriores: string[]): string {
   const cur = String(atual ?? "").trim();
   if (!cur) return cur;
+  // 23/09/2026 ocular: "gere legendas e separe os conjuntos" no meio de um fio
+  // que ja tinha "emita os cards". O composto herdava o verbo de card, a janela
+  // gastava o acervo inteiro e a resposta dizia que faltou emitir card.
+  if (pedidoSoLegendasSemEmissao(cur)) return cur;
   if (ehPedidoDeAto(cur) || ehPerguntaDeLeitura(cur) || ehLeituraDeDesempenho(cur)) return cur;
   const prev = (anteriores ?? [])
     .map((s) => String(s ?? "").trim())

@@ -10,6 +10,7 @@ import {
   leituraDriveVoltouVazia,
   parseMeioDriveArg,
   normalizarMeioWaba,
+  pastaContemDoPedido,
   pastaFormatoIgnorada,
   deveDescerPastaDrive,
   pedidoExigeInventarioDrive,
@@ -232,5 +233,21 @@ assert(chat.includes("MSG_NUDGE_DRIVE_VAZIO"), "chat tem nudge de leitura vazia 
 assert(chat.includes("recorte_formato_ignorado"), "chat declara recorte descartado");
 assert(chat.includes("driveVazioIncompleto"), "chat auto-continua quando o Drive volta vazio");
 assert(chat.includes("pedidoSoLegendasSemEmissao"), "chat nao trata legendas como emissao");
+
+const pedidoSetembro =
+  "realize a analise dos criativos na pasta de setembro dentro do drive e os separe 4 para cada conjunto. gere legendas. [contexto do fio: sistema ocular]";
+const recorteSet = recorteDriveDoPedido(pedidoSetembro);
+assert(recorteSet.pastaContem === "setembro", "pasta de setembro vira token setembro");
+assert(recorteSet.meio === "sistema_ocular", "contexto do fio traz o ocular");
+assert(pastaContemDoPedido("liste a pasta 09. Setembro") === "setembro", "09. Setembro");
+const acervoMisto = aplicarRecorteAcervo({
+  itens: [
+    { nome: "a.mp4", caminho: "VISTTA/2026/09. Setembro/Reels/a.mp4", tipo: "video" },
+    { nome: "b.mp4", caminho: "VISTTA/2026/08. Agosto/Reels/b.mp4", tipo: "video" },
+    { nome: "c.mp4", caminho: "Juridico/2026/09. Setembro/c.mp4", tipo: "video" },
+  ],
+}, recorteSet) as { itens: { nome: string }[]; aviso_recorte?: string };
+assert(acervoMisto.itens.length === 1 && acervoMisto.itens[0].nome === "a.mp4", "so setembro do ocular");
+assert(String(acervoMisto.aviso_recorte ?? "").includes("setembro"), "aviso cita a pasta");
 
 console.log("ok pedido_drive_criativos");

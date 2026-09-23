@@ -201,8 +201,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_acervo_para_anuncio: {
     descricao:
-      "LEITURA do acervo do Drive para montar anuncio, com os ids da Meta e na_biblioteca_da_meta por peca. Em lote ou mix, chame SEM produto na primeira vez; quando o slate ja tem drive_file_ids, passe-os. Esta e a fonte para escolher peca do acervo — get_criativos_conteudo so tem anuncios ja no ar.",
-    parametros: {"type":"object","properties":{"produto":{"type":"string","description":"Opcional. Em lote/mix deixe vazio na 1a chamada."},"incluir_inaptas":{"type":"boolean","description":"Padrao true."},"drive_file_ids":{"type":"array","items":{"type":"string"},"description":"Opcional. Recorte: so estes arquivos (slate conhecido)."},"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}}}},
+      "LEITURA do acervo do Drive para montar anuncio, com os ids da Meta e na_biblioteca_da_meta por peca. Em lote ou mix, chame SEM produto na primeira vez; quando o slate ja tem drive_file_ids, passe-os. Se o gestor citou a pasta do mes (setembro, 09. Setembro), passe pasta com esse mes: o servidor recorta o caminho e nao devolve o acervo inteiro. Esta e a fonte para escolher peca do acervo — get_criativos_conteudo so tem anuncios ja no ar.",
+    parametros: {"type":"object","properties":{"produto":{"type":"string","description":"Opcional. Em lote/mix deixe vazio na 1a chamada."},"incluir_inaptas":{"type":"boolean","description":"Padrao true."},"drive_file_ids":{"type":"array","items":{"type":"string"},"description":"Opcional. Recorte: so estes arquivos (slate conhecido)."},"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro. Obrigatorio quando o gestor citou a pasta."}}},
     superficies: ["chat","job"], omitidos: {"job":["drive_file_ids"]},
     efeito: "leitura",
     setor: "Ativo criativo e copy",
@@ -225,8 +225,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_analise_visual_drive: {
     descricao:
-      "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Use quando o gestor pedir para classificar as pecas da pasta. Recorte por meio e formatos.",
-    parametros: {"type":"object","properties":{"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}}}},
+      "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Use quando o gestor pedir para classificar as pecas da pasta. Recorte por meio, formatos e pasta (mes, ex.: setembro).",
+    parametros: {"type":"object","properties":{"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro."}}},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Ativo criativo e copy",
@@ -273,8 +273,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_drive_criativos: {
     descricao:
-      "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo e data, sem thumbnail. Recorte com meio (la_felicita|juridico|sistema_ocular) e formatos (Reels, Videos). Use para LISTAR o que existe na pasta; nao substitui por get_criativos_conteudo, que traz anuncios ja no ar.",
-    parametros: {"type":"object","properties":{"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}}}},
+      "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo e data, sem thumbnail. Recorte com meio (la_felicita|juridico|sistema_ocular), formatos (Reels, Videos) e pasta (mes, ex.: setembro). Use para LISTAR o que existe na pasta; nao substitui por get_criativos_conteudo, que traz anuncios ja no ar.",
+    parametros: {"type":"object","properties":{"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro."}}},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Ativo criativo e copy",

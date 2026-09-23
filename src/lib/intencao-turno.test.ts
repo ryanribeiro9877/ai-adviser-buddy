@@ -264,6 +264,16 @@ describe("objetivoDoFio", () => {
     expect(objetivoDoFio("ok, pode seguir", [criar])).toBe("ok, pode seguir");
   });
 
+  it("nao herda emita cards quando a fala pede so legendas", () => {
+    const fala =
+      "agora preciso que voce realize a analise dos criativos na pasta de setembro dentro do drive e os separe 4 para cada um dos conjuntos, que totalizam 16 criativos. gere legendas para cada um deles e as traga para que eu as avalie uma por uma.";
+    const prev = "emita os cards de criacao dos 4 conjuntos na campanha SETEMBRO";
+    const out = objetivoDoFio(fala, [prev]);
+    expect(out).toBe(fala);
+    expect(pedidoSoLegendasSemEmissao(out)).toBe(true);
+    expect(ehPedidoDeAto(out)).toBe(false);
+  });
+
   it("pedido com verbo de ato fica como esta", () => {
     expect(objetivoDoFio("emita os 3 cards do conjunto 2", [criar])).toBe(
       "emita os 3 cards do conjunto 2",

@@ -1,4 +1,15 @@
 /** Espelho de src/lib/lote-criativo.ts — Deno nao importa o frontend. */
+/** Quantas legendas o pedido pede. Sem numero explicito, o lote classico fica em 6. */
+export function nLegendasPedidas(pedido: string): number {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  const total = p.match(/\b(\d{1,2})\s+criativos?\b/);
+  if (total) {
+    const n = Number(total[1]);
+    if (n >= 2 && n <= 24) return n;
+  }
+  return 6;
+}
+
 export function pedidoLoteCriativo(pedido: string): boolean {
   const p = deacc(String(pedido ?? "").toLowerCase());
   const pedeVarios =

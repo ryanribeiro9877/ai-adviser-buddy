@@ -816,7 +816,7 @@ import {
 import { urlDestinoSocialTopo, urlWhatsAppMe, ehUrlWhatsApp, digitosWhatsApp, ctaPadraoMensagensWhatsApp, ctaPadraoTrafegoWebsite, LINK_CTWA_API_WHATSAPP } from "../_shared/destino_url_lp.ts";
 import { preferidoWhatsAppParaAds, resolverWhatsAppCtwa, toolGetWhatsAppDaPagina } from "../_shared/whatsapp_pagina.ts";
 import { pipeboardListTools, pipeboardToken } from "../_shared/pipeboard.ts";
-import { pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto } from "../_shared/lote_criativo.ts";
+import { nLegendasPedidas, pedidoLoteCriativo, replyLoteComLegendas, replyLoteCriativoIncompleto } from "../_shared/lote_criativo.ts";
 import {
   casarConjuntosPorPedido,
   classificarLinhaProdutoCohapm,
@@ -1941,7 +1941,7 @@ function compactarAcervoParaAgente(data: unknown, filtroAtivo: boolean, recorte?
     if (it.bloqueada_por_compliance) o.bloqueada_por_compliance = it.bloqueada_por_compliance;
     return o;
   });
-  const recorteAtivo = !!(recorte?.meio || recorte?.soReelsVideos);
+  const recorteAtivo = !!(recorte?.meio || recorte?.soReelsVideos || recorte?.pastaContem);
   const tetoItens = recorteAtivo || filtroAtivo ? 50 : 25;
   const tetoChars = recorteAtivo ? 14000 : (filtroAtivo ? 9000 : 8000);
   const cortado = cortarLista({ ...obj, itens: compactos }, "itens", tetoChars) as Record<string, unknown>;
@@ -5683,6 +5683,12 @@ async function t_waba_status(companyId: string, meio?: string) {
 function prioridadeTool(nome: string, pedido: string): number {
   const p = norm(pedido);
   const perguntaLeitura = ehPerguntaDeLeitura(pedido);
+  if (pedidoSoLegendasSemEmissao(pedido) || (pedidoLoteCriativo(pedido) && /legend/.test(p))) {
+    if (nome === "gerar_legendas" || nome === "get_acervo_para_anuncio" || nome === "get_legendas_da_conversa") return 0;
+    if (nome === "get_drive_criativos") return 1;
+    if (nome === "registrar_peca_da_conversa" || nome === "registrar_legenda_da_conversa") return 2;
+    if (nome === "nota_visual_da_peca" || nome === "ler_brand_identity" || nome === "get_analise_visual_drive") return 40;
+  }
   if (perguntaLeitura && (
     nome === "propose_action" || nome === "gerar_legendas" ||
     nome === "upload_midia" || nome === "registrar_legenda_da_conversa" ||
@@ -6084,7 +6090,8 @@ async function runTool(name: string, args: any, ctx: any) {
           };
         }
         return await t_gerar_legendas(
-          ctx.companyId, ctx.mcpKey, args, ctx.convId, Math.min(28_000, restante - 8_000),
+          ctx.companyId, ctx.mcpKey, args, ctx.convId,
+          Math.min(26_000, Math.max(18_000, restante - 6_000)),
           String(ctx.pedido ?? ""),
         );
       }
@@ -7022,6 +7029,12 @@ Deno.serve(async (req) => {
       .filter((m: { role?: string }) => m.role === "user")
       .map((m: { content?: string }) => String(m.content ?? ""));
     objetivoOriginal = objetivoDoFio(message, usersPrev);
+    if (pedidoSoLegendasSemEmissao(objetivoOriginal) && !inferirMeioDrive(objetivoOriginal)) {
+      const meio = inferirMeioDrive(usersPrev.slice(-6).join("\n"));
+      if (meio === "sistema_ocular") objetivoOriginal += "\n[contexto do fio: sistema ocular]";
+      else if (meio === "la_felicita") objetivoOriginal += "\n[contexto do fio: la felicita]";
+      else if (meio === "juridico") objetivoOriginal += "\n[contexto do fio: juridico]";
+    }
   }
   let ultimoAssistantIdx = -1, ultimoUserIdx = -1;
   for (let i = cronologico.length - 1; i >= 0; i--) {
@@ -7619,7 +7632,12 @@ Deno.serve(async (req) => {
           const nomeSkip = String(tc.function?.name ?? "");
           const executarProposeAposColeta =
             nomeSkip === "propose_action" && precisaProposeAto() && aindaCabePropose() && !flushUpload;
-          if (!executarProposeAposColeta) {
+          const executarLegendaAposColeta =
+            nomeSkip === "gerar_legendas" &&
+            (pedidoSoLegendasSemEmissao(objetivoOriginal) || pedidoLoteTurno) &&
+            restanteAgora > 24_000 &&
+            !flushUpload;
+          if (!executarProposeAposColeta && !executarLegendaAposColeta) {
             deadlineTools = true;
             let argsSkip: any = {}; try { argsSkip = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
             messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
@@ -8022,7 +8040,8 @@ Deno.serve(async (req) => {
       /deadline|orcamento|consulta_nao_realizada|nao foi lido/i.test(String(t.erro ?? "")));
 
   const nLegendasOk = nGerarLegendasOk(turnCheckpoint, toolResults);
-  const loteFaltamLegendas = pedidoLote && nLegendasOk < 6;
+  const alvoLegendas = nLegendasPedidas(objetivoOriginal);
+  const loteFaltamLegendas = pedidoLote && nLegendasOk < alvoLegendas;
   const toolsPuladas = toolResults.some((t) =>
     /consulta_nao_realizada|deadline|teto de ferramentas|nao foi lido|flush_upload/i.test(String(t.erro ?? "")));
   const pedidoDetalhe = ehPedidoDetalhamentoCampanha(objetivoOriginal);
@@ -8064,7 +8083,8 @@ Deno.serve(async (req) => {
   );
   const maxSeg = pedidoUploadTurno
     ? (uploadCurto ? 3 : MAX_TURN_SEGMENTS_UPLOAD)
-    : (pedidoDetalhe || pedidoOrigem || leituraIncompleta || leituraComTeto || atoSemPropose || driveVazioIncompleto ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS);
+    : (pedidoLote && alvoLegendas > 6 ? 8
+      : (pedidoDetalhe || pedidoOrigem || leituraIncompleta || leituraComTeto || atoSemPropose || driveVazioIncompleto ? MAX_TURN_SEGMENTS_LEITURA : MAX_TURN_SEGMENTS));
   const podeContinuarSegmento = segmentoAtual < maxSeg;
   let continuarTurno = false;
   let usouFallback = false;

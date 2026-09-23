@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  nLegendasPedidas,
   pedidoLoteCriativo,
   replyLoteComLegendas,
   replyLoteCriativoIncompleto,
@@ -14,6 +15,14 @@ describe("pedidoLoteCriativo", () => {
 
   it("nao classifica pergunta de gasto como lote", () => {
     expect(pedidoLoteCriativo("quanto gastamos ontem no conjunto 1?")).toBe(false);
+  });
+
+  it("conta 16 criativos no pedido de setembro", () => {
+    const fala =
+      "separe 4 para cada um dos conjuntos, que totalizam 16 criativos. gere legendas para cada um deles. criativos diferentes";
+    expect(nLegendasPedidas(fala)).toBe(16);
+    expect(pedidoLoteCriativo(fala)).toBe(true);
+    expect(nLegendasPedidas("escolha 6 criativos diferentes e gere as legendas")).toBe(6);
   });
 
   it("nao classifica uma unica peca como lote de 6", () => {
