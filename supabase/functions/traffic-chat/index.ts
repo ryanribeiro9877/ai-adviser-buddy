@@ -1027,7 +1027,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.15";
+const VERSAO = "chat-v29.16";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -6156,7 +6156,9 @@ async function runTool(name: string, args: any, ctx: any) {
       case "get_slate_da_conversa": return await t_get_slate_da_conversa(ctx.companyId, ctx.convId, args);
       case "registrar_peca_da_conversa": return await t_registrar_peca_da_conversa(ctx.companyId, ctx.convId, args);
       case "get_criativos_conteudo": {
-        const buscaNome = String(args?.busca_nome ?? "").trim();
+        const buscaBruta = String(args?.busca_nome ?? "").trim();
+        const conj = buscaBruta.match(/conj\.?\s*0*(\d+)/i);
+        const buscaNome = conj ? `CONJ.${Number(conj[1])}` : buscaBruta;
         // v28.11: COM BUSCA, o default de somente_ativas inverte para false. Medido: 'Reel02' com
         // true devolve 0 e com false devolve 2 - e esses dois sao justamente os unicos moldes de
         // video que expoem object_story_spec, ou seja, os unicos que servem para o GT-13. Herdar o

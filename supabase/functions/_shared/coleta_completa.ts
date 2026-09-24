@@ -326,7 +326,7 @@ export function compactarItemCriativo(item: unknown): Record<string, unknown> {
     anuncio: c.anuncio ?? c.nome ?? c.name ?? null,
     campanha: c.campanha ?? null,
     conjunto: c.conjunto ?? c.adset ?? c.adset_name ?? null,
-    campanha_ativa: c.campanha_ativa === true,
+    campanha_ativa: c.campanha_ativa === true ? true : c.campanha_ativa === false ? false : null,
     status_anuncio: c.status_anuncio ?? c.status ?? null,
     object_type: c.object_type ?? null,
     cta: c.cta ?? null,

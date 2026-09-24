@@ -1,6 +1,7 @@
 // Prova: deno run --allow-read supabase/functions/_shared/_prova_coleta_completa.ts
 import {
   aplicarCompactacaoEstrutura,
+  aplicarCompactacaoCriativos,
   compactarConjuntoEstrutura,
   filtrarRelacaoAtivos,
   markdownRelacaoGeo,
@@ -30,6 +31,26 @@ const pedidoGeo =
 assert(ehPedidoRelacaoGeoPublico(pedidoGeo), "pedido geo/publico");
 assert(!ehPedidoRelacaoNumerica(pedidoGeo), "geo nao e relacao de gasto/criativo");
 assert(soAtivosDoPedido(pedidoGeo), "campanha ativa no pedido geo");
+
+const pausaConj4 = aplicarCompactacaoCriativos({
+  anuncios: [
+    {
+      anuncio: "WA_LAF_C4_AD10_Agosto10_V1",
+      campanha: "COHAPM_LAFELICITA_CONV_WA_2026-08",
+      conjunto: "LAF_WA_CONJ.4_9392-3821",
+      status: "ACTIVE",
+    },
+    {
+      anuncio: "WA_LAF_C4_AD01_Agosto01_V1",
+      campanha: "COHAPM_LAFELICITA_CONV_WA_2026-08",
+      conjunto: "LAF_WA_CONJ.4_9392-3821",
+      status: "ACTIVE",
+    },
+  ],
+}, "na campanha do lafelicita que esta ativa, pause os criativos do conjunto 4 e mantenha o AD10");
+const nomes = (pausaConj4.anuncios as { anuncio: string }[]).map((a) => a.anuncio);
+assert(nomes.includes("WA_LAF_C4_AD10_Agosto10_V1"), "AD10 ativo da La Felicita nao some no recorte");
+assert(nomes.includes("WA_LAF_C4_AD01_Agosto01_V1"), "os outros ativos do conjunto 4 tambem ficam");
 
 const gordos = Array.from({ length: 24 }, (_, i) => ({
   conjunto: i < 8 ? `JURIDICO_CONJ.${i + 1}` : `LAFELICITA_CONJ.${i}`,
