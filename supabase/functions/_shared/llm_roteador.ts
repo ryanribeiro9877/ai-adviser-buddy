@@ -72,6 +72,13 @@ export type TipoTarefaLlm =
 
 /** Modelo unico da casa. Trocar aqui troca em todo agente e toda tarefa. */
 export const MODELO_PADRAO = "x-ai/grok-4.7";
+/**
+ * Reserva imediata do chat e da triagem (AG-01). Nao e primario.
+ * 24/09/2026: o 4.7 ficou mudo 70s e o resgate foi para o Haiku, que nao coube
+ * na janela. O 4.6 e o modelo que a casa ja operava; entra primeiro na cadeia
+ * `models` para `aplicarResgateTimeout` troca-lo antes de Haiku e Luna.
+ */
+export const RESERVA_GROK_46 = "x-ai/grok-4.6";
 
 /** Valores aceitos pela OpenRouter para o padrao da casa (supported_efforts). */
 export type EsforcoRaciocinio = "low" | "medium" | "high" | "xhigh";
@@ -515,6 +522,10 @@ export function resolverChamadaLlm(opts: {
     motivo += ` [${MODELO_PADRAO} nao declara ${faltando} no catalogo — primario ${primario}]`;
   }
   const cadeia = montarCadeia(rede, primario, preferido);
+  if (tipo === "chat_loop" || tipo === "planner") {
+    const resto = cadeia.fallbacks.filter((s) => s !== RESERVA_GROK_46 && s !== MODELO_PADRAO);
+    cadeia.fallbacks = [RESERVA_GROK_46, ...resto].slice(0, 3);
+  }
   const esforco = esforcoDoModo(modo);
   motivo += ` | raciocinio ${esforco} (modo ${modo})`;
   return {

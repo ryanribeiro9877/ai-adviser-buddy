@@ -21,6 +21,9 @@ export type LlmModelo = {
 };
 
 export const CATALOGO_ECONOMIA: LlmModelo[] = [
+  // 24/09/2026: reserva do chat e do AG-01. Primario continua o 4.7 (premium).
+  // Mesmas capacidades medidas no 4.6 em 03/09: tools, visao, json, prosa.
+  { slug: "x-ai/grok-4.6", faixa: "economia", tools: true, visao: true, json: true, prosa: true, nota: "reserva do chat e da triagem; primario e o 4.7" },
   { slug: "openai/gpt-5.6-luna", faixa: "economia", tools: true, visao: true, json: true, prosa: true, nota: "#4 uso OR; padrao da casa para loop de tools" },
   { slug: "openai/gpt-5.6-luna-pro", faixa: "economia", tools: true, visao: true, json: true, prosa: true, nota: "mesma faixa Luna com margem extra de qualidade" },
   { slug: "google/gemini-3.7-flash", faixa: "economia", tools: true, visao: true, json: true, prosa: true, nota: "Flash recente; copy e visao baratas" },

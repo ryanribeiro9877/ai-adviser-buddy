@@ -908,6 +908,7 @@ import {
   resolverChamadaLlm,
   respostaLlmUtil,
 } from "../_shared/llm_roteador.ts";
+import { buscarChatOpenRouter } from "../_shared/openrouter_stream.ts";
 import { COMPANY_COHAPM, businessIdPorCompanyId, tokenAdsPorCompanyId, tokenWabaPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import {
   campanhaNoEscopoVinculoIg,
@@ -1026,7 +1027,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.11";
+const VERSAO = "chat-v29.12";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -7460,37 +7461,34 @@ Deno.serve(async (req) => {
       }
       return { erro: "openrouter_timeout", detalhe };
     }
-    // v28.32: AbortSignal — sem isso uma unica geracao com contexto grande segura o HTTP
-    // alem dos ~150s do gateway (ms_total=170s medido em 20/08 com 504 no cliente).
+    // v29.12: stream + silencio de 18s. Sem isso o Grok mudo segurava os 70s do teto
+    // e o fallback (agora o 4.6) morria no resto da janela (24/09, tokens 0).
     const capMs = Math.min(OPENROUTER_CALL_CAP_MS, restanteMs);
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), capMs);
-    let resp: Response;
-    let text: string;
+    let respOk = false;
+    let respStatus = 0;
+    let respHeaders = new Headers();
+    let text = "";
     const tModelo = Date.now();
     try {
-      resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` },
-        body: JSON.stringify(payload),
-        signal: ac.signal,
-      });
-      text = await resp.text();
-    } catch (e) {
-      const nome = String((e as any)?.name ?? "");
-      if (nome === "AbortError" || /abort/i.test(String((e as any)?.message ?? e))) {
-        return await resgatarHang(capMs, `chamada abortada apos ${capMs}ms (orcamento de parede)`);
+      const lido = await buscarChatOpenRouter({ payload, apiKey: OPENROUTER_KEY, capMs });
+      if (lido.aborted) {
+        const gasto = Date.now() - tModelo;
+        const por = lido.motivoAbort === "idle" ? "provedor mudo" : "orcamento de parede";
+        return await resgatarHang(gasto, `chamada abortada apos ${gasto}ms (${por})`);
       }
+      respOk = lido.ok;
+      respStatus = lido.status;
+      respHeaders = lido.headers;
+      text = lido.text;
+    } catch (e) {
       return { erro: "openrouter_fetch_failed", detalhe: String((e as any)?.message ?? e).slice(0, 200) };
     } finally {
-      clearTimeout(timer);
-      // Conta a viagem mesmo quando ela falha: timeout de modelo tambem e parede gasta.
       msModelo += Date.now() - tModelo;
     }
-    if (!resp.ok) {
+    if (!respOk) {
       // v21: degradacao em 2 passos. Tira o reasoning primeiro (parametro novo, nao provado)
       // e so depois o cache (provado funcionando em 4 turnos v20 - nao vale perder de graca).
-      if (resp.status === 400 || resp.status === 422) {
+      if (respStatus === 400 || respStatus === 422) {
         if (!reasoningDesativado) {
           reasoningDesativado = true; reasoningRejeitado = true;
           return await chamar(comTools, maxTokens, semRaciocinio, retry429);
@@ -7501,10 +7499,10 @@ Deno.serve(async (req) => {
         }
       }
       // v28.43: 429/502/503 — backoff curto se ainda cabe no HARD_LIMIT.
-      if ((resp.status === 429 || resp.status === 502 || resp.status === 503) && retry429 < 3) {
+      if ((respStatus === 429 || respStatus === 502 || respStatus === 503) && retry429 < 3) {
         const sobra = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
         if (sobra > 12_000) {
-          const ra = Number(resp.headers.get("retry-after"));
+          const ra = Number(respHeaders.get("retry-after"));
           const waitMs = Math.min(
             Number.isFinite(ra) && ra > 0 ? Math.floor(ra * 1000) : 1000 * (retry429 + 1),
             Math.min(8_000, sobra - 8_000),
@@ -7513,39 +7511,39 @@ Deno.serve(async (req) => {
           return await chamar(comTools, maxTokens, semRaciocinio, retry429 + 1, payloadForcado);
         }
       }
-      if (resp.status === 402) {
+      if (respStatus === 402) {
         console.warn(`[openrouter] 402 model=${payload.model} detalhe=${text.slice(0, 400)}`);
-        for (let i = 0; i < 3 && !resp.ok && resp.status === 402; i++) {
+        for (let i = 0; i < 3 && !respOk && respStatus === 402; i++) {
           const plano = aplicarResgate402(payload, text);
           if (!plano) break;
           const sobra402 = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
           if (sobra402 < 8_000) break;
           console.warn(`[openrouter] ${plano.motivo}`);
           payload = plano.payload;
-          const ac402 = new AbortController();
           const cap402 = Math.min(OPENROUTER_CALL_CAP_MS, sobra402);
-          const timer402 = setTimeout(() => ac402.abort(), cap402);
           const t402 = Date.now();
           try {
-            resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-              method: "POST",
-              headers: { "content-type": "application/json", authorization: `Bearer ${OPENROUTER_KEY}` },
-              body: JSON.stringify(payload),
-              signal: ac402.signal,
+            const lido402 = await buscarChatOpenRouter({
+              payload,
+              apiKey: OPENROUTER_KEY,
+              capMs: cap402,
             });
-            text = await resp.text();
-          } catch (e) {
-            const nome = String((e as any)?.name ?? "");
-            if (nome === "AbortError" || /abort/i.test(String((e as any)?.message ?? e))) {
-              return await resgatarHang(cap402, `chamada abortada apos ${cap402}ms (resgate 402)`);
+            if (lido402.aborted) {
+              const gasto = Date.now() - t402;
+              const por = lido402.motivoAbort === "idle" ? "provedor mudo" : "resgate 402";
+              return await resgatarHang(gasto, `chamada abortada apos ${gasto}ms (${por})`);
             }
+            respOk = lido402.ok;
+            respStatus = lido402.status;
+            respHeaders = lido402.headers;
+            text = lido402.text;
+          } catch (e) {
             return { erro: "openrouter_fetch_failed", detalhe: String((e as any)?.message ?? e).slice(0, 200) };
           } finally {
-            clearTimeout(timer402);
             msModelo += Date.now() - t402;
           }
         }
-        if (resp.ok) {
+        if (respOk) {
           try {
             const parsed402 = JSON.parse(text);
             if (!respostaLlmUtil(parsed402)) {
@@ -7555,7 +7553,7 @@ Deno.serve(async (req) => {
           } catch { return { erro: "openrouter_non_json", detalhe: text.slice(0, 300) }; }
         }
       }
-      return { erro: `openrouter_http_${resp.status}`, detalhe: text.slice(0, 300) };
+      return { erro: `openrouter_http_${respStatus}`, detalhe: text.slice(0, 300) };
     }
     try {
       const parsed = JSON.parse(text);

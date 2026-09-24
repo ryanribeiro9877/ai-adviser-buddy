@@ -14,6 +14,7 @@ import {
   MAX_TOKENS_PISO_RACIOCINIO,
   maxTokensDo402,
   MODELO_PADRAO,
+  RESERVA_GROK_46,
   respostaLlmUtil,
   type ModoRaciocinio,
   resolverChamadaLlm,
@@ -25,10 +26,11 @@ function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
 }
 
-assert(CATALOGO_ECONOMIA.length === 15, `economia=${CATALOGO_ECONOMIA.length}`);
+assert(CATALOGO_ECONOMIA.length === 16, `economia=${CATALOGO_ECONOMIA.length}`);
 assert(CATALOGO_PREMIUM.length === 15, `premium=${CATALOGO_PREMIUM.length}`);
 const slugs = CATALOGO_TODOS.map((m) => m.slug);
-assert(new Set(slugs).size === 30, "slugs duplicados no catalogo");
+assert(new Set(slugs).size === 31, "slugs duplicados no catalogo");
+assert(!!acharModelo(RESERVA_GROK_46), "grok-4.6 precisa estar no catalogo como reserva");
 assert(CATALOGO_ECONOMIA.every((m) => m.faixa === "economia" && m.tools), "economia deve ter tools");
 assert(CATALOGO_PREMIUM.every((m) => m.faixa === "premium"), "premium mal marcado");
 assert(MODELO_PADRAO === "x-ai/grok-4.7", `padrao vigente inesperado: ${MODELO_PADRAO}`);
@@ -76,6 +78,19 @@ assert(
   `fallback sem visao na rota de visao: ${visao.fallbacks.join(",")}`,
 );
 assert(visao.fallbacks[0] === "google/gemini-2.5-flash", `preferido antigo deve abrir a rede: ${visao.fallbacks[0]}`);
+
+// 24/09/2026: chat e triagem AG-01 resgatam primeiro no grok-4.6. O 4.7 continua primario.
+for (const opts of [
+  { tipo: "chat_loop" as const },
+  { tipo: "chat_loop" as const, pedidoAto: true },
+  { tipo: "chat_loop" as const, pergunta: "cenario completo da campanha la felicita" },
+  { tipo: "planner" as const },
+]) {
+  const r = resolverChamadaLlm(opts);
+  assert(r.model === MODELO_PADRAO, `${opts.tipo} primario=${r.model}`);
+  assert(r.fallbacks[0] === RESERVA_GROK_46, `${opts.tipo} reserva=${r.fallbacks[0]}`);
+  assert(!r.fallbacks.includes(MODELO_PADRAO), `${opts.tipo}: 4.7 nao pode repetir na reserva`);
+}
 
 // ---------------------------------------------------------------------------
 // 2. Esforco de raciocinio: quem dita e o MODO, e a NATUREZA da tarefa vence o tier.
