@@ -6,7 +6,7 @@ import {
   janelaDetalhe,
 } from "./leitura_desempenho.ts";
 import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
-import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, ehPedidoDeAto, ehPerguntaDeLeitura } from "./intencao_turno.ts";
+import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, ehPedidoDeAto, ehPerguntaDeLeitura, ehLeituraDeDesempenho } from "./intencao_turno.ts";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -81,6 +81,13 @@ assert(ehPedidoRelacaoNumerica(ocularValores), "valores dos conjuntos e relacao 
 assert(!ehPedidoDeAto(ocularValores), "traga valores nao e ato");
 assert(ehPerguntaDeLeitura(ocularValores), "traga valores e leitura");
 assert(ehPedidoDetalhamentoCampanha(ocularValores), "valores por conjunto e detalhamento");
+
+const cenarioLaf =
+  "preciso de um cenario completo da campanha do lafelicita que esta ativa na meta hoje, traga pra mim: a data inicial de criacao. quanto gastou ao total desde a criacao ate hoje. quantas conversas foram geradas desde a criacao ate hoje. qual o preco de conversa gerada total.";
+assert(!ehPedidoDeAto(cenarioLaf), "data de criacao nao e verbo de criar");
+assert(ehLeituraDeDesempenho(cenarioLaf), "cenario da campanha e leitura");
+assert(ehPerguntaDeLeitura(cenarioLaf), "cenario da campanha e pergunta de leitura");
+assert(ehPedidoDeAto("crie a campanha da la felicita"), "crie a campanha continua ato");
 
 const prosaIncompleta = `
 A configuração das campanhas e dos conjuntos foi lida; o detalhamento de desempenho diário por conjunto e anúncio não foi retornado nesta rodada.

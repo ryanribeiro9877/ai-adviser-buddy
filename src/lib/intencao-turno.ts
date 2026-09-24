@@ -4,7 +4,7 @@ function deacc(s: string): string {
 
 /** Verbos de emitir/criar/pausar — so estes autorizam propose_action. */
 export const RE_PEDIDO_DE_ATO =
-  /\b(crie|criar|cria|criacao|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
+  /\b(crie|criar|cria|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
 
 const RE_VERBO_FORTE_ATO =
   /\b(suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|quero subir|vamos criar)\b/;
@@ -15,7 +15,7 @@ const RE_VERBO_COM_ENTREGA_ANALITICA =
 
 /** "altere o orcamento" / "monte os conjuntos" — verbo fraco com objeto de escrita. */
 const RE_VERBO_FRACO_COM_OBJETO_DE_ESCRITA =
-  /\b(crie|criar|cria|criacao|altere|alterar|aumente|aumentar|reduza|reduzir|monte|montar)\s+.{0,50}\b(cards?|aprovacoes?|campanhas?|conjuntos?|anuncios?|criativos?|or[cç]amentos?|publicos?|lances?)\b/;
+  /\b(crie|criar|cria|altere|alterar|aumente|aumentar|reduza|reduzir|monte|montar)\s+.{0,50}\b(cards?|aprovacoes?|campanhas?|conjuntos?|anuncios?|criativos?|or[cç]amentos?|publicos?|lances?)\b/;
 
 /**
  * Leitura de desempenho: o gestor quer numero, ranking ou verificacao — nao card.
@@ -32,6 +32,7 @@ export function ehLeituraDeDesempenho(pedido: string): boolean {
     /\b(gastando mais|mais gast|gasto (por|dos|das|nas|nos)|quais.{0,40}gast)\b/.test(p) ||
     /\b(desempenho|pior|melhor).{0,40}(conjunto|campanha|anuncio)\b/.test(p) ||
     /\b(mesmas? informacoes|todos os valores|valores dos conjuntos)\b/.test(p) ||
+    /\b(cenario|desde a criacao|data inicial|quanto gastou|preco de conversa)\b/.test(p) ||
     ehPedidoRelacaoNumerica(p)
   );
 }

@@ -1027,7 +1027,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.13";
+const VERSAO = "chat-v29.14";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -1765,8 +1765,6 @@ async function t_campaign_detail(companyId: string, name_like: string, date_from
           : (cats.length ? "outra_categoria_especial" : "nao_marcada_no_espelho"),
       gasto_acumulado: brl(num(c.spend)),
     },
-    serie_diaria: rows.map(linhaDia),
-    serie_diaria_14d: rows.map(linhaDia),
     janela: { date_from: from, date_to: to },
     totais_periodo: {
       dias_com_dado: rows.length, dias_fechados: fechados.length,
@@ -1774,6 +1772,7 @@ async function t_campaign_detail(companyId: string, name_like: string, date_from
       gasto_medio_por_dia_fechado: fechados.length ? brl(gastoFechado / fechados.length) : null,
       ...totaisDe(tot, baseDoObjetivo(c.category, null, (c as any).objective)),
     },
+    serie_diaria: rows.map(linhaDia),
     outras_encontradas: hits.filter((x) => x.id !== c.id).slice(0, 5).map((x) => x.name),
     nota: "serie diaria e totais vem de metric_snapshots (D-1, coletor oficial pipeboard:meta). special_ad_categories e campo da CAMPANHA (Meta nao grava isso no anuncio): se a campanha tem FINANCIAL_PRODUCTS_SERVICES, TODOS os anuncios dela estao sob a categoria especial. Para confirmar ao vivo, ler_pipeboard get_campaign_details. DUAS BASES DE CLIQUE, NAO MISTURE: cliques_todos = TODOS os cliques; cliques_no_link = SO cliques de destino. ALCANCE: alcance_soma_diaria_nao_deduplicada e SOMA diaria (nao pessoas unicas).",
   };
