@@ -2834,12 +2834,9 @@ async function rodarSubagente(
   const identidade = ag
     ? `Voce e o ${ag.codigo} ${ag.nome}, especialista em ${ag.setor}, atuando pela unidade '${nome}'`
     : `Voce e o subagente '${nome}'`;
-  const fronteira = ag?.nao_delegar_quando ? `\nFORA DO SEU SETOR: ${ag.nao_delegar_quando}` : "";
-  const limites = Array.isArray(ag?.limites) && ag.limites.length
-    ? `\nNINGUEM NESTE SISTEMA: ${ag.limites.join(" ")}`
-    : "";
-  const sys = `${identidade} do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).
-MISSAO: ${cfg.missao}${fronteira}${limites}
+  const persona = ag?.papel ? `\n${ag.papel}` : "";
+  const sys = `${identidade} do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).${persona}
+MISSAO: ${cfg.missao}
 FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
 FIDELIDADE AO PEDIDO: interprete a pergunta de forma fria e literal. Nao amplie a janela, nao traga campanha fora do universo do CONTRATO DO PEDIDO, nao responda o que nao foi perguntado. Se o contrato traz date_from, ele e a janela de toda leitura de desempenho.
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio, registre em LACUNAS e siga so com a sua parte.

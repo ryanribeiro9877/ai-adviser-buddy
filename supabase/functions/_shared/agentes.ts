@@ -332,22 +332,17 @@ export function ferramentasDosAgentes(cat: CatalogoAgentes, refs: string[]): Set
   return chaves.size ? chaves : null;
 }
 
-/** Bloco de identidade para o system prompt do turno: quem esta atuando e onde e a fronteira. */
+/** Bloco de identidade do turno. So persona, habilidades e deveres — o campo `papel`. */
 export function blocoIdentidadeAgentes(cat: CatalogoAgentes, refs: string[]): string {
   const codigos = expandirComNucleoECascata(refs, cat);
   const escolhidos = cat.agentes
     .filter((a) => codigos.includes(a.codigo) && a.roteavel)
     .sort((x, y) => x.ordem - y.ordem);
   if (!escolhidos.length) return "";
-  const linhas = escolhidos.map((a) => {
-    const fronteira = a.nao_delegar_quando ? ` FORA DO SEU SETOR: ${a.nao_delegar_quando}` : "";
-    const limites = a.limites?.length ? ` NINGUEM FAZ: ${a.limites.join(" ")}` : "";
-    return `- ${a.codigo} ${a.nome} (${a.setor}): ${a.papel}${fronteira}${limites}`;
-  });
-  return `## AGENTES DESTE TURNO
-O Roteador delegou este pedido aos agentes abaixo. Voce atua como eles, com as ferramentas deles na mesa.
-${linhas.join("\n")}
-Se o pedido exigir setor que nao esta nesta lista, diga o que falta em vez de improvisar com a ferramenta mais parecida.`;
+  const linhas = escolhidos.map((a) =>
+    `### ${a.codigo} ${a.nome} — ${a.setor}\n${a.papel}`
+  );
+  return `## AGENTES DESTE TURNO\n${linhas.join("\n\n")}`;
 }
 
 // ============================================================================
