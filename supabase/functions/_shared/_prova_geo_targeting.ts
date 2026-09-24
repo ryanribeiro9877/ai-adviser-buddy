@@ -3,6 +3,7 @@ import {
   aplicarGeoNoTargeting,
   escolherPinoGeocode,
   itemParaGeoKey,
+  linhasDoPhoton,
   normalizarGeoDoPedido,
   normalizarRaioKm,
   paramsGeoComAliasCidades,
@@ -91,5 +92,22 @@ const pino = escolherPinoGeocode([
   { lat: "-12.949141", lon: "-38.431034", name: "Centro Administrativo da Bahia", category: "boundary", type: "administrative", addresstype: "suburb", display_name: "Centro Administrativo da Bahia, Salvador, Bahia, Brasil" },
 ], "Salvador");
 assert(pino?.name === "Centro Administrativo da Bahia", "CAB geocode prefere o suburbio, nao a estacao");
+
+const photon = linhasDoPhoton({
+  features: [
+    {
+      properties: { name: "Vila Centro Administrativo da Bahia", city: "Salvador", state: "Bahia", country: "Brasil", osm_key: "landuse", osm_value: "residential", type: "locality" },
+      geometry: { coordinates: [-38.4226448, -12.9388422] },
+    },
+    {
+      properties: { name: "Centro Administrativo da Bahia", city: "Salvador", state: "Bahia", country: "Brasil", osm_key: "place", osm_value: "suburb", type: "district" },
+      geometry: { coordinates: [-38.4310335, -12.9491408] },
+    },
+  ],
+});
+const pinoPhoton = escolherPinoGeocode(photon, "Salvador");
+assert(pinoPhoton?.name === "Centro Administrativo da Bahia", "photon escolhe o suburbio do CAB");
+assert(pinoPhoton?.lat === "-12.9491408", "latitude do CAB");
+assert(pinoPhoton?.lon === "-38.4310335", "longitude do CAB");
 
 console.log("OK geo_targeting prova");

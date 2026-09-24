@@ -760,7 +760,38 @@ export type PinoRaioResolvido = {
 };
 
 const NOMINATIM = "https://nominatim.openstreetmap.org/search";
+const PHOTON = "https://photon.komoot.io/api/";
 const UA_GEO = "SuperGestor/1.0 (geo-raio; conjunto Meta custom_locations)";
+
+/** Photon devolve [longitude, latitude]. A borda do Nominatim (403 no edge) cai aqui. */
+export function linhasDoPhoton(body: unknown): LinhaGeocode[] {
+  const features = (body as { features?: unknown[] } | null)?.features;
+  if (!Array.isArray(features)) return [];
+  const out: LinhaGeocode[] = [];
+  for (const f of features) {
+    const feat = f as {
+      properties?: { name?: string; city?: string; state?: string; country?: string; osm_value?: string; osm_key?: string; type?: string };
+      geometry?: { coordinates?: number[] };
+    };
+    const coords = feat.geometry?.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) continue;
+    const lon = coords[0];
+    const lat = coords[1];
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    const p = feat.properties ?? {};
+    const display = [p.name, p.city, p.state, p.country].filter(Boolean).join(", ");
+    out.push({
+      lat: String(lat),
+      lon: String(lon),
+      name: p.name,
+      display_name: display,
+      category: p.osm_key,
+      type: p.osm_value ?? p.type,
+      addresstype: p.type,
+    });
+  }
+  return out;
+}
 
 function chavePino(lat: number, lng: number): string {
   return `${lat.toFixed(3)}|${lng.toFixed(3)}`;
@@ -814,12 +845,25 @@ export async function geocodificarRaios(opts: {
         headers: { "user-agent": UA_GEO, accept: "application/json" },
         signal: AbortSignal.timeout(8000),
       });
-      if (!r.ok) {
-        falhas.push(`${nome}: http_${r.status}`);
-        continue;
+      let rows: LinhaGeocode[] = [];
+      if (r.ok) {
+        const body = await r.json();
+        rows = Array.isArray(body) ? body as LinhaGeocode[] : [];
       }
-      const body = await r.json();
-      const rows = Array.isArray(body) ? body as LinhaGeocode[] : [];
+      if (!rows.length) {
+        const photonUrl = new URL(PHOTON);
+        photonUrl.searchParams.set("q", q);
+        photonUrl.searchParams.set("limit", "5");
+        const pr = await fetch(photonUrl.toString(), {
+          headers: { accept: "application/json" },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (!pr.ok) {
+          falhas.push(`${nome}: http_${r.ok ? "vazio" : r.status}/${pr.status}`);
+          continue;
+        }
+        rows = linhasDoPhoton(await pr.json());
+      }
       const escolhido = escolherPinoGeocode(rows, opts.cidade);
       if (!escolhido) {
         falhas.push(nome);
