@@ -2,6 +2,7 @@
 import {
   casarConjuntosPorPedido,
   conjuntoVivoParaDestino,
+  desempateConjuntoAmbiguo,
   desempateDeAlvoDoCard,
   escolherNomeCriativoTravado,
   ehFlagSemMolde,
@@ -187,6 +188,20 @@ assert(
   assert(statusObjetoOperacional("ACTIVE"), "active fica");
   assert(!conjuntoVivoParaDestino({ status: "DELETED" }), "conjunto deleted nao e destino");
   assert(conjuntoVivoParaDestino({ status: "ACTIVE" }), "conjunto active e destino");
+  const tresConj1 = [
+    { name: "CONJ.1_LAF_8CRIATIVOS_JUN/JUL26 - 30-65ANOS", external_id: "120249714579300182" },
+    { name: "LAF_WA_CONJ.1_9213-6179", external_id: "120249788961240182" },
+    { name: "LAF_WA_CONJ.1_9213-6179_GEO_CAB", external_id: "120250192284730182" },
+  ];
+  const pelaFala = desempateConjuntoAmbiguo(
+    tresConj1,
+    "Emito no LAF_WA_CONJ.1_9213-6179_GEO_CAB da campanha de setembro",
+    [],
+  );
+  assert(pelaFala?.external_id === "120250192284730182", "nome completo na fala desempata o CONJ.1");
+  const peloCard = desempateConjuntoAmbiguo(tresConj1, "emita os proximos 2 cards", ["120250192284730182"]);
+  assert(peloCard?.external_id === "120250192284730182", "card anterior desempata o CONJ.1");
+  assert(desempateConjuntoAmbiguo(tresConj1, "conjunto 1", []) == null, "sem pista continua ambiguo");
   const pool = filtrarOperacionais([
     { name: "vivo", status: "CAMPAIGN_PAUSED" },
     { name: "morto", status: "DELETED" },

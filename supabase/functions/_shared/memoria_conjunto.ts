@@ -657,6 +657,47 @@ export function conjuntoVivoParaDestino(row: { status?: unknown } | null | undef
 }
 
 /**
+ * Vários CONJ.N da mesma linha. O fio já escolheu um: o id usado num card anterior
+ * desta conversa, ou o nome completo que já apareceu na fala.
+ * Medido 24/09/2026: o card do 01. Setembro saiu em LAF_WA_CONJ.1_9213-6179_GEO_CAB
+ * e "emita os próximos 2" morreu em conjunto_destino_ambiguo (agosto e setembro ativos).
+ */
+export function desempateConjuntoAmbiguo(
+  pool: Array<{ name?: string | null; external_id?: string | null }>,
+  fala: string,
+  idsJaUsados: string[],
+): { external_id: string; name: string } | null {
+  const vivos = (pool ?? []).filter((s) => String(s.external_id ?? "").trim());
+  if (vivos.length === 1) {
+    return { external_id: String(vivos[0].external_id), name: String(vivos[0].name ?? "") };
+  }
+  if (vivos.length < 2) return null;
+  const usados = new Set(idsJaUsados.map((id) => String(id ?? "").trim()).filter(Boolean));
+  const porUso = vivos.filter((s) => usados.has(String(s.external_id)));
+  if (porUso.length === 1) {
+    return { external_id: String(porUso[0].external_id), name: String(porUso[0].name ?? "") };
+  }
+  const blob = String(fala ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const porNome = vivos.filter((s) => {
+    const nome = String(s.name ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    return nome.length >= 12 && blob.includes(nome);
+  });
+  if (porNome.length >= 1) {
+    const ordenados = [...porNome].sort((a, b) => String(b.name ?? "").length - String(a.name ?? "").length);
+    const primeiro = String(ordenados[0].name ?? "").length;
+    const segundo = ordenados[1] ? String(ordenados[1].name ?? "").length : 0;
+    if (ordenados.length === 1 || primeiro > segundo) {
+      return { external_id: String(ordenados[0].external_id), name: String(ordenados[0].name ?? "") };
+    }
+  }
+  const porId = vivos.filter((s) => blob.includes(String(s.external_id)));
+  if (porId.length === 1) {
+    return { external_id: String(porId[0].external_id), name: String(porId[0].name ?? "") };
+  }
+  return null;
+}
+
+/**
  * Instrucao de desempate honesta quando sobram varios conjuntos com o mesmo nome.
  *
  * Mandar "informe params.campanha_destino" quando as duplicatas estao na MESMA campanha

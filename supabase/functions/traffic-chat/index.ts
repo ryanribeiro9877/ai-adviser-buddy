@@ -823,6 +823,7 @@ import {
   conjuntoNomeCasaComIdentidade,
   conjuntoNomeCasaComNumero,
   conjuntoVivoParaDestino,
+  desempateConjuntoAmbiguo,
   desempateDeAlvoDoCard,
   desempateDeConjunto,
   escolherConjuntosDaMesmaLinha,
@@ -1027,7 +1028,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.17";
+const VERSAO = "chat-v29.18";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -3969,6 +3970,21 @@ async function t_propose_criacao(
     // conjunto_destino_external_id — o que montarCriacao consome. Alias conjunto_destino so
     // resolve o objeto aqui; a RPC e o payload usam o external_id.
     const falaConv = await carregarFalaConversa(convId);
+    const { data: cardsDestinoConv } = await supa
+      .from("approval_requests")
+      .select("action, payload, execution_result")
+      .eq("company_id", companyId)
+      .eq("conversation_id", convId)
+      .in("action", ["criar_anuncio_a_partir_de", "criar_conjunto_a_partir_de"])
+      .order("created_at", { ascending: false })
+      .limit(15);
+    const idsJaUsados: string[] = [];
+    for (const r of cardsDestinoConv ?? []) {
+      const doCard = String((r as any)?.payload?.conjunto_destino_external_id ?? "").trim();
+      const criado = String((r as any)?.execution_result?.id_criado ?? "").trim();
+      if (doCard) idsJaUsados.push(doCard);
+      if ((r as any)?.action === "criar_conjunto_a_partir_de" && criado) idsJaUsados.push(criado);
+    }
     const conjuntoDestinoParam = String(
       params?.conjunto_destino ?? params?.conjunto_destino_external_id ?? "",
     ).trim();
@@ -4034,7 +4050,9 @@ async function t_propose_criacao(
           candidatos: mesmaLinha.slice(0, 12).map((s: any) => s.name),
         };
       } else if (pool.length > 1) {
-        return {
+        const escolhido = desempateConjuntoAmbiguo(pool, falaConv.blob, idsJaUsados);
+        if (escolhido) conjuntoDestino = escolhido.external_id;
+        else return {
           erro: "conjunto_destino_ambiguo",
           detalhe: desempateDeConjunto(
             `Ha ${pool.length} conjuntos ${rotuloPedido} da mesma linha.`,
@@ -4288,7 +4306,9 @@ async function t_propose_criacao(
           candidatos: mesmaLinha.slice(0, 12).map((s: any) => s.name),
         };
       } else {
-        return {
+        const escolhido = desempateConjuntoAmbiguo(pool, falaConv.blob, idsJaUsados);
+        if (escolhido) dest = pool.find((s) => s.external_id === escolhido.external_id) ?? null;
+        if (!dest) return {
           erro: "conjunto_destino_ambiguo",
           detalhe: desempateDeConjunto(`Ha ${pool.length} conjuntos ${rotuloPedido}.`, pool),
           candidatos: pool.slice(0, 8).map((s: any) => {
