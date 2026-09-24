@@ -16,7 +16,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
+import { aplicarResgate402, bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
 import {
   empresaEhCredito,
   filtrarRegrasPorEmpresa,
@@ -200,22 +200,38 @@ Deno.serve(async (req) => {
     content.push({ type: "image_url", image_url: { url: `data:${mime};base64,${imgB64}` } });
 
   const rota = resolverChamadaLlm({ tipo: "compliance", temImagem: !!imgB64 });
-  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  let payload = bodyOpenRouter(rota, {
+    max_tokens: tetoDeSaida(),
+    messages: [{ role: "user", content }],
+  });
+  let resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${OPENROUTER_KEY}`,
     },
-    body: JSON.stringify(bodyOpenRouter(rota, {
-      // 05/09/2026: 2.000 ficava ABAIXO do p50 de saida do padrao da casa (2.609 medido em
-      // chat_messages para esforco `high`). O veredito de conformidade e curto, mas o teto
-      // conta raciocinio + texto: o modelo pensava, estourava e devolvia `content` vazio, o
-      // que aqui cai em `veredito_nao_estruturado` — 502 alto, mas 502 sempre.
-      max_tokens: tetoDeSaida(),
-      messages: [{ role: "user", content }],
-    })),
+    body: JSON.stringify(payload),
   });
-  const raw = await resp.text();
+  let raw = await resp.text();
+  let tentativasEmVoo = 0;
+  for (let i = 0; !resp.ok && resp.status === 402 && i < 3; i++) {
+    const plano = aplicarResgate402(payload, raw, { tentativasEmVoo });
+    if (!plano) break;
+    if (plano.esperarMs) {
+      tentativasEmVoo++;
+      await new Promise((r) => setTimeout(r, Math.min(plano.esperarMs, 4000)));
+    }
+    payload = plano.payload;
+    resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${OPENROUTER_KEY}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    raw = await resp.text();
+  }
   if (!resp.ok)
     return json({ error: `openrouter_http_${resp.status}`, detail: raw.slice(0, 300) }, 502);
   let parsed: any;

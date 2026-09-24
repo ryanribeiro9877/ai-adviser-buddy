@@ -2577,14 +2577,16 @@ async function chamarLLM(messages: any[], opts: {
     ({ resp, text, aborted } = await postOnce(payload));
     if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   }
-  // 402 nao e retriaivel no mesmo primario: a OpenRouter reserva o Grok inteiro e recusa
-  // o request antes de tentar `models`. Troca o primario / corta max_tokens e tenta de novo.
+  // 402 de orcamento em voo repete o mesmo Grok. So depois disso troca o primario.
   if (!resp.ok && resp.status === 402) {
     console.warn(`[openrouter] 402 model=${payload.model} detalhe=${text.slice(0, 400)}`);
+    let tentativasEmVoo = 0;
     for (let i = 0; i < 3 && !resp.ok && resp.status === 402; i++) {
-      const plano = aplicarResgate402(payload, text);
+      const plano = aplicarResgate402(payload, text, { tentativasEmVoo });
       if (!plano) break;
+      if (plano.esperarMs) tentativasEmVoo++;
       console.warn(`[openrouter] ${plano.motivo}`);
+      if (plano.esperarMs) await new Promise((r) => setTimeout(r, Math.min(plano.esperarMs, 4000)));
       payload = plano.payload;
       JOB_LLM_ROTAS.push({
         tipo: rota.tipo, model: String(payload.model ?? ""), faixa: rota.faixa,

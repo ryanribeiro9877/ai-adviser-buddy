@@ -332,6 +332,11 @@ assert(tetoDeSaida(900) === MAX_TOKENS_PISO_RACIOCINIO, "fora do legado, o piso 
   );
   assert(troca != null && troca.payload.model === "openai/gpt-5.6-luna", "402 generico troca o primario");
   assert(JSON.stringify(troca.payload.models) === JSON.stringify(["google/gemini-2.5-flash"]), "402 consome o primeiro fallback");
+  const emVoo = "This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle. in_flight_budget_exhausted";
+  const espera = aplicarResgate402({ model: MODELO_PADRAO, models: ["x-ai/grok-4.6", "openai/gpt-5.6-luna"], max_tokens: 8000 }, emVoo);
+  assert(espera != null && espera.payload.model === MODELO_PADRAO && (espera.esperarMs ?? 0) > 0, "402 em voo repete o Grok");
+  const depois = aplicarResgate402({ model: MODELO_PADRAO, models: ["x-ai/grok-4.6"], max_tokens: 8000 }, emVoo, { tentativasEmVoo: 2 });
+  assert(depois != null && depois.payload.model === "x-ai/grok-4.6", "depois da espera, 402 em voo cai no Grok 4.6");
   assert(aplicarResgate402({ model: MODELO_PADRAO, max_tokens: 800 }, "Insufficient credits") == null, "sem rede e sem teto para cortar, nao ha resgate");
 }
 

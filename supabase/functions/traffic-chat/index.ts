@@ -1028,7 +1028,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.18";
+const VERSAO = "chat-v29.19";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -7534,12 +7534,17 @@ Deno.serve(async (req) => {
       }
       if (respStatus === 402) {
         console.warn(`[openrouter] 402 model=${payload.model} detalhe=${text.slice(0, 400)}`);
+        let tentativasEmVoo = 0;
         for (let i = 0; i < 3 && !respOk && respStatus === 402; i++) {
-          const plano = aplicarResgate402(payload, text);
+          const plano = aplicarResgate402(payload, text, { tentativasEmVoo });
           if (!plano) break;
+          if (plano.esperarMs) tentativasEmVoo++;
           const sobra402 = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
           if (sobra402 < 8_000) break;
           console.warn(`[openrouter] ${plano.motivo}`);
+          if (plano.esperarMs) {
+            await new Promise((r) => setTimeout(r, Math.min(plano.esperarMs, 4000)));
+          }
           payload = plano.payload;
           const cap402 = Math.min(OPENROUTER_CALL_CAP_MS, sobra402);
           const t402 = Date.now();

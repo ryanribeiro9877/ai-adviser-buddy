@@ -625,11 +625,26 @@ export function maxTokensDo402(detalhe: string, maxAtual: number): number | null
   return teto < n ? teto : null;
 }
 
+export function eh402OrcamentoEmVoo(detalhe: string): boolean {
+  return /in_flight_budget_exhausted|in-flight requests settle/i.test(String(detalhe ?? ""));
+}
+
 export function aplicarResgate402(
   payload: Record<string, unknown>,
   detalhe: string,
-): { payload: Record<string, unknown>; motivo: string } | null {
+  opts?: { tentativasEmVoo?: number },
+): { payload: Record<string, unknown>; motivo: string; esperarMs?: number } | null {
   const s = String(detalhe ?? "");
+  // 24/09/2026: 402 in_flight_budget_exhausted nao e falta de credito. Trocar na hora
+  // para o Luna fazia a validacao e o chat sairem no GPT com o Grok ainda sendo o padrao.
+  // Espera curta e repete o mesmo modelo; so depois disso a rede de fallback entra.
+  if (eh402OrcamentoEmVoo(s) && (opts?.tentativasEmVoo ?? 0) < 2) {
+    return {
+      payload,
+      motivo: "402 orcamento em voo — repetir o mesmo modelo",
+      esperarMs: 2000,
+    };
+  }
   const mencionaTeto = /max_tokens|affordable|fewer max/i.test(s);
   const maxAtual = Number(payload.max_tokens ?? 0);
   const teto = maxTokensDo402(s, maxAtual);
