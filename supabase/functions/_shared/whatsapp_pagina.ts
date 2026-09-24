@@ -127,6 +127,16 @@ export function ehRecusaWhatsappNaoLigado(body: unknown): boolean {
     .test(msg);
 }
 
+/**
+ * (#200) Permissions error no create_adset. Medido 24/09/2026 no CONJ.3 La Felicità:
+ * o conjunto vivo de agosto tem só whatsapp_phone_number; o card novo mandou também
+ * whats_app_business_phone_number_id e a Meta recusou. O conjunto 4, com id válido, passou.
+ */
+export function ehRecusaPermissaoDoIdWhatsApp(body: unknown): boolean {
+  const s = typeof body === "string" ? body : JSON.stringify(body ?? "");
+  return /\(#200\)\s*Permissions error/i.test(s);
+}
+
 function phoneIdValido(id: unknown): string | null {
   const s = String(id ?? "").trim();
   if (!s || s.startsWith("ads-wa:")) return null;

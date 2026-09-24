@@ -409,6 +409,7 @@ import {
   candidatosPromotedObjectCtwa,
   diagnosticoRecusaWhatsApp,
   ehRecusaWhatsappNaoLigado,
+  ehRecusaPermissaoDoIdWhatsApp,
   listarWhatsAppDaPagina,
   resolverWhatsAppCtwa,
   variantesDigitosWhatsAppBr,
@@ -4639,7 +4640,7 @@ Deno.serve(async (req) => {
         if (
           !exec.id &&
           (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") &&
-          ehRecusaWhatsappNaoLigado(exec.body) &&
+          (ehRecusaWhatsappNaoLigado(exec.body) || ehRecusaPermissaoDoIdWhatsApp(exec.body)) &&
           cands.length
         ) {
           const tentativasWa: unknown[] = [{ label: "primeiro", status: exec.status, body: exec.body }];

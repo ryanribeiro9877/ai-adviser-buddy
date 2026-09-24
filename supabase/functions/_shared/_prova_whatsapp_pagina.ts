@@ -5,6 +5,7 @@ import {
   mesmaLinhaWhatsApp,
   casarNumeroWhatsApp,
   ehRecusaWhatsappNaoLigado,
+  ehRecusaPermissaoDoIdWhatsApp,
   candidatosPromotedObjectCtwa,
   parecerPedidoWhatsAppConjunto,
   diagnosticoRecusaWhatsApp,
@@ -41,6 +42,11 @@ assert(match?.phone_number_id === "1282892438232205", "leva o id do match");
 assert(ehRecusaWhatsappNaoLigado({
   error: { error_subcode: SUBCODE_WA_NAO_LIGADO, error_user_msg: "This WhatsApp phone number is not linked to your account" },
 }), "1487246");
+assert(ehRecusaPermissaoDoIdWhatsApp({
+  status: 200,
+  body: { texto: "create_adset failed: { \"message\": \"(#200) Permissions error\", \"code\": 200 }" },
+}), "200 permissions do id do WhatsApp");
+assert(!ehRecusaPermissaoDoIdWhatsApp({ status: 200, body: { id: "123" } }), "sucesso nao e recusa 200");
 
 const cands = candidatosPromotedObjectCtwa({
   pageId: "105656372312257",
