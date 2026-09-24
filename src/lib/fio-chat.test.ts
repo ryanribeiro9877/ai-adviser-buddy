@@ -88,6 +88,12 @@ describe("isProgressOnlyReply — vazio nao e resposta", () => {
   it("prosa comum e resposta", () => {
     expect(isProgressOnlyReply(RESPOSTA_REAL)).toBe(false);
   });
+
+  it("vou puxar nao fecha o turno", () => {
+    expect(isProgressOnlyReply(
+      "Vou puxar cada anúncio da campanha ativa de La Felicità, conjunto por conjunto, com criação, gasto, conversas e preço desde o início.",
+    )).toBe(true);
+  });
 });
 
 describe("isJobFailureStub — stub de falha nao encerra o turno", () => {

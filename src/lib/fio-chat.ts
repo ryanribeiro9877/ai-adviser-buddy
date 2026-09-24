@@ -82,6 +82,12 @@ export function isProgressOnlyReply(text: string): boolean {
   if (/##\s*status do upload/i.test(raw)) return false;
   const t = deaccFront(raw.toLowerCase());
   if (raw.length < 80 && /continuando|montando os pedidos/.test(t)) return true;
+  if (
+    raw.length < 400 &&
+    /\b(vou|irei|deixe-?me|deixa eu)\b.{0,80}\b(puxar|trazer|consultar|ler|classificar|listar|fechar|detalhar|buscar|cruzar)\b/.test(t)
+  ) {
+    return true;
+  }
   return (
     /^montando os pedidos de aprovacao/.test(t) ||
     /^continuando automaticamente/.test(t) ||

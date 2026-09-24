@@ -1027,7 +1027,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.14";
+const VERSAO = "chat-v29.15";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -1138,7 +1138,7 @@ function ehStubProgressoChat(s: string): boolean {
 }
 // Narracao mid-loop ("vou consultar…") — nao conta como resposta que fecha o turno.
 const RE_INTENCAO =
-  /\b(vou|deixe-?me|deixa eu|irei|vou apenas)\b.{0,80}\b(cruzar|ler|consultar|verificar|checar|buscar|abrir|olhar|coletar|apurar|rodar|chamar|emitir|criar|propor)\b/i;
+  /\b(vou|deixe-?me|deixa eu|irei|vou apenas)\b.{0,80}\b(cruzar|ler|consultar|verificar|checar|buscar|abrir|olhar|coletar|apurar|rodar|chamar|emitir|criar|propor|puxar|trazer|classificar|listar|detalhar|fechar|levantar|separar|dividir|montar|organizar)\b/i;
 const HIST = 24;
 // v28.11: orcamento da reinjecao de retorno de ferramenta.
 // TETO_PERSIST e o MESMO corte aplicado ao que vai para o modelo: persistir mais seria gravar
@@ -8192,8 +8192,10 @@ Deno.serve(async (req) => {
       ? uploadIncompleto
       : (!replyTrim || atoEmAndamentoSemCard || loteFaltamLegendas || leituraIncompleta || detalheSemTool || origemSemTool)
   );
-  const falhaModelo = /openrouter/.test(String(finishReason));
-  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && !falhaModelo && (
+  // Timeout com ferramentas ja lidas nao e turno perdido: a janela seguinte
+  // retoma do checkpoint. So bloqueia continuacao quando o modelo nao devolveu nada.
+  const falhaModeloSemColeta = /openrouter/.test(String(finishReason)) && toolsUsed.length === 0;
+  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && !falhaModeloSemColeta && (
     deadlineSemConteudo ||
     (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas)) ||
     uploadIncompleto ||
