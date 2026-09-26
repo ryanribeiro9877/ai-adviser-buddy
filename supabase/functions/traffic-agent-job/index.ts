@@ -1,4 +1,8 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.27)
+// supabase/functions/traffic-agent-job/index.ts (v4.28)
+// v4.28 (26/09/2026) - RELATORIO SEM NARRATIVA: colheita 36/36 em ~6s, mas criativos e
+//   alertas ainda rodavam. O Grok pendurava, o resgate repetia a chamada inteira e a
+//   escrita recebia 28s/52s (openrouter_timeout_27889 e _52501 na Lafelicità, 25 e
+//   26/09). Com a colheita fechada a narrativa sai direto da base, no orçamento de 150s.
 // v4.27 (18/09/2026) - RELACAO GEO/PUBLICO: "relação geográfica de cada conjunto" +
 //   "como foi definido o público-alvo" caía em ehPedidoRelacaoNumerica só pela palavra
 //   "relação" e a colheita despejava criativos/CPL. Classificador separado; colheita
@@ -5684,6 +5688,19 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
     if (colheita.temWaba) lote = lote.filter((p) => p.nome !== "whatsapp_waba");
     if (!lote.length && !colheita.temDesempenho) {
       lote.push({ nome: "desempenho_campanhas", foco: focoExtra });
+    }
+    // Colheita fechada já leu campanha, anúncio, ranking, alerta, recomendação,
+    // criativo e fadiga. Os especialistas que sobravam (criativos, alertas) reliam
+    // isso por LLM. A primeira chamada cabe em prazo−120s (~220s); se o modelo
+    // pendura, o resgate em chamarLLM repete o mesmo teto e a reserva da narrativa
+    // some. Medido: Lafelicità 25/09 escrita com 52s, 26/09 com 28s, tabelas ok.
+    const colheitaFechada = colheita.temDesempenho
+      && colheita.total > 0
+      && colheita.ok === colheita.total
+      && colheita.falhas.length === 0;
+    if (colheitaFechada) {
+      console.warn(`[relatorio] colheita fechada ${colheita.ok}/${colheita.total} em ${colheita.ms}ms; narrativa sem especialistas extras`);
+      lote = [];
     }
 
     const ctxLote = { companyId, companyName, mcpKey, pedido: pergunta };
