@@ -125,6 +125,8 @@ export function FormularioMissao({
   isAdmin,
   onSubmit,
   ocupado = false,
+  campanhaTravada = false,
+  rotuloBotao = "Criar força-tarefa",
 }: {
   form: FormMissaoRitmo;
   onChange: (next: FormMissaoRitmo) => void;
@@ -136,6 +138,9 @@ export function FormularioMissao({
   isAdmin: boolean;
   onSubmit?: (form: FormMissaoRitmo) => void;
   ocupado?: boolean;
+  /** Em execução a campanha já está concedida: o seletor some e o nome fica fixo. */
+  campanhaTravada?: boolean;
+  rotuloBotao?: string;
 }) {
   const set = (patch: Partial<FormMissaoRitmo>) => onChange({ ...form, ...patch });
   const ativas = useMemo(
@@ -169,52 +174,62 @@ export function FormularioMissao({
       <div className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <Label htmlFor="ritmo-campanha">Campanha</Label>
-          <div className="flex items-center gap-2">
-            <Badge variant={fonteCampanhas === "ao_vivo" ? "default" : "outline"}>
-              {fonteCampanhas === "ao_vivo" ? "lista ao vivo" : "espelho local"}
-            </Badge>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={onRecarregarCampanhas}
-              disabled={carregandoCampanhas}
-            >
-              Atualizar lista
-            </Button>
-          </div>
-        </div>
-        {avisoFonte && <p className="text-xs text-muted-foreground">{avisoFonte}</p>}
-        <Select
-          value={form.campaignId || undefined}
-          disabled={!isAdmin}
-          onValueChange={(id) => {
-            const c = ativas.find((x) => x.external_id === id);
-            set({
-              campaignId: id,
-              campaignName: c?.nome ?? "",
-              adAccountId: "",
-            });
-          }}
-        >
-          <SelectTrigger id="ritmo-campanha" className="w-full">
-            <SelectValue placeholder="Escolha uma campanha ativa" />
-          </SelectTrigger>
-          <SelectContent position="item-aligned" className={CLASSE_LISTA_SELETOR}>
-            {ativas.map((c) => (
-              <SelectItem
-                key={c.external_id}
-                value={c.external_id}
-                className={CLASSE_ITEM_SELETOR}
-                style={ESTILO_ITEM_SELETOR}
+          {!campanhaTravada && (
+            <div className="flex items-center gap-2">
+              <Badge variant={fonteCampanhas === "ao_vivo" ? "default" : "outline"}>
+                {fonteCampanhas === "ao_vivo" ? "lista ao vivo" : "espelho local"}
+              </Badge>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={onRecarregarCampanhas}
+                disabled={carregandoCampanhas}
               >
-                {c.nome}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        {ativas.length === 0 && (
-          <p className="text-xs text-muted-foreground">Nenhuma campanha ativa nesta empresa.</p>
+                Atualizar lista
+              </Button>
+            </div>
+          )}
+        </div>
+        {campanhaTravada ? (
+          <p id="ritmo-campanha" className="text-sm font-medium">
+            {form.campaignName || form.campaignId}
+          </p>
+        ) : (
+          <>
+            {avisoFonte && <p className="text-xs text-muted-foreground">{avisoFonte}</p>}
+            <Select
+              value={form.campaignId || undefined}
+              disabled={!isAdmin}
+              onValueChange={(id) => {
+                const c = ativas.find((x) => x.external_id === id);
+                set({
+                  campaignId: id,
+                  campaignName: c?.nome ?? "",
+                  adAccountId: "",
+                });
+              }}
+            >
+              <SelectTrigger id="ritmo-campanha" className="w-full">
+                <SelectValue placeholder="Escolha uma campanha ativa" />
+              </SelectTrigger>
+              <SelectContent position="item-aligned" className={CLASSE_LISTA_SELETOR}>
+                {ativas.map((c) => (
+                  <SelectItem
+                    key={c.external_id}
+                    value={c.external_id}
+                    className={CLASSE_ITEM_SELETOR}
+                    style={ESTILO_ITEM_SELETOR}
+                  >
+                    {c.nome}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {ativas.length === 0 && (
+              <p className="text-xs text-muted-foreground">Nenhuma campanha ativa nesta empresa.</p>
+            )}
+          </>
         )}
       </div>
 
@@ -305,7 +320,7 @@ export function FormularioMissao({
 
       {isAdmin && (
         <Button type="button" onClick={enviar} disabled={ocupado}>
-          Criar força-tarefa
+          {rotuloBotao}
         </Button>
       )}
     </div>

@@ -60,6 +60,8 @@ function Harness({
   fonteCampanhas = "ao_vivo",
   onSubmit,
   ocupado = false,
+  campanhaTravada = false,
+  rotuloBotao,
 }: {
   inicial: FormMissaoRitmo;
   isAdmin?: boolean;
@@ -67,6 +69,8 @@ function Harness({
   fonteCampanhas?: "ao_vivo" | "espelho";
   onSubmit?: (form: FormMissaoRitmo) => void;
   ocupado?: boolean;
+  campanhaTravada?: boolean;
+  rotuloBotao?: string;
 }) {
   const [form, setForm] = useState(inicial);
   return (
@@ -81,6 +85,8 @@ function Harness({
       isAdmin={isAdmin}
       onSubmit={onSubmit}
       ocupado={ocupado}
+      campanhaTravada={campanhaTravada}
+      rotuloBotao={rotuloBotao}
     />
   );
 }
@@ -215,5 +221,31 @@ describe("FormularioMissao", () => {
     expect(botao).toBeDisabled();
     await userEvent.click(botao);
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("em edição trava a campanha e salva com o rótulo novo", async () => {
+    const onSubmit = vi.fn();
+    montar(
+      <Harness
+        inicial={valido()}
+        onSubmit={onSubmit}
+        campanhaTravada
+        rotuloBotao="Salvar parâmetros"
+      />,
+    );
+    expect(screen.queryByRole("combobox", { name: "Campanha" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Atualizar lista" })).not.toBeInTheDocument();
+    expect(screen.getByText("Consignado SP")).toBeInTheDocument();
+    const dissertacao = screen.getByLabelText("Dissertação");
+    await userEvent.clear(dissertacao);
+    await userEvent.type(dissertacao, "novo ritmo no prazo");
+    await userEvent.click(screen.getByRole("button", { name: "Salvar parâmetros" }));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        campaignId: "120",
+        campaignName: "Consignado SP",
+        dissertacao: "novo ritmo no prazo",
+      }),
+    );
   });
 });

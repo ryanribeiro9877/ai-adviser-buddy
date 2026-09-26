@@ -26,6 +26,17 @@ import {
   type PlanoRitmo,
 } from "@/lib/ritmo";
 import { AndamentoMissao, montarEntradaAndamento } from "@/components/ritmo/andamento-missao";
+import {
+  FormularioMissao,
+  type FormMissaoRitmo,
+} from "@/components/ritmo/formulario-missao";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import type { Tables } from "@/integrations/supabase/types";
 
 export type MissaoRitmo = Tables<"ritmo_missoes">;
@@ -107,6 +118,50 @@ function linhaRespostaMeta(raw: unknown): string {
   } catch {
     return "—";
   }
+}
+
+const MOTIVO_EDICAO: Record<string, string> = {
+  status: "Só dá para editar uma força-tarefa em execução.",
+  missao_ausente: "A força-tarefa não foi encontrada.",
+  prazo: "O prazo precisa ter entre 1 e 90 dias.",
+  metrica: "Escolha uma métrica válida.",
+  dissertacao: "Descreva o que a força-tarefa deve fazer.",
+  sonho: "O sonho, se informado, precisa ser maior que zero.",
+  extra: "O extra de investimento não pode ser negativo.",
+};
+
+function formDaMissao(missao: MissaoRitmo): FormMissaoRitmo {
+  const extra = Number(missao.extra_investimento ?? 0);
+  return {
+    campaignId: missao.campaign_id,
+    campaignName: missao.campaign_name || missao.campaign_id,
+    adAccountId: missao.ad_account_id ?? "",
+    periodoInicio: String(missao.periodo_inicio).slice(0, 10),
+    periodoFim: String(missao.periodo_fim).slice(0, 10),
+    metrica: missao.metrica,
+    dissertacao: missao.dissertacao,
+    sonho: missao.sonho == null ? "" : String(missao.sonho),
+    extra: Number.isFinite(extra) ? String(extra) : "",
+  };
+}
+
+function numeroOuZero(bruto: string): number {
+  if (bruto.trim() === "") return 0;
+  const n = Number(bruto);
+  return Number.isFinite(n) ? n : Number.NaN;
+}
+
+function parametrosIguais(missao: MissaoRitmo, pedido: FormMissaoRitmo): boolean {
+  const sonhoPedido = pedido.sonho.trim() === "" ? null : Number(pedido.sonho);
+  const sonhoAtual = missao.sonho == null ? null : Number(missao.sonho);
+  return (
+    pedido.periodoInicio === String(missao.periodo_inicio).slice(0, 10) &&
+    pedido.periodoFim === String(missao.periodo_fim).slice(0, 10) &&
+    pedido.metrica === missao.metrica &&
+    pedido.dissertacao.trim() === missao.dissertacao.trim() &&
+    sonhoPedido === sonhoAtual &&
+    numeroOuZero(pedido.extra) === Number(missao.extra_investimento ?? 0)
+  );
 }
 
 function textoDryRun(dryRun: boolean | null | undefined): string | null {
@@ -260,6 +315,8 @@ export function DetalheMissao({
   onMudou?: () => void;
 }) {
   const [ocupado, setOcupado] = useState(false);
+  const [edicaoAberta, setEdicaoAberta] = useState(false);
+  const [formEdicao, setFormEdicao] = useState<FormMissaoRitmo>(() => formDaMissao(missao));
   const qc = useQueryClient();
   const plano = useMemo(() => planoDaMissao(missao.plano_json), [missao.plano_json]);
   const leitura =
@@ -427,6 +484,59 @@ export function DetalheMissao({
     }
   };
 
+  const abrirEdicao = () => {
+    setFormEdicao(formDaMissao(missao));
+    setEdicaoAberta(true);
+  };
+
+  const salvarParametros = async (pedido: FormMissaoRitmo) => {
+    if (ocupado) return;
+    if (parametrosIguais(missao, pedido)) {
+      toast.success("Os parâmetros já estão esses.");
+      setEdicaoAberta(false);
+      return;
+    }
+    setOcupado(true);
+    try {
+      const { data, error } = await supabase.rpc("atualizar_parametros_ritmo_missao", {
+        p_id: missao.id,
+        p_periodo_inicio: pedido.periodoInicio,
+        p_periodo_fim: pedido.periodoFim,
+        p_metrica: pedido.metrica,
+        p_dissertacao: pedido.dissertacao.trim(),
+        p_sonho: pedido.sonho.trim() === "" ? null : Number(pedido.sonho),
+        p_extra: numeroOuZero(pedido.extra),
+      });
+      if (error) throw error;
+      const r = data as { ok?: boolean; motivo?: string } | null;
+      if (r?.ok !== true) {
+        const motivo = typeof r?.motivo === "string" ? r.motivo.trim() : "";
+        toast.error(MOTIVO_EDICAO[motivo] ?? (motivo || "Não foi possível salvar os parâmetros."));
+        return;
+      }
+      await logAudit({
+        companyId,
+        action: "ritmo.parametros",
+        targetType: "ritmo_missoes",
+        targetId: missao.id,
+      });
+      const inv = await supabase.functions.invoke("traffic-agent-job", {
+        body: { modo: "ritmo_replano", missao_id: missao.id },
+      });
+      if (inv.error) {
+        toast.success("Parâmetros atualizados. O plano realinha no próximo passe do dia.");
+      } else {
+        toast.success("Parâmetros atualizados. Os agentes estão relendo o plano.");
+      }
+      setEdicaoAberta(false);
+      onMudou?.();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Não foi possível salvar os parâmetros.");
+    } finally {
+      setOcupado(false);
+    }
+  };
+
   const encerrar = async () => {
     if (ocupado) return;
     setOcupado(true);
@@ -507,6 +617,11 @@ export function DetalheMissao({
               ? ` · teto ${fmtBRL(Number(missao.teto_gasto_janela))}`
               : ""}
           </p>
+          {String(missao.dissertacao ?? "").trim() && (
+            <p className="max-w-3xl whitespace-pre-wrap text-sm text-muted-foreground">
+              {missao.dissertacao}
+            </p>
+          )}
         </div>
         {mostraAutorizarArea && (
           <div className="flex max-w-md flex-col items-end gap-2">
@@ -518,6 +633,11 @@ export function DetalheMissao({
                 {missao.status === "plano_pronto" && (
                   <Button type="button" disabled={ocupado} onClick={() => void autorizar()}>
                     Autorizar
+                  </Button>
+                )}
+                {missao.status === "em_execucao" && (
+                  <Button type="button" variant="outline" disabled={ocupado} onClick={abrirEdicao}>
+                    Editar parâmetros
                   </Button>
                 )}
                 <Button type="button" variant="outline" disabled={ocupado} onClick={() => void encerrar()}>
@@ -556,7 +676,12 @@ export function DetalheMissao({
             <p className="text-sm text-muted-foreground">
               Baseline: {fmtBRL(plano.baseline.gasto_diario)}/dia em {plano.baseline.dias_usados}{" "}
               dias com gasto (confiança {plano.baseline.confianca}). Teto da janela:{" "}
-              {fmtBRL(plano.teto_janela)}.
+              {fmtBRL(
+                missao.teto_gasto_janela != null
+                  ? Number(missao.teto_gasto_janela)
+                  : plano.teto_janela,
+              )}
+              .
             </p>
             {plano.baseline.confianca === "baixa" && (
               <p className="text-sm text-amber-700 dark:text-amber-400">
@@ -745,6 +870,36 @@ export function DetalheMissao({
           )}
         </Card>
       )}
+
+      <Dialog open={edicaoAberta} onOpenChange={setEdicaoAberta}>
+        <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Editar parâmetros</DialogTitle>
+            <DialogDescription>
+              O prazo, a métrica, o sonho, o extra e a dissertação passam a valer nesta execução. A
+              campanha continua a mesma. O teto da janela é recalculado com o ritmo de gasto
+              congelado na análise. Os agentes releem o plano em seguida. O que já mudou na
+              campanha permanece.
+            </DialogDescription>
+          </DialogHeader>
+          <FormularioMissao
+            form={formEdicao}
+            onChange={setFormEdicao}
+            campanhas={[]}
+            fonteCampanhas="espelho"
+            avisoFonte={null}
+            carregandoCampanhas={false}
+            onRecarregarCampanhas={() => {}}
+            isAdmin={isAdmin}
+            ocupado={ocupado}
+            campanhaTravada
+            rotuloBotao="Salvar parâmetros"
+            onSubmit={(pedido) => {
+              void salvarParametros(pedido);
+            }}
+          />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

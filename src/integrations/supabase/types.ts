@@ -1680,6 +1680,18 @@ export type Database = {
         Args: { p_id: string; p_motivo: string };
         Returns: Json;
       };
+      atualizar_parametros_ritmo_missao: {
+        Args: {
+          p_id: string;
+          p_periodo_inicio: string;
+          p_periodo_fim: string;
+          p_metrica: string;
+          p_dissertacao: string;
+          p_sonho: number | null;
+          p_extra: number | null;
+        };
+        Returns: Json;
+      };
       pode_executar_ato_ritmo: {
         Args: {
           p_missao_id: string;

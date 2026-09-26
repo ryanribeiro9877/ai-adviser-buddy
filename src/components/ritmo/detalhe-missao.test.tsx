@@ -117,6 +117,9 @@ beforeEach(() => {
   logAuditMock.mockReset();
   toastErrorMock.mockReset();
   toastSuccessMock.mockReset();
+  Element.prototype.hasPointerCapture = vi.fn(() => false);
+  Element.prototype.releasePointerCapture = vi.fn();
+  Element.prototype.scrollIntoView = vi.fn();
   fromMock.mockImplementation((tabela: string) => {
     if (tabela === "campaigns") return encadear({ id: "camp-uuid" });
     if (tabela === "ritmo_atos") return encadear([]);
@@ -332,6 +335,112 @@ describe("DetalheMissao", () => {
     expect(
       await screen.findByText(/os agentes neste dia: pausar conjunto s1 \(ok\)/i),
     ).toBeInTheDocument();
+  });
+
+  it("plano pronto não oferece edição de parâmetros", async () => {
+    montar(<DetalheMissao missao={missao({ status: "plano_pronto" })} isAdmin companyId="c1" />);
+    expect(await screen.findByText("Campanha ativa, learning ok.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Editar parâmetros" })).not.toBeInTheDocument();
+  });
+
+  it("visualizador em execução não edita parâmetros", async () => {
+    montar(
+      <DetalheMissao
+        missao={missao({ status: "em_execucao", autonomia_concedida_em: "2026-09-11T12:00:00Z" })}
+        isAdmin={false}
+        companyId="c1"
+      />,
+    );
+    expect(await screen.findByText("subir conversas")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Editar parâmetros" })).not.toBeInTheDocument();
+  });
+
+  it("admin em execução salva parâmetros e pede o replano", async () => {
+    rpcMock.mockImplementation(async (nome: string) => {
+      if (nome === "atualizar_parametros_ritmo_missao") {
+        return { data: { ok: true, teto_gasto_janela: 220 }, error: null };
+      }
+      return { data: { ok: true }, error: null };
+    });
+    montar(
+      <DetalheMissao
+        missao={missao({ status: "em_execucao", autonomia_concedida_em: "2026-09-11T12:00:00Z" })}
+        isAdmin
+        companyId="c1"
+      />,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Editar parâmetros" }));
+    const dissertacao = await screen.findByLabelText("Dissertação");
+    await userEvent.clear(dissertacao);
+    await userEvent.type(dissertacao, "priorizar o fim do prazo");
+    await userEvent.click(screen.getByRole("button", { name: "Salvar parâmetros" }));
+    await waitFor(() => {
+      expect(rpcMock).toHaveBeenCalledWith("atualizar_parametros_ritmo_missao", {
+        p_id: "m2",
+        p_periodo_inicio: "2026-09-10",
+        p_periodo_fim: "2026-09-20",
+        p_metrica: "conversas",
+        p_dissertacao: "priorizar o fim do prazo",
+        p_sonho: 50,
+        p_extra: 0,
+      });
+    });
+    expect(invokeMock).toHaveBeenCalledWith("traffic-agent-job", {
+      body: { modo: "ritmo_replano", missao_id: "m2" },
+    });
+    expect(logAuditMock).toHaveBeenCalledWith({
+      companyId: "c1",
+      action: "ritmo.parametros",
+      targetType: "ritmo_missoes",
+      targetId: "m2",
+    });
+    expect(toastSuccessMock).toHaveBeenCalledWith(
+      "Parâmetros atualizados. Os agentes estão relendo o plano.",
+    );
+  });
+
+  it("salvar sem mudança não chama a RPC", async () => {
+    montar(
+      <DetalheMissao
+        missao={missao({ status: "em_execucao", autonomia_concedida_em: "2026-09-11T12:00:00Z" })}
+        isAdmin
+        companyId="c1"
+      />,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Editar parâmetros" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Salvar parâmetros" }));
+    expect(rpcMock).not.toHaveBeenCalledWith(
+      "atualizar_parametros_ritmo_missao",
+      expect.anything(),
+    );
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(toastSuccessMock).toHaveBeenCalledWith("Os parâmetros já estão esses.");
+  });
+
+  it("recusa da RPC não dispara o replano", async () => {
+    rpcMock.mockImplementation(async (nome: string) => {
+      if (nome === "atualizar_parametros_ritmo_missao") {
+        return { data: { ok: false, motivo: "status" }, error: null };
+      }
+      return { data: { ok: true }, error: null };
+    });
+    montar(
+      <DetalheMissao
+        missao={missao({ status: "em_execucao", autonomia_concedida_em: "2026-09-11T12:00:00Z" })}
+        isAdmin
+        companyId="c1"
+      />,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Editar parâmetros" }));
+    const dissertacao = await screen.findByLabelText("Dissertação");
+    await userEvent.clear(dissertacao);
+    await userEvent.type(dissertacao, "outro pedido");
+    await userEvent.click(screen.getByRole("button", { name: "Salvar parâmetros" }));
+    await waitFor(() => {
+      expect(toastErrorMock).toHaveBeenCalledWith("Só dá para editar uma força-tarefa em execução.");
+    });
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(logAuditMock).not.toHaveBeenCalled();
   });
 
   it("na área de Autorizar declara dry-run quando a config está ligada", async () => {
