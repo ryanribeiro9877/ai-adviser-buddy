@@ -88,10 +88,17 @@ function CardAchado({ achado }: { achado: AchadoRelatorio }) {
   );
 }
 
-export function DetalheRelatorio({ relatorio }: { relatorio: RelatorioGerado }) {
+export function DetalheRelatorio({
+  relatorio,
+  nomesCampanha = [],
+}: {
+  relatorio: RelatorioGerado;
+  nomesCampanha?: string[];
+}) {
   const achados = normalizarAchados(relatorio.achados);
   const narrativa = humanizarMarkdownRelatorio(relatorio.corpo_md ?? "");
   const cobertura = limparJargaoRelatorio(relatorio.cobertura ?? "");
+  const nomes = nomesCampanha.map((n) => n.trim()).filter(Boolean);
 
   return (
     <div className="space-y-6">
@@ -109,9 +116,11 @@ export function DetalheRelatorio({ relatorio }: { relatorio: RelatorioGerado }) 
         </div>
         <p className="text-sm text-muted-foreground">
           {periodoLegivel(relatorio.periodo_inicio, relatorio.periodo_fim)}
-          {relatorio.campaign_ids_resolvidos?.length
-            ? ` · ${relatorio.campaign_ids_resolvidos.length} campanha(s)`
-            : ""}
+          {nomes.length
+            ? ` · ${nomes.join(" · ")}`
+            : relatorio.campaign_ids_resolvidos?.length
+              ? ` · ${relatorio.campaign_ids_resolvidos.length} campanha(s)`
+              : ""}
         </p>
       </div>
 
@@ -132,7 +141,7 @@ export function DetalheRelatorio({ relatorio }: { relatorio: RelatorioGerado }) 
           <h3 className="text-sm font-semibold">Opiniões</h3>
           <div className="space-y-3">
             {achados.map((a, i) => (
-              <CardAchado key={`${a.tipo}-${a.alvo_id ?? i}`} achado={a} />
+              <CardAchado key={`${relatorio.id}:${i}`} achado={a} />
             ))}
           </div>
         </section>

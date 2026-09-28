@@ -126,4 +126,88 @@ describe("Relatórios", () => {
     expect(await screen.findByText("timeout na síntese")).toBeInTheDocument();
     expect(screen.getAllByText("Falhou").length).toBeGreaterThan(0);
   });
+
+  it("a opinião acompanha o relatório clicado, não o último da lista", async () => {
+    const opiniao = {
+      tipo: "teto",
+      nivel: "campanha",
+      severidade: "atencao",
+      mecanismo: "orcamento no conjunto",
+      acao: "conferir o diario",
+      metrica_sucesso: "gasto dentro do teto",
+      janela_leitura: "proximo dia",
+      reversa: "se o teto mudou, ignorar",
+    };
+    fromMock.mockImplementation((tabela: string) => {
+      if (tabela === "relatorio_agendamentos") return encadear([]);
+      if (tabela === "relatorio_gerados") {
+        return encadear([
+          {
+            id: "laf",
+            nome: "Relatório diário operacional",
+            status: "done",
+            fonte_campanhas: "ao_vivo",
+            campaign_ids_resolvidos: ["120250192130160182"],
+            periodo_inicio: "2026-09-25",
+            periodo_fim: "2026-09-27",
+            corpo_md: "## Resumo executivo\nLa Felicità na janela.",
+            achados: [
+              {
+                ...opiniao,
+                alvo_id: "120250192130160182",
+                alvo_nome: "COHAPM_LAFELICITA_CONV_WA_2026 - SETEMBRO",
+                evidencia: "De 25 a 27/09 a campanha gastou R$ 409,74",
+              },
+              {
+                ...opiniao,
+                alvo_id: "120250192130160182",
+                alvo_nome: "COHAPM_LAFELICITA_CONV_WA_2026 - SETEMBRO",
+                evidencia: "Na janela fechada, 71 conversas",
+              },
+            ],
+            cobertura: null,
+            erro: null,
+            criado_em: "2026-09-28T17:03:00Z",
+            finalizado_em: "2026-09-28T17:05:00Z",
+          },
+          {
+            id: "ocu",
+            nome: "Relatório diário operacional (Ocular)",
+            status: "done",
+            fonte_campanhas: "ao_vivo",
+            campaign_ids_resolvidos: ["120249817715740182"],
+            periodo_inicio: "2026-09-26",
+            periodo_fim: "2026-09-26",
+            corpo_md: "## Resumo executivo\nVistta no dia.",
+            achados: [
+              {
+                ...opiniao,
+                alvo_id: "120249817715740182",
+                alvo_nome: "COHAPM_VISTTA_CONV_WA_SET26",
+                evidencia: "Em 26/09/2026 a campanha gastou R$ 194,72",
+              },
+            ],
+            cobertura: null,
+            erro: null,
+            criado_em: "2026-09-27T10:55:00Z",
+            finalizado_em: "2026-09-27T10:56:00Z",
+          },
+        ]);
+      }
+      return encadear([]);
+    });
+    rpcMock.mockResolvedValue({
+      data: [
+        { external_id: "120250192130160182", nome: "COHAPM_LAFELICITA_CONV_WA_2026 - SETEMBRO", status: "active", objetivo: null, tipo: null, gasto: 0, last_synced_at: null },
+        { external_id: "120249817715740182", nome: "COHAPM_VISTTA_CONV_WA_SET26", status: "active", objetivo: null, tipo: null, gasto: 0, last_synced_at: null },
+      ],
+      error: null,
+    });
+    montar();
+    expect(await screen.findByText(/409,74/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Ocular/i }));
+    expect(await screen.findByText(/194,72/)).toBeInTheDocument();
+    expect(screen.queryByText(/409,74/)).not.toBeInTheDocument();
+    expect(screen.getAllByText("COHAPM_VISTTA_CONV_WA_SET26").length).toBeGreaterThan(0);
+  });
 });

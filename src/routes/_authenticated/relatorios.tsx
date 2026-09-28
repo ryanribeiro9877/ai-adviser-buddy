@@ -103,6 +103,18 @@ function rotuloFreq(a: Agenda): string {
   return a.frequencia;
 }
 
+function nomesDoRelatorio(r: RelatorioGerado, mapa: Map<string, string> | undefined): string[] {
+  const vistos = new Set<string>();
+  const nomes: string[] = [];
+  for (const id of r.campaign_ids_resolvidos ?? []) {
+    const nome = mapa?.get(id);
+    if (!nome || vistos.has(nome)) continue;
+    vistos.add(nome);
+    nomes.push(nome);
+  }
+  return nomes;
+}
+
 function quando(iso: string | null) {
   if (!iso) return "—";
   return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
@@ -129,6 +141,24 @@ function Relatorios() {
         .order("criado_em", { ascending: false });
       if (error) throw error;
       return (data ?? []) as Agenda[];
+    },
+  });
+
+  const nomesCampanhaQ = useQuery({
+    queryKey: ["relatorio-nomes-campanha", companyId],
+    enabled: !!companyId,
+    queryFn: async (): Promise<Map<string, string>> => {
+      const { data, error } = await supabase.rpc("listar_campanhas_para_relatorio", {
+        p_company_id: companyId!,
+      });
+      if (error) throw error;
+      const mapa = new Map<string, string>();
+      for (const c of data ?? []) {
+        const id = String(c.external_id ?? "").trim();
+        const nome = String(c.nome ?? "").trim();
+        if (id && nome) mapa.set(id, nome);
+      }
+      return mapa;
     },
   });
 
@@ -429,28 +459,38 @@ function Relatorios() {
                 Ainda não há relatório gerado. Crie uma agenda ou peça um agora.
               </Card>
             )}
-            {(geradosQ.data ?? []).map((r) => (
-              <button
-                key={r.id}
-                type="button"
-                onClick={() => setDetalheId(r.id)}
-                className={`w-full rounded-md border px-3 py-2 text-left text-sm ${
-                  detalhe?.id === r.id ? "border-ring bg-muted/60" : "border-border"
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate font-medium">{r.nome}</span>
-                  <Badge variant={r.status === "error" ? "destructive" : "outline"}>
-                    {rotuloStatusGerado(r.status)}
-                  </Badge>
-                </div>
-                <div className="text-xs text-muted-foreground">{quando(r.criado_em)}</div>
-              </button>
-            ))}
+            {(geradosQ.data ?? []).map((r) => {
+              const nomes = nomesDoRelatorio(r, nomesCampanhaQ.data);
+              return (
+                <button
+                  key={r.id}
+                  type="button"
+                  onClick={() => setDetalheId(r.id)}
+                  className={`w-full rounded-md border px-3 py-2 text-left text-sm ${
+                    detalhe?.id === r.id ? "border-ring bg-muted/60" : "border-border"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate font-medium">{r.nome}</span>
+                    <Badge variant={r.status === "error" ? "destructive" : "outline"}>
+                      {rotuloStatusGerado(r.status)}
+                    </Badge>
+                  </div>
+                  {nomes.length > 0 && (
+                    <div className="truncate text-xs text-muted-foreground">{nomes.join(" · ")}</div>
+                  )}
+                  <div className="text-xs text-muted-foreground">{quando(r.criado_em)}</div>
+                </button>
+              );
+            })}
           </div>
           <div>
             {detalhe ? (
-              <DetalheRelatorio relatorio={detalhe} />
+              <DetalheRelatorio
+                key={detalhe.id}
+                relatorio={detalhe}
+                nomesCampanha={nomesDoRelatorio(detalhe, nomesCampanhaQ.data)}
+              />
             ) : (
               <Card className="p-8 text-center text-sm text-muted-foreground">
                 <FileText className="mx-auto mb-2 h-6 w-6" />

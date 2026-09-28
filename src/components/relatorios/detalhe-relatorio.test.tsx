@@ -72,4 +72,58 @@ describe("DetalheRelatorio", () => {
     expect(screen.queryByText(/"corpo_md"/)).not.toBeInTheDocument();
     expect(screen.getByText(/narrativa abaixo foi recuperada/i)).toBeInTheDocument();
   });
+
+  it("troca a opinião ao mudar de relatório, mesmo com dois cards do mesmo tipo e alvo", () => {
+    const opiniao = base.achados[0] as Record<string, unknown>;
+    const lafelicita: RelatorioGerado = {
+      ...base,
+      id: "laf",
+      nome: "Relatório diário operacional (Lafelicità)",
+      achados: [
+        {
+          ...opiniao,
+          tipo: "teto",
+          alvo_id: "120250192130160182",
+          alvo_nome: "COHAPM_LAFELICITA_CONV_WA_2026 - SETEMBRO",
+          evidencia: "De 25 a 27/09 a campanha gastou R$ 409,74",
+        },
+        {
+          ...opiniao,
+          tipo: "teto",
+          alvo_id: "120250192130160182",
+          alvo_nome: "COHAPM_LAFELICITA_CONV_WA_2026 - SETEMBRO",
+          evidencia: "Na janela fechada, 71 conversas e R$ 409,74",
+        },
+      ],
+    };
+    const ocular: RelatorioGerado = {
+      ...base,
+      id: "ocu",
+      nome: "Relatório diário operacional (Ocular)",
+      periodo_inicio: "2026-09-26",
+      periodo_fim: "2026-09-26",
+      campaign_ids_resolvidos: ["120249817715740182"],
+      achados: [
+        {
+          ...opiniao,
+          tipo: "teto",
+          alvo_id: "120249817715740182",
+          alvo_nome: "COHAPM_VISTTA_CONV_WA_SET26",
+          evidencia: "Em 26/09/2026 a campanha gastou R$ 194,72",
+        },
+      ],
+    };
+    const { rerender } = render(
+      <DetalheRelatorio relatorio={lafelicita} nomesCampanha={["COHAPM_LAFELICITA_CONV_WA_2026 - SETEMBRO"]} />,
+    );
+    expect(screen.getAllByText(/409,74/).length).toBeGreaterThan(0);
+    rerender(
+      <DetalheRelatorio relatorio={ocular} nomesCampanha={["COHAPM_VISTTA_CONV_WA_SET26"]} />,
+    );
+    expect(screen.getByRole("heading", { name: "Relatório diário operacional (Ocular)" })).toBeInTheDocument();
+    expect(screen.getByText(/194,72/)).toBeInTheDocument();
+    expect(screen.getAllByText("COHAPM_VISTTA_CONV_WA_SET26").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/409,74/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/LAFELICITA/)).not.toBeInTheDocument();
+  });
 });
