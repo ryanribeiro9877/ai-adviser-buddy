@@ -536,6 +536,47 @@ export function janelaAnteriorDoPeriodo(periodo: {
   return { inicio: addDaysYmd(prevFim, -(dias - 1)), fim: prevFim };
 }
 
+function normNomeCampanhaRelatorio(s: string): string {
+  return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function idMetaDoItem(item: Record<string, unknown>): string {
+  for (const k of ["campaign_external_id", "campaign_id", "external_id"]) {
+    const v = String(item[k] ?? "").trim();
+    if (/^\d{8,}$/.test(v)) return v;
+  }
+  return "";
+}
+
+/** Nome inteiro da campanha. Prefixo não conta: SET26 não é SET26- SETEMBRO. */
+export function nomeDeCampanhaNoTexto(texto: string, nome: string): boolean {
+  const t = texto.toLowerCase();
+  const n = normNomeCampanhaRelatorio(nome);
+  if (n.length < 4) return false;
+  let from = 0;
+  while (from < t.length) {
+    const i = t.indexOf(n, from);
+    if (i < 0) return false;
+    const antesOk = i === 0 || !/[a-z0-9_]/.test(t[i - 1] ?? "");
+    const resto = t.slice(i + n.length);
+    const continua = /^[a-z0-9_-]/.test(resto) || /^\s*-\s*[a-z0-9]/.test(resto);
+    if (antesOk && !continua) return true;
+    from = i + n.length;
+  }
+  return false;
+}
+
+function itemEhDaCampanha(
+  item: Record<string, unknown>,
+  ids: Set<string>,
+  nomes: Set<string>,
+): boolean {
+  const id = idMetaDoItem(item);
+  if (id) return ids.has(id);
+  const campanha = normNomeCampanhaRelatorio(String(item.campanha ?? item.campaign_name ?? ""));
+  return campanha.length >= 4 && nomes.has(campanha);
+}
+
 export function filtrarConjuntosDoRecorte(
   raw: unknown,
   nomes: string[],
@@ -543,14 +584,9 @@ export function filtrarConjuntosDoRecorte(
 ): Record<string, unknown> {
   const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const lista = Array.isArray(o.conjuntos) ? (o.conjuntos as Record<string, unknown>[]) : [];
-  const chaves = [...nomes, ...ids]
-    .map((x) => String(x ?? "").trim().toLowerCase())
-    .filter((x) => x.length >= 4);
-  const filtrados = lista.filter((item) => {
-    const campanha = String(item.campanha ?? item.campaign_name ?? "").toLowerCase();
-    if (!campanha) return false;
-    return chaves.some((k) => campanha.includes(k) || k.includes(campanha));
-  });
+  const idsSet = new Set(ids.map((x) => String(x ?? "").trim()).filter(Boolean));
+  const nomesSet = new Set(nomes.map(normNomeCampanhaRelatorio).filter((n) => n.length >= 4));
+  const filtrados = lista.filter((item) => itemEhDaCampanha(item, idsSet, nomesSet));
   return {
     ...o,
     conjuntos: filtrados,
@@ -558,7 +594,7 @@ export function filtrarConjuntosDoRecorte(
     exibidos: filtrados.length,
     total_antes_do_filtro: lista.length,
     nota_recorte: filtrados.length
-      ? `Conjuntos das campanhas do recorte (${filtrados.length} de ${lista.length} na amostra).`
+      ? `Conjuntos das campanhas do recorte pelo ID da Meta (${filtrados.length} de ${lista.length} na amostra). Nome parecido ou o mesmo mes no nome nao entra.`
       : lista.length
         ? "A amostra estrutural tem conjuntos, mas nenhum desta(s) campanha(s) — nao misturar outras linhas da conta."
         : "Nenhum conjunto na amostra estrutural.",
@@ -574,17 +610,40 @@ export function recortarAlertasDoRecorte(
   const lista = Array.isArray(o.alertas_ativos)
     ? (o.alertas_ativos as Record<string, unknown>[])
     : [];
-  const chaves = [...nomes, ...ids]
-    .map((x) => String(x ?? "").trim().toLowerCase())
-    .filter((x) => x.length >= 6);
+  const idsSet = new Set(ids.map((x) => String(x ?? "").trim()).filter((x) => x.length >= 8));
+  const nomesLista = nomes.map((x) => String(x ?? "").trim()).filter((x) => x.length >= 4);
   const doRecorte = lista.filter((a) => {
-    const blob = `${a.title ?? ""} ${a.description ?? ""} ${a.alvo ?? ""}`.toLowerCase();
-    return chaves.some((k) => blob.includes(k));
+    if (itemEhDaCampanha(a, idsSet, new Set(nomesLista.map(normNomeCampanhaRelatorio)))) return true;
+    const blob = `${a.title ?? ""} ${a.description ?? ""} ${a.alvo ?? ""}`;
+    if ([...idsSet].some((id) => blob.includes(id))) return true;
+    return nomesLista.some((n) => nomeDeCampanhaNoTexto(blob, n));
   });
   return {
     alertas_do_recorte: doRecorte,
     outros_da_conta: lista.length - doRecorte.length,
-    nota: "Zero no recorte significa nenhum alerta nestas campanhas, nao 'nao coletado'.",
+    nota: "Zero no recorte significa nenhum alerta nestas campanhas, nao 'nao coletado'. Campanha irma, com o mesmo mes no nome, fica de fora.",
+  };
+}
+
+export function recortarOverviewDoRecorte(raw: unknown, ids: string[]): unknown {
+  if (!raw || typeof raw !== "object") return raw;
+  const o = raw as Record<string, unknown>;
+  if (o.erro) return raw;
+  const lista = Array.isArray(o.campanhas_ativas_lista) ? o.campanhas_ativas_lista : null;
+  if (!lista) return raw;
+  const pedidas = new Set(ids.map((x) => String(x ?? "").trim()).filter(Boolean));
+  const filtrada = lista.filter((c) => {
+    if (!c || typeof c !== "object") return false;
+    const item = c as { id?: unknown; external_id?: unknown };
+    const id = String(item.id ?? item.external_id ?? "").trim();
+    return pedidas.has(id);
+  });
+  return {
+    ...o,
+    campanhas_ativas: filtrada.length,
+    campanhas_ativas_lista: filtrada,
+    nota_recorte:
+      "Lista restrita aos IDs da Meta do recorte. Outra campanha com o mesmo nome, o mesmo prefixo ou o mesmo mes no nome nao entra.",
   };
 }
 

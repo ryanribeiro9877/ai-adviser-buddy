@@ -347,6 +347,39 @@ describe("filtrarConjuntosDoRecorte / recortarAlertasDoRecorte", () => {
     expect((r.conjuntos as { conjunto: string }[])[0].conjunto).toBe("JUR A");
   });
 
+  it("SET26 nao arrasta a campanha SET26- SETEMBRO, nem o contrario", () => {
+    const conjuntos = [
+      { conjunto: "velha", campanha: "COHAPM_VISTTA_CONV_WA_SET26", campaign_external_id: "120249817715740182" },
+      { conjunto: "nova", campanha: "COHAPM_VISTTA_CONV_WA_SET26- SETEMBRO", campaign_external_id: "120250158071500182" },
+    ];
+    const setembro = filtrarConjuntosDoRecorte(
+      { conjuntos },
+      ["COHAPM_VISTTA_CONV_WA_SET26- SETEMBRO"],
+      ["120250158071500182"],
+    );
+    expect((setembro.conjuntos as { conjunto: string }[]).map((c) => c.conjunto)).toEqual(["nova"]);
+    const antiga = filtrarConjuntosDoRecorte(
+      { conjuntos },
+      ["COHAPM_VISTTA_CONV_WA_SET26"],
+      ["120249817715740182"],
+    );
+    expect((antiga.conjuntos as { conjunto: string }[]).map((c) => c.conjunto)).toEqual(["velha"]);
+  });
+
+  it("dois AGOSTO com o mesmo nome seguem o ID da Meta, nao o texto", () => {
+    const r = filtrarConjuntosDoRecorte(
+      {
+        conjuntos: [
+          { conjunto: "A1", campanha: "AGOSTO", campaign_external_id: "11111111" },
+          { conjunto: "A2", campanha: "AGOSTO", campaign_external_id: "22222222" },
+        ],
+      },
+      ["AGOSTO"],
+      ["11111111"],
+    );
+    expect((r.conjuntos as { conjunto: string }[]).map((c) => c.conjunto)).toEqual(["A1"]);
+  });
+
   it("zero no recorte de alerta nao e 'nao coletado'", () => {
     const r = recortarAlertasDoRecorte(
       {
@@ -360,6 +393,21 @@ describe("filtrarConjuntosDoRecorte / recortarAlertasDoRecorte", () => {
     );
     expect((r.alertas_do_recorte as unknown[]).length).toBe(1);
     expect(r.outros_da_conta).toBe(1);
+  });
+
+  it("alerta da campanha com sufixo de mes nao entra no recorte do prefixo", () => {
+    const r = recortarAlertasDoRecorte(
+      {
+        alertas_ativos: [
+          { title: "Teto", description: "COHAPM_VISTTA_CONV_WA_SET26- SETEMBRO passou de R$ 120" },
+          { title: "Teto", description: "COHAPM_VISTTA_CONV_WA_SET26 passou de R$ 80" },
+        ],
+      },
+      ["COHAPM_VISTTA_CONV_WA_SET26"],
+      ["120249817715740182"],
+    );
+    const textos = (r.alertas_do_recorte as { description: string }[]).map((a) => a.description);
+    expect(textos).toEqual(["COHAPM_VISTTA_CONV_WA_SET26 passou de R$ 80"]);
   });
 });
 

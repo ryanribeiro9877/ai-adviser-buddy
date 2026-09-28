@@ -305,6 +305,7 @@ import {
   rankingCampanhasRelatorio,
   rankingConjuntosRelatorio,
   recortarAlertasDoRecorte,
+  recortarOverviewDoRecorte,
   titulosDasSecoes,
   type CampanhaAoVivoBruta,
   type CampanhaRelatorio,
@@ -1322,7 +1323,7 @@ async function resolveCompany(name?: string): Promise<{ id: string; name: string
 // Pendencia registrada: extrair para _shared/traffic-tools.ts.
 // ============================================================================
 async function t_overview(companyId: string) {
-  const { data: camps } = await supa.from("campaigns").select("name,status,category,spend,external_account_id").eq("company_id", companyId);
+  const { data: camps } = await supa.from("campaigns").select("external_id,name,status,category,spend,external_account_id").eq("company_id", companyId);
   const ativos = (camps ?? []).filter((c) => c.status === "active");
   const from = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
   const { data: snaps } = await supa.from("metric_snapshots")
@@ -1341,7 +1342,7 @@ async function t_overview(companyId: string) {
     campanhas_ativas: ativos.length, campanhas_total: (camps ?? []).length,
     ultimos_7_dias: { gasto: brl(s.spend), dias_com_dado: dias, impressoes: s.imp, cliques_link: s.link,
       formularios: s.forms, conversas_whatsapp: s.msg, ...custos },
-    campanhas_ativas_lista: ativos.map((c) => ({ nome: c.name, categoria: c.category, conta: c.external_account_id, gasto_acumulado: brl(Number(c.spend || 0)) })),
+    campanhas_ativas_lista: ativos.map((c) => ({ id: c.external_id, nome: c.name, categoria: c.category, conta: c.external_account_id, gasto_acumulado: brl(Number(c.spend || 0)) })),
     nota: NOTA_OVERVIEW,
   };
 }
@@ -5394,9 +5395,10 @@ async function colherBaseRelatorio(args: {
     runTool("saude_das_integracoes", { dias_tolerancia: 3 }, ctx),
     runTool("get_funnel", { date_from: args.periodo.inicio, date_to: args.periodo.fim }, ctx),
   ]);
+  const overviewRecorte = recortarOverviewDoRecorte(overview, ids);
   marcar("get_overview", {
-    ...(overview && typeof overview === "object" ? overview as Record<string, unknown> : { valor: overview }),
-    nota_janela: "Overview e conta inteira dos ultimos 7 dias, NAO a janela fechada do relatorio.",
+    ...(overviewRecorte && typeof overviewRecorte === "object" ? overviewRecorte as Record<string, unknown> : { valor: overview }),
+    nota_janela: "Overview numerico e da conta nos ultimos 7 dias, NAO a janela fechada. A lista de campanhas desta peca e SO o ID da Meta do recorte.",
   });
   marcar("teto_vigente_conversa", tetoConv);
   marcar("teto_vigente_formulario", tetoForm);
@@ -5443,9 +5445,6 @@ async function colherBaseRelatorio(args: {
   const buscas = new Set<string>();
   for (const p of porCampanha) {
     for (const n of nomesDoRanking(p.rank)) buscas.add(n);
-  }
-  for (const nomeCamp of nomes) {
-    for (const bit of nomeCamp.split(/[_\s-]+/).filter((b) => b.length >= 5).slice(0, 2)) buscas.add(bit);
   }
   const buscasLista = [...buscas].slice(0, 12);
   if (buscasLista.length) {
@@ -5578,7 +5577,7 @@ async function sintetizarRelatorioAutonomo(args: {
 
 LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: nome de ferramenta/especialista (desempenho_campanhas, estrutura_conta, get_ads_ranking), codigo interno (openrouter_timeout), chave JSON (amostra_pequena=true, budget_remaining=0, effective_status). Traduza: "a leitura de desempenho desta campanha falhou por tempo esgotado"; "amostra pequena"; "orcamento restante da campanha zerado"; "status real". ID numerico da Meta so entre parenteses no fim do nome, se precisar.
 
-NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio. Peca marcada [ok] na BASE foi lida: nao diga que nao foi coletada.
+NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio. Peca marcada [ok] na BASE foi lida: nao diga que nao foi coletada. Campanha se identifica pelo ID da Meta do recorte. Nome igual, prefixo compartilhado ou o mesmo mes no nome (SETEMBRO, SET26, AGOSTO) e OUTRA campanha: nao cite, nao some, nao compare.
 
 corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Quebra por campanha: NAO cole a tabela — so o titulo ## Quebra por campanha; o sistema injeta as linhas da base (todas as ativas do recorte). Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
 
@@ -5651,7 +5650,8 @@ async function processarRelatorio(relatorioId: string, mcpKey: string): Promise<
     const pergunta = `RELATORIO AUTONOMO (nao e conversa).
 Empresa: ${companyName}.
 Periodo FECHADO: ${periodo.inicio} a ${periodo.fim} (America/Sao_Paulo; hoje nao entra).
-Campanhas do recorte (unicas permitidas): ${nomes}.
+Campanhas do recorte (unicas permitidas; a identidade e o ID da Meta entre parenteses, nao o mes nem o prefixo do nome): ${nomes}.
+Duas campanhas com o mesmo nome, ou uma cujo nome contem a outra (SET26 e SET26- SETEMBRO, dois AGOSTO), sao objetos diferentes na Meta. So escreva sobre o ID listado.
 Secoes obrigatorias (use estes titulos humanos no markdown): ${titulosDasSecoes(secoes).join("; ")}.
 ${resolvidas.cobertura}
 Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contrato fora. Nao misture bases de resultado. Nao execute acao. Escreva para o gestor, nao para o log da ferramenta.`;
