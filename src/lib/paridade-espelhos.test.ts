@@ -100,6 +100,7 @@ const FALAS = [
   "monte um ranking dos conjuntos da campanha do sistema ocular por gasto",
   "preciso que você traga pra mim uma relação geográfica de cada um dos conjuntos referentes a campanha ativa do lafelicità",
   "gera uma relação mostrando os gastos, conversas geradas, impressões e orçamento por conjuntos e por criativos",
+  "todos os dados desde a criação até ontem, por dia, para entender como as campanhas estão performando.\nCOHAPM_VISTTA_CONV_WA_SET26\nCOHAPM_JURIDICO_CONV_WA_2026-08",
   "sobe os videos para a biblioteca da meta",
   "suba os restantes para a biblioteca",
   "detalha a campanha JUR_CONV e mostra os conjuntos e anuncios",
@@ -411,6 +412,7 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
     // Sem isto, um glob quebrado zeraria PARES e a suíte inteira passaria vazia — falso verde
     // pior que nenhuma guarda.
     expect(PARES.map((p) => p.nome).sort()).toEqual([
+      "correcao-custo",
       "intencao-turno",
       "lote-criativo",
       "memoria-conjunto",

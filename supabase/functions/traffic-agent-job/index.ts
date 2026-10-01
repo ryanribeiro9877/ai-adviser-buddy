@@ -1,4 +1,10 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.28)
+// supabase/functions/traffic-agent-job/index.ts (v4.29)
+// v4.29 (01/10/2026) - LEITURA NAO E TABELA: pedido de 5 campanhas (VISTTA, La Felicita,
+//   Juridico), desde a criacao ate ontem, por dia, ativos e inativos. A colheita numerica
+//   casou so ocular (underscore em COHAPM_JURIDICO nao e fronteira de palavra), janela de
+//   14 dias, e pulou o LLM. A resposta saiu com model openrouter/auto e 0 tokens.
+//   Nomes citados sao o universo. Janela segue o pedido. Se o pedido pede interpretacao,
+//   a tabela alimenta uma analise no Grok 4.7 (high) e vai anexada depois — nao e a resposta.
 // v4.28 (26/09/2026) - RELATORIO SEM NARRATIVA: colheita 36/36 em ~6s, mas criativos e
 //   alertas ainda rodavam. O Grok pendurava, o resgate repetia a chamada inteira e a
 //   escrita recebia 28s/52s (openrouter_timeout_27889 e _52501 na Lafelicità, 25 e
@@ -282,11 +288,13 @@ import {
   aplicarResgate402,
   aplicarResgateTimeout,
   bodyOpenRouter,
+  MODELO_PADRAO,
   resolverChamadaLlm,
   type FaixaLlm,
   type TipoTarefaLlm,
 } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
+import { emitirPlanoDeCusto, rodarPasseCorrecaoCusto } from "../_shared/correcao_custo_passe.ts";
 import {
   addDaysYmd,
   especialistasPorSecoes,
@@ -354,7 +362,7 @@ import {
   recorteDriveDoPedido,
   serieCarrosselDrive,
 } from "../_shared/pedido_drive_criativos.ts";
-import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, extrairNomesDeCampanhaCitados, pedidoExigeInterpretacao, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
 import {
   aplicarCompactacaoCriativos,
   aplicarCompactacaoEstrutura,
@@ -366,9 +374,11 @@ import {
 import {
   tDetalheAnuncios,
   casarCampanhas,
+  casarCampanhasCitadas,
   escolherCampanhaUnica,
   janelaDetalhe,
   parseJanelaDatasPedido,
+  resolverJanelaPedido,
   somarSnaps,
   totaisDe,
   custosDaContaPorBase,
@@ -972,12 +982,14 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
   const p = deacc(raw.toLowerCase());
   const hoje = today();
 
-  const desdeAtivacao = /\b(desde (o momento da )?ativac|a partir da ativac|desde que (essas|estas) campanhas|apos a ativac)\b/.test(p);
+  const desdeCriacao = /\bdesde\b/.test(p) && /\b(criacao|criada|momento|dados reais|trouxe dados)\b/.test(p);
+  const desdeAtivacao = desdeCriacao || /\b(desde (o momento da )?ativac|a partir da ativac|desde que (essas|estas) campanhas|apos a ativac)\b/.test(p);
   const dessasCampanhas = /\b(essas|estas) campanhas\b/.test(p) || /\bdessas campanhas\b/.test(p);
   const contaInteira = /\b(conta inteira|conta toda|todas as campanhas|historico completo|serie inteira)\b/.test(p);
   const soAtivas = /\b(campanhas? ativas?|o que (esta|estao) rodando|em operacao)\b/.test(p);
 
   const nomes_hint: string[] = [];
+  for (const citado of extrairNomesDeCampanhaCitados(raw)) nomes_hint.push(citado);
   if (/\bjuridico\b|\bjur\b/.test(p)) nomes_hint.push("JURIDICO", "JUR");
   if (/\bla\s*felicita|\blafelicita|\blf\b/.test(p)) nomes_hint.push("LAFELICITA", "LF");
   if (/\bsalt\b/.test(p)) nomes_hint.push("SALT");
@@ -993,8 +1005,9 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
   }
 
   const janelaPedido = parseJanelaDatasPedido(raw, hoje);
-  let date_from: string | undefined = janelaPedido.date_from;
-  let date_to: string | undefined = janelaPedido.date_to ?? hoje;
+  const janelaResolvida = resolverJanelaPedido(raw, hoje);
+  let date_from: string | undefined = janelaPedido.date_from ?? janelaResolvida.date_from;
+  let date_to: string | undefined = janelaPedido.date_to ?? janelaResolvida.date_to ?? hoje;
 
   const perguntas_obrigatorias: string[] = [];
   if (/\bfuncionaram melhor\b|\bmelhor(es)? criativo|\bperformance dos criativos\b/.test(p)) {
@@ -1744,40 +1757,86 @@ async function t_estrutura_conjuntos(companyId: string, pedido?: string, pagina 
   return aplicarCompactacaoEstrutura(bruto, String(pedido ?? ""), pagina);
 }
 
+async function primeiroDiaComEntrega(companyId: string, campaignIds: string[]): Promise<string | null> {
+  const ids = campaignIds.map((x) => String(x ?? "").trim()).filter(Boolean);
+  if (!ids.length) return null;
+  const { data } = await supa.from("metric_snapshots")
+    .select("snapshot_date")
+    .eq("company_id", companyId)
+    .in("campaign_id", ids)
+    .or("spend.gt.0,impressions.gt.0")
+    .order("snapshot_date", { ascending: true })
+    .limit(1);
+  const d = data?.[0]?.snapshot_date;
+  return d ? String(d).slice(0, 10) : null;
+}
+
 async function colherRelacaoNumerica(args: {
   companyId: string;
   pedido: string;
-}): Promise<{ ok: boolean; markdown: string; cobertura: string; campanhas: number }> {
+}): Promise<{ ok: boolean; markdown: string; leitura: string; cobertura: string; campanhas: number }> {
   const pedido = args.pedido;
-  const janelaP = parseJanelaDatasPedido(pedido);
-  const { from, to } = janelaDetalhe(janelaP.date_from, janelaP.date_to, 14);
+  const hoje = today();
+  const janela = resolverJanelaPedido(pedido, hoje);
+  const citados = extrairNomesDeCampanhaCitados(pedido);
+  const comSerie = pedidoExigeInterpretacao(pedido) || /\bpor dia\b/.test(deacc(pedido.toLowerCase())) || janela.desde_criacao;
   const { data: camps, error } = await supa.from("campaigns")
     .select("id,name,status,external_id")
     .eq("company_id", args.companyId);
   if (error) {
-    return { ok: false, markdown: "", cobertura: `campanhas: ${error.message}`, campanhas: 0 };
+    return { ok: false, markdown: "", leitura: "", cobertura: `campanhas: ${error.message}`, campanhas: 0 };
   }
-  const operacionais = ((camps ?? []) as Array<{ name?: string; status?: unknown; external_id?: string }>)
-    .filter((c) => statusObjetoOperacional(c.status));
-  const meio = inferirMeioDrive(pedido);
-  let alvos = meio
-    ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
-    : [];
-  if (!alvos.length && meio) {
-    const needle = meio === "juridico" ? "juridico" : meio === "la_felicita" ? "felicita" : "ocular";
-    alvos = casarCampanhas(operacionais, needle);
-  }
-  if (soAtivosDoPedido(pedido)) {
-    alvos = alvos.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
+  type CampAlvo = { id?: string; name?: string; status?: unknown; external_id?: string };
+  const operacionais = ((camps ?? []) as CampAlvo[]).filter((c) => statusObjetoOperacional(c.status));
+  let alvos: CampAlvo[] = [];
+  let faltando: string[] = [];
+  if (citados.length) {
+    const casa = casarCampanhasCitadas(operacionais, citados);
+    alvos = casa.escolhidas;
+    faltando = casa.faltando;
+  } else {
+    const meio = inferirMeioDrive(pedido);
+    alvos = meio
+      ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
+      : [];
+    if (!alvos.length && meio) {
+      const needle = meio === "juridico" ? "juridico" : meio === "la_felicita" ? "felicita" : "ocular";
+      alvos = casarCampanhas(operacionais, needle);
+    }
+    if (soAtivosDoPedido(pedido)) {
+      alvos = alvos.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
+    }
   }
   if (!alvos.length) {
-    return { ok: false, markdown: "", cobertura: "nenhuma campanha da linha no recorte", campanhas: 0 };
+    const porque = citados.length
+      ? `nenhuma das campanhas citadas no espelho (${faltando.join("; ")})`
+      : "nenhuma campanha da linha no recorte";
+    return { ok: false, markdown: "", leitura: "", cobertura: porque, campanhas: 0 };
   }
+  const toFetch = janela.dia_aberto ?? janela.date_to;
+  let from = janela.date_from;
+  if (!from) {
+    if (janela.desde_criacao) {
+      from = await primeiroDiaComEntrega(args.companyId, alvos.map((c) => String(c.id ?? "")))
+        ?? "2025-01-01";
+    } else {
+      from = janelaDetalhe(undefined, toFetch, 14).from;
+    }
+  }
+  const rotuloJanela = janela.dia_aberto
+    ? `${from} → ${janela.date_to} fechada; ${janela.dia_aberto} em aberto (entra na série, fica fora do veredito de custo)`
+    : `${from} → ${toFetch}`;
+  const soAtivos = citados.length ? false : soAtivosDoPedido(pedido);
   const blocos: string[] = [];
+  const blocosLeitura: string[] = [];
   const falhas: string[] = [];
-  for (const camp of alvos.slice(0, 6)) {
+  const teto = Math.min(12, Math.max(alvos.length, 1));
+  for (const camp of alvos.slice(0, teto)) {
     const id = String(camp.external_id ?? "");
-    if (!id) continue;
+    if (!id) {
+      falhas.push(`${camp.name}: sem external_id`);
+      continue;
+    }
     let pagina = 1;
     let restantes = 1;
     let base: Record<string, unknown> | null = null;
@@ -1786,9 +1845,9 @@ async function colherRelacaoNumerica(args: {
       const det = await tDetalheAnuncios(supa, args.companyId, {
         campaign_id: id,
         date_from: from,
-        date_to: to,
+        date_to: toFetch,
         pagina,
-        incluir_serie_diaria: true,
+        incluir_serie_diaria: comSerie,
       });
       if (typeof det.erro === "string") {
         falhas.push(`${camp.name}: ${det.erro}`);
@@ -1800,20 +1859,62 @@ async function colherRelacaoNumerica(args: {
       pagina += 1;
     }
     if (!base) continue;
-    const md = montarRelacaoDeDetalhe(
-      { ...base, anuncios, restantes: 0, exibidos: anuncios.length },
-      soAtivosDoPedido(pedido),
-    );
+    const pacote = { ...base, anuncios, restantes: 0, exibidos: anuncios.length };
+    const md = montarRelacaoDeDetalhe(pacote, soAtivos, comSerie);
+    const mdLeitura = comSerie ? montarRelacaoDeDetalhe(pacote, soAtivos, false) : md;
     if (md) blocos.push(md);
     else falhas.push(`${camp.name}: sem conjuntos/anuncios no recorte`);
+    if (mdLeitura) blocosLeitura.push(mdLeitura);
   }
-  const markdown = blocos.join("\n\n");
+  const cabeca = [
+    `Campanhas pedidas: ${citados.length ? citados.join(" · ") : "(nenhuma nomeada; recorte pela linha do pedido)"}.`,
+    `Entraram: ${blocos.length}.`,
+    faltando.length ? `Não encontradas no espelho: ${faltando.join(" · ")}.` : "",
+    `Janela: ${rotuloJanela}.`,
+  ].filter(Boolean).join("\n");
+  const markdown = [cabeca, ...blocos].filter(Boolean).join("\n\n");
+  const leitura = [cabeca, ...blocosLeitura].filter(Boolean).join("\n\n");
   return {
     ok: blocos.length > 0,
     markdown,
-    cobertura: `${blocos.length} campanha(s); falhas=${falhas.length}; janela ${from}→${to}`,
+    leitura,
+    cobertura: `${blocos.length} campanha(s); faltando=${faltando.length}; falhas=${falhas.length}; janela ${from}→${toFetch}`,
     campanhas: blocos.length,
   };
+}
+
+async function interpretarColheita(args: {
+  companyName: string;
+  companyId: string;
+  pergunta: string;
+  leitura: string;
+  escopo?: EscopoPedido;
+  timeoutMs: number;
+}): Promise<{ texto: string; erro?: string; tin: number; tout: number; finish: string }> {
+  const sys = `${montarSysSintese(args.companyName, "", "", args.escopo, args.companyId)}
+
+ESTA RODADA E LEITURA, NAO DESPEJO. Os numeros do usuario abaixo ja foram coletados e sao a unica fonte da conta. Escreva a interpretacao:
+- Cubra cada campanha citada pelo nome. Se a coleta disser que uma nao entrou, declare o nome. Nao troque por outra campanha.
+- A janela e a da coleta. Dia em aberto nao entra no veredito de custo.
+- Por campanha: o que carrega conversa, o que gasta sem resultado, conjunto e criativo, ativo e pausado com historico.
+- Nao repita as tabelas. O sistema anexa os numeros e a serie diaria depois do seu texto.
+- Nao invente metrica. Nao diga que vai consultar. Nao entregue so a tabela.`;
+  const r = await chamarLLM([
+    { role: "system", content: sys },
+    { role: "user", content: `PEDIDO DO GESTOR:\n${args.pergunta}\n\nCOLETA (totais; a serie diaria e anexada depois):\n${args.leitura.slice(0, 48_000)}` },
+  ], {
+    maxTokens: 8_000,
+    timeoutMs: args.timeoutMs,
+    tipo: "analise",
+    retries: OPENROUTER_RETRY_MAX_SINTESE,
+    retryCapMs: OPENROUTER_RETRY_CAP_SINTESE_MS,
+  });
+  if (r.erro) return { texto: "", erro: String(r.erro), tin: 0, tout: 0, finish: String(r.erro) };
+  const u = usoDe(r.parsed);
+  const texto = String(r.parsed?.choices?.[0]?.message?.content ?? "").trim();
+  const finish = String(r.parsed?.choices?.[0]?.finish_reason ?? "");
+  if (!texto) return { texto: "", erro: finish || "analise_vazia", tin: u.tin, tout: u.tout, finish };
+  return { texto, tin: u.tin, tout: u.tout, finish };
 }
 
 async function colherRelacaoGeo(args: {
@@ -2591,7 +2692,7 @@ async function chamarLLM(messages: any[], opts: {
       if (!plano) break;
       if (plano.esperarMs) tentativasEmVoo++;
       console.warn(`[openrouter] ${plano.motivo}`);
-      if (plano.esperarMs) await new Promise((r) => setTimeout(r, Math.min(plano.esperarMs, 4000)));
+      if (plano.esperarMs) await new Promise((r) => setTimeout(r, Math.min(plano.esperarMs ?? 0, 4000)));
       payload = plano.payload;
       JOB_LLM_ROTAS.push({
         tipo: rota.tipo, model: String(payload.model ?? ""), faixa: rota.faixa,
@@ -4473,7 +4574,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.27";
+  tel.versao = "job-v4.29";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -4626,7 +4727,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     let plano: { nome: string; foco: string }[] = [];
     let degradado = false;
     let relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
-    let colheitaRelacao: { ok: boolean; markdown: string; cobertura: string } | null = null;
+    let colheitaRelacao: { ok: boolean; markdown: string; leitura?: string; cobertura: string } | null = null;
     if (ehPedidoRelacaoGeoPublico(pergunta)) {
       await pushProgresso(jobId, "subagentes", "colheita deterministica da geo e do publico-alvo por conjunto");
       colheitaRelacao = await colherRelacaoGeo({ companyId, pedido: pergunta });
@@ -4775,11 +4876,46 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     // Memoria escolhida so AQUI: o plano ja existe e entra no gatilho de relevancia.
     const memoria = memoriaDaSintese(memCarregada, pergunta, escopo, tel, plano);
 
-    // FASE 3 - sintese (com resgate 429). Colheita de relacao ja e a resposta.
+    // FASE 3 - sintese. Relacao curta (so a tabela) entrega a colheita.
+    // Pedido de leitura (varias campanhas, desde a criacao, por dia, "como performa")
+    // nao pode sair sem modelo: em 01/10 a colheita pulou o LLM e carimbou openrouter/auto.
     let texto: string | null = null;
-    if (colheitaRelacao?.ok) {
+    if (colheitaRelacao?.ok && pedidoExigeInterpretacao(pergunta)) {
+      await pushProgresso(jobId, "sintese", "lendo a coleta — a tabela não é a resposta");
+      if (JOB_MODELO_ROTEADO === MODEL) JOB_MODELO_ROTEADO = MODELO_PADRAO;
+      const tLeitura = Date.now();
+      const lido = await interpretarColheita({
+        companyName, companyId, pergunta,
+        leitura: colheitaRelacao.leitura || colheitaRelacao.markdown,
+        escopo, timeoutMs: sintTimeoutMs,
+      });
+      if (lido.texto) {
+        texto = `${lido.texto}\n\n---\n\n${colheitaRelacao.markdown}`;
+        tel.sintese = {
+          tipo: "analise",
+          tokens_in: lido.tin,
+          tokens_out: lido.tout,
+          finish_reason: lido.finish || "stop",
+          ms: Date.now() - tLeitura,
+        };
+      } else {
+        texto = `A interpretação não fechou nesta rodada (${lido.erro ?? "sem texto"}). Os números abaixo cobrem o pedido; a leitura do modelo não saiu.\n\n${colheitaRelacao.markdown}`;
+        tel.sintese = {
+          pulada: "analise_vazia",
+          erro: lido.erro ?? "sem texto",
+          tokens_in: lido.tin,
+          tokens_out: lido.tout,
+          finish_reason: lido.finish || "analise_vazia",
+          ms: Date.now() - tLeitura,
+        };
+        if (JOB_MODELO_ROTEADO === MODEL || JOB_MODELO_ROTEADO === MODELO_PADRAO) {
+          JOB_MODELO_ROTEADO = "coleta";
+        }
+      }
+    } else if (colheitaRelacao?.ok) {
       texto = colheitaRelacao.markdown;
       tel.sintese = { pulada: "colheita_relacao", tokens_in: 0, tokens_out: 0, finish_reason: "stop" };
+      if (JOB_MODELO_ROTEADO === MODEL) JOB_MODELO_ROTEADO = "coleta";
       await pushProgresso(jobId, "sintese", "resposta da colheita deterministica (sem LLM de sintese)");
     } else {
       texto = await sintetizarComResgate({
@@ -6350,6 +6486,36 @@ Deno.serve(async (req) => {
     }
     emBackground(processarRitmoReplano(missaoId, String(cfg?.api_key ?? "")));
     return json({ ok: true, async: true, modo: "ritmo_replano", missao_id: missaoId }, 202);
+  }
+  if (modoRel === "correcao_custo") {
+    const companyId = String(body?.company_id ?? "").trim() || null;
+    if (userId) {
+      if (!companyId) return json({ error: "correcao_custo com JWT exige company_id" }, 400);
+      const { data: membro } = await supa.rpc("is_company_member", {
+        _company_id: companyId,
+        _user_id: userId,
+      });
+      if (!membro) return json({ error: "nao_e_membro_da_empresa" }, 403);
+    }
+    emBackground(rodarPasseCorrecaoCusto({
+      supa,
+      openRouterKey: OPENROUTER_KEY,
+      companyId,
+    }));
+    return json({ ok: true, async: true, modo: "correcao_custo", company_id: companyId }, 202);
+  }
+  if (modoRel === "emitir_plano_custo") {
+    const companyId = String(body?.company_id ?? "").trim();
+    const planoId = String(body?.plano_id ?? "").trim();
+    if (!companyId || !planoId) return json({ error: "emitir_plano_custo exige company_id e plano_id" }, 400);
+    if (!userId) return json({ error: "emissao_exige_gestor" }, 403);
+    const { data: membro } = await supa.rpc("is_company_member", {
+      _company_id: companyId,
+      _user_id: userId,
+    });
+    if (!membro) return json({ error: "nao_e_membro_da_empresa" }, 403);
+    const emissao = await emitirPlanoDeCusto({ supa, companyId, planoId, userId });
+    return json(emissao, emissao.ok ? 200 : 422);
   }
 
   // v2: CONTINUACAO DE SEGMENTO - a propria edge se reinvoca com o job_id; o novo worker

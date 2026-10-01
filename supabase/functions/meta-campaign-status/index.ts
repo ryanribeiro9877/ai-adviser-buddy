@@ -1289,6 +1289,7 @@ Deno.serve(async (req) => {
   const adsetsPorConta = new Map<string, string[]>(); // account_id -> external_ids
   const campanhasPorConta = new Map<string, string[]>(); // account_id -> campaign external_ids
   const orfaosPorConta: Record<string, unknown> = {};
+  const contasIncompletas: string[] = [];
 
   const CAMPOS = [
     "name",
@@ -1403,6 +1404,7 @@ Deno.serve(async (req) => {
         pagAds++;
       }
       anunciosPorConta.set(c, anuncios);
+      if (url || urlSets || urlAds) contasIncompletas.push(c);
     }
   }
 
@@ -2184,8 +2186,16 @@ Deno.serve(async (req) => {
     .select("id", { count: "exact", head: true })
     .eq("provider", "meta_ads");
 
+  const espelhoCompleto = contasIncompletas.length === 0 && acessiveis.length > 0;
+  await supa.rpc("registrar_frescor_espelho_meta", {
+    p_completo: espelhoCompleto,
+    p_detalhe: { contas_incompletas: contasIncompletas, contas_acessiveis: acessiveis.length },
+  });
+
   return json({
     ok: true,
+    espelho_completo: espelhoCompleto,
+    contas_incompletas: contasIncompletas,
     mcp_chamador: auth.chamador,
     mcp_chave_legada: auth.legado,
     contas_acessiveis: acessiveis.length,
