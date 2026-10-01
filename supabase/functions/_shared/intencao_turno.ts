@@ -379,6 +379,54 @@ export function ehPedidoOrigemDriveDosAnuncios(pedido: string): boolean {
   return anuncioOuConj && pasta;
 }
 
+/**
+ * Nomes de campanha citados linha a linha (COHAPM_…).
+ * O underscore nao cria fronteira de palavra: `\bjuridico` nao casa `COHAPM_JURIDICO`.
+ * Por isso a lista explicita vale mais do que inferir a linha do produto.
+ */
+export function extrairNomesDeCampanhaCitados(pedido: string): string[] {
+  const vistos = new Set<string>();
+  const nomes: string[] = [];
+  for (const linha of String(pedido ?? "").split(/\n/)) {
+    const t = linha
+      .trim()
+      .replace(/^[-*•]\s*/, "")
+      .replace(/^campanha:\s*/i, "")
+      .trim();
+    if (!/^COHAPM_/i.test(t) || t.length < 12 || t.length > 140) continue;
+    const chave = t.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[-_\s]+/g, "");
+    if (vistos.has(chave)) continue;
+    vistos.add(chave);
+    nomes.push(t.replace(/\s+/g, " "));
+  }
+  return nomes;
+}
+
+/**
+ * O gestor pediu leitura, nao o despejo da tabela.
+ * Relacao curta ("gastos por conjunto e criativo") continua tabela.
+ * "entender como performa", serie desde a criacao, ou varias campanhas nomeadas
+ * com esse pedido, exigem interpretacao — foi o que a colheita pulou em 01/10/2026.
+ */
+export function pedidoExigeInterpretacao(pedido: string): boolean {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  if (!p) return false;
+  const leitura =
+    /\b(entender|interpret\w*|diagnostic\w*|performando)\b/.test(p) ||
+    /\bcomo (essas|estas|a|as) campanhas? (estao |esta )?perform/.test(p) ||
+    /\btodos os dados\b/.test(p) ||
+    /\bdetermine que\b/.test(p) ||
+    /\bnecessario para entender\b/.test(p);
+  const serie = /\bpor dia\b/.test(p) || /\bdia a dia\b/.test(p) || /\bserie diaria\b/.test(p);
+  const desde =
+    (/\bdesde\b/.test(p) && /\b(criacao|criada|momento|dados reais|trouxe dados)\b/.test(p));
+  const varias = extrairNomesDeCampanhaCitados(pedido).length >= 2;
+  if (leitura) return true;
+  if (serie && desde) return true;
+  if (varias && (serie || desde || leitura)) return true;
+  return false;
+}
+
 /** Leitura que cruza anuncio no ar × peca do Drive — nao cabe no Luna mais barato. */
 export function ehPedidoLeituraCruzada(pedido: string): boolean {
   if (ehPedidoOrigemDriveDosAnuncios(pedido)) return true;

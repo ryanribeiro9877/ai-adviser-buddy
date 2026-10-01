@@ -7,6 +7,7 @@ import {
   aplicarResgateTimeout,
   bodyOpenRouter,
   diagnosticoRota,
+  ehTarefaDeAnalise,
   ehTarefaDeFusao,
   ehTarefaDeTriagem,
   ehTarefaInterativa,
@@ -47,7 +48,7 @@ assert(
 // ---------------------------------------------------------------------------
 const TIPOS: TipoTarefaLlm[] = [
   "planner", "subagente", "visao", "coordenacao", "sintese",
-  "chat_loop", "legendas", "compliance", "reco", "waba",
+  "chat_loop", "analise", "legendas", "compliance", "reco", "waba",
 ];
 for (const tipo of TIPOS) {
   for (const temImagem of [false, true]) {
@@ -85,6 +86,7 @@ for (const opts of [
   { tipo: "chat_loop" as const, pedidoAto: true },
   { tipo: "chat_loop" as const, pergunta: "cenario completo da campanha la felicita" },
   { tipo: "planner" as const },
+  { tipo: "analise" as const, tier: "deep" as const },
 ]) {
   const r = resolverChamadaLlm(opts);
   assert(r.model === MODELO_PADRAO, `${opts.tipo} primario=${r.model}`);
@@ -114,6 +116,8 @@ const modoNatural = (tipo: TipoTarefaLlm): ModoRaciocinio | null =>
     ? "interativo"
     : ehTarefaDeFusao(tipo)
     ? "fusao"
+    : ehTarefaDeAnalise(tipo)
+    ? "padrao"
     : null;
 
 for (const tipo of TIPOS) {

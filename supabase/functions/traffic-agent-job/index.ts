@@ -1826,7 +1826,7 @@ async function colherRelacaoNumerica(args: {
   const rotuloJanela = janela.dia_aberto
     ? `${from} → ${janela.date_to} fechada; ${janela.dia_aberto} em aberto (entra na série, fica fora do veredito de custo)`
     : `${from} → ${toFetch}`;
-  const soAtivos = citados.length ? false : soAtivosDoPedido(pedido);
+  const soAtivos = soAtivosDoPedido(pedido);
   const blocos: string[] = [];
   const blocosLeitura: string[] = [];
   const falhas: string[] = [];

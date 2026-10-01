@@ -87,9 +87,12 @@ export function pedidoExigeInventarioDrive(pedido: string): boolean {
 }
 
 export function inferirMeioDrive(pedido: string): MeioDrive | null {
-  const p = deaccPedido(pedido);
+  // Underscore e caractere de palavra: `\bjuridico` nao casa `COHAPM_JURIDICO`.
+  // Sem isto, um pedido com VISTTA + LAFELICITA + JURIDICO caia so em ocular.
+  const p = deaccPedido(pedido).replace(/_/g, " ");
   const oc = textoTemSistemaOcular(p);
-  const lf = /\bla\s*felicita|\blafelicita|\bfelicita|\bconj\.?\s*[1-4]_laf|\blaf_/.test(p)
+  const lf = /\bla\s*felicita|\blafelicita|\bfelicita\b/.test(p)
+    || /\bconj\.?\s*[1-4]\s*laf\b/.test(p)
     || (/\blf\b/.test(p) && !/\bjuridico\b/.test(p) && !oc);
   const jur = /\bjuridico\b/.test(p);
   const hits: MeioDrive[] = [];

@@ -111,6 +111,91 @@ export function janelaDetalhe(date_from?: string, date_to?: string, daysDefault 
   return { from, to };
 }
 
+export function isoMaisDias(iso: string, dias: number): string {
+  const d = new Date(`${iso.slice(0, 10)}T12:00:00-03:00`);
+  d.setDate(d.getDate() + dias);
+  return d.toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
+}
+
+/**
+ * Janela que o pedido descreve, sem cair nos 14 dias padrão.
+ * "até ontem, fechado" encerra no dia anterior. "até o dia de hoje" no mesmo
+ * texto marca hoje como dia em aberto — a série inclui, o veredito não trata como fechado.
+ * "desde a criação" deixa date_from vazio para o chamador preencher com o primeiro dia com entrega.
+ */
+export function resolverJanelaPedido(pedido: string, hojeIso?: string): {
+  date_from?: string;
+  date_to: string;
+  desde_criacao: boolean;
+  dia_aberto: string | null;
+} {
+  const hoje = (hojeIso || todayIsoBrt()).slice(0, 10);
+  const p = deaccLeitura(String(pedido ?? "").toLowerCase());
+  const explicita = parseJanelaDatasPedido(pedido, hoje);
+  const desde = /\bdesde\b/.test(p) && /\b(criacao|criada|momento|dados reais|trouxe dados)\b/.test(p);
+  const ontemFechado = /\bontem\b/.test(p) && /\bfechad/.test(p);
+  const pedeHoje = /\bdia de hoje\b/.test(p) || /\bate hoje\b/.test(p);
+  let date_to = explicita.date_to;
+  let dia_aberto: string | null = null;
+  if (!date_to) {
+    if (ontemFechado) {
+      date_to = isoMaisDias(hoje, -1);
+      if (pedeHoje) dia_aberto = hoje;
+    } else {
+      date_to = hoje;
+    }
+  }
+  return {
+    date_from: explicita.date_from,
+    date_to,
+    desde_criacao: desde && !explicita.date_from,
+    dia_aberto,
+  };
+}
+
+/**
+ * Casa cada nome citado com UMA campanha. O nome mais longo entra primeiro:
+ * `SET26` nao pode engolir `SET26- SETEMBRO`, que o contem.
+ */
+export function casarCampanhasCitadas<T extends CampanhaRef>(
+  camps: T[],
+  citados: string[],
+): { escolhidas: T[]; faltando: string[] } {
+  const pool = [...camps];
+  const escolhidas: T[] = [];
+  const faltando: string[] = [];
+  const ordem = [...citados].sort((a, b) => normLeitura(b).length - normLeitura(a).length);
+  for (const citado of ordem) {
+    const n = normLeitura(citado);
+    if (!n) {
+      faltando.push(citado);
+      continue;
+    }
+    const exact = pool.filter((c) => normLeitura(String(c.name ?? "")) === n);
+    let hits = exact;
+    if (!hits.length) {
+      hits = pool.filter((c) => {
+        const cn = normLeitura(String(c.name ?? ""));
+        return cn.startsWith(n) || n.startsWith(cn);
+      });
+      hits.sort((a, b) =>
+        Math.abs(normLeitura(String(a.name ?? "")).length - n.length) -
+        Math.abs(normLeitura(String(b.name ?? "")).length - n.length)
+      );
+      hits = hits.slice(0, 1);
+    }
+    if (!hits.length) {
+      faltando.push(citado);
+      continue;
+    }
+    const hit = hits[0];
+    escolhidas.push(hit);
+    const i = pool.indexOf(hit);
+    if (i >= 0) pool.splice(i, 1);
+  }
+  return { escolhidas, faltando };
+}
+
 function linhaMetrica(s: Record<string, unknown>, hoje: string) {
   const spend = num(s.spend), imp = num(s.impressions);
   const clkTodos = num(s.clicks), clkLink = num(s.link_clicks);

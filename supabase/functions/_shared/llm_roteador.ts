@@ -65,6 +65,7 @@ export type TipoTarefaLlm =
   | "coordenacao"
   | "sintese"
   | "chat_loop"
+  | "analise"
   | "legendas"
   | "compliance"
   | "reco"
@@ -265,6 +266,20 @@ const TIPOS_DE_FUSAO: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
   "sintese",
 ]);
 
+/**
+ * A colheita numerica entrega tabela crua. Quem escreve em cima dela nao esta fundindo
+ * um relatorio que ja pensou — esta fazendo a leitura que o gestor pediu.
+ * Fica em `high` (`padrao`) mesmo em job deep: `xhigh` censurou a sintese em 330s,
+ * e `low` e o piso da fusao, que foi o que devolveu tabela sem leitura em 01/10/2026.
+ */
+const TIPOS_DE_ANALISE: ReadonlySet<TipoTarefaLlm> = new Set<TipoTarefaLlm>([
+  "analise",
+]);
+
+export function ehTarefaDeAnalise(tipo: TipoTarefaLlm): boolean {
+  return TIPOS_DE_ANALISE.has(tipo);
+}
+
 export function ehTarefaDeTriagem(tipo: TipoTarefaLlm): boolean {
   return TIPOS_DE_TRIAGEM.has(tipo);
 }
@@ -335,6 +350,9 @@ export function modoRaciocinio(
   // raciocinado". Se algum dia a sintese precisar subir, isso passa a ser decisao desta lista
   // e nao efeito colateral de uma flag de tier.
   if (opts.tipo && ehTarefaDeFusao(opts.tipo)) return "fusao";
+  // Analise primaria nao sobe para xhigh: o material ainda nao foi raciocinado, mas a
+  // medicao de 05/09 mostrou que xhigh na escrita nao devolve texto. `high` e a banda.
+  if (opts.tipo && ehTarefaDeAnalise(opts.tipo)) return "padrao";
   if (typeof opts.profundo === "boolean") return opts.profundo ? "profundo" : "padrao";
   return opts.tier === "deep" ? "profundo" : "padrao";
 }
@@ -485,6 +503,11 @@ export function resolverChamadaLlm(opts: {
       req = { json: true };
       motivo = "coordenacao: julga relatorios";
       break;
+    case "analise":
+      preferido = "anthropic/claude-sonnet-5";
+      req = { prosa: true };
+      motivo = "leitura do pedido: a coleta e numero cru, a resposta e a interpretacao";
+      break;
     case "sintese":
       if (opts.faixaForcada === "economia") {
         faixa = "economia";
@@ -522,7 +545,7 @@ export function resolverChamadaLlm(opts: {
     motivo += ` [${MODELO_PADRAO} nao declara ${faltando} no catalogo — primario ${primario}]`;
   }
   const cadeia = montarCadeia(rede, primario, preferido);
-  if (tipo === "chat_loop" || tipo === "planner") {
+  if (tipo === "chat_loop" || tipo === "planner" || tipo === "analise") {
     const resto = cadeia.fallbacks.filter((s) => s !== RESERVA_GROK_46 && s !== MODELO_PADRAO);
     cadeia.fallbacks = [RESERVA_GROK_46, ...resto].slice(0, 3);
   }

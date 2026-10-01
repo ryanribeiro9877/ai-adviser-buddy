@@ -182,7 +182,11 @@ export function recortarCriativosPorPedido(
 
 export function soAtivosDoPedido(pedido: string): boolean {
   const p = String(pedido ?? "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  return /\bativ[oa]s?\b/.test(p) && !/\b(pausad|historico|todas? as campanhas)\b/.test(p);
+  // "ativos e inativos" contem a palavra ativos. Pedir os dois e pedir a lista inteira.
+  if (/\binativ/.test(p) || /\bpausad/.test(p) || /\bhistorico\b/.test(p) || /\btodas as campanhas\b/.test(p)) {
+    return false;
+  }
+  return /\bativ[oa]s?\b/.test(p);
 }
 
 export function statusEhAtivo(status: unknown): boolean {
@@ -193,13 +197,15 @@ export function statusEhAtivo(status: unknown): boolean {
 export function serieDiariaEnxuta(dias: unknown[]): Record<string, unknown>[] {
   return (Array.isArray(dias) ? dias : []).map((d) => {
     const o = d && typeof d === "object" ? d as Record<string, unknown> : {};
-    return {
+    const linha: Record<string, unknown> = {
       dia: o.dia ?? o.snapshot_date ?? null,
       gasto: o.gasto ?? null,
       impressoes: o.impressoes ?? o.impressions ?? null,
       conversas: o.conversas ?? o.messaging_started ?? null,
       formularios: o.formularios ?? o.form_leads ?? null,
     };
+    if (o.dia_parcial_em_coleta === true || o.dia_parcial === true) linha.dia_parcial = true;
+    return linha;
   });
 }
 
@@ -410,6 +416,7 @@ export function filtrarRelacaoAtivos(
 export function montarRelacaoDeDetalhe(
   det: Record<string, unknown>,
   soAtivos: boolean,
+  comSerie = false,
 ): string | null {
   if (!det || typeof det !== "object") return null;
   if (typeof det.erro === "string" || det.ambiguo === true) return null;
@@ -427,14 +434,24 @@ export function montarRelacaoDeDetalhe(
     anuncios = f.anuncios;
   }
   if (!conjuntos.length && !anuncios.length) return null;
-  return markdownRelacaoPorConjunto({
+  const tot = det.totais_campanha_janela && typeof det.totais_campanha_janela === "object"
+    ? det.totais_campanha_janela as Record<string, unknown>
+    : null;
+  const totais = tot
+    ? `Totais na janela: gasto ${tot.gasto ?? "—"} · impressões ${tot.impressoes ?? "—"} · conversas ${tot.conversas ?? "—"} · preço/conversa ${tot.custo_por_resultado ?? "—"}.`
+    : "";
+  const md = markdownRelacaoPorConjunto({
     campanha: String(camp.nome ?? camp.name ?? "campanha"),
+    campanha_status: camp.status != null ? String(camp.status) : undefined,
     janela: jan.date_from && jan.date_to
       ? `${jan.date_from} → ${jan.date_to}`
       : String(jan.date_to ?? ""),
     conjuntos,
     anuncios,
+    soAtivos,
+    comSerie,
   });
+  return totais ? `${totais}\n\n${md}` : md;
 }
 
 /** Prefixa tabela_markdown para o corte bruto de 14k nao comer os totais dos conjuntos. */
@@ -495,14 +512,47 @@ export function markdownTabelaConjuntos(args: {
   ].join("\n");
 }
 
+function diaTeveEntrega(o: Record<string, unknown>): boolean {
+  const imp = Number(o.impressoes ?? 0);
+  const conv = Number(o.conversas ?? 0);
+  if (imp > 0 || conv > 0) return true;
+  const bruto = String(o.gasto ?? "").replace(/[^\d,.-]/g, "").replace(",", ".");
+  const n = Number(bruto);
+  return Number.isFinite(n) && n > 0;
+}
+
+function markdownSerie(titulo: string, serie: unknown): string[] {
+  if (!Array.isArray(serie) || !serie.length) return [];
+  const dias = serie.filter((d) => d && typeof d === "object" && diaTeveEntrega(d as Record<string, unknown>)) as Record<string, unknown>[];
+  if (!dias.length) return [];
+  const linhas = [
+    `#### ${titulo}`,
+    "| Dia | Gasto | Impressões | Conversas |",
+    "|---|---:|---:|---:|",
+  ];
+  for (const o of dias) {
+    const marca = o.dia_parcial === true ? " (em aberto)" : "";
+    linhas.push(`| ${o.dia ?? "—"}${marca} | ${o.gasto ?? "—"} | ${o.impressoes ?? "—"} | ${o.conversas ?? "—"} |`);
+  }
+  linhas.push("");
+  return linhas;
+}
+
 /** Tabela pronta para a síntese: conjuntos, depois criativos dentro de cada conjunto. */
 export function markdownRelacaoPorConjunto(args: {
   campanha: string;
+  campanha_status?: string;
   janela: string;
   conjuntos: Record<string, unknown>[];
   anuncios: Record<string, unknown>[];
+  soAtivos?: boolean;
+  comSerie?: boolean;
 }): string {
   const linhasConj = markdownLinhasConjuntos(args.conjuntos);
+  const seriePorConj = new Map<string, unknown>();
+  for (const c of args.conjuntos) {
+    seriePorConj.set(String(c.nome ?? c.conjunto ?? ""), c.serie_diaria);
+  }
 
   const porConj = new Map<string, Record<string, unknown>[]>();
   for (const a of args.anuncios) {
@@ -525,12 +575,20 @@ export function markdownRelacaoPorConjunto(args: {
       );
     }
     blocosAds.push("");
+    if (args.comSerie) {
+      blocosAds.push(...markdownSerie("Série diária do conjunto", seriePorConj.get(nome)));
+      for (const a of ads) {
+        blocosAds.push(...markdownSerie(`Série diária — ${a.nome ?? a.ad_id ?? "anúncio"}`, a.serie_diaria));
+      }
+    }
   }
 
+  const tituloConjuntos = args.soAtivos ? "## Conjuntos (somente os ativos)" : "## Conjuntos";
+  const status = args.campanha_status ? ` (${args.campanha_status})` : "";
   return [
-    `Campanha: **${args.campanha}**. Janela: **${args.janela}**.`,
+    `Campanha: **${args.campanha}**${status}. Janela: **${args.janela}**.`,
     "",
-    "## Conjuntos (ativos da linha)",
+    tituloConjuntos,
     ...linhasConj,
     "",
     "## Criativos por conjunto",

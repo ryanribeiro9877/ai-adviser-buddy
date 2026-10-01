@@ -13,7 +13,8 @@ import {
   soAtivosDoPedido,
 } from "./coleta_completa.ts";
 import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
-import { ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica } from "./intencao_turno.ts";
+import { ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, extrairNomesDeCampanhaCitados, pedidoExigeInterpretacao } from "./intencao_turno.ts";
+import { casarCampanhasCitadas, resolverJanelaPedido } from "./leitura_desempenho.ts";
 
 function assert(cond: boolean, msg: string) {
   if (!cond) throw new Error(msg);
@@ -172,7 +173,58 @@ assert(
   /"criativos",\s*\n\s*"criativos_drive"/.test(job),
   "pecas no ar entram antes do inventario Drive",
 );
-assert(job.includes("job-v4.27"), "versao da telemetria andou");
+assert(job.includes("job-v4.29"), "versao da telemetria andou");
+assert(job.includes("interpretarColheita"), "leitura do pedido nao pode pular o modelo");
+assert(job.includes("pedidoExigeInterpretacao"), "colheita distingue tabela de leitura");
+
+const pedidoCinco = [
+  "preciso de todos os dados desde a criação dessas campanhas até o dia de ontem, fechado. Traga custo, impressão, custo por conversa e gasto.",
+  "traga também por dia, por conjunto, ativos e inativos, e por criativo, desde o momento em que a campanha trouxe dados reais até o dia de hoje, para entender como todas as campanhas estão performando.",
+  "COHAPM_VISTTA_CONV_WA_SET26- SETEMBRO",
+  "COHAPM_VISTTA_CONV_WA_SET26",
+  "COHAPM_LAFELICITA_CONV_WA_2026-08",
+  "COHAPM_JURIDICO_CONV_WA_2026-08",
+  "COHAPM_LAFELICITA_CONV_WA_2026 - SETEMBRO",
+].join("\n");
+assert(pedidoExigeInterpretacao(pedidoCinco), "pedido longo e leitura, nao tabela pronta");
+assert(ehPedidoRelacaoNumerica(pedidoCinco), "continua sendo relacao numerica");
+assert(!soAtivosDoPedido(pedidoCinco), "ativos e inativos nao filtra so o que esta no ar");
+assert(extrairNomesDeCampanhaCitados(pedidoCinco).length === 5, "cinco campanhas citadas");
+const casa = casarCampanhasCitadas([
+  { name: "COHAPM_VISTTA_CONV_WA_SET26- SETEMBRO", external_id: "1" },
+  { name: "COHAPM_VISTTA_CONV_WA_SET26", external_id: "2" },
+  { name: "COHAPM_LAFELICITA_CONV_WA_2026-08", external_id: "3" },
+  { name: "COHAPM_JURIDICO_CONV_WA_2026-08", external_id: "4" },
+  { name: "COHAPM_LAFELICITA_CONV_WA_2026 - SETEMBRO", external_id: "5" },
+  { name: "COHAPM_OUTRA", external_id: "9" },
+], extrairNomesDeCampanhaCitados(pedidoCinco));
+assert(casa.escolhidas.length === 5 && casa.faltando.length === 0, `casamento ${casa.escolhidas.length}/${casa.faltando.length}`);
+assert(new Set(casa.escolhidas.map((c) => c.external_id)).size === 5, "SET26 nao engole SETEMBRO");
+const janela = resolverJanelaPedido(pedidoCinco, "2026-10-01");
+assert(janela.desde_criacao, "desde a criacao nao cai em 14 dias");
+assert(janela.date_to === "2026-09-30", `fechado em ontem, veio ${janela.date_to}`);
+assert(janela.dia_aberto === "2026-10-01", "hoje fica em aberto");
+const comDia = markdownRelacaoPorConjunto({
+  campanha: "COHAPM_JURIDICO_CONV",
+  janela: "2026-08-01 → 2026-09-30",
+  soAtivos: false,
+  comSerie: true,
+  conjuntos: [{
+    nome: "JURIDICO_CONJ.1", status: "PAUSED",
+    serie_diaria: [{ dia: "2026-08-02", gasto: "R$ 4.00", impressoes: 10, conversas: 1 }],
+  }],
+  anuncios: [{
+    nome: "AD_JUR_01", conjunto: "JURIDICO_CONJ.1", status: "PAUSED",
+    serie_diaria: [
+      { dia: "2026-08-02", gasto: "R$ 4.00", impressoes: 10, conversas: 1 },
+      { dia: "2026-08-03", gasto: "R$ 0.00", impressoes: 0, conversas: 0 },
+    ],
+  }],
+});
+assert(comDia.includes("## Conjuntos\n"), "titulo nao mente que so ha ativos");
+assert(!comDia.includes("ativos da linha"), "cabecalho antigo saiu");
+assert(comDia.includes("2026-08-02"), "dia com entrega entra");
+assert(!comDia.includes("2026-08-03"), "dia zerado nao entra");
 assert(job.includes("colherRelacaoGeo"), "colheita geo no job");
 
 console.log("ok coleta_completa");

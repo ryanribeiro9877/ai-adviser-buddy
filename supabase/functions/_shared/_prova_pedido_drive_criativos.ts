@@ -94,6 +94,12 @@ assert(inferirMeioDeProduto("juridico_whatsapp") === "juridico", "produto juridi
 assert(inferirMeioDeProduto("sistema ocular") === "sistema_ocular", "produto ocular");
 assert(inferirMeioDrive("criativos do Sistema Ocular no drive") === "sistema_ocular", "pedido ocular");
 assert(inferirMeioDrive("pasta VISTTA") === "sistema_ocular", "pedido VISTTA");
+assert(inferirMeioDrive("COHAPM_JURIDICO_CONV_WA_2026-08") === "juridico", "underscore nao esconde juridico");
+assert(inferirMeioDrive("COHAPM_LAFELICITA_CONV_WA_2026-08") === "la_felicita", "underscore nao esconde la felicita");
+assert(
+  inferirMeioDrive("COHAPM_VISTTA_CONV_WA_SET26\nCOHAPM_LAFELICITA_CONV_WA_2026-08\nCOHAPM_JURIDICO_CONV_WA_2026-08") === null,
+  "tres linhas citadas nao colapsam na primeira",
+);
 assert(parseMeioDriveArg("vistta") === "sistema_ocular", "arg vistta");
 assert(normalizarMeioWaba("sistema_ocular") === "sistema_ocular", "WABA aceita ocular");
 assert(normalizarMeioWaba("vistta") === "sistema_ocular", "WABA alias vistta");

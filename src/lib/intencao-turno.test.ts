@@ -7,6 +7,8 @@ import {
   ehPerguntaDeLeitura,
   ehLeituraDeDesempenho,
   ehPedidoRelacaoNumerica,
+  extrairNomesDeCampanhaCitados,
+  pedidoExigeInterpretacao,
   ehPedidoRelacaoGeoPublico,
   recusaFalsaMoldeTrafego,
   recusaFalsaClassificacaoSemMetrica,
@@ -119,9 +121,25 @@ describe("ehPerguntaDeLeitura", () => {
     expect(ehPedidoDeAto(ocular)).toBe(false);
     expect(ehPerguntaDeLeitura(ocular)).toBe(true);
     expect(ehPedidoDetalhamentoCampanha(ocular)).toBe(true);
+    expect(pedidoExigeInterpretacao(ocular)).toBe(false);
     expect(
       deveForcarEmissao({ pedido: ocular, chamouPropose: false, cardsEmitidos: 0 }),
     ).toBe(false);
+  });
+
+  it("cinco campanhas nomeadas, desde a criacao e por dia, exigem leitura", () => {
+    const pedido = [
+      "todos os dados desde a criação até o dia de ontem, fechado, por dia,",
+      "conjuntos ativos e inativos, para entender como as campanhas estão performando.",
+      "COHAPM_VISTTA_CONV_WA_SET26",
+      "COHAPM_JURIDICO_CONV_WA_2026-08",
+    ].join("\n");
+    expect(pedidoExigeInterpretacao(pedido)).toBe(true);
+    expect(extrairNomesDeCampanhaCitados(pedido)).toEqual([
+      "COHAPM_VISTTA_CONV_WA_SET26",
+      "COHAPM_JURIDICO_CONV_WA_2026-08",
+    ]);
+    expect(ehPedidoDeAto(pedido)).toBe(false);
   });
 });
 
