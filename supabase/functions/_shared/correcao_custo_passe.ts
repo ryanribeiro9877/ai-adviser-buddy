@@ -333,20 +333,21 @@ function planoDeterministico(
     };
   }
   const peca = colheita.acervo[0] as Record<string, unknown> | undefined;
-  const atos = escada.atos.map((action) => ({
-    action,
-    target_external_id: action === "criar_anuncio_a_partir_de"
-      ? txt(est.conjunto_external_id) || txt(est.alvo_external_id)
-      : txt(est.alvo_external_id),
-    target_name: action === "criar_anuncio_a_partir_de"
-      ? txt(est.conjunto_nome) || txt(est.alvo_nome)
-      : txt(est.alvo_nome),
-    payload: action === "criar_anuncio_a_partir_de"
-      ? { drive_file_id: peca ? txt(peca.drive_file_id) : null, nome: peca ? txt(peca.nome) : null }
-      : action === "ajustar_posicionamentos_do_conjunto"
-        ? { formato_midia: "video" }
-        : {},
-  }));
+  const conjuntoId = txt(est.conjunto_external_id);
+  const conjuntoNome = txt(est.conjunto_nome);
+  const atos = escada.atos.map((action) => {
+    const noConjunto = action === "criar_anuncio_a_partir_de" || action === "ajustar_posicionamentos_do_conjunto";
+    return {
+      action,
+      target_external_id: noConjunto ? (conjuntoId || txt(est.alvo_external_id)) : txt(est.alvo_external_id),
+      target_name: noConjunto ? (conjuntoNome || txt(est.alvo_nome)) : txt(est.alvo_nome),
+      payload: action === "criar_anuncio_a_partir_de"
+        ? { drive_file_id: peca ? txt(peca.drive_file_id) : null, nome: peca ? txt(peca.nome) : null }
+        : action === "ajustar_posicionamentos_do_conjunto"
+          ? { formato_midia: txt(est.formato_midia) || null, posicionamento: txt(est.posicionamento) || null }
+          : {},
+    };
+  });
   const discorda = est.direcoes_discordam === true;
   return {
     alvo: { nivel: est.nivel, external_id: est.alvo_external_id, nome: est.alvo_nome },
@@ -585,7 +586,7 @@ export async function rodarPasseCorrecaoCusto(opts: {
       const entregando = num(est.anuncios_entregando_no_conjunto) ?? colheita.ranking.length;
       const podeCusto = est.nivel !== "anuncio"
         || (colheita.podePausar as Record<string, unknown> | null)?.permitido !== false;
-      const escada = escolherEscada({
+      let escada = escolherEscada({
         anuncios_entregando: entregando,
         pode_pausar_por_custo: podeCusto,
         peca_ok: colheita.acervo.length > 0,
@@ -594,6 +595,9 @@ export async function rodarPasseCorrecaoCusto(opts: {
         carencia: false,
         alavancas_esgotadas: colheita.esgotadas,
       });
+      if (escada.alavanca === "ajustar_posicionamentos_do_conjunto" && !txt(est.formato_midia)) {
+        escada = { alavanca: null, atos: [], motivo: "formato_de_midia_nao_medido" };
+      }
       let corpo = await redigir(opts.openRouterKey, est, colheita, escada);
       if (corpo && escada.alavanca && txt(corpo.alavanca) !== escada.alavanca) corpo = null;
       let montado = corpo ?? planoDeterministico(est, escada, colheita, corpo ? null : "llm_sem_json");
