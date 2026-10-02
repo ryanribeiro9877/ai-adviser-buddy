@@ -3009,7 +3009,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
       `Trocar o criativo do anuncio "${alvo.name}" para ${String(params?.creative_id ?? "")}. Nao zera o aprendizado, mas a Meta volta o anuncio a revisao. Nao declare corrigido sem reler effective_status. O criativo antigo permanece.`,
     vincular_instagram_dos_anuncios: (() => {
       const n = Array.isArray(params?.anuncios) ? (params.anuncios as unknown[]).length : 0;
-      const h = String(params?.instagram_destino_handle ?? "@cohapm");
+      const h = String(params?.instagram_destino_handle ?? "o perfil proprio");
       return `Vincular ${h} em ${n} anúncio(s) de "${alvo.name}" (conjuntos ativos e pausados)`;
     })(),
   } as Record<string, string>)[action];
@@ -3426,7 +3426,7 @@ async function identidadeOficialIgEmpresa(
       instagram_actor_id: parCohapm[0],
       instagram_handle: `@${HANDLE_COHAPM_OFICIAL}`,
       fonte: "config_empresa",
-      procedencia: "instagram_accounts da conta Meta (@cohapm)",
+      procedencia: "instagram_accounts da conta Meta (perfil proprio)",
       vinculo_pagina_confirmado: true,
     };
   }
@@ -3522,7 +3522,7 @@ async function t_ler_instagram_anuncios(companyId: string, args: any) {
   if (!ident.encontrada || !ident.instagram_actor_id) {
     return {
       erro: "instagram_oficial_nao_resolvido",
-      detalhe: "Nao achei @cohapm na conta Meta nem identidade na config. Nao classifiquei os anuncios.",
+      detalhe: "Nao achei o perfil proprio da empresa na conta Meta nem na identidade da config. Nao classifiquei os anuncios.",
       campanha: camp.name,
     };
   }
@@ -3578,7 +3578,7 @@ async function t_ler_instagram_anuncios(companyId: string, args: any) {
       precisa_relincar: a.precisa_relincar,
     })),
     instrucao:
-      "Classifique com classificacao (coop_cohapm / cohapm / outro / sem_vinculo / id_sem_handle). " +
+      "A chave classificacao usa o codigo cadastrado da empresa. O de-para (perfil proprio, perfil relacionado, terceiro, sem vinculo) esta na memoria da empresa. " +
       "Nao presuma pelo perfil unico da conta. Para alterar, chame vincular_instagram_dos_anuncios na MESMA campanha.",
   };
 }
@@ -3603,19 +3603,20 @@ async function t_vincular_instagram_anuncios(
       totais: (leitura as any).totais,
     };
   }
+  const handleOficial = String((leitura as any).instagram_oficial?.handle ?? "o perfil proprio");
   return await t_propose_action(companyId, convId, requestedBy, {
     action_type: "vincular_instagram_dos_anuncios",
     target_name: (leitura as any).campanha,
     justificativa: String(args?.justificativa ?? "").trim() ||
-      `Vincular @cohapm nos ${aMudar.length} anuncios da campanha ${(leitura as any).campanha} que ainda nao usam o Instagram oficial (conjuntos ACTIVE e PAUSED). Outras campanhas ficam de fora.`,
+      `Vincular ${handleOficial} nos ${aMudar.length} anuncios da campanha ${(leitura as any).campanha} que ainda nao usam o perfil proprio (conjuntos ACTIVE e PAUSED). Outras campanhas ficam de fora.`,
     reversa:
       "Recriar o criativo com o Instagram anterior (id lido no card) pelo mesmo fluxo, ou restaurar no Gerenciador. Quem desfaz: administrador, em ate 24h.",
     metrica_sucesso:
-      "get_instagram_dos_anuncios na mesma campanha devolve classificacao=cohapm e precisa_relincar=false em todos os anuncios do lote.",
+      "get_instagram_dos_anuncios na mesma campanha devolve a classificacao do perfil proprio e precisa_relincar=false em todos os anuncios do lote.",
     risco:
       "A Meta reanalisa o criativo; anuncio ACTIVE pode ir a PENDING_REVIEW. Conjuntos PAUSED nao sao ativados. Nao cria anuncio novo.",
     mecanismo:
-      "Novo adcreative com a mesma peca + instagram_user_id @cohapm; update_ad no creative_id. Status do anuncio se mantem.",
+      "Novo adcreative com a mesma peca e o perfil proprio da empresa; update_ad no creative_id. Status do anuncio se mantem.",
     params: {
       campanha_destino_nome: (leitura as any).campanha,
       campanha_external_id: (leitura as any).campanha_external_id,

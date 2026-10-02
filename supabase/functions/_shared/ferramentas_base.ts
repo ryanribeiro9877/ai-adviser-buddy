@@ -73,7 +73,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   alterar_publico_do_conjunto: {
     descricao:
-      "Emite CARD DE APROVACAO para trocar o DETALHAMENTO (interesses / flexible_spec) de UM conjunto JA PUBLICADO (ACTIVE ou PAUSED), sem criar conjunto novo e sem recorte global. POST targeting no objeto vivo — o mesmo caminho de alterar_geo. Passe interesses com {id,name} de buscar_interesses. Advantage+ desliga por padrao (senao o recorte vira sugestao). NAO diga que publico nao se edita em conjunto publicado nem que so da para duplicar. NAO afirma que o recorte prova renda R$ 8 mil.",
+      "Emite CARD DE APROVACAO para trocar o DETALHAMENTO (interesses / flexible_spec) de UM conjunto JA PUBLICADO (ACTIVE ou PAUSED), sem criar conjunto novo e sem recorte global. POST targeting no objeto vivo — o mesmo caminho de alterar_geo. Passe interesses com {id,name} de buscar_interesses. Advantage+ desliga por padrao (senao o recorte vira sugestao). NAO diga que publico nao se edita em conjunto publicado nem que so da para duplicar. Segmentacao por interesse e afinidade declarada, nao renda verificada: nao afirme que o recorte prova faixa de renda.",
     parametros: {"type":"object","properties":{"conjunto":{"type":"string","description":"Nome atual do conjunto."},"alvo_external_id":{"type":"string","description":"Id Meta do conjunto quando o nome nao for unico."},"interesses":{"type":"array","description":"Array {id,name} da buscar_interesses. OR no mesmo grupo."},"advantage_audience":{"type":"integer","description":"0 (padrao, recorte vale) ou 1 (Advantage+ dilui)."},"justificativa":{"type":"string"},"reversa":{"type":"string"},"metrica_sucesso":{"type":"string"}},"required":["conjunto","interesses"]},
     superficies: ["chat"],
     efeito: "escrita",
@@ -81,8 +81,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   alterar_orcamento: {
     descricao:
-      "Emite CARD DE APROVACAO para alterar o ORCAMENTO DIARIO de UM conjunto JA PUBLICADO. Passe conjunto (nome atual) e orcamento_diario_reais em REAIS por dia (20 = R$ 20,00 — NUNCA 2000). CONJ.04 no nome NAO e dinheiro. Pedido 'altere o orçamento do CONJ.X para 20' E a ordem desta mensagem: emita o card. Orcamento de criacao anterior nesta conversa NAO trava. NAO peca confirmacao de que o valor novo substitui o antigo.",
-    parametros: {"type":"object","properties":{"conjunto":{"type":"string","description":"Nome atual do conjunto (ex. JUR_WA_CONJ.04_9331-6245)."},"alvo_external_id":{"type":"string","description":"Id Meta do conjunto quando o nome nao for unico."},"orcamento_diario_reais":{"type":"number","description":"Novo valor em REAIS por dia (ex. 20). Alias: novo_orcamento_diario_reais."},"novo_orcamento_diario_reais":{"type":"number","description":"Alias de orcamento_diario_reais."},"justificativa":{"type":"string"},"reversa":{"type":"string"},"metrica_sucesso":{"type":"string"}},"required":["conjunto","orcamento_diario_reais"]},
+      "Emite CARD DE APROVACAO para alterar o ORCAMENTO DIARIO de UM conjunto JA PUBLICADO. Passe conjunto (nome atual) e orcamento_diario_reais. O parametro orcamento_diario_reais e em reais por dia, nao em centavos — a conversao para centavos e da Graph, nao sua. Numero que faz parte do nome do conjunto nunca e orcamento. Pedido de alterar o orcamento deste conjunto, com o valor e a ordem nesta mensagem: emita o card. Orcamento de criacao anterior nesta conversa NAO trava. NAO peca confirmacao de que o valor novo substitui o antigo.",
+    parametros: {"type":"object","properties":{"conjunto":{"type":"string","description":"Nome atual do conjunto."},"alvo_external_id":{"type":"string","description":"Id Meta do conjunto quando o nome nao for unico."},"orcamento_diario_reais":{"type":"number","description":"Novo valor em reais por dia, nao em centavos. Alias: novo_orcamento_diario_reais."},"novo_orcamento_diario_reais":{"type":"number","description":"Alias de orcamento_diario_reais."},"justificativa":{"type":"string"},"reversa":{"type":"string"},"metrica_sucesso":{"type":"string"}},"required":["conjunto","orcamento_diario_reais"]},
     superficies: ["chat"],
     efeito: "escrita",
     setor: "Atos na conta Meta",
@@ -90,7 +90,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   criar_conjunto: {
     descricao:
       "Emite CARD DE APROVACAO para CRIAR um conjunto do zero, com spec completo, sem molde. Campos: nome, campaign_id, orcamento_diario_reais, optimization_goal, billing_event, bid_strategy, destination_type, promoted_object, start_time opcional e targeting INTEIRO. Nasce PAUSADO: aprovar nao ativa. targeting sem targeting_automation.advantage_audience e recusado (spec parcial apaga advantage_audience 0). Pre-voo obrigatorio. O card descreve verba, idade, cidades, quantos bairros e pinos, e cada termo de segmentacao com nome e classe.",
-    parametros: {"type":"object","properties":{"nome":{"type":"string"},"campaign_id":{"type":"string"},"orcamento_diario_reais":{"type":"number","description":"Reais por dia. 40 = R$ 40."},"optimization_goal":{"type":"string"},"billing_event":{"type":"string"},"bid_strategy":{"type":"string"},"destination_type":{"type":"string"},"promoted_object":{"type":"object"},"start_time":{"type":"string"},"targeting":{"type":"object","description":"Spec completo, com age_min, geo_locations e targeting_automation.advantage_audience 0 ou 1."},"justificativa":{"type":"string"},"reversa":{"type":"string"},"metrica_sucesso":{"type":"string"}},"required":["nome","campaign_id","orcamento_diario_reais","optimization_goal","billing_event","bid_strategy","destination_type","promoted_object","targeting"]},
+    parametros: {"type":"object","properties":{"nome":{"type":"string"},"campaign_id":{"type":"string"},"orcamento_diario_reais":{"type":"number","description":"Reais por dia, nao centavos."},"optimization_goal":{"type":"string"},"billing_event":{"type":"string"},"bid_strategy":{"type":"string"},"destination_type":{"type":"string"},"promoted_object":{"type":"object"},"start_time":{"type":"string"},"targeting":{"type":"object","description":"Spec completo, com age_min, geo_locations e targeting_automation.advantage_audience 0 ou 1."},"justificativa":{"type":"string"},"reversa":{"type":"string"},"metrica_sucesso":{"type":"string"}},"required":["nome","campaign_id","orcamento_diario_reais","optimization_goal","billing_event","bid_strategy","destination_type","promoted_object","targeting"]},
     superficies: ["chat"],
     efeito: "escrita",
     setor: "Atos na conta Meta",
@@ -218,7 +218,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   checar_par_texto_e_peca: {
     descricao:
       "Avalia o PAR legenda + peca pela concatenacao do texto disponivel. Exige legenda e drive_file_id; passe campanha e conjunto quando for emitir. Existe caminho conjunto: nunca diga que o par nao e avaliado.",
-    parametros: {"type":"object","properties":{"legenda":{"type":"string"},"drive_file_id":{"type":"string"},"campanha":{"type":"string","description":"Nome da campanha destino (COHAPM: obriga casar linha da peca)."},"conjunto":{"type":"string","description":"Nome do conjunto destino."},"nome_criativo":{"type":"string"}},"required":["legenda","drive_file_id"]},
+    parametros: {"type":"object","properties":{"legenda":{"type":"string"},"drive_file_id":{"type":"string"},"campanha":{"type":"string","description":"Nome da campanha destino. A linha da peca tem de casar com a do destino."},"conjunto":{"type":"string","description":"Nome do conjunto destino."},"nome_criativo":{"type":"string"}},"required":["legenda","drive_file_id"]},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Conformidade",
@@ -226,7 +226,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   check_compliance: {
     descricao:
       "GUARDIAO DE COMPLIANCE: valida deterministicamente UMA legenda (texto integral) e/ou a peca anexada contra as regras versionadas. Esboco que VOCE escreveu nesta conversa: passe o proprio texto em legenda=. Anuncio ja publicado: pegue a legenda em get_criativos_conteudo. Passe campanha, conjunto e nome_criativo ao auditar destino x peca.",
-    parametros: {"type":"object","properties":{"legenda":{"type":"string","description":"Texto integral da legenda a validar (obrigatorio se nao houver imagem anexada)."},"campanha":{"type":"string"},"conjunto":{"type":"string"},"nome_criativo":{"type":"string"},"drive_file_id":{"type":"string"},"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]}},"required":["legenda"]},
+    parametros: {"type":"object","properties":{"legenda":{"type":"string","description":"Texto integral da legenda a validar (obrigatorio se nao houver imagem anexada)."},"campanha":{"type":"string"},"conjunto":{"type":"string"},"nome_criativo":{"type":"string"},"drive_file_id":{"type":"string"},"meio":{"type":"string","description":"Valor cadastrado da empresa."}},"required":["legenda"]},
     superficies: ["chat","job"], omitidos: {"job":["meio","drive_file_id"]},
     efeito: "leitura",
     setor: "Conformidade",
@@ -266,7 +266,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   gerar_legendas: {
     descricao:
       "ESP-37, MOTOR DE LEGENDA: gera exatamente 3 variantes Hook -> Beneficio/prova -> CTA e grava em conversation_legendas. NAO cria anuncio. objetivo e obrigatorio; passe produto, meio e o drive_file_id do slate (get_slate_da_conversa).",
-    parametros: {"type":"object","properties":{"produto":{"type":"string","description":"Ex.: imovel / la_felicita, juridico_whatsapp (COHAPM Juridico) ou consignado_clt (Legal). SEM default CLT."},"objetivo":{"type":"string","description":"O que a legenda deve comunicar (obrigatorio)."},"eixo":{"type":"string","description":"Sinonimo de objetivo."},"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"],"description":"Voz da marca. La Felicita = la_felicita."},"drive_file_id":{"type":"string","description":"Peca do Drive (do slate)."},"peca_chave":{"type":"string","description":"Chave estavel. Default = drive_file_id ou objetivo."},"referencias":{"type":"array","items":{"type":"string"},"description":"Ate 5 legendas de referencia (estilo)."}},"required":["objetivo"]},
+    parametros: {"type":"object","properties":{"produto":{"type":"string","description":"Produto do pedido ou da campanha. Sem default. A leitura de brand_identity diz a voz."},"objetivo":{"type":"string","description":"O que a legenda deve comunicar (obrigatorio)."},"eixo":{"type":"string","description":"Sinonimo de objetivo."},"meio":{"type":"string","description":"Valor cadastrado da empresa. Campanha e produto definem."},"drive_file_id":{"type":"string","description":"Peca do Drive (do slate)."},"peca_chave":{"type":"string","description":"Chave estavel. Default = drive_file_id ou objetivo."},"referencias":{"type":"array","items":{"type":"string"},"description":"Ate 5 legendas de referencia (estilo)."}},"required":["objetivo"]},
     superficies: ["chat"],
     efeito: "escrita",
     setor: "Ativo criativo e copy",
@@ -274,7 +274,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   get_acervo_para_anuncio: {
     descricao:
       "LEITURA do acervo do Drive para montar anuncio, com os ids da Meta e na_biblioteca_da_meta por peca. Em lote ou mix, chame SEM produto na primeira vez; quando o slate ja tem drive_file_ids, passe-os. Se o gestor citou a pasta do mes (setembro, 09. Setembro), passe pasta com esse mes: o servidor recorta o caminho e nao devolve o acervo inteiro. Esta e a fonte para escolher peca do acervo — get_criativos_conteudo so tem anuncios ja no ar.",
-    parametros: {"type":"object","properties":{"produto":{"type":"string","description":"Opcional. Em lote/mix deixe vazio na 1a chamada."},"incluir_inaptas":{"type":"boolean","description":"Padrao true."},"drive_file_ids":{"type":"array","items":{"type":"string"},"description":"Opcional. Recorte: so estes arquivos (slate conhecido)."},"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro. Obrigatorio quando o gestor citou a pasta."}}},
+    parametros: {"type":"object","properties":{"produto":{"type":"string","description":"Opcional. Em lote/mix deixe vazio na 1a chamada."},"incluir_inaptas":{"type":"boolean","description":"Padrao true."},"drive_file_ids":{"type":"array","items":{"type":"string"},"description":"Opcional. Recorte: so estes arquivos (slate conhecido)."},"meio":{"type":"string","description":"Valor cadastrado da empresa."},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro. Obrigatorio quando o gestor citou a pasta."}}},
     superficies: ["chat","job"], omitidos: {"job":["drive_file_ids"]},
     efeito: "leitura",
     setor: "Ativo criativo e copy",
@@ -298,7 +298,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   get_analise_visual_drive: {
     descricao:
       "VEREDITO VISUAL POR PECA das midias do Drive, ja persistido pelo especialista de visao: produto detectado pelos pixels, texto visivel, risco e veredito aproveitavel sim/nao/incerto com motivo. Use quando o gestor pedir para classificar as pecas da pasta. Recorte por meio, formatos e pasta (mes, ex.: setembro).",
-    parametros: {"type":"object","properties":{"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro."}}},
+    parametros: {"type":"object","properties":{"meio":{"type":"string","description":"Valor cadastrado da empresa."},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro."}}},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Ativo criativo e copy",
@@ -345,8 +345,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_drive_criativos: {
     descricao:
-      "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo e data, sem thumbnail. Recorte com meio (la_felicita|juridico|sistema_ocular), formatos (Reels, Videos) e pasta (mes, ex.: setembro). Use para LISTAR o que existe na pasta; nao substitui por get_criativos_conteudo, que traz anuncios ja no ar.",
-    parametros: {"type":"object","properties":{"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"]},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro."}}},
+      "INVENTARIO DA PASTA DE CRIATIVOS NOVOS no Google Drive (somente leitura): caminho, nome, tipo e data, sem thumbnail. Recorte com meio e formatos, usando os valores cadastrados da empresa. Use para LISTAR o que existe na pasta; nao substitui por get_criativos_conteudo, que traz anuncios ja no ar. Se o gestor citou a pasta do mes, passe pasta com esse mes: o servidor recorta o caminho e nao devolve o acervo inteiro.",
+    parametros: {"type":"object","properties":{"meio":{"type":"string","description":"Valor cadastrado da empresa."},"formatos":{"type":"array","items":{"type":"string"}},"pasta":{"type":"string","description":"Mes ou trecho do caminho, ex.: setembro."}}},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Ativo criativo e copy",
@@ -361,7 +361,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_funil_credito: {
     descricao:
-      "FORA DE ESCOPO desde 28/07/2026: CRM e conversao final foram removidos do sistema por decisao da empresa. Existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta, contrato ou receita, explique a exclusao e ofereca as metricas de midia.",
+      "FORA DE ESCOPO: CRM e conversao final foram removidos do sistema por decisao da empresa. Existe so por compatibilidade e devolve um aviso de fora-de-escopo. NAO a chame; se o gestor pedir proposta, contrato ou receita, explique a exclusao e ofereca as metricas de midia.",
     parametros: {"type":"object","properties":{"dias":{"type":"number","description":"janela em dias (default 90). Use a MESMA janela do get_funnel ao comparar."}}},
     superficies: ["chat"],
     efeito: "leitura",
@@ -377,8 +377,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_instagram_dos_anuncios: {
     descricao:
-      "LEITURA AO VIVO na Graph: o Instagram de CADA anuncio da campanha (conjuntos ACTIVE e PAUSED), com handle quando a Meta expoe, id e classificacao coop_cohapm|cohapm|outro|sem_vinculo|id_sem_handle. Chame antes de afirmar vinculo ou de emitir alteracao.",
-    parametros: {"type":"object","properties":{"campanha":{"type":"string","description":"Nome da campanha (ex.: COHAPM_LAFELICITA_CONV_AGO26)."}},"required":["campanha"]},
+      "LEITURA AO VIVO na Graph: o Instagram de CADA anuncio da campanha (conjuntos ACTIVE e PAUSED), com handle quando a Meta expoe, id e classificacao. Chame antes de afirmar vinculo ou de emitir alteracao. A classificacao segue o de-para da empresa: perfil proprio, perfil relacionado, terceiro, sem vinculo.",
+    parametros: {"type":"object","properties":{"campanha":{"type":"string","description":"Nome da campanha em trabalho no fio."}},"required":["campanha"]},
     superficies: ["chat"],
     efeito: "leitura",
     setor: "Ativo criativo e copy",
@@ -433,8 +433,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   get_waba_status: {
     descricao:
-      "INVENTARIO WHATSAPP da empresa. Obrigatorio para pergunta sobre numero operacional ou de pe, qual WA linkar, WABA, Cloud, qualidade ou tier, e para o isolamento Juridico vs La Felicita vs Sistema Ocular/VISTTA. Filtro meio=juridico|la_felicita|financeiro|sistema_ocular|outro. NAO decide se um conjunto CTWA pode ser emitido: isso e get_whatsapp_da_pagina.",
-    parametros: {"type":"object","properties":{"meio":{"type":"string","description":"Opcional: juridico | la_felicita | financeiro | sistema_ocular | outro"}}},
+      "INVENTARIO WHATSAPP da empresa. Obrigatoria para qualquer pergunta sobre numero operacional, WABA, Cloud, qualidade ou tier, e para verificar isolamento entre linhas de produto. O filtro meio aceita os valores cadastrados da empresa. NAO decide se um conjunto CTWA pode ser emitido: isso e get_whatsapp_da_pagina.",
+    parametros: {"type":"object","properties":{"meio":{"type":"string","description":"Opcional. Valor cadastrado da empresa."}}},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Canal WhatsApp",
@@ -457,8 +457,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   ler_brand_identity: {
     descricao:
-      "ESP-36: identidade de marca VIGENTE. COHAPM tem TRES vozes: meio=juridico | la_felicita | sistema_ocular (VISTTA). Sem meio, a RPC prefere juridico.",
-    parametros: {"type":"object","properties":{"meio":{"type":"string","enum":["la_felicita","juridico","sistema_ocular"],"description":"Recorte de voz. Obrigatorio em COHAPM quando o pedido recorta um empreendimento."}}},
+      "Identidade de marca vigente da empresa do turno. Uma empresa pode ter mais de uma voz, uma por linha de produto; o parametro meio escolhe. Sem meio, a RPC devolve a voz padrao da empresa.",
+    parametros: {"type":"object","properties":{"meio":{"type":"string","description":"Valor cadastrado da empresa. Sem meio, a RPC devolve a voz padrao."}}},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Ativo criativo e copy",
@@ -506,7 +506,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   origem_drive_dos_anuncios: {
     descricao:
       "PASTA DO DRIVE DE CADA ANUNCIO JA NO AR de um conjunto ou campanha. UMA chamada lista todos: nome, pasta, peca_nome, drive_file_id e vinculo. OBRIGATORIA quando o gestor pergunta de qual pasta do Drive sao os anuncios do CONJ.N. NAO e inventario de pecas novas (isso e get_acervo_para_anuncio), e NAO declare 'sem vinculo' sem ter chamado isto.",
-    parametros: {"type":"object","properties":{"conjunto":{"type":"number","description":"Numero do conjunto (1-99). Preferivel."},"name_like":{"type":"string","description":"Trecho da campanha (ex.: VISTTA_CONV_WA_SET26) se houver mais de um CONJ.N."},"campaign_id":{"type":"string","description":"ID Meta da campanha."},"ad_external_id":{"type":"string","description":"Se quiser um anuncio so."},"incluir_apagados":{"type":"boolean","description":"Default false. DELETED/ARCHIVED ficam de fora."}}},
+    parametros: {"type":"object","properties":{"conjunto":{"type":"number","description":"Numero do conjunto (1-99). Preferivel."},"name_like":{"type":"string","description":"Trecho da campanha, se houver mais de um CONJ.N."},"campaign_id":{"type":"string","description":"ID Meta da campanha."},"ad_external_id":{"type":"string","description":"Se quiser um anuncio so."},"incluir_apagados":{"type":"boolean","description":"Default false. DELETED/ARCHIVED ficam de fora."}}},
     superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Ativo criativo e copy",
@@ -617,8 +617,8 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   vincular_instagram_dos_anuncios: {
     descricao:
-      "Emite CARD DE APROVACAO para vincular o Instagram oficial @cohapm em TODOS os anuncios da campanha em trabalho que ainda nao o usam, conjuntos ativos e pausados. Le a Graph na hora da proposta.",
-    parametros: {"type":"object","properties":{"campanha":{"type":"string","description":"Nome da campanha (ex.: COHAPM_LAFELICITA_CONV_AGO26)."},"justificativa":{"type":"string"}},"required":["campanha"]},
+      "Emite CARD DE APROVACAO para vincular o perfil proprio da empresa em TODOS os anuncios da campanha em trabalho que ainda nao o usam, conjuntos ativos e pausados. Le a Graph na hora da proposta. A classificacao do vinculo e perfil proprio da empresa, perfil relacionado, terceiro ou sem vinculo.",
+    parametros: {"type":"object","properties":{"campanha":{"type":"string","description":"Nome da campanha em trabalho no fio."},"justificativa":{"type":"string"}},"required":["campanha"]},
     superficies: ["chat"],
     efeito: "escrita",
     setor: "Atos na conta Meta",
