@@ -85,6 +85,28 @@ function vereditoDeLista(enviado: unknown[], gravado: unknown[]): VereditoReleit
   return "divergente";
 }
 
+/** Conclusao medida em 02/10/2026 no La Felicita. Vai para recusas_meta quando a Meta devolve 1870194. */
+export const CONCLUSAO_LOCATION_TYPES_EXCLUSAO =
+  "Num conjunto com exclusao geografica, divergencia de location_types entre os dois blocos e esperada e nao deve alarmar: geo_locations pode ganhar frequently_in, e excluded_geo_locations perde frequently_in e fica em home, recent, mandando o que mandar. O que deve alarmar e o Gerenciador recusando a publicacao.";
+
+function tiposDe(lista: unknown[]): Set<string> {
+  return new Set(lista.map((x) => String(x ?? "").trim().toLowerCase()).filter(Boolean));
+}
+
+/**
+ * O bloco de exclusao volta home, recent. Perder frequently_in nao e divergencia.
+ * Sumir home ou recent, ou gravar outro tipo, continua divergente.
+ */
+export function vereditoLocationTypesExclusao(enviado: unknown[], gravado: unknown[]): VereditoReleitura {
+  const a = tiposDe(enviado);
+  const b = tiposDe(Array.isArray(gravado) ? gravado : []);
+  if (a.size === b.size && [...a].every((x) => b.has(x))) return "igual";
+  const gravadoHomeRecent = b.size === 2 && b.has("home") && b.has("recent");
+  const enviadoConhecido = [...a].every((x) => x === "home" || x === "recent" || x === "frequently_in");
+  if (gravadoHomeRecent && enviadoConhecido && a.has("home")) return "normalizado";
+  return "divergente";
+}
+
 function blocoDeSpec(bloco: unknown): string {
   if (!bloco || typeof bloco !== "object" || Array.isArray(bloco)) return assinatura(bloco);
   const o = bloco as Record<string, unknown>;
@@ -126,8 +148,11 @@ function compararNo(
 ) {
   if (Array.isArray(enviado)) {
     const nome = caminho.split(".").pop() ?? "";
+    const exclusao = caminho.endsWith("excluded_geo_locations.location_types");
     const veredito = nome === "flexible_spec"
       ? vereditoFlexibleSpec(enviado, gravado)
+      : exclusao
+      ? vereditoLocationTypesExclusao(enviado, Array.isArray(gravado) ? gravado : [])
       : vereditoDeLista(enviado, Array.isArray(gravado) ? gravado : []);
     empurrar(saida, caminho, enviado, gravado ?? null, veredito);
     return;

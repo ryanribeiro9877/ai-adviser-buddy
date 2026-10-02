@@ -475,10 +475,20 @@ import { canonicalizarAcaoDoCard } from "../_shared/acao_do_card.ts";
 import { textoLembreteDeCriacao } from "../_shared/lembrete_criacao.ts";
 import { gravarDivergenciasMeta, relerDepoisDaEscrita } from "../_shared/releitura_pos_escrita.ts";
 import {
+  aplicarExclusaoNoTargeting,
   aplicarGeoNoTargeting,
+  normalizarExclusaoDoPedido,
   normalizarGeoDoPedido,
   paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
+import { montarCriativoDeClique } from "../_shared/criativo_whatsapp.ts";
+import { validarSpecConjunto } from "../_shared/conjunto_spec.ts";
+import {
+  fronteiraDePersonalizacao,
+  temRegrasDePlacement,
+  validarTrocaCriativo,
+  vereditoDepoisDaTroca,
+} from "../_shared/troca_criativo.ts";
 import {
   aplicarPublicoNoTargeting,
   validarPublicoDoPedido,
@@ -550,10 +560,11 @@ const EXECUTAVEIS = [
   "alterar_geo_do_conjunto",
   "alterar_publico_do_conjunto",
   "alterar_idade_do_conjunto",
+  "trocar_criativo_do_anuncio",
 ];
 /** Renomear e a mesma escrita nos tres niveis: o campo `name` do objeto que ja existe. */
 const RENOMEACOES = ["renomear_campanha", "renomear_conjunto", "renomear_criativo"];
-const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
+const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
@@ -689,9 +700,11 @@ async function escreverCriacao(
   if (acao === "criar_campanha") {
     tool = "create_campaign";
     args = argsCampanhaDeGraph(conta, body, { dry_run: !!opts?.dry_run });
-  } else if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
+  } else if (acao === "criar_conjunto_a_partir_de" || acao === "criar_conjunto" || acao === "escalar_duplicar") {
     tool = "create_adset";
     args = argsAdsetDeGraph(conta, body);
+  } else if (acao === "criar_criativo") {
+    return escreverCreative("graph", conta, path, body, pbToken);
   } else {
     return {
       status: 0,
@@ -890,6 +903,15 @@ async function escreverUpdate(
       args.targeting = JSON.parse(post.targeting);
     } catch {
       args.targeting = post.targeting;
+    }
+  }
+  if (post.creative != null && typeof post.creative === "string") {
+    try {
+      const c = JSON.parse(post.creative);
+      args.creative = c;
+      if (c && typeof c === "object" && c.creative_id) args.creative_id = String(c.creative_id);
+    } catch {
+      args.creative = post.creative;
     }
   }
   if (opts?.dry_run) args.dry_run = true;
@@ -1758,6 +1780,52 @@ export async function montarCriacao(
       familia_objetivo: familiaDeObjetivo(objetivo),
       special_ad_categories: catsEspeciais,
     };
+  }
+
+  if (acao === "criar_conjunto") {
+    const spec = validarSpecConjunto((p ?? {}) as Record<string, unknown>);
+    if (!spec.ok) return { erro: spec.erro, detalhe: spec.detalhe };
+    if (!companyId) {
+      return {
+        erro: "avaliacao_de_orcamento_indisponivel",
+        detalhe: "company_id ausente — sem ele nao consulto avaliar_orcamento_diario.",
+      };
+    }
+    const julgado = await julgarOrcamentoDiario(supa, companyId, spec.reais, 1);
+    if (!julgado.ok) {
+      return { erro: julgado.motivo, detalhe: julgado.detalhe, avaliacao_orcamento: julgado.avaliacao };
+    }
+    const orcNovo = await g(`/${spec.corpo.campaign_id}?fields=daily_budget,lifetime_budget`);
+    if (orcNovo.status !== 200) {
+      return {
+        erro: "falha_ao_verificar_campanha_destino",
+        detalhe: "Nao li o orcamento da campanha pai. Sem isso nao crio o conjunto.",
+      };
+    }
+    const obNovo: any = orcNovo.body ?? {};
+    if (Number(obNovo.daily_budget ?? 0) > 0 || Number(obNovo.lifetime_budget ?? 0) > 0) {
+      return {
+        erro: "campanha_usa_orcamento_proprio_cbo",
+        detalhe: "A campanha pai tem orcamento proprio. Este sistema cria conjunto com orcamento diario so em campanha ABO.",
+      };
+    }
+    const { data: segNovo } = await supa.rpc("checar_segmentacao", {
+      p_company_id: companyId,
+      p_targeting: spec.targeting,
+    });
+    if (segNovo && typeof segNovo === "object" && (segNovo as any).aplica === true && (segNovo as any).permitido === false) {
+      return {
+        erro: "segmentacao_recusada_pelo_gate",
+        detalhe: String((segNovo as any).mensagem_para_o_gestor ?? (segNovo as any).motivo ?? "checar_segmentacao recusou."),
+      };
+    }
+    return { path: `/${conta}/adsets`, body: spec.corpo, resumo_legivel: spec.resumo };
+  }
+
+  if (acao === "criar_criativo") {
+    const criativoNovo = montarCriativoDeClique((p ?? {}) as Record<string, unknown>);
+    if (!criativoNovo.ok) return { erro: criativoNovo.erro, detalhe: criativoNovo.detalhe };
+    return { path: `/${conta}/adcreatives`, body: criativoNovo.body, resumo_legivel: criativoNovo.resumo };
   }
 
   if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
@@ -3326,13 +3394,13 @@ async function espelhar(
         : { ok: true, tabela: "campaigns" };
     }
 
-    if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
+    if (acao === "criar_conjunto_a_partir_de" || acao === "criar_conjunto" || acao === "escalar_duplicar") {
       // ad_sets.campaign_id e o uuid INTERNO, nao o id da Meta - precisa resolver.
       const { data: camp } = await supa
         .from("campaigns")
         .select("id")
         .eq("provider", "meta_ads")
-        .eq("external_id", String(p?.campanha_destino_external_id ?? ""))
+        .eq("external_id", String(p?.campanha_destino_external_id ?? p?.campaign_id ?? ""))
         .maybeSingle();
       const { error } = await supa.from("ad_sets").upsert(
         {
@@ -3341,11 +3409,13 @@ async function espelhar(
           account_id: contaSemPrefixo,
           campaign_id: camp?.id ?? null, // null e aceito (FK ON DELETE SET NULL)
           external_id: novoId,
-          name: String(objeto?.name ?? p?.nome_novo ?? ""),
+          name: String(objeto?.name ?? p?.nome_novo ?? p?.nome ?? ""),
           status: statusMeta.toUpperCase(), // ad_sets = MAIUSCULO
-          daily_budget: Math.round(Number(p?.orcamento_diario_reais ?? 0) * 100), // centavos
-          bid_strategy: moldeLido?.bid_strategy ?? null,
-          targeting: moldeLido?.targeting ?? null,
+          daily_budget: objeto?.daily_budget != null
+            ? Number(objeto.daily_budget)
+            : Math.round(Number(p?.orcamento_diario_reais ?? 0) * 100),
+          bid_strategy: objeto?.bid_strategy ?? moldeLido?.bid_strategy ?? p?.bid_strategy ?? null,
+          targeting: objeto?.targeting ?? p?.targeting ?? moldeLido?.targeting ?? null,
           destination_type: String(objeto?.destination_type ?? p?.destination_type ?? "").trim() || null,
           optimization_goal: String(objeto?.optimization_goal ?? p?.optimization_goal ?? "").trim() || null,
           criado_pelo_sistema: true,
@@ -3422,6 +3492,10 @@ async function espelhar(
       return error
         ? { ok: false, erro: error.message, tabela: "ad_sets" }
         : { ok: true, tabela: "ad_sets" };
+    }
+
+    if (acao === "criar_criativo") {
+      return { ok: true };
     }
 
     return { ok: false, erro: `acao sem regra de espelho: ${acao}` };
@@ -4880,7 +4954,7 @@ Deno.serve(async (req) => {
         const releitura = await conferirOQueFicou({
           approvalId: String(r.id),
           objetoId: String(novoId),
-          nivel: nivelDaAcao(acao) ?? "conjunto",
+          nivel: acao === "criar_criativo" ? "criativo" : (nivelDaAcao(acao) ?? "conjunto"),
           enviado: bodyFinal as Record<string, unknown>,
           anterior: null,
         });
@@ -4910,7 +4984,9 @@ Deno.serve(async (req) => {
               reconciliacao_estado: reconciliacao?.estado ?? null,
               reconciliacao_conferida: reconciliacao?.estado === "conferido",
               reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
-              lembrete: textoLembreteDeCriacao(String(pl.body?.status ?? r.payload?.status_inicial ?? "ACTIVE")),
+              lembrete: acao === "criar_criativo"
+                ? "Criativo criado. Criativo e imutavel e sozinho nao gasta. Para coloca-lo num anuncio que ja roda, use trocar_criativo_do_anuncio e releia effective_status antes de declarar pronto."
+                : textoLembreteDeCriacao(String(pl.body?.status ?? r.payload?.status_inicial ?? "ACTIVE")),
             },
           })
           .eq("id", r.id);
@@ -5421,11 +5497,14 @@ Deno.serve(async (req) => {
       }
       const paramsGeo = paramsGeoComAliasCidades((r.payload ?? {}) as Record<string, unknown>);
       const geoNorm = normalizarGeoDoPedido(paramsGeo);
-      if (geoNorm.erro || !geoNorm.geo) {
-        const motivo = geoNorm.erro ?? "geo_obrigatorio";
+      const excNorm = normalizarExclusaoDoPedido(paramsGeo);
+      if (geoNorm.erro || excNorm.erro || (!geoNorm.geo && !excNorm.geo)) {
+        const motivo = geoNorm.erro ?? excNorm.erro ?? "geo_obrigatorio";
+        const detalhe = geoNorm.detalhe ?? excNorm.detalhe ??
+          "Informe geo de inclusao ou de exclusao (excluded_geo_locations, excluir_bairros, excluir_cidades, excluir_pinos).";
         await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
           motivo,
-          detalhe: geoNorm.detalhe,
+          detalhe,
           acao,
           driver_escrita: driver,
         });
@@ -5434,46 +5513,56 @@ Deno.serve(async (req) => {
           acao,
           resultado: "bloqueado",
           motivo,
-          detalhe: geoNorm.detalhe,
+          detalhe,
           driver_escrita: driver,
         });
 
       }
-      const tokGeo = tokenAdsPorCompanyId(String(r.company_id));
-      const gateGeo = await aplicarGateGeoCriarConjunto({
-        companyId: String(r.company_id),
-        params: paramsGeo,
-        sinaisMeio: [
-          String(r.payload?.target_name ?? ""),
-          String(r.payload?.campanha_nome ?? ""),
-          String((antes.body as any)?.name ?? ""),
-        ],
-        geoNorm,
-        supa,
-        tokenAds: tokGeo?.token ?? null,
-      });
-      if ((gateGeo as any).erro || !(gateGeo as any).geo) {
-        const motivo = String((gateGeo as any).erro ?? "geo_gate_sem_resultado");
-        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
-          motivo,
-          detalhe: (gateGeo as any).detalhe,
-          acao,
-          driver_escrita: driver,
+      let geoEfetivo: Record<string, unknown> | null = null;
+      let resumoGate: string | null = geoNorm.resumo ?? null;
+      let contagemGate: Record<string, number> | null = geoNorm.contagem ?? null;
+      if (geoNorm.geo) {
+        const tokGeo = tokenAdsPorCompanyId(String(r.company_id));
+        const gateGeo = await aplicarGateGeoCriarConjunto({
+          companyId: String(r.company_id),
+          params: paramsGeo,
+          sinaisMeio: [
+            String(r.payload?.target_name ?? ""),
+            String(r.payload?.campanha_nome ?? ""),
+            String((antes.body as any)?.name ?? ""),
+          ],
+          geoNorm,
+          supa,
+          tokenAds: tokGeo?.token ?? null,
         });
-        return ({
-          id: r.id,
-          acao,
-          resultado: "bloqueado",
-          motivo,
-          detalhe: (gateGeo as any).detalhe,
-          driver_escrita: driver,
-        });
+        if ((gateGeo as any).erro || !(gateGeo as any).geo) {
+          const motivo = String((gateGeo as any).erro ?? "geo_gate_sem_resultado");
+          await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+            motivo,
+            detalhe: (gateGeo as any).detalhe,
+            acao,
+            driver_escrita: driver,
+          });
+          return ({
+            id: r.id,
+            acao,
+            resultado: "bloqueado",
+            motivo,
+            detalhe: (gateGeo as any).detalhe,
+            driver_escrita: driver,
+          });
 
+        }
+        geoEfetivo = (gateGeo as any).geo as Record<string, unknown>;
+        resumoGate = (gateGeo as any).resumo ?? resumoGate;
+        contagemGate = (gateGeo as any).contagem ?? contagemGate;
       }
-      const geoEfetivo = (gateGeo as any).geo as Record<string, unknown>;
+      const targetingChecagem: Record<string, unknown> = {};
+      if (geoEfetivo) targetingChecagem.geo_locations = geoEfetivo;
+      if (excNorm.geo) targetingChecagem.excluded_geo_locations = excNorm.geo;
       const { data: seg } = await supa.rpc("checar_segmentacao", {
         p_company_id: r.company_id,
-        p_targeting: { geo_locations: geoEfetivo },
+        p_targeting: targetingChecagem,
       });
       if (seg && typeof seg === "object" && (seg as any).aplica === true && (seg as any).permitido === false) {
         const motivo = "segmentacao_recusada_pelo_gate";
@@ -5495,14 +5584,15 @@ Deno.serve(async (req) => {
 
       }
       const tgtAtual = ((antes.body as any)?.targeting ?? {}) as Record<string, unknown>;
-      const tgtNovo = aplicarGeoNoTargeting(
-        tgtAtual && typeof tgtAtual === "object" ? tgtAtual : {},
-        geoEfetivo,
-      );
+      let tgtNovo = tgtAtual && typeof tgtAtual === "object" ? { ...tgtAtual } : {};
+      if (geoEfetivo) tgtNovo = aplicarGeoNoTargeting(tgtNovo, geoEfetivo);
+      if (excNorm.geo) tgtNovo = aplicarExclusaoNoTargeting(tgtNovo, excNorm.geo);
       post = { targeting: JSON.stringify(tgtNovo) };
       r.payload.targeting_aprovado = tgtNovo;
-      r.payload.geo_resumo = (gateGeo as any).resumo ?? geoNorm.resumo ?? null;
-      r.payload.geo_contagem = (gateGeo as any).contagem ?? geoNorm.contagem ?? null;
+      r.payload.geo_resumo = [resumoGate, excNorm.resumo].filter(Boolean).join("; ") || null;
+      r.payload.geo_contagem = contagemGate;
+      r.payload.exclusao_resumo = excNorm.resumo ?? null;
+      r.payload.exclusao_contagem = excNorm.contagem ?? null;
     }
     if (acao === "alterar_publico_do_conjunto") {
       if (antes.status !== 200 || !antes.body || typeof antes.body !== "object") {
@@ -5633,6 +5723,54 @@ Deno.serve(async (req) => {
         r.payload.advantage_audience = idadeOk.params.advantage_audience;
       }
       r.payload.targeting_antes = tgtAtual;
+    }
+    if (acao === "trocar_criativo_do_anuncio") {
+      const troca = validarTrocaCriativo((r.payload ?? {}) as Record<string, unknown>);
+      if (!troca.ok) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: troca.erro,
+          detalhe: troca.detalhe,
+          acao,
+          driver_escrita: driver,
+        });
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo: troca.erro, detalhe: troca.detalhe, driver_escrita: driver });
+      }
+      const idAtual = String((antes.body as any)?.creative?.id ?? "").trim();
+      if (!idAtual) {
+        const motivo = "criativo_atual_nao_lido";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, { motivo, acao, driver_escrita: driver });
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+      }
+      const [lidoAtual, lidoNovo] = await Promise.all([
+        g(`/${idAtual}?fields=asset_feed_spec,object_story_spec`),
+        g(`/${troca.creative_id}?fields=asset_feed_spec,object_story_spec`),
+      ]);
+      if (lidoAtual.status !== 200 || lidoNovo.status !== 200) {
+        const motivo = "criativos_da_troca_nao_lidos";
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo,
+          atual: lidoAtual.status,
+          novo: lidoNovo.status,
+          acao,
+          driver_escrita: driver,
+        });
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo, driver_escrita: driver });
+      }
+      const fronteira = fronteiraDePersonalizacao(
+        temRegrasDePlacement(lidoAtual.body),
+        temRegrasDePlacement(lidoNovo.body),
+      );
+      if (!fronteira.ok) {
+        await audit(r.company_id, sistema, "meta_action_blocked", r.id, {
+          motivo: fronteira.erro,
+          detalhe: fronteira.detalhe,
+          acao,
+          driver_escrita: driver,
+        });
+        return ({ id: r.id, acao, resultado: "bloqueado", motivo: fronteira.erro, detalhe: fronteira.detalhe, driver_escrita: driver });
+      }
+      post = { creative: JSON.stringify({ creative_id: troca.creative_id }) };
+      r.payload.creative_id_anterior = idAtual;
     }
 
     if (conf.dry_run) {
@@ -5947,6 +6085,12 @@ Deno.serve(async (req) => {
         anterior: (antes.body && typeof antes.body === "object") ? antes.body as Record<string, unknown> : null,
       });
       carimboReleituraUpdate = releitura.carimbo;
+      const vereditoTroca = acao === "trocar_criativo_do_anuncio"
+        ? vereditoDepoisDaTroca((depois.body as any)?.effective_status)
+        : null;
+      if (vereditoTroca && !vereditoTroca.declarado_pronto) {
+        carimboReleituraUpdate = vereditoTroca.rotulo;
+      }
       if (opts?.persistencia !== "ritmo") {
       await supa
         .from("approval_requests")
@@ -5954,8 +6098,10 @@ Deno.serve(async (req) => {
           executed_at: new Date().toISOString(),
           ultima_falha: null, // sucesso apaga a falha da tentativa anterior
           execution_result: {
-            ok: releitura.carimbo === "conferido",
+            ok: releitura.carimbo === "conferido" && (vereditoTroca ? vereditoTroca.declarado_pronto : true),
             releitura: releitura.carimbo,
+            declarado_pronto: vereditoTroca ? vereditoTroca.declarado_pronto : releitura.carimbo === "conferido",
+            effective_status: vereditoTroca?.effective_status ?? (depois.body as any)?.effective_status ?? null,
             campos_releitura: releitura.visiveis,
             antes: antes.body,
             depois: alvoLido,

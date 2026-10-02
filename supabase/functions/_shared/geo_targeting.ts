@@ -250,6 +250,59 @@ export function aplicarGeoNoTargeting(
 }
 
 /**
+ * O bloco de exclusao. A Meta grava location_types deste bloco como home + recent
+ * e descarta frequently_in, sempre. Mandar os tres tipos deixa os dois blocos
+ * divergentes e o Gerenciador recusa a publicacao (1870194). Por isso o que sai
+ * daqui ja e home, recent — o que a Meta vai gravar.
+ */
+export const LOCATION_TYPES_EXCLUSAO = ["home", "recent"] as const;
+
+export function normalizarExclusaoDoPedido(
+  params: Record<string, unknown> | null | undefined,
+): {
+  geo?: Record<string, unknown>;
+  erro?: string;
+  detalhe?: string;
+  resumo?: string;
+  contagem?: Record<string, number>;
+} {
+  if (!params || typeof params !== "object") return {};
+  const objeto = params.excluded_geo_locations ?? params.excluir_geo_locations;
+  const bairros = params.excluir_bairros ?? params.excluir_neighborhoods;
+  const cidades = params.excluir_cidades ?? params.excluir_cities;
+  const pinos = params.excluir_pinos ?? params.excluir_custom_locations;
+  const pedidos = [objeto != null, bairros != null, cidades != null, pinos != null].filter(Boolean).length;
+  if (pedidos === 0) return {};
+  if (pedidos > 1) {
+    return {
+      erro: "exclusao_geo_conflitante",
+      detalhe:
+        "Passe UM formato de exclusao: excluded_geo_locations, excluir_bairros, excluir_cidades ou excluir_pinos.",
+    };
+  }
+  const sintetico: Record<string, unknown> = bairros != null
+    ? { bairros }
+    : cidades != null
+    ? { cidades }
+    : pinos != null
+    ? { geo_locations: { custom_locations: pinos } }
+    : { geo_locations: objeto };
+  const norm = normalizarGeoDoPedido(paramsGeoComAliasCidades(sintetico));
+  if (norm.erro || !norm.geo) return norm;
+  norm.geo.location_types = [...LOCATION_TYPES_EXCLUSAO];
+  if (norm.resumo) norm.resumo = `excluir ${norm.resumo}`;
+  return norm;
+}
+
+/** Substitui excluded_geo_locations. Nao mexe no bloco de inclusao. */
+export function aplicarExclusaoNoTargeting(
+  targeting: Record<string, unknown>,
+  excluded: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ...targeting, excluded_geo_locations: excluded };
+}
+
+/**
  * Alias de pedido: params.cidades / params.cities vira geo_locations.cities.
  * Nao converte se ja veio geo_locations ou bairros (evita misturar recortes).
  */

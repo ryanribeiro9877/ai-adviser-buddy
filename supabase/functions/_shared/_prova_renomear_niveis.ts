@@ -21,6 +21,8 @@ function ok(cond: boolean, msg: string) {
   ok(nivelDaAcao("alterar_geo_do_conjunto") === "conjunto", "alterar_geo_do_conjunto fora do nivel conjunto");
   ok(nivelDaAcao("alterar_publico_do_conjunto") === "conjunto", "alterar_publico_do_conjunto fora do nivel conjunto");
   ok(nivelDaAcao("alterar_idade_do_conjunto") === "conjunto", "alterar_idade_do_conjunto fora do nivel conjunto");
+  ok(nivelDaAcao("criar_conjunto") === "conjunto", "criar_conjunto fora do nivel conjunto");
+  ok(nivelDaAcao("trocar_criativo_do_anuncio") === "anuncio", "trocar_criativo fora do nivel anuncio");
   ok(nivelDaAcao("ajustar_posicionamentos_do_conjunto") === "conjunto", "posicionamentos fora do nivel conjunto");
 }
 

@@ -34,6 +34,15 @@ describe("tituloDoCardAprovacao", () => {
       "Card de alterar idade do conjunto",
     );
   });
+  it("conjunto que nasce de spec", () => {
+    expect(tituloDoCardAprovacao("criar_conjunto")).toBe("Card de criação de conjunto");
+    expect(ehCardDeCriacao("criar_conjunto")).toBe(true);
+  });
+  it("troca de criativo", () => {
+    expect(tituloDoCardAprovacao("trocar_criativo_do_anuncio")).toBe(
+      "Card de trocar criativo do anúncio",
+    );
+  });
   it("nao despeja o ensaio do summary como titulo", () => {
     const ensaio =
       'Criar anuncio "X" com PECA NOVA do acervo — compliance atencao, nasce ACTIVE\nCompliance (atencao): LGL-03';

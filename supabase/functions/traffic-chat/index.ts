@@ -944,10 +944,14 @@ import {
 import {
   buscarGeolocalizacoesMeta,
   geocodificarRaios,
+  normalizarExclusaoDoPedido,
   normalizarGeoDoPedido,
   normalizarRaioKm,
   paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
+import { montarCriativoDeClique } from "../_shared/criativo_whatsapp.ts";
+import { validarSpecConjunto } from "../_shared/conjunto_spec.ts";
+import { validarTrocaCriativo } from "../_shared/troca_criativo.ts";
 import {
   buscarInteressesMeta,
   buscarSegmentacaoMeta,
@@ -1007,6 +1011,9 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   alterar_publico_do_conjunto: 8,
   alterar_idade_do_conjunto: 8,
   alterar_orcamento: 8,
+  criar_conjunto: 8,
+  criar_criativo: 16,
+  trocar_criativo_do_anuncio: 8,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
   get_seguidores_instagram_ads: 2,
@@ -1025,7 +1032,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
 // propose_action de criacao nao consome o teto global do turno (so o teto por ferramenta).
 // Assim releituras opcionais nao "roubam" as vagas dos cards quando o slate ja esta no chat.
-const ACOES_CRIACAO_NO_TETO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
+const ACOES_CRIACAO_NO_TETO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 // v29.09 (23/09/2026): teto 2 + o carve-out so do PRIMEIRO card faziam
 // "emita os proximos cards" sair um por janela. O segundo propose morria
 // em "nao foi lido nesta janela" assim que o primeiro nascia (deadline 55s
@@ -2621,39 +2628,49 @@ async function validarGeoDeAlteracao(
   params: Record<string, unknown>,
   sinaisMeio: Array<string | null | undefined>,
 ): Promise<
-  | { ok: true; geo: Record<string, unknown>; resumo: string; params: Record<string, unknown> }
+  | { ok: true; geo: Record<string, unknown> | null; excluded: Record<string, unknown> | null; resumo: string; params: Record<string, unknown> }
   | { ok: false; erro: string; detalhe?: string }
 > {
   const paramsGeo = paramsGeoComAliasCidades(params);
   const geoNorm = normalizarGeoDoPedido(paramsGeo);
+  const excNorm = normalizarExclusaoDoPedido(paramsGeo);
   if (geoNorm.erro) return { ok: false, erro: geoNorm.erro, detalhe: geoNorm.detalhe };
-  if (!geoNorm.geo) {
+  if (excNorm.erro) return { ok: false, erro: excNorm.erro, detalhe: excNorm.detalhe };
+  if (!geoNorm.geo && !excNorm.geo) {
     return {
       ok: false,
       erro: "geo_obrigatorio",
       detalhe:
-        "Informe params.geo_locations (cities/neighborhoods com key Meta) ou params.cidades (keys). Resolva nomes com buscar_geolocalizacao tipo=city. Nao invente key.",
+        "Informe inclusao (geo_locations, cidades, bairros) ou exclusao (excluded_geo_locations, excluir_bairros, excluir_cidades, excluir_pinos). Resolva nomes com buscar_geolocalizacao. Nao invente key.",
     };
   }
-  const tokGeo = tokenAdsPorCompanyId(companyId);
-  const gateGeo = await aplicarGateGeoCriarConjunto({
-    companyId,
-    params: paramsGeo,
-    sinaisMeio,
-    geoNorm,
-    supa,
-    tokenAds: tokGeo?.token ?? null,
-  });
-  if (gateGeo.erro) {
-    return { ok: false, erro: gateGeo.erro, detalhe: gateGeo.detalhe };
+  let geoEfetivo: Record<string, unknown> | null = null;
+  let resumoInc = "";
+  if (geoNorm.geo) {
+    const tokGeo = tokenAdsPorCompanyId(companyId);
+    const gateGeo = await aplicarGateGeoCriarConjunto({
+      companyId,
+      params: paramsGeo,
+      sinaisMeio,
+      geoNorm,
+      supa,
+      tokenAds: tokGeo?.token ?? null,
+    });
+    if (gateGeo.erro) {
+      return { ok: false, erro: gateGeo.erro, detalhe: gateGeo.detalhe };
+    }
+    geoEfetivo = gateGeo.geo ?? null;
+    if (!geoEfetivo) {
+      return { ok: false, erro: "geo_obrigatorio", detalhe: "Gate de geo nao devolveu geo_locations." };
+    }
+    resumoInc = String(gateGeo.resumo ?? geoNorm.resumo ?? "");
   }
-  const geoEfetivo = gateGeo.geo;
-  if (!geoEfetivo) {
-    return { ok: false, erro: "geo_obrigatorio", detalhe: "Gate de geo nao devolveu geo_locations." };
-  }
+  const targetingChecagem: Record<string, unknown> = {};
+  if (geoEfetivo) targetingChecagem.geo_locations = geoEfetivo;
+  if (excNorm.geo) targetingChecagem.excluded_geo_locations = excNorm.geo;
   const { data: seg } = await supa.rpc("checar_segmentacao", {
     p_company_id: companyId,
-    p_targeting: { geo_locations: geoEfetivo },
+    p_targeting: targetingChecagem,
   });
   if (seg && typeof seg === "object" && (seg as any).aplica === true && (seg as any).permitido === false) {
     return {
@@ -2662,15 +2679,20 @@ async function validarGeoDeAlteracao(
       detalhe: String((seg as any).mensagem_para_o_gestor ?? (seg as any).motivo ?? "checar_segmentacao recusou o geo."),
     };
   }
+  const resumo = [resumoInc, excNorm.resumo].filter(Boolean).join("; ");
   return {
     ok: true,
     geo: geoEfetivo,
-    resumo: String(gateGeo.resumo ?? geoNorm.resumo ?? ""),
+    excluded: excNorm.geo ?? null,
+    resumo,
     params: {
       ...params,
-      geo_locations: geoEfetivo,
-      geo_resumo: gateGeo.resumo ?? geoNorm.resumo,
-      geo_contagem: gateGeo.contagem ?? geoNorm.contagem,
+      ...(geoEfetivo ? { geo_locations: geoEfetivo } : {}),
+      ...(excNorm.geo ? { excluded_geo_locations: excNorm.geo } : {}),
+      geo_resumo: resumo,
+      geo_contagem: geoNorm.contagem ?? null,
+      exclusao_resumo: excNorm.resumo ?? null,
+      exclusao_contagem: excNorm.contagem ?? null,
     },
   };
 }
@@ -2699,6 +2721,11 @@ function corpoPrevooDaAcao(
     const termos = Array.isArray(params.interesses) ? params.interesses as { id: string; name: string; classe: "interests" | "behaviors" | "work_positions" | "industries"; grupo?: number }[] : [];
     return { caminho, body: { targeting: JSON.stringify({ flexible_spec: montarFlexibleSpec(termos) }) } };
   }
+  if (action === "trocar_criativo_do_anuncio") {
+    const id = String(params.creative_id ?? "").trim();
+    if (!/^\d{5,}$/.test(id)) return null;
+    return { caminho, body: { creative: JSON.stringify({ creative_id: id }) } };
+  }
   return null;
 }
 
@@ -2725,6 +2752,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     "alterar_publico_do_conjunto",
     "alterar_idade_do_conjunto",
     "vincular_instagram_dos_anuncios",
+    "trocar_criativo_do_anuncio",
   ];
   if (!VALID.includes(action)) return { erro: `action_type invalido; use: ${VALID.join(", ")}` };
   if (!targetLike) return { erro: "target_name obrigatorio" };
@@ -2759,7 +2787,8 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
 
   const needle = norm(targetLike);
   const isAd = action === "pausar_criativo" || action === "ativar_criativo" ||
-    action === "escalar_criativo" || action === "renomear_criativo";
+    action === "escalar_criativo" || action === "renomear_criativo" ||
+    action === "trocar_criativo_do_anuncio";
   const isAdset =
     action === "alterar_orcamento" ||
     action === "ajustar_posicionamentos_do_conjunto" ||
@@ -2870,6 +2899,17 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
     }
   }
 
+  if (action === "trocar_criativo_do_anuncio") {
+    const troca = validarTrocaCriativo({
+      ...(params as Record<string, unknown>),
+      ad_id: (params as Record<string, unknown>).ad_id ?? alvo.external_id,
+    });
+    if (!troca.ok) return { erro: troca.erro, detalhe: troca.detalhe };
+    params.ad_id = troca.ad_id;
+    params.creative_id = troca.creative_id;
+    params.alvo_external_id = troca.ad_id;
+  }
+
   // ESP-24: guarda do unico conjunto entregando — se pausar este zera entrega, nao emite card.
   let avisoGuardaConjunto: string | null = null;
   if (action === "pausar_conjunto" && alvo.external_id) {
@@ -2965,6 +3005,8 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
       `Alterar publico de "${alvo.name}" para ${String(params?.publico_resumo ?? "interesses informados")} (Advantage+ ${Number(params?.advantage_audience) === 1 ? "ligado" : "desligado"}; mesmo conjunto; nao cria objeto novo)`,
     alterar_idade_do_conjunto:
       `Alterar idade de "${alvo.name}" para ${String(params?.idade_resumo ?? "faixa informada")} (mesmo conjunto; nao cria objeto novo)`,
+    trocar_criativo_do_anuncio:
+      `Trocar o criativo do anuncio "${alvo.name}" para ${String(params?.creative_id ?? "")}. Nao zera o aprendizado, mas a Meta volta o anuncio a revisao. Nao declare corrigido sem reler effective_status. O criativo antigo permanece.`,
     vincular_instagram_dos_anuncios: (() => {
       const n = Array.isArray(params?.anuncios) ? (params.anuncios as unknown[]).length : 0;
       const h = String(params?.instagram_destino_handle ?? "@cohapm");
@@ -3178,6 +3220,10 @@ async function t_alterar_geo_do_conjunto(
     geo_locations: args?.geo_locations,
     bairros: args?.bairros,
     cidades: args?.cidades ?? args?.cities,
+    excluded_geo_locations: args?.excluded_geo_locations ?? args?.excluir_geo_locations,
+    excluir_bairros: args?.excluir_bairros,
+    excluir_cidades: args?.excluir_cidades ?? args?.excluir_cities,
+    excluir_pinos: args?.excluir_pinos,
   };
   const geoOk = await validarGeoDeAlteracao(companyId, params, [conjunto]);
   if (!geoOk.ok) return { erro: geoOk.erro, detalhe: geoOk.detalhe };
@@ -3197,6 +3243,73 @@ async function t_alterar_geo_do_conjunto(
     params: {
       ...geoOk.params,
       alvo_external_id: params.alvo_external_id,
+    },
+  }, cards);
+}
+
+async function t_criar_conjunto(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+  mcpKey: string,
+  complianceCache?: Map<string, any>,
+) {
+  const nome = String(args?.nome ?? args?.nome_novo ?? args?.target_name ?? "").trim();
+  if (!nome) return { erro: "nome obrigatorio" };
+  return await t_propose_criacao(companyId, convId, requestedBy, {
+    action_type: "criar_conjunto",
+    target_name: nome,
+    justificativa: String(args?.justificativa ?? "").trim() || `Criar conjunto "${nome}" a partir do spec, pausado.`,
+    reversa: String(args?.reversa ?? "").trim() || "Pausar ja nasce pausado. Se o conjunto nao servir, pausar_conjunto permanece e o objeto fica no historico.",
+    metrica_sucesso: String(args?.metrica_sucesso ?? "").trim() || "Releitura confirma status PAUSED, os campos do spec e advantage_audience gravado.",
+    params: args?.params && typeof args.params === "object" ? { ...args.params, nome } : { ...args, nome },
+  }, cards, mcpKey, complianceCache);
+}
+
+async function t_criar_criativo(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+  mcpKey: string,
+  complianceCache?: Map<string, any>,
+) {
+  const nome = String(args?.nome ?? args?.nome_novo ?? args?.target_name ?? "criativo").trim();
+  return await t_propose_criacao(companyId, convId, requestedBy, {
+    action_type: "criar_criativo",
+    target_name: nome,
+    justificativa: String(args?.justificativa ?? "").trim() || `Criar criativo "${nome}" com a saudacao e o botao do pedido.`,
+    reversa: String(args?.reversa ?? "").trim() || "Criativo e imutavel. Se o texto, o botao ou a saudacao estiverem errados, crie outro e troque o anuncio. O criativo velho permanece para auditoria.",
+    metrica_sucesso: String(args?.metrica_sucesso ?? "").trim() || "O criativo nasce com page_welcome_message e CTA compativel com o destino do conjunto.",
+    params: args?.params && typeof args.params === "object" ? { ...args.params, nome } : { ...args, nome },
+  }, cards, mcpKey, complianceCache);
+}
+
+async function t_trocar_criativo_do_anuncio(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+) {
+  const anuncio = String(args?.anuncio ?? args?.target_name ?? args?.ad_id ?? "").trim();
+  if (!anuncio) return { erro: "anuncio obrigatorio (nome ou ad_id)" };
+  return await t_propose_action(companyId, convId, requestedBy, {
+    action_type: "trocar_criativo_do_anuncio",
+    target_name: anuncio,
+    justificativa: String(args?.justificativa ?? "").trim() ||
+      "Trocar o criativo do anuncio. Nao zera o aprendizado, mas reinicia a revisao da Meta.",
+    reversa: String(args?.reversa ?? "").trim() ||
+      "O criativo anterior continua na conta. Apontar o anuncio de volta para o creative_id anterior desfaz a troca, com nova revisao.",
+    metrica_sucesso: String(args?.metrica_sucesso ?? "").trim() ||
+      "PATCH aceito e effective_status relido. IN_PROCESS nao e corrigido.",
+    params: {
+      creative_id: args?.creative_id ?? args?.criativo_id,
+      ad_id: args?.ad_id,
+      alvo_external_id: args?.alvo_external_id ?? args?.ad_id,
     },
   }, cards);
 }
@@ -3516,7 +3629,7 @@ async function t_vincular_instagram_anuncios(
 // v25: proposta das acoes de CRIACAO. Separada de t_propose_action porque a semantica e
 // oposta: lÃ¡ o alvo e o objeto a modificar; aqui o "alvo" e o MOLDE a replicar (ou, no caso
 // de campanha, o nome do objeto que vai nascer).
-const ACOES_CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_anuncio_a_partir_de", "escalar_duplicar"];
+const ACOES_CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
 /** Summary visivel do card: so nomes. Ensaio (compliance, visao, ESP) vai no payload. */
 function summaryPreviaCriacao(nomes: {
@@ -3574,6 +3687,102 @@ async function t_propose_criacao(
   if (!contaDaEmpresa) {
     return { erro: "criacao_bloqueada_por_isolamento_de_portfolio",
       detalhe: `A empresa desta conversa nao tem nenhuma conta de anuncios habilitada para criacao. Contas da empresa: ${candidatas.join(", ") || "(nenhuma)"}. Habilitadas para criacao: ${contasOk.join(", ")}. Informe ao gestor que criar objeto para esta empresa exige liberar a conta dela na configuracao - e NAO proponha usar a conta de outra empresa.` };
+  }
+
+  if (action === "criar_conjunto") {
+    const spec = validarSpecConjunto({
+      ...(params as Record<string, unknown>),
+      nome: params?.nome ?? params?.nome_novo ?? nomeAlvo,
+    });
+    if (!spec.ok) return { erro: spec.erro, detalhe: spec.detalhe };
+    const julgado = await julgarOrcamentoDiario(supa, companyId, spec.reais, 1);
+    if (!julgado.ok) return { erro: julgado.motivo, detalhe: julgado.detalhe, avaliacao_orcamento: julgado.avaliacao };
+    const { data: campRow } = await supa
+      .from("campaigns")
+      .select("id,name")
+      .eq("company_id", companyId)
+      .eq("provider", "meta_ads")
+      .eq("external_id", spec.corpo.campaign_id)
+      .maybeSingle();
+    if (!campRow) {
+      return {
+        erro: "campanha_nao_e_desta_empresa",
+        detalhe: `Campanha ${spec.corpo.campaign_id} nao esta no espelho desta empresa. Nao crio conjunto em campanha de outro portfolio.`,
+      };
+    }
+    const { data: seg } = await supa.rpc("checar_segmentacao", {
+      p_company_id: companyId,
+      p_targeting: spec.targeting,
+    });
+    if (seg && typeof seg === "object" && (seg as any).aplica === true && (seg as any).permitido === false) {
+      return {
+        erro: "segmentacao_recusada_pelo_gate",
+        detalhe: String((seg as any).mensagem_para_o_gestor ?? (seg as any).motivo ?? ""),
+      };
+    }
+    const tokPre = tokenAdsPorCompanyId(companyId);
+    if (!tokPre) return { erro: "prevoo_sem_token", detalhe: "Sem token desta empresa o card nao nasce." };
+    const pre = await validarSomenteNaMeta({
+      token: tokPre.token,
+      caminho: `/${contaDaEmpresa}/adsets`,
+      body: spec.corpo,
+    });
+    if (!pre.ok) {
+      const recusa = pre.recusa.toLowerCase();
+      if (!recusa.includes("execution_options") && !recusa.includes("validate_only")) {
+        return { erro: "prevoo_recusado", detalhe: pre.recusa, corpo: pre.corpo };
+      }
+    }
+    return await gravarCard(companyId, convId, requestedBy, action, "adset", campRow.id, spec.resumo, {
+      ...spec.corpo,
+      targeting: spec.targeting,
+      orcamento_diario_reais: spec.reais,
+      nome_novo: spec.corpo.name,
+      campanha_destino_external_id: spec.corpo.campaign_id,
+      campanha_destino_nome: campRow.name,
+      status_inicial: "PAUSED",
+      conta_destino: contaDaEmpresa,
+      justificativa,
+      reversa,
+      metrica_sucesso: sucesso,
+      resumo_legivel: spec.resumo,
+      ...(pre.ok ? carimboDeValidacao(pre.validado_em) : { validacao: "nao_testado", prevoo_nota: pre.recusa }),
+    }, cards);
+  }
+
+  if (action === "criar_criativo") {
+    const criativo = montarCriativoDeClique({
+      ...(params as Record<string, unknown>),
+      nome: params?.nome ?? params?.nome_novo ?? nomeAlvo,
+    });
+    if (!criativo.ok) return { erro: criativo.erro, detalhe: criativo.detalhe };
+    const tokPre = tokenAdsPorCompanyId(companyId);
+    if (!tokPre) return { erro: "prevoo_sem_token", detalhe: "Sem token desta empresa o card nao nasce." };
+    const pre = await validarSomenteNaMeta({
+      token: tokPre.token,
+      caminho: `/${contaDaEmpresa}/adcreatives`,
+      body: criativo.body,
+    });
+    if (!pre.ok) {
+      const recusa = pre.recusa.toLowerCase();
+      if (!recusa.includes("execution_options") && !recusa.includes("validate_only")) {
+        return { erro: "prevoo_recusado", detalhe: pre.recusa, corpo: pre.corpo };
+      }
+    }
+    return await gravarCard(companyId, convId, requestedBy, action, "creative", null, criativo.resumo, {
+      ...criativo.body,
+      ...(params as Record<string, unknown>),
+      nome_novo: criativo.body.name,
+      instagram_actor_id: String(params?.instagram_actor_id ?? params?.instagram_user_id ?? ""),
+      conta_destino: contaDaEmpresa,
+      saudacao: criativo.saudacao,
+      pergunta: criativo.pergunta,
+      justificativa,
+      reversa,
+      metrica_sucesso: sucesso,
+      resumo_legivel: criativo.resumo,
+      ...(pre.ok ? carimboDeValidacao(pre.validado_em) : { validacao: "nao_testado", prevoo_nota: pre.recusa }),
+    }, cards);
   }
 
   // -------- criar_campanha: NOME LIVRE (target_name / params.nome / nome_novo) --------
@@ -5262,8 +5471,12 @@ async function gravarCard(companyId: string, convId: string, requestedBy: string
     target_type: "approval_request", target_id: ins.id,
     details: { acao: action, resumo: summary, payload, origem: "edge:traffic-chat" } });
   cards.push({ approval_id: ins.id, action, entity_type: entityType, target_name: String(payload.nome_novo ?? ""), summary, params: payload, status: "pending" });
-  return { ok: true, approval_id: ins.id, resumo: summary, expira_em: ins.expires_at,
-    aviso: "Pedido PENDENTE. Nada foi criado na Meta ainda. Ao ser aprovado, campanha/conjunto/anuncio nascem ACTIVE (a aprovacao do card autoriza entrega). Para religar objeto ja PAUSED use ativar_campanha, ativar_conjunto ou ativar_criativo. O pedido expira em 24h se nao for decidido." };
+  const aviso = action === "criar_conjunto"
+    ? "Pedido PENDENTE. Nada foi criado. Ao aprovar, o conjunto nasce PAUSADO. Ativar e outra decisao: ativar_conjunto."
+    : action === "criar_criativo"
+    ? "Pedido PENDENTE. Nasce um criativo, nao um anuncio, e criativo e imutavel. Para corrigir texto, botao ou saudacao, crie outro e use trocar_criativo_do_anuncio."
+    : "Pedido PENDENTE. Nada foi criado na Meta ainda. Ao ser aprovado, campanha/conjunto/anuncio nascem ACTIVE (a aprovacao do card autoriza entrega). Para religar objeto ja PAUSED use ativar_campanha, ativar_conjunto ou ativar_criativo. O pedido expira em 24h se nao for decidido.";
+  return { ok: true, approval_id: ins.id, resumo: summary, expira_em: ins.expires_at, aviso };
 }
 
 async function t_check_compliance(
@@ -6400,6 +6613,9 @@ async function runTool(name: string, args: any, ctx: any) {
       case "renomear_campanha": return await t_renomear_campanha(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_categoria_especial": return await t_alterar_categoria_especial(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_geo_do_conjunto": return await t_alterar_geo_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
+      case "criar_conjunto": return await t_criar_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey, ctx.complianceCache);
+      case "criar_criativo": return await t_criar_criativo(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey, ctx.complianceCache);
+      case "trocar_criativo_do_anuncio": return await t_trocar_criativo_do_anuncio(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_publico_do_conjunto": return await t_alterar_publico_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_idade_do_conjunto": return await t_alterar_idade_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_orcamento": {
@@ -7841,8 +8057,9 @@ Deno.serve(async (req) => {
           const sobra402 = HARD_LIMIT_MS - decorrido() - RESERVA_GRAVACAO_MS;
           if (sobra402 < 8_000) break;
           console.warn(`[openrouter] ${plano.motivo}`);
-          if (plano.esperarMs) {
-            await new Promise((r) => setTimeout(r, Math.min(plano.esperarMs, 4000)));
+          const espera402 = plano.esperarMs;
+          if (espera402) {
+            await new Promise((r) => setTimeout(r, Math.min(espera402, 4000)));
           }
           payload = plano.payload;
           const cap402 = Math.min(OPENROUTER_CALL_CAP_MS, sobra402);

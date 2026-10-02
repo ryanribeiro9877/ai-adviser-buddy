@@ -398,6 +398,7 @@ export function argsAdsetDeGraph(
   if (body.attribution_spec) out.attribution_spec = parseMaybeJson(body.attribution_spec);
   if (body.dsa_beneficiary) out.dsa_beneficiary = body.dsa_beneficiary;
   if (body.dsa_payor) out.dsa_payor = body.dsa_payor;
+  if (body.start_time) out.start_time = body.start_time;
   return out;
 }
 
@@ -534,6 +535,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
     case "alterar_categoria_especial_campanha":
       return "campanha";
     case "criar_conjunto_a_partir_de":
+    case "criar_conjunto":
     case "escalar_duplicar":
     case "alterar_orcamento":
     case "ajustar_posicionamentos_do_conjunto":
@@ -545,6 +547,7 @@ export function nivelDaAcao(acao: string): NivelMeta | null {
     case "renomear_conjunto":
       return "conjunto";
     case "criar_anuncio_a_partir_de":
+    case "trocar_criativo_do_anuncio":
     case "pausar_criativo":
     case "ativar_criativo":
     case "renomear_criativo":

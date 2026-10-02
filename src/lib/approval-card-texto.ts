@@ -5,6 +5,9 @@
 const TITULO_POR_ACAO: Record<string, string> = {
   criar_campanha: "Card de criação de campanha",
   criar_conjunto_a_partir_de: "Card de criação de conjunto",
+  criar_conjunto: "Card de criação de conjunto",
+  criar_criativo: "Card de criação de criativo",
+  trocar_criativo_do_anuncio: "Card de trocar criativo do anúncio",
   criar_anuncio_a_partir_de: "Card de criação de anúncio",
   escalar_duplicar: "Card de escala de conjunto",
   pausar_criativo: "Card de pausar criativo",
@@ -30,6 +33,8 @@ const TITULO_POR_ACAO: Record<string, string> = {
 const ACOES_CRIACAO = new Set([
   "criar_campanha",
   "criar_conjunto_a_partir_de",
+  "criar_conjunto",
+  "criar_criativo",
   "criar_anuncio_a_partir_de",
   "escalar_duplicar",
 ]);
@@ -76,11 +81,19 @@ export function previaDoCardAprovacao(
   if (acao === "criar_campanha") {
     return { campanha: campo(payload, "nome_novo") ?? campanha ?? undefined };
   }
-  if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
+  if (acao === "criar_conjunto_a_partir_de" || acao === "criar_conjunto" || acao === "escalar_duplicar") {
     return {
       campanha: campanha ?? undefined,
       conjunto: campo(payload, "nome_novo") ?? conjunto ?? undefined,
     };
+  }
+  if (acao === "criar_criativo") {
+    return {
+      criativo: campo(payload, "nome_novo", "nome") ?? criativo ?? undefined,
+    };
+  }
+  if (acao === "trocar_criativo_do_anuncio") {
+    return { criativo: campo(payload, "target_name") ?? criativo ?? undefined };
   }
   if (acao === "criar_anuncio_a_partir_de") {
     return {

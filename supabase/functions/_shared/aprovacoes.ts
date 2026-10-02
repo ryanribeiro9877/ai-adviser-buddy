@@ -260,6 +260,29 @@ const ASSINATURAS: {
       "com publico Advantage+ a Meta so aceita idade minima entre 18 e 25 e nao aceita age_max no pedido (o teto fica em 65). O sistema agora sanitiza isso automaticamente — reemitir ou tentar de novo.",
   },
   {
+    recusa: "location_types_entre_blocos_de_geo",
+    quando: /1870194/,
+    frase:
+      "Num conjunto com exclusao geografica, divergencia de location_types entre os dois blocos e esperada e nao deve alarmar: geo_locations pode ganhar frequently_in, e excluded_geo_locations perde frequently_in e fica em home, recent. O que deve alarmar e o Gerenciador recusando a publicacao — e um erro de CTA no anuncio pode estar segurando este.",
+  },
+  {
+    recusa: "cta_incompativel_derruba_o_conjunto",
+    quando: /1885882/,
+    frase:
+      "um anuncio com botao incompativel (Saiba mais / LEARN_MORE apontando para site) dentro de conjunto de conversas derrubou o conjunto inteiro. O criativo certo e WHATSAPP_MESSAGE. Apagar ou trocar esse anuncio e o que libera os outros.",
+  },
+  {
+    recusa: "troca_cruza_personalizacao_de_placement",
+    quando: /1885866/,
+    frase:
+      "a Meta recusou a troca de criativo porque um tem regras de placement (asset_customization_rules) e o outro nao. Nao cruze essa fronteira.",
+  },
+  {
+    recusa: "video_sem_miniatura",
+    quando: /1443226/,
+    frase: "video sem thumbnail_url. A Meta recusa o criativo. Passe a miniatura e tente de novo.",
+  },
+  {
     // Medido 22/08/2026 cards a703e076 / 934e1a2f: video_data.link no POST /adcreatives.
     recusa: "video_data_link_nao_suportado",
     quando:

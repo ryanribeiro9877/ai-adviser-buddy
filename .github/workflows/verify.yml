@@ -138,6 +138,9 @@ jobs:
             exit 1
           fi
 
+      - name: Replay do dia La Felicita
+        run: node teste_replay_la_felicita.mjs
+
       - name: deno lint (informativo)
         # O eslint ignora supabase/functions (código Deno tem toolchain própria); este passo é o
         # dono legítimo desses achados. NÃO bloqueia: a esmagadora maioria é no-explicit-any, e

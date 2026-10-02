@@ -1,9 +1,11 @@
 // Prova isolada de geo_targeting (sem rede).
 import {
+  aplicarExclusaoNoTargeting,
   aplicarGeoNoTargeting,
   escolherPinoGeocode,
   itemParaGeoKey,
   linhasDoPhoton,
+  normalizarExclusaoDoPedido,
   normalizarGeoDoPedido,
   normalizarRaioKm,
   paramsGeoComAliasCidades,
@@ -109,5 +111,39 @@ const pinoPhoton = escolherPinoGeocode(photon, "Salvador");
 assert(pinoPhoton?.name === "Centro Administrativo da Bahia", "photon escolhe o suburbio do CAB");
 assert(pinoPhoton?.lat === "-12.9491408", "latitude do CAB");
 assert(pinoPhoton?.lon === "-38.4310335", "longitude do CAB");
+
+const exc = normalizarExclusaoDoPedido({
+  excluir_bairros: ["111", { key: "222", name: "Horto" }],
+});
+assert(exc.geo, "exclusao de bairros");
+assert((exc.geo!.neighborhoods as unknown[]).length === 2, "dois bairros excluidos");
+assert(
+  JSON.stringify(exc.geo!.location_types) === JSON.stringify(["home", "recent"]),
+  "exclusao sai home, recent",
+);
+
+const excTipos = normalizarExclusaoDoPedido({
+  excluded_geo_locations: {
+    cities: [{ key: "9", name: "Dias d'Avila" }],
+    location_types: ["home", "recent", "frequently_in"],
+  },
+});
+assert(
+  JSON.stringify(excTipos.geo!.location_types) === JSON.stringify(["home", "recent"]),
+  "frequently_in nao e pedido no bloco de exclusao",
+);
+
+const pinosExc = normalizarExclusaoDoPedido({
+  excluir_pinos: [{ latitude: -12.97, longitude: -38.5, radius: 1, distance_unit: "kilometer" }],
+});
+assert((pinosExc.geo!.custom_locations as unknown[]).length === 1, "pino de exclusao");
+
+const soInclusao = normalizarExclusaoDoPedido({ bairros: ["111"] });
+assert(!soInclusao.geo && !soInclusao.erro, "inclusao nao vira exclusao");
+
+const baseExc = { age_min: 25, geo_locations: { cities: [{ key: "1" }] } };
+const comExc = aplicarExclusaoNoTargeting(baseExc, exc.geo!);
+assert((comExc.geo_locations as { cities: unknown[] }).cities.length === 1, "exclusao nao apaga inclusao");
+assert((comExc as { age_min: number }).age_min === 25, "exclusao mantem idade");
 
 console.log("OK geo_targeting prova");

@@ -82,4 +82,51 @@ const blocos = compararEnviadoComGravado({
 });
 assert(campo(blocos, "flexible_spec")?.veredito === "igual", "blocos reordenados continuam iguais");
 
+const exclusao = compararEnviadoComGravado({
+  enviado: {
+    targeting: {
+      geo_locations: { location_types: ["home"], cities: [{ key: "1" }] },
+      excluded_geo_locations: {
+        location_types: ["home", "recent", "frequently_in"],
+        cities: [{ key: "2" }],
+      },
+    },
+  },
+  gravado: {
+    targeting: {
+      geo_locations: { location_types: ["frequently_in", "home", "recent"], cities: [{ key: "1" }] },
+      excluded_geo_locations: { location_types: ["home", "recent"], cities: [{ key: "2" }] },
+    },
+  },
+});
+const tiposInclusao = exclusao.find((c) => c.campo.endsWith("geo_locations.location_types"));
+const tiposExclusao = exclusao.find((c) => c.campo.endsWith("excluded_geo_locations.location_types"));
+assert(tiposInclusao?.veredito === "normalizado", `inclusao devia normalizar, veio ${tiposInclusao?.veredito}`);
+assert(tiposExclusao?.veredito === "normalizado", `exclusao home, recent nao alarma, veio ${tiposExclusao?.veredito}`);
+assert(carimboDaReleitura(exclusao, true) === "conferido", "divergencia esperada dos dois blocos nao alarma");
+
+const cidadeErrada = compararEnviadoComGravado({
+  enviado: {
+    targeting: {
+      geo_locations: { location_types: ["home"], cities: [{ key: "1" }] },
+      excluded_geo_locations: { location_types: ["home", "recent"], cities: [{ key: "2" }] },
+    },
+  },
+  gravado: {
+    targeting: {
+      geo_locations: { location_types: ["frequently_in", "home", "recent"], cities: [{ key: "1" }] },
+      excluded_geo_locations: { location_types: ["home", "recent"], cities: [{ key: "9" }] },
+    },
+  },
+});
+const cidadeExc = cidadeErrada.find((c) => c.campo.endsWith("excluded_geo_locations.cities"));
+assert(cidadeExc?.veredito === "divergente", "cidade errada no bloco de exclusao alarma");
+assert(carimboDaReleitura(cidadeErrada, true) === "gravado_diferente", "bloco irmao quebrado nao herda luz verde do principal");
+
+const vantagem = compararEnviadoComGravado({
+  enviado: { targeting: { targeting_automation: { advantage_audience: 0 }, geo_locations: { cities: [{ key: "1" }] } } },
+  gravado: { targeting: { targeting_automation: { advantage_audience: 0 }, geo_locations: { cities: [{ key: "1" }] } } },
+});
+assert(campo(vantagem, "advantage_audience")?.veredito === "igual", "advantage_audience 0 sobrevive");
+
 console.log("OK releitura_pos_escrita");
