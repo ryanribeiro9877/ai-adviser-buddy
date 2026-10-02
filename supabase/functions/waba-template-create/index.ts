@@ -86,7 +86,11 @@ Deno.serve(async (req) => {
   const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
   if (!cfg?.api_key) return json({ error: "cascade_key_unavailable" }, 500);
 
-  const { data: comp } = await supa.from("companies").select("id").ilike("name", "%legal%").limit(1).maybeSingle();
+  let bodyPre: any = {};
+  try { bodyPre = await req.clone().json(); } catch { /* */ }
+  const companyIdPedido = String(bodyPre?.company_id ?? "").trim();
+  if (!companyIdPedido) return json({ error: "company_id obrigatorio. O template nao se escolhe pelo nome da empresa." }, 400);
+  const { data: comp } = await supa.from("companies").select("id").eq("id", companyIdPedido).maybeSingle();
   if (!comp) return json({ error: "empresa não encontrada" }, 500);
   const { data: adm } = await supa.from("user_roles").select("user_id").eq("role", "admin").limit(1).maybeSingle();
   const actor = adm?.user_id ?? null;

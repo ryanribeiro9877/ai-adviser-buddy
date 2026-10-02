@@ -97,20 +97,28 @@ function Campanhas() {
 
   const requestChange = async (campaign: CampaignRow, action: string, form: FormData) => {
     if (!selectedCompany) return;
-    const summary = `${action === "pause" ? "Pausar" : action === "activate" ? "Ativar" : "Ajustar orçamento"} — ${campaign.campanha}`;
+    const canon =
+      action === "pause" || action === "pausar_campanha" ? "pausar_campanha"
+      : action === "activate" || action === "ativar_campanha" ? "ativar_campanha"
+      : "alterar_orcamento";
+    const summary = `${canon === "pausar_campanha" ? "Pausar" : canon === "ativar_campanha" ? "Ativar" : "Ajustar orçamento"} — ${campaign.campanha}`;
     const budgetRaw = form.get("budget");
+    const orcamento = budgetRaw ? Number(budgetRaw) : null;
     const { error } = await supabase.from("approval_requests").insert({
       company_id: selectedCompany.id,
       requested_by: user.id,
       entity_type: "campaign",
       entity_id: campaign.campaign_id || null,
-      action,
+      action: canon,
       summary,
       payload: {
         campaign_id: campaign.campaign_id,
         campaign_name: campaign.campanha,
-        new_budget: budgetRaw ? Number(budgetRaw) : null,
+        target_external_id: campaign.campaign_id,
+        target_name: campaign.campanha,
+        novo_orcamento_diario_reais: canon === "alterar_orcamento" ? orcamento : null,
         note: String(form.get("note") || ""),
+        justificativa: String(form.get("note") || ""),
       } as never,
     });
     if (error) return toast.error(error.message);
@@ -262,10 +270,10 @@ function Campanhas() {
                                   name="action"
                                   className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
                                 >
-                                  <option value={isActive ? "pause" : "activate"}>
+                                  <option value={isActive ? "pausar_campanha" : "ativar_campanha"}>
                                     {isActive ? "Pausar campanha" : "Ativar campanha"}
                                   </option>
-                                  <option value="update_budget">Ajustar orçamento diário</option>
+                                  <option value="alterar_orcamento">Ajustar orçamento diário</option>
                                 </select>
                               </div>
                               <div>

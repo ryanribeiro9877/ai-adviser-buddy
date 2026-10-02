@@ -45,10 +45,16 @@ export function NotificationBell() {
 
   const resolver = async (item: ItemNotificacao) => {
     setResolvendo(item.id);
-    const { error } = await supabase.from("alerts").update({ resolved: true }).eq("id", item.id);
+    const { error, data: gravadas } = await supabase
+      .from("alerts")
+      .update({ resolved: true })
+      .eq("id", item.id)
+      .select("id");
     setResolvendo(null);
-    if (error) {
-      toast.error(`Não foi possível resolver: ${error.message}`);
+    if (error || !gravadas?.length) {
+      toast.error(
+        `Não foi possível resolver: ${error?.message ?? "nenhuma linha foi gravada"}`,
+      );
       return;
     }
     await logAudit({

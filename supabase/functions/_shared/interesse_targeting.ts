@@ -14,7 +14,26 @@ export const TERMOS_GEO_NAO_INTERESSE = [
   "linha verde",
 ] as const;
 
-export type InteresseRef = { id: string; name: string };
+export type InteresseRef = { id: string; name: string; classe?: ClasseSegmentacao; grupo?: number };
+
+export const CLASSES_SEGMENTACAO = ["interests", "behaviors", "work_positions", "industries"] as const;
+export type ClasseSegmentacao = (typeof CLASSES_SEGMENTACAO)[number];
+
+export type TermoSegmentacao = {
+  id: string;
+  name: string;
+  classe: ClasseSegmentacao;
+  grupo?: number;
+};
+
+export function classeValida(v: unknown): ClasseSegmentacao | null {
+  const s = String(v ?? "").trim().toLowerCase();
+  if (s === "interest" || s === "interests" || s === "adinterest") return "interests";
+  if (s === "behavior" || s === "behaviors" || s === "comportamento" || s === "comportamentos") return "behaviors";
+  if (s === "work_positions" || s === "work_position" || s === "cargo" || s === "profissao") return "work_positions";
+  if (s === "industries" || s === "industry" || s === "setor" || s === "industria") return "industries";
+  return null;
+}
 
 export function stripInteresse(s: string): string {
   return String(s ?? "")
@@ -47,6 +66,22 @@ export function normalizarIdInteresse(raw: unknown): string | null {
   const s = String(raw ?? "").trim();
   if (!/^\d{5,20}$/.test(s)) return null;
   return s;
+}
+
+export function itemParaTermo(item: unknown): TermoSegmentacao | null {
+  if (!item || typeof item !== "object") return null;
+  const o = item as Record<string, unknown>;
+  const id = normalizarIdInteresse(o.id ?? o.interest_id ?? o.key);
+  const classe = classeValida(o.classe ?? o.class ?? o.tipo);
+  if (!id || !classe) return null;
+  const name = String(o.name ?? o.nome ?? "").trim() || id;
+  const grupoRaw = o.grupo != null ? Number(o.grupo) : undefined;
+  return {
+    id,
+    name,
+    classe,
+    grupo: grupoRaw != null && Number.isFinite(grupoRaw) ? grupoRaw : undefined,
+  };
 }
 
 export function itemParaInteresse(item: unknown): InteresseRef | null {
@@ -84,12 +119,13 @@ export function normalizarInteressesDoPedido(params: Record<string, unknown> | n
       resumo: "",
       erro: "interesses_obrigatorios",
       detalhe:
-        "Passe interesses[] com {id, name} devolvidos por buscar_interesses. Nao invente id. Nome sem id nao vale.",
+        "Passe interesses[] com {id, name, classe} devolvidos por buscar_segmentacao. classe e interests, behaviors, work_positions ou industries. Id sem classe nao entra.",
     };
   }
-  const out: InteresseRef[] = [];
+  const out: TermoSegmentacao[] = [];
   const seen = new Set<string>();
   const semId: string[] = [];
+  const semClasse: string[] = [];
   const geo: string[] = [];
   for (const item of bruto) {
     if (typeof item === "string" && !normalizarIdInteresse(item)) {
@@ -98,14 +134,16 @@ export function normalizarInteressesDoPedido(params: Record<string, unknown> | n
       else semId.push(nome || "(vazio)");
       continue;
     }
-    const ref = itemParaInteresse(item);
+    const ref = itemParaTermo(item);
     if (!ref) {
-      const nome = item && typeof item === "object"
-        ? String((item as Record<string, unknown>).name ?? (item as Record<string, unknown>).nome ?? "")
-          .trim()
+      const o = item && typeof item === "object" ? item as Record<string, unknown> : null;
+      const id = o ? normalizarIdInteresse(o.id ?? o.interest_id ?? o.key) : normalizarIdInteresse(item);
+      const nome = o
+        ? String(o.name ?? o.nome ?? "").trim()
         : String(item ?? "").trim();
       if (nome && ehTermoGeoNaoInteresse(nome)) geo.push(nome);
-      else semId.push(nome || JSON.stringify(item).slice(0, 80));
+      else if (id && !classeValida(o?.classe ?? o?.class ?? o?.tipo)) semClasse.push(id);
+      else semId.push(nome || id || JSON.stringify(item).slice(0, 80));
       continue;
     }
     if (ehTermoGeoNaoInteresse(ref.name)) {
@@ -125,13 +163,23 @@ export function normalizarInteressesDoPedido(params: Record<string, unknown> | n
         `${geo.join(", ")} e local (geo), nao interesse. Use buscar_geolocalizacao + alterar_geo_do_conjunto.`,
     };
   }
+  if (semClasse.length) {
+    return {
+      interesses: [],
+      resumo: "",
+      erro: "classe_obrigatoria",
+      detalhe:
+        `Estes ids nao tem classe declarada (${semClasse.join(", ")}). ` +
+        "Comportamento, cargo e setor nao sao interests. Resolva com buscar_segmentacao e passe {id,name,classe}.",
+    };
+  }
   if (semId.length) {
     return {
       interesses: [],
       resumo: "",
       erro: "interesses_sem_id_meta",
       detalhe:
-        `Estes itens nao tem id numerico da Meta: ${semId.join(", ")}. Resolva com buscar_interesses e passe {id,name}.`,
+        `Estes itens nao tem id numerico da Meta: ${semId.join(", ")}. Resolva com buscar_segmentacao e passe {id,name,classe}.`,
     };
   }
   if (!out.length) {
@@ -180,17 +228,82 @@ export function validarPublicoDoPedido(params: Record<string, unknown> | null | 
   };
 }
 
+/**
+ * Um bloco = OU. Blocos diferentes do flexible_spec a Meta trata como E
+ * e o publico despenca. Cada id vai na chave da propria classe.
+ */
+export function montarFlexibleSpec(
+  termos: TermoSegmentacao[],
+): Array<Record<string, Array<{ id: string; name: string }>>> {
+  const grupos = new Map<number, TermoSegmentacao[]>();
+  for (const t of termos) {
+    const g = t.grupo ?? 0;
+    const arr = grupos.get(g) ?? [];
+    arr.push(t);
+    grupos.set(g, arr);
+  }
+  const blocos: Array<Record<string, Array<{ id: string; name: string }>>> = [];
+  for (const g of [...grupos.keys()].sort((a, b) => a - b)) {
+    const bloco: Record<string, Array<{ id: string; name: string }>> = {};
+    for (const t of grupos.get(g) ?? []) {
+      const lista = bloco[t.classe] ?? [];
+      if (!lista.some((x) => x.id === t.id)) lista.push({ id: t.id, name: t.name });
+      bloco[t.classe] = lista;
+    }
+    if (Object.keys(bloco).length) blocos.push(bloco);
+  }
+  return blocos;
+}
+
+export function idsConferemComResolucao(
+  termos: TermoSegmentacao[],
+  resolvidos: Array<{ id: string; classe: ClasseSegmentacao }>,
+): { ok: true } | { ok: false; erro: string; detalhe: string } {
+  const mapa = new Map(resolvidos.map((r) => [r.id, r.classe]));
+  for (const t of termos) {
+    const classe = mapa.get(t.id);
+    if (!classe) {
+      return {
+        ok: false,
+        erro: "id_nao_resolvido_nesta_conversa",
+        detalhe:
+          `O id ${t.id} nao foi resolvido por buscar_segmentacao nesta conversa. Id digitado a mao nao entra no card.`,
+      };
+    }
+    if (classe !== t.classe) {
+      return {
+        ok: false,
+        erro: "classe_diverge_da_resolucao",
+        detalhe:
+          `O id ${t.id} foi resolvido como ${classe} e o pedido o colocou em ${t.classe}. Nao grave comportamento dentro de interests.`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 /** Substitui flexible_spec e advantage_audience; preserva geo/idade/plataformas. */
 export function aplicarPublicoNoTargeting(
   targeting: Record<string, unknown>,
-  opts: { interesses: InteresseRef[]; advantage_audience: 0 | 1 },
+  opts: {
+    interesses?: Array<InteresseRef & { classe?: ClasseSegmentacao; grupo?: number }>;
+    termos?: TermoSegmentacao[];
+    advantage_audience: 0 | 1;
+  },
 ): Record<string, unknown> {
+  const bruto = opts.termos ?? opts.interesses ?? [];
+  const termos: TermoSegmentacao[] = [];
+  for (const x of bruto) {
+    const classe = classeValida(x.classe);
+    if (!classe || !x.id) continue;
+    termos.push({ id: x.id, name: x.name, classe, grupo: x.grupo });
+  }
   const next: Record<string, unknown> = { ...targeting };
   delete next.interests;
   delete next.behaviors;
-  next.flexible_spec = [{
-    interests: opts.interesses.map((x) => ({ id: x.id, name: x.name })),
-  }];
+  delete next.work_positions;
+  delete next.industries;
+  next.flexible_spec = montarFlexibleSpec(termos);
   const autoRaw = next.targeting_automation;
   const auto: Record<string, unknown> =
     autoRaw && typeof autoRaw === "object" && !Array.isArray(autoRaw)
@@ -259,11 +372,38 @@ function escolherInteresse(
   return { escolhido: null, ambiguo: false };
 }
 
+function paramsDaBusca(
+  classe: ClasseSegmentacao,
+  query: string,
+  limit: number,
+  locale: string,
+  token: string,
+): URLSearchParams {
+  if (classe === "interests") {
+    return new URLSearchParams({
+      type: "adinterest",
+      q: query,
+      limit: String(limit),
+      locale,
+      access_token: token,
+    });
+  }
+  return new URLSearchParams({
+    type: "adTargetingCategory",
+    class: classe,
+    q: query,
+    limit: String(limit),
+    locale,
+    access_token: token,
+  });
+}
+
 export async function buscarInteressesMeta(opts: {
   token: string;
   nomes: string[];
   limit_por_query?: number;
   locale?: string;
+  classe?: ClasseSegmentacao;
 }): Promise<{
   ok: boolean;
   total_pedidos: number;
@@ -317,16 +457,11 @@ export async function buscarInteressesMeta(opts: {
 
   const limit = Math.min(25, Math.max(1, Number(opts.limit_por_query ?? 8) || 8));
   const locale = String(opts.locale ?? "pt_BR").trim() || "pt_BR";
+  const classe = opts.classe ?? "interests";
 
   const consultas = await mapPool(uniq, CONCORRENCIA_BUSCA, async (query) => {
     const pareceGeo = ehTermoGeoNaoInteresse(query);
-    const qs = new URLSearchParams({
-      type: "adinterest",
-      q: query,
-      limit: String(limit),
-      locale,
-      access_token: opts.token,
-    });
+    const qs = paramsDaBusca(classe, query, limit, locale, opts.token);
     const base: ResultadoBuscaInteresse = {
       query,
       parece_geo: pareceGeo,
@@ -407,7 +542,7 @@ export async function buscarInteressesMeta(opts: {
     if (c.ambiguo) ambiguos.push(c);
     if (c.escolhido && !seenId.has(c.escolhido.id)) {
       seenId.add(c.escolhido.id);
-      resolvidos.push(c.escolhido);
+      resolvidos.push({ ...c.escolhido, classe });
     } else if (!c.escolhido && !c.parece_geo) {
       nao_encontrados.push(c.query);
     }
@@ -428,7 +563,99 @@ export async function buscarInteressesMeta(opts: {
       "Nao existe filtro R$ 8.000. Empilhar termos nao aproxima teto salarial. " +
       "Lauro de Freitas, Praia do Forte e Linha Verde sao geo — alterar_geo_do_conjunto. " +
       "Aluguel de casa costuma resolver para aluguel de carro: nao use. " +
-      "Para o card: params.interesses = resolvidos {id,name}. " +
+      `Para o card: params.interesses = resolvidos {id,name,classe:"${classe}"}. ` +
+      "Nao troque a classe. Comportamento nao entra em interests. " +
       "Advantage+ ligado dilui o recorte; alterar_publico desliga por padrao.",
   };
+}
+
+export async function buscarSegmentacaoMeta(opts: {
+  token: string;
+  nomes: string[];
+  classe: ClasseSegmentacao;
+  limit_por_query?: number;
+  locale?: string;
+}) {
+  return await buscarInteressesMeta(opts);
+}
+
+type ClienteResolucao = {
+  from: (t: string) => {
+    insert: (rows: unknown[]) => Promise<{ error: { message: string } | null }>;
+    select: (cols: string) => {
+      eq: (col: string, val: string) => {
+        eq: (col: string, val: string) => {
+          gte: (col: string, val: string) => Promise<{
+            data: Array<{ termo_id: string; classe: string }> | null;
+            error: { message: string } | null;
+          }>;
+        };
+      };
+    };
+  };
+};
+
+export async function registrarResolucaoDeSegmentacao(
+  supa: ClienteResolucao,
+  opts: {
+    companyId: string;
+    conversaId: string | null;
+    termos: Array<{ id: string; name: string; classe?: string }>;
+  },
+): Promise<{ ok: true } | { ok: false; motivo: string }> {
+  const linhas = opts.termos
+    .map((t) => {
+      const classe = classeValida(t.classe);
+      const id = normalizarIdInteresse(t.id);
+      if (!classe || !id) return null;
+      return {
+        company_id: opts.companyId,
+        conversa_id: opts.conversaId,
+        termo_id: id,
+        classe,
+        nome: String(t.name ?? id),
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => !!x);
+  if (!linhas.length) return { ok: true };
+  const { error } = await supa.from("segmentacao_resolvida").insert(linhas);
+  if (error) return { ok: false, motivo: error.message };
+  return { ok: true };
+}
+
+export async function recusarIdsNaoResolvidosNaConversa(
+  supa: {
+    from: (t: string) => {
+      select: (cols: string) => {
+        eq: (col: string, val: string) => {
+          gte: (col: string, val: string) => Promise<{
+            data: Array<{ termo_id: string; classe: string }> | null;
+            error: { message: string } | null;
+          }>;
+        };
+      };
+    };
+  },
+  opts: { companyId: string; termos: TermoSegmentacao[] },
+): Promise<{ ok: true } | { ok: false; erro: string; detalhe: string }> {
+  const desde = new Date(Date.now() - 6 * 3600e3).toISOString();
+  const { data, error } = await supa
+    .from("segmentacao_resolvida")
+    .select("termo_id,classe")
+    .eq("company_id", opts.companyId)
+    .gte("resolvido_em", desde);
+  if (error) {
+    return {
+      ok: false,
+      erro: "consulta_falhou",
+      detalhe: `Nao consegui ler as resolucoes desta conversa (${error.message}). Sem isso o card nao nasce.`,
+    };
+  }
+  const resolvidos = (data ?? [])
+    .map((r) => {
+      const classe = classeValida(r.classe);
+      return classe ? { id: String(r.termo_id), classe } : null;
+    })
+    .filter((x): x is { id: string; classe: ClasseSegmentacao } => !!x);
+  return idsConferemComResolucao(opts.termos, resolvidos);
 }

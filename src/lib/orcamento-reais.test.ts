@@ -1,12 +1,27 @@
 import { describe, it, expect } from "vitest";
 import { ehFlagSemMolde } from "./memoria-conjunto";
 import {
+  centavosParaReais,
   conferirOrcamentoReais,
   ehFlagOrcamentoConfirmadoReais,
   extrairOrcamentoDiarioDaFala,
   pareceOrcamentoCentavosComoReais,
+  reaisParaCentavos,
   reaisPedidoAlterarOrcamento,
 } from "./orcamento-reais";
+
+describe("espelho reais e centavos", () => {
+  it("R$ 150 vira 15000 centavos e volta R$ 150", () => {
+    expect(reaisParaCentavos(150)).toBe(15000);
+    expect(centavosParaReais(15000)).toBe(150);
+    expect(centavosParaReais(reaisParaCentavos(150))).toBe(150);
+  });
+
+  it("nao divide um valor que ja esta em reais so porque passou de 100", () => {
+    expect(centavosParaReais(150)).toBe(1.5);
+    expect(reaisParaCentavos(1.5)).toBe(150);
+  });
+});
 
 describe("extrairOrcamentoDiarioDaFala", () => {
   it("pega (30,00) no contrato dos 4 conjuntos e ignora idade 30-65", () => {

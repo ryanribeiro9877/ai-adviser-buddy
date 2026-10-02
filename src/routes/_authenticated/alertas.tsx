@@ -5,6 +5,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { useApp, logAudit } from "@/lib/app-context";
 import { useNotificacoes } from "@/hooks/use-notificacoes";
 import { EmptyCompany } from "@/components/metric-card";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
+import { updateQueGravou } from "@/lib/escrita-honesta";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,11 +41,12 @@ function Alertas() {
     queryKey: ["alerts", selectedCompany?.id],
     enabled: !!selectedCompany,
     queryFn: async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("alerts")
         .select("*")
         .eq("company_id", selectedCompany!.id)
         .order("created_at", { ascending: false });
+      if (error) throw error;
       return data ?? [];
     },
   });
@@ -55,7 +58,13 @@ function Alertas() {
   }, [destacado, q.data]);
 
   const resolve = async (id: string) => {
-    await supabase.from("alerts").update({ resolved: true }).eq("id", id);
+    const gravou = await updateQueGravou(
+      supabase.from("alerts").update({ resolved: true }).eq("id", id).select("id"),
+    );
+    if (!gravou.ok) {
+      toast.error(gravou.motivo);
+      return;
+    }
     await logAudit({
       companyId: selectedCompany!.id,
       action: "alert.resolve",
@@ -68,6 +77,15 @@ function Alertas() {
   };
 
   if (!selectedCompany) return <EmptyCompany />;
+  if (q.isError) {
+    return (
+      <FalhaDeCarga
+        oQue="os alertas desta empresa"
+        erro={q.error}
+        onTentarDeNovo={() => q.refetch()}
+      />
+    );
+  }
   // Ordena por severidade (critical → low) e, dentro de cada nível, por data desc.
   const items = [...(q.data ?? [])].sort((a, b) => {
     const rank = (SEVERITY_RANK[a.severity] ?? 9) - (SEVERITY_RANK[b.severity] ?? 9);

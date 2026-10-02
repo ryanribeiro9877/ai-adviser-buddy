@@ -12,9 +12,19 @@ export type FatoMemoria = {
 };
 
 const MARCA_LEGAL =
-  /legal\s*e\s*viver|\bLEV\b|consignado\s*CLT|FIN-0[0-9]|CET na|act_3302001729967572/i;
+  /legal\s*e\s*viver|\bLEV\b|consignado\s*CLT|FIN-0[0-9]|CET na/i;
 const MARCA_COHAPM =
-  /COHAPM|La Felicit|Jur[ií]dico\s+COHAPM|act_1622612945584817/i;
+  /COHAPM|La Felicit|Jur[ií]dico\s+COHAPM/i;
+
+/** IDs act_ no fato que nao pertencem a esta empresa contaminam a memoria. */
+export function fatoCitaContaAlheia(fato: string, contasDaEmpresa: string[]): boolean {
+  const citados = [...String(fato ?? "").matchAll(/\bact_(\d{6,})\b/gi)].map((m) => m[1]);
+  if (!citados.length) return false;
+  const proprias = new Set(
+    (contasDaEmpresa ?? []).map((c) => String(c).replace(/^act_/i, "").trim()).filter(Boolean),
+  );
+  return citados.some((id) => !proprias.has(id));
+}
 
 /** Universais que citam as DUAS marcas (doutrina de isolamento) passam. */
 function universalSeguroParaEmpresa(fato: string, companyId: string): boolean {
@@ -37,13 +47,15 @@ function universalSeguroParaEmpresa(fato: string, companyId: string): boolean {
 export function filtrarMemoriaPorEmpresa(
   rows: FatoMemoria[],
   companyId: string,
+  contasDaEmpresa: string[] = [],
 ): FatoMemoria[] {
   const id = String(companyId ?? "").trim();
   if (!id) return [];
   return rows.filter((r) => {
     const cid = r.company_id == null ? null : String(r.company_id);
+    if (cid != null && cid !== id) return false;
+    if (fatoCitaContaAlheia(String(r.fato ?? ""), contasDaEmpresa)) return false;
     if (cid === id) return true;
-    if (cid != null) return false; // nunca carregar fato de outra empresa
     return universalSeguroParaEmpresa(String(r.fato ?? ""), id);
   });
 }
@@ -63,15 +75,29 @@ export async function carregarMemoriaInstitucional(
   // deno-lint-ignore no-explicit-any
   supa: { from: (t: string) => any },
   companyId: string,
-): Promise<{ rows: FatoMemoria[]; texto: string }> {
+): Promise<{ rows: FatoMemoria[]; texto: string; consulta_falhou?: boolean }> {
   const id = String(companyId ?? "").trim();
   if (!id) return { rows: [], texto: "(sem fatos registrados)" };
-  const { data } = await supa
+  const { data, error } = await supa
     .from("agent_context")
     .select("categoria,fato,desde,company_id")
     .eq("vigente", true)
     .or(`company_id.is.null,company_id.eq.${id}`)
     .order("categoria");
-  const filtrados = filtrarMemoriaPorEmpresa((data ?? []) as FatoMemoria[], id);
+  if (error) {
+    return {
+      rows: [],
+      texto: `consulta_falhou: nao foi possivel ler a memoria institucional (${error.message}). Isto NAO e 'sem fatos'.`,
+      consulta_falhou: true,
+    };
+  }
+  const { data: contas } = await supa
+    .from("meta_ad_accounts")
+    .select("account_id")
+    .eq("company_id", id);
+  const ids = ((contas ?? []) as { account_id?: string }[])
+    .map((c) => String(c.account_id ?? ""))
+    .filter(Boolean);
+  const filtrados = filtrarMemoriaPorEmpresa((data ?? []) as FatoMemoria[], id, ids);
   return { rows: filtrados, texto: formatarMemoria(filtrados) };
 }

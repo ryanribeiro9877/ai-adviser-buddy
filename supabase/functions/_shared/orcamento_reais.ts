@@ -4,6 +4,20 @@
  * nos dois primeiros (3000 centavos = R$ 30) e a Meta nasceu com R$ 3.000/dia.
  */
 
+/** Reais de diaria -> centavos que a Graph guarda. R$ 150 vira 15000, nunca 1,50. */
+export function reaisParaCentavos(reais: unknown): number | null {
+  const n = Number(reais);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100);
+}
+
+/** Centavos da Graph -> reais. 15000 vira 150. A unidade vem do campo, nao do tamanho do numero. */
+export function centavosParaReais(centavos: unknown): number | null {
+  const n = Number(centavos);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n) / 100;
+}
+
 function parseParte(intP: string, dec?: string | null): number | null {
   const n = dec != null && String(dec).length ? Number(`${intP}.${dec}`) : Number(intP);
   if (!Number.isFinite(n) || n <= 0 || n > 5000) return null;

@@ -803,6 +803,10 @@ import {
   extrairOrcamentoDiarioDaFala,
   reaisPedidoAlterarOrcamento,
 } from "../_shared/orcamento_reais.ts";
+import { parseArgumentosDeFerramenta } from "../_shared/leitura_honesta.ts";
+import { carimboDeValidacao, validarSomenteNaMeta } from "../_shared/prevoo_meta.ts";
+import { lerObjetoAoVivo, nivelDoArgumento, type ParteFicha } from "../_shared/ler_objeto.ts";
+import { conferirCampos, CAMPOS_CONFERENCIA_CONJUNTO } from "../_shared/conferir_plano.ts";
 import { resolverNomeFinal, classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import {
   resolverObjetivoOdax,
@@ -946,7 +950,12 @@ import {
 } from "../_shared/geo_targeting.ts";
 import {
   buscarInteressesMeta,
+  buscarSegmentacaoMeta,
+  montarFlexibleSpec,
+  recusarIdsNaoResolvidosNaConversa,
+  registrarResolucaoDeSegmentacao,
   validarPublicoDoPedido,
+  type ClasseSegmentacao,
 } from "../_shared/interesse_targeting.ts";
 import { prepararIdadeParaCriacao, validarIdadeDoPedido } from "../_shared/idade_targeting.ts";
 import {
@@ -1002,7 +1011,12 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   ler_pipeboard: 5,
   get_seguidores_instagram_ads: 2,
   buscar_geolocalizacao: 6,
-  buscar_interesses: 6,
+  buscar_interesses: 8,
+  buscar_comportamentos: 8,
+  buscar_setores_de_trabalho: 8,
+  buscar_segmentacao: 8,
+  ler_objeto: 12,
+  conferir_contra_plano: 4,
   propose_action: 10,
   get_acervo_para_anuncio: 3,
   nota_visual_da_peca: 6,
@@ -1380,15 +1394,33 @@ async function sheetToText(name: string, mime: string, b64: string): Promise<{ t
 }
 
 async function t_overview(companyId: string) {
-  const { data: camps } = await supa.from("campaigns").select("name,status,category,spend,external_account_id").eq("company_id", companyId);
+  const campsQ = await supa.from("campaigns").select("name,status,category,spend,external_account_id").eq("company_id", companyId);
+  if (campsQ.error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_overview.campaigns",
+      motivo: campsQ.error.message,
+      aviso: "A consulta falhou. Isto NAO e zero campanhas. Relate a falha.",
+    };
+  }
+  const camps = campsQ.data;
   const vivos = (camps ?? []).filter((c) => statusObjetoOperacional(c.status));
   const ativos = vivos.filter((c) => c.status === "active");
   const from = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
-  const { data: snaps } = await supa.from("metric_snapshots")
+  const snapsQ = await supa.from("metric_snapshots")
     // `campaign_id` entrou em 04/09/2026 para escopar o gasto por base; `leads` saiu (coluna
     // aposentada, era somada e nunca usada).
     .select("campaign_id,spend,impressions,link_clicks,form_leads,messaging_started,snapshot_date")
     .eq("company_id", companyId).gte("snapshot_date", from);
+  if (snapsQ.error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_overview.metric_snapshots",
+      motivo: snapsQ.error.message,
+      aviso: "A consulta de gasto falhou. Isto NAO e gasto zero. Relate a falha.",
+    };
+  }
+  const snaps = snapsQ.data;
   const s = (snaps ?? []).reduce((a, r) => ({
     spend: a.spend + Number(r.spend || 0), imp: a.imp + Number(r.impressions || 0),
     link: a.link + Number(r.link_clicks || 0), forms: a.forms + Number(r.form_leads || 0),
@@ -1405,13 +1437,29 @@ async function t_overview(companyId: string) {
   };
 }
 async function t_alerts(companyId: string) {
-  const { data } = await supa.from("alerts").select("severity,title,description,created_at,resolved")
+  const { data, error } = await supa.from("alerts").select("severity,title,description,created_at,resolved")
     .eq("company_id", companyId).eq("resolved", false).order("created_at", { ascending: false }).limit(20);
+  if (error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_alerts",
+      motivo: error.message,
+      aviso: "A consulta de alertas falhou. Isto NAO e 'nenhum alerta'. Relate a falha.",
+    };
+  }
   return { alertas_ativos: data ?? [] };
 }
 async function t_recos(companyId: string) {
-  const { data } = await supa.from("ai_recommendations").select("category,impact,title,description,status,created_at")
+  const { data, error } = await supa.from("ai_recommendations").select("category,impact,title,description,status,created_at")
     .eq("company_id", companyId).eq("status", "new").order("created_at", { ascending: false }).limit(20);
+  if (error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_recommendations",
+      motivo: error.message,
+      aviso: "A consulta de recomendacoes falhou. Isto NAO e fila vazia. Relate a falha.",
+    };
+  }
   return { recomendacoes_pendentes: data ?? [], nota: "regua destas recomendacoes e custo de MIDIA, nao contrato pago. Antes de aprovar escala, cruze com get_funil_credito." };
 }
 
@@ -1585,7 +1633,15 @@ async function t_funnel(companyId: string, date_from?: string, date_to?: string)
   let q = supa.from("metric_snapshots").select("campaign_id,snapshot_date,spend,impressions,clicks,link_clicks,landing_page_views,form_leads,messaging_started").eq("company_id", companyId);
   if (date_from) q = q.gte("snapshot_date", date_from);
   if (date_to) q = q.lte("snapshot_date", date_to);
-  const { data } = await q;
+  const { data, error } = await q;
+  if (error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_funnel",
+      motivo: error.message,
+      aviso: "O funil nao foi lido. Isto NAO e funil zerado. Relate a falha.",
+    };
+  }
   const linhas = data ?? [];
   const s = linhas.reduce((a, r) => ({
     spend: a.spend + Number(r.spend || 0), imp: a.imp + Number(r.impressions || 0), clk: a.clk + Number(r.clicks || 0),
@@ -1628,7 +1684,11 @@ async function t_ads_ranking(companyId: string, days = 30, ordenar_por = "gasto"
   const ordenar = String(ordenar_por ?? "gasto").toLowerCase();
   const from = date_from?.slice(0, 10) || new Date(Date.now() - d * 864e5).toISOString().slice(0, 10);
   const to = date_to?.slice(0, 10);
-  const { data: ads } = await supa.from("ads").select("external_id,name,campaign_id,status").eq("company_id", companyId);
+  const adsQ = await supa.from("ads").select("external_id,name,campaign_id,status").eq("company_id", companyId);
+  if (adsQ.error) {
+    return { consulta_falhou: true, onde: "get_ads_ranking.ads", motivo: adsQ.error.message, aviso: "O ranking nao foi lido. Isto NAO e ranking vazio." };
+  }
+  const ads = adsQ.data;
   let campQ = supa.from("campaigns").select("id,name,category,status,external_id").eq("company_id", companyId);
   const needle = String(name_like ?? "").trim();
   const { data: camps } = needle ? await campQ : await campQ.eq("status", "active");
@@ -2233,25 +2293,156 @@ async function t_buscar_geolocalizacao(companyId: string, args: any) {
   };
 }
 
-async function t_buscar_interesses(companyId: string, args: any) {
+async function t_ler_objeto(companyId: string, args: any) {
+  const tok = tokenAdsPorCompanyId(companyId);
+  if (!tok) {
+    return {
+      consulta_falhou: true,
+      onde: "ler_objeto",
+      motivo: "token_ads_ausente_para_empresa",
+      aviso: "Sem token nao leio a ficha ao vivo. Isto NAO significa que o campo esta vazio.",
+    };
+  }
+  const nivel = nivelDoArgumento(args?.nivel ?? args?.tipo);
+  if (!nivel) {
+    return { erro: "nivel_obrigatorio", detalhe: "nivel = campanha, conjunto, anuncio ou criativo." };
+  }
+  const parteBruta = String(args?.parte ?? "tudo");
+  const parte = (["tudo", "targeting", "promoted_object", "creative", "cabecalho"].includes(parteBruta)
+    ? parteBruta
+    : "tudo") as ParteFicha;
+  return await lerObjetoAoVivo({
+    token: tok.token,
+    id: String(args?.id ?? args?.external_id ?? ""),
+    nivel,
+    parte,
+  });
+}
+
+function fichaComoPlano(ficha: Record<string, unknown>): Record<string, unknown> {
+  const targeting = ficha.targeting && typeof ficha.targeting === "object"
+    ? ficha.targeting as Record<string, unknown>
+    : {};
+  const promo = ficha.promoted_object && typeof ficha.promoted_object === "object"
+    ? ficha.promoted_object as Record<string, unknown>
+    : {};
+  const cents = Number(ficha.daily_budget);
+  return {
+    nome: ficha.name ?? null,
+    verba_diaria_reais: Number.isFinite(cents) && cents > 0 ? Math.round(cents) / 100 : null,
+    idade_min: targeting.age_min ?? null,
+    idade_max: targeting.age_max ?? null,
+    whatsapp: promo.whatsapp_phone_number ?? promo.whats_app_business_phone_number ?? null,
+    destination_type: ficha.destination_type ?? null,
+    optimization_goal: ficha.optimization_goal ?? null,
+    status: ficha.effective_status ?? ficha.status ?? null,
+  };
+}
+
+async function t_conferir_contra_plano(companyId: string, args: any) {
+  let q = supa.from("plano_campanha").select("id,campanha_nome,campanha_external_id,conjuntos,versao").eq("company_id", companyId).eq("vigente", true);
+  const nome = String(args?.campanha ?? args?.campanha_nome ?? "").trim();
+  if (nome) q = q.ilike("campanha_nome", `%${nome.replace(/[%_]/g, "")}%`);
+  const { data, error } = await q;
+  if (error) {
+    return {
+      consulta_falhou: true,
+      onde: "conferir_contra_plano",
+      motivo: error.message,
+      aviso: "A conferencia nao leu o plano. Isto NAO e 'esta tudo certo'.",
+    };
+  }
+  const planos = data ?? [];
+  if (!planos.length) {
+    return { erro: "plano_ausente", detalhe: "Nao ha plano vigente para esta campanha. Grave um com gravar_plano antes de conferir." };
+  }
+  const saida: unknown[] = [];
+  for (const plano of planos) {
+    const conjuntos = Array.isArray(plano.conjuntos) ? plano.conjuntos as Record<string, unknown>[] : [];
+    const itens: unknown[] = [];
+    for (const conj of conjuntos) {
+      const id = String(conj.external_id ?? conj.id ?? "").trim();
+      if (!id) {
+        itens.push({ nome: conj.nome ?? null, consulta_falhou: true, motivo: "plano sem external_id do conjunto" });
+        continue;
+      }
+      const ficha = await t_ler_objeto(companyId, { id, nivel: "conjunto", parte: "tudo" });
+      if ((ficha as { consulta_falhou?: boolean }).consulta_falhou) {
+        itens.push({ nome: conj.nome ?? null, ...ficha as object });
+        continue;
+      }
+      const diff = conferirCampos(conj, fichaComoPlano(ficha as Record<string, unknown>), CAMPOS_CONFERENCIA_CONJUNTO);
+      itens.push({ nome: conj.nome ?? null, id, ...diff });
+    }
+    saida.push({ campanha: plano.campanha_nome, versao: plano.versao, conjuntos: itens });
+  }
+  return { fonte: "graph_ao_vivo", planos: saida };
+}
+
+async function t_gravar_plano(companyId: string, args: any) {
+  const campanha = String(args?.campanha_nome ?? args?.campanha ?? "").trim();
+  const conjuntos = args?.conjuntos;
+  if (!campanha || !Array.isArray(conjuntos) || !conjuntos.length) {
+    return { erro: "plano_incompleto", detalhe: "Passe campanha_nome e conjuntos[] (nome, verba, idade, geo, segmentacao com id e classe, whatsapp)." };
+  }
+  await supa.from("plano_campanha").update({ vigente: false }).eq("company_id", companyId).eq("campanha_nome", campanha).eq("vigente", true);
+  const { data, error } = await supa.from("plano_campanha").insert({
+    company_id: companyId,
+    campanha_nome: campanha,
+    campanha_external_id: args?.campanha_external_id ?? null,
+    conjuntos,
+    origem: "chat",
+    vigente: true,
+  }).select("id,versao").single();
+  if (error) return { consulta_falhou: true, onde: "gravar_plano", motivo: error.message, aviso: "O plano nao foi gravado." };
+  return { ok: true, plano_id: data?.id, versao: data?.versao };
+}
+
+async function t_buscar_segmentacao(
+  companyId: string,
+  args: any,
+  classe: ClasseSegmentacao,
+  convId?: string | null,
+) {
   const tok = tokenAdsPorCompanyId(companyId);
   if (!tok) {
     return {
       erro: "token_ads_ausente_para_empresa",
       detalhe:
-        "Sem META_ADS_TOKEN desta empresa no runtime nao busco adinterest. Confirme o secret da empresa.",
+        "Sem META_ADS_TOKEN desta empresa no runtime nao busco segmentacao. Confirme o secret da empresa.",
     };
   }
   const nomesRaw = args?.nomes ?? args?.interesses ?? args?.names;
   const nomes = Array.isArray(nomesRaw)
     ? nomesRaw.map((n: unknown) => String(n ?? "").trim()).filter(Boolean)
     : [];
-  return await buscarInteressesMeta({
+  const achado = await buscarSegmentacaoMeta({
     token: tok.token,
     nomes,
+    classe,
     limit_por_query: args?.limit_por_query != null ? Number(args.limit_por_query) : undefined,
     locale: args?.locale != null ? String(args.locale) : undefined,
   });
+  if (achado.ok && achado.resolvidos.length) {
+    const reg = await registrarResolucaoDeSegmentacao(supa as never, {
+      companyId,
+      conversaId: convId ?? null,
+      termos: achado.resolvidos,
+    });
+    if (!reg.ok) {
+      return {
+        ...achado,
+        consulta_falhou: true,
+        aviso:
+          `A busca na Meta respondeu, mas nao gravei a resolucao (${reg.motivo}). Sem esse registro o card de publico nao nasce. Nao use o id assim mesmo.`,
+      };
+    }
+  }
+  return achado;
+}
+
+async function t_buscar_interesses(companyId: string, args: any, convId?: string | null) {
+  return await t_buscar_segmentacao(companyId, args, "interests", convId);
 }
 
 // v28.7 (04/08/2026): a RPC ganhou empresa e paginacao. Sem p_company_id ela devolve lista vazia
@@ -2484,6 +2675,33 @@ async function validarGeoDeAlteracao(
   };
 }
 
+const prevooTentativas = new Map<string, number>();
+
+function corpoPrevooDaAcao(
+  action: string,
+  params: Record<string, unknown>,
+  alvoId: string,
+): { caminho: string; body: Record<string, string> } | null {
+  if (!/^\d{5,}$/.test(alvoId)) return null;
+  const caminho = `/${alvoId}`;
+  if (action === "pausar_campanha" || action === "pausar_conjunto" || action === "pausar_criativo") {
+    return { caminho, body: { status: "PAUSED" } };
+  }
+  if (action === "ativar_campanha" || action === "ativar_conjunto" || action === "ativar_criativo") {
+    return { caminho, body: { status: "ACTIVE" } };
+  }
+  if (action === "alterar_orcamento") {
+    const reais = Number(params.novo_orcamento_diario_reais ?? 0);
+    if (!(reais > 0)) return null;
+    return { caminho, body: { daily_budget: String(Math.round(reais * 100)) } };
+  }
+  if (action === "alterar_publico_do_conjunto") {
+    const termos = Array.isArray(params.interesses) ? params.interesses as { id: string; name: string; classe: "interests" | "behaviors" | "work_positions" | "industries"; grupo?: number }[] : [];
+    return { caminho, body: { targeting: JSON.stringify({ flexible_spec: montarFlexibleSpec(termos) }) } };
+  }
+  return null;
+}
+
 async function t_propose_action(companyId: string, convId: string, requestedBy: string, args: any, cards: CardInfo[]) {
   const action = String(args?.action_type ?? "");
   const targetLike = String(args?.target_name ?? "").trim();
@@ -2628,6 +2846,11 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   if (action === "alterar_publico_do_conjunto") {
     const pubOk = validarPublicoDoPedido(params as Record<string, unknown>);
     if (!pubOk.ok) return { erro: pubOk.erro, detalhe: pubOk.detalhe };
+    const classeOk = await recusarIdsNaoResolvidosNaConversa(supa as never, {
+      companyId,
+      termos: pubOk.params.interesses as { id: string; name: string; classe: ClasseSegmentacao }[],
+    });
+    if (!classeOk.ok) return { erro: classeOk.erro, detalhe: classeOk.detalhe };
     Object.assign(params, pubOk.params);
     params.publico_resumo = pubOk.resumo;
   }
@@ -2750,6 +2973,46 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   } as Record<string, string>)[action];
   const avisosExtra = [avisoOrcamentoAlteracao, avisoGuardaConjunto].filter(Boolean);
   const summary = avisosExtra.length ? `${summaryBase} — ${avisosExtra.join(" · ")}` : summaryBase;
+  const corpoPrevoo = corpoPrevooDaAcao(action, params, String(alvo.external_id ?? ""));
+  if (corpoPrevoo) {
+    const tokPre = tokenAdsPorCompanyId(companyId);
+    if (!tokPre) {
+      return {
+        erro: "prevoo_sem_token",
+        detalhe: "Sem token desta empresa nao valido o pedido na Meta. O card nao nasceu.",
+      };
+    }
+    const chavePre = `${companyId}:${action}:${alvo.external_id}:${corpoPrevoo.body.targeting ?? corpoPrevoo.body.status ?? corpoPrevoo.body.daily_budget ?? ""}`;
+    const ja = prevooTentativas.get(chavePre) ?? 0;
+    if (ja >= 2) {
+      return {
+        erro: "prevoo_esgotado",
+        detalhe: "A Meta recusou este pedido duas vezes. O card nao nasceu. Pergunte ao gestor, com a recusa literal, o que corrigir.",
+        pergunta_ao_gestor: true,
+      };
+    }
+    const pre = await validarSomenteNaMeta({ token: tokPre.token, caminho: corpoPrevoo.caminho, body: corpoPrevoo.body });
+    if (!pre.ok) {
+      const recusa = pre.recusa.toLowerCase();
+      const opcaoNaoAceita = recusa.includes("execution_options") || recusa.includes("validate_only");
+      if (!opcaoNaoAceita) {
+        prevooTentativas.set(chavePre, ja + 1);
+        return {
+          erro: "prevoo_recusado",
+          detalhe: pre.recusa,
+          corpo: pre.corpo,
+          tentativa: ja + 1,
+          aviso: "A Meta recusou na validacao. O card nao nasceu. Corrija o campo e chame de novo. Validado nao e garantido, mas recusado nao vai ao humano.",
+        };
+      }
+      params.validacao = "nao_testado";
+      params.prevoo_nota = pre.recusa;
+    } else {
+      Object.assign(params, carimboDeValidacao(pre.validado_em));
+    }
+  } else {
+    params.validacao = "nao_testado";
+  }
   const { data: ins, error: ie } = await supa.from("approval_requests").insert({
     company_id: companyId, requested_by: requestedBy, conversation_id: convId, entity_type: entityType,
     entity_id: alvo.id, action, summary,
@@ -4175,8 +4438,13 @@ async function t_propose_criacao(
       const iguais = (data ?? []).filter((r: { nome?: string }) =>
         norm(String(r.nome ?? "")).replace(/\.[a-z0-9]{2,5}$/i, "").replace(/[^a-z0-9]+/g, " ").trim() === base);
       if (iguais.length === 1) return String(iguais[0].drive_file_id ?? "") || null;
-      const deSetembro = iguais.filter((r: { caminho?: string }) => /setembro/.test(norm(String(r.caminho ?? ""))));
-      if (deSetembro.length === 1) return String(deSetembro[0].drive_file_id ?? "") || null;
+      const mesAtual = new Intl.DateTimeFormat("pt-BR", { month: "long", timeZone: "America/Sao_Paulo" })
+        .format(new Date())
+        .normalize("NFD")
+        .replace(/\p{M}/gu, "")
+        .toLowerCase();
+      const doMes = iguais.filter((r: { caminho?: string }) => norm(String(r.caminho ?? "")).includes(mesAtual));
+      if (doMes.length === 1) return String(doMes[0].drive_file_id ?? "") || null;
       return null;
     }
 
@@ -4208,7 +4476,7 @@ async function t_propose_criacao(
               erro: "peca_sem_drive_file_id",
               detalhe:
                 `target_name '${nomeAlvo}' e o CONJUNTO, nao um anuncio molde. A peca '${nomePeca}' nao teve drive_file_id. ` +
-                `Chame get_acervo_para_anuncio da pasta de setembro e reenvie com params.drive_file_id e sem_molde=true.`,
+                `Chame get_acervo_para_anuncio da pasta do mes corrente e reenvie com params.drive_file_id e sem_molde=true.`,
               instrucao: "Nao repita o nome do conjunto em target_name. target_name=sem_molde e o arquivo vem do acervo.",
             };
           }
@@ -6309,8 +6577,34 @@ async function runTool(name: string, args: any, ctx: any) {
         );
       case "buscar_geolocalizacao":
         return await t_buscar_geolocalizacao(ctx.companyId, args);
+      case "ler_objeto":
+        return await t_ler_objeto(ctx.companyId, args);
+      case "conferir_contra_plano":
+        return await t_conferir_contra_plano(ctx.companyId, args);
+      case "gravar_plano":
+        return await t_gravar_plano(ctx.companyId, args);
       case "buscar_interesses":
-        return await t_buscar_interesses(ctx.companyId, args);
+        return await t_buscar_interesses(ctx.companyId, args, ctx.convId);
+      case "buscar_comportamentos":
+        return await t_buscar_segmentacao(ctx.companyId, args, "behaviors", ctx.convId);
+      case "buscar_setores_de_trabalho":
+        return await t_buscar_segmentacao(
+          ctx.companyId,
+          args,
+          String(args?.classe ?? "work_positions") === "industries" ? "industries" : "work_positions",
+          ctx.convId,
+        );
+      case "buscar_segmentacao": {
+        const classe = String(args?.classe ?? "");
+        const ok = classe === "interests" || classe === "behaviors" || classe === "work_positions" || classe === "industries";
+        if (!ok) {
+          return {
+            erro: "classe_obrigatoria",
+            detalhe: "buscar_segmentacao exige classe: interests, behaviors, work_positions ou industries.",
+          };
+        }
+        return await t_buscar_segmentacao(ctx.companyId, args, classe, ctx.convId);
+      }
       case "get_aprovacoes": return await t_aprovacoes(ctx.companyId, args?.apenas_abertos === false ? false : true);
       case "get_conhecimento": return await t_conhecimento(String(args?.tema ?? ""), args?.secao ? String(args.secao) : undefined);
       default: return { erro: `tool desconhecida: ${name}` };
@@ -6335,7 +6629,7 @@ function systemPrompt(companyName: string, memoria: string, estilo: string, indi
   const perfil = legal
     ? "Empresa de credito consignado; aplique regras financeiras/Categoria Especial quando os dados da campanha confirmarem esse produto. Fatos de outras empresas do portfolio NAO se aplicam."
     : "Empresa NAO e de credito consignado. Nao aplique consignado, CET, FIN-*, benchmarks, identidades, produtos ou contas de outra empresa. Use so brand_identity/config/memoria DESTA empresa.";
-  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()} (fuso de Brasilia). Responde ao gestor (Roberto) em portugues brasileiro.
+  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()} (fuso de Brasilia). Responde ao gestor desta empresa em portugues brasileiro. O nome da pessoa, se houver, vem da configuracao da empresa — nao invente um nome.
 PERFIL EMPRESARIAL: ${perfil}
 HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar uma janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado.
 
@@ -6878,14 +7172,17 @@ function decidirRotaAssincrona(pedido: string, nAnexos: number): { rotear: boole
   const porFamilia = familias >= ROTA_FAMILIAS_MIN;
   const porTamanho = pedido.length >= ROTA_CHARS_MIN;
   const detalhe = ehPedidoDetalhamentoCampanha(pedido);
-  if (!porFamilia && !porTamanho && !detalhe) return { rotear: false, motivo: "cabe no turno sincrono", familias };
+  const investigacao = /confer|auditor|diagnost|esta tudo certo|ta tudo certo|o que falta|por que falhou|recusa da meta/.test(p);
+  if (!porFamilia && !porTamanho && !detalhe && !investigacao) return { rotear: false, motivo: "cabe no turno sincrono", familias };
   // As tres guardas abaixo NAO sao cautela generica: cada uma cobre uma capacidade que a rota
   // assincrona nao tem, e mandar o pedido para la seria perde-la em silencio.
   if (RE_CONTINUACAO.test(p)) return { rotear: false, motivo: "continuacao: o job replaneja do zero e nao retoma texto cortado", familias };
   if (nAnexos > 0) return { rotear: false, motivo: "pedido com anexo: o job nao le anexo", familias };
-  if (ehPedidoDeAto(pedido)) return { rotear: false, motivo: "pedido de ato: propose_action nao existe no job e o card seria perdido", familias };
+  if (ehPedidoDeAto(pedido)) return { rotear: false, motivo: "pedido de ato de criacao fica no chat; o job emite card de modificacao depois de investigar", familias };
   return { rotear: true, familias,
-    motivo: detalhe && !porFamilia && !porTamanho
+    motivo: investigacao && !porFamilia && !porTamanho && !detalhe
+      ? "investigacao (conferencia, auditoria ou diagnostico) vai ao job pelo tipo da tarefa"
+      : detalhe && !porFamilia && !porTamanho
       ? "detalhamento de campanha (leitura completa)"
       : porFamilia ? `pedido cobre ${familias} familias de assunto (>= ${ROTA_FAMILIAS_MIN})` : `pedido com ${pedido.length} chars (>= ${ROTA_CHARS_MIN})` };
 }
@@ -7761,7 +8058,8 @@ Deno.serve(async (req) => {
             !flushUpload;
           if (!executarProposeAposColeta && !executarLegendaAposColeta) {
             deadlineTools = true;
-            let argsSkip: any = {}; try { argsSkip = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
+            const argsSkipParsed = parseArgumentosDeFerramenta(tc.function?.arguments);
+            const argsSkip = argsSkipParsed.ok ? argsSkipParsed.args : {};
             messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
               erro: "consulta_nao_realizada_nesta_rodada",
               aviso: flushUpload
@@ -7776,7 +8074,28 @@ Deno.serve(async (req) => {
         // e possivel simplesmente pular - devolvemos um resultado que DECLARA o teto, para
         // o modelo nao tratar o dado como zero nem como inexistente (R3).
         const nomeTc = String(tc.function?.name ?? "");
-        let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
+        const argsParsed = parseArgumentosDeFerramenta(tc.function?.arguments);
+        if (!argsParsed.ok) {
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: JSON.stringify({
+              erro: argsParsed.erro,
+              detalhe: argsParsed.detalhe,
+              nudge: argsParsed.nudge,
+            }),
+          });
+          toolResults.push({
+            tool: nomeTc,
+            args: {},
+            chars: 0,
+            cortado: false,
+            retorno: null,
+            erro: argsParsed.erro,
+          });
+          continue;
+        }
+        const args: any = argsParsed.args;
         const jaUsou = toolsUsed.filter((t) => t.tool === nomeTc).length;
         const limiteDesta = MAX_POR_FERRAMENTA[nomeTc] ?? MAX_POR_FERRAMENTA_DEFAULT;
         // v28.31: criar_anuncio (e demais criacoes) nao competem com releituras pelo teto global.
@@ -7857,16 +8176,17 @@ Deno.serve(async (req) => {
         // v28.11: um unico corte, usado nos dois destinos - o que o modelo le e o que fica
         // gravado sao literalmente a mesma string.
         const bruto = JSON.stringify(result ?? null);
-        const cortado = bruto.length > TOOLRES_TETO_PERSIST;
+        const tetoDeste = nomeTc === "ler_objeto" || nomeTc === "conferir_contra_plano" ? 48_000 : TOOLRES_TETO_PERSIST;
+        const cortado = bruto.length > tetoDeste;
         toolResults.push({ tool: nomeTc, args, chars: bruto.length, cortado,
-          retorno: cortado ? bruto.slice(0, TOOLRES_TETO_PERSIST) : (result ?? null) });
+          retorno: cortado ? bruto.slice(0, tetoDeste) : (result ?? null) });
         // A doutrina de uso vai colada ao retorno E FORA do que se persiste. O que fica em
         // tool_results volta em turnos seguintes no bloco [RETORNOS DE FERRAMENTA JA APURADOS
         // EM ...]; a doutrina serve para ler ESTE retorno, entao pagar por ela de novo em cada
         // turno que reinjeta o historico seria refazer exatamente o problema que este registro
         // veio resolver. Ela tambem escapa do corte por tamanho, que so se aplica ao JSON.
         messages.push({ role: "tool", tool_call_id: tc.id,
-          content: retornoComDoutrina(catFerr, nomeTc, bruto.slice(0, TOOLRES_TETO_PERSIST)) });
+          content: retornoComDoutrina(catFerr, nomeTc, bruto.slice(0, tetoDeste)) });
       }
       if (
         pedidoPedeVariosCards(objetivoOriginal) &&

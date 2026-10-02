@@ -7,16 +7,29 @@
 // elimina a paginação como trabalho do modelo.
 
 import { classificarLinhaProdutoCohapm } from "./memoria_conjunto.ts";
+import { centavosParaReais } from "./orcamento_reais.ts";
 import { inferirMeioDrive, type MeioDrive } from "./pedido_drive_criativos.ts";
 
 export const TETO_PAYLOAD_FERRAMENTA = 11_500;
 
+/**
+ * Converte o campo que a Graph e o espelho guardam em CENTAVOS.
+ * Nao adivinha pela magnitude: R$ 150 ja em reais nao passa por aqui.
+ */
 export function reaisDeOrcamentoMeta(v: unknown): number | null {
-  const n = Number(v);
-  if (!Number.isFinite(n) || n <= 0) return null;
-  // Graph guarda daily_budget em centavos. Valores já em reais (ex.: 30) ficam como estão.
-  if (Number.isInteger(n) && n >= 100) return n / 100;
+  const n = centavosParaReais(v);
+  if (n == null || n <= 0) return null;
   return n;
+}
+
+/** Prefere o campo ja em reais. So divide centavos quando o campo de reais nao veio. */
+export function reaisDoItemDeOrcamento(item: Record<string, unknown>): number | null {
+  const reais = item.orcamento_diario_reais;
+  if (reais != null && reais !== "") {
+    const n = Number(reais);
+    if (Number.isFinite(n) && n > 0) return Math.round(n * 100) / 100;
+  }
+  return reaisDeOrcamentoMeta(item.orcamento_diario_centavos ?? item.daily_budget);
 }
 
 function nomesDeGeo(v: unknown, max = 16): string[] | null {
@@ -116,7 +129,7 @@ export function compactarConjuntoEstrutura(item: unknown): Record<string, unknow
     campanha: c.campanha ?? null,
     campanha_status: c.campanha_status ?? null,
     entregando: c.entregando ?? null,
-    orcamento_diario_reais: reaisDeOrcamentoMeta(c.daily_budget ?? c.orcamento_diario_centavos),
+    orcamento_diario_reais: reaisDoItemDeOrcamento(c),
     leitura_orcamento: c.leitura_orcamento ?? null,
     optimization_goal: c.optimization_goal ?? null,
     destination_type: c.destination_type ?? null,
@@ -312,9 +325,18 @@ export async function esgotarPaginasRpc(
   while (offset < max) {
     const data = await fetchPage(offset, tam);
     last = data && typeof data === "object" ? data : {};
-    if (typeof last.erro === "string") {
+    if (typeof last.erro === "string" || last.consulta_falhou === true) {
       if (!todos.length) return last;
-      break;
+      return {
+        ...last,
+        [campo]: todos,
+        restantes: null,
+        truncado: true,
+        consulta_falhou: true,
+        motivo: String(last.erro ?? last.motivo ?? "pagina seguinte falhou"),
+        aviso:
+          "A lista parou porque uma pagina falhou. restantes nao e zero: o que falta NAO foi lido.",
+      };
     }
     const lista = Array.isArray(last[campo]) ? last[campo] as unknown[] : [];
     todos.push(...lista);
@@ -476,8 +498,8 @@ export function anexarTabelaMarkdownDetalhe(det: Record<string, unknown>): Recor
   return { tabela_markdown: md, ...det };
 }
 
-function txtOrcamento(v: unknown): string {
-  const n = reaisDeOrcamentoMeta(v);
+function txtOrcamento(item: Record<string, unknown>): string {
+  const n = reaisDoItemDeOrcamento(item);
   if (n == null) return "—";
   return `R$ ${n.toFixed(2)}`;
 }
@@ -492,7 +514,7 @@ function markdownLinhasConjuntos(conjuntos: Record<string, unknown>[]): string[]
       ? c.totais_janela as Record<string, unknown>
       : null;
     linhas.push(
-      `| ${c.nome ?? c.conjunto ?? "—"} | ${c.status ?? "—"} | ${txtOrcamento(c.orcamento_diario_reais ?? c.orcamento_diario_centavos ?? c.daily_budget)} | ${tot?.gasto ?? c.gasto ?? "—"} | ${tot?.impressoes ?? "—"} | ${tot?.conversas ?? tot?.resultados_na_base ?? "—"} | ${tot?.custo_por_resultado ?? "—"} | ${c.destination_type ?? "—"} |`,
+      `| ${c.nome ?? c.conjunto ?? "—"} | ${c.status ?? "—"} | ${txtOrcamento(c)} | ${tot?.gasto ?? c.gasto ?? "—"} | ${tot?.impressoes ?? "—"} | ${tot?.conversas ?? tot?.resultados_na_base ?? "—"} | ${tot?.custo_por_resultado ?? "—"} | ${c.destination_type ?? "—"} |`,
     );
   }
   return linhas;

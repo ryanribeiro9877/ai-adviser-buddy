@@ -30,6 +30,7 @@ import { AccountsTable } from "@/components/accounts-table";
 import { CampaignsTable } from "@/components/campaigns-table";
 import { WeeklyReport } from "@/components/weekly-report";
 import { Button } from "@/components/ui/button";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { useAccountBreakdown, useCampaignBreakdown } from "@/hooks/use-breakdown";
 import {
   fmtBRL,
@@ -108,6 +109,18 @@ function Dashboard() {
   const selectedAccount = accounts.find((a) => a.account_id === accountId) ?? null;
 
   if (!selectedCompany) return <EmptyCompany />;
+  if (accountsQ.isError || campaignsQ.isError) {
+    return (
+      <FalhaDeCarga
+        oQue="o dashboard desta empresa"
+        erro={accountsQ.error ?? campaignsQ.error}
+        onTentarDeNovo={() => {
+          accountsQ.refetch();
+          campaignsQ.refetch();
+        }}
+      />
+    );
+  }
 
   const isLoading = accountsQ.isLoading || campaignsQ.isLoading;
   const hasRevenue = kpi.revenue > 0 || kpi.sales > 0;

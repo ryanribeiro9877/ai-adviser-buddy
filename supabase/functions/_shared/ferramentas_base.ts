@@ -129,9 +129,57 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   },
   buscar_interesses: {
     descricao:
-      "Resolve NOMES de interesse/detalhamento para IDs da Meta (Graph /search type=adinterest). Chame ANTES de alterar_publico_do_conjunto. Lote maximo de 20 termos. Default locale=pt_BR. NAO cria conjunto e NUNCA invente id. Lauro de Freitas, Praia do Forte e Linha Verde SAO GEO (use buscar_geolocalizacao). Aluguel de casa costuma devolver aluguel de carro: nao use.",
+      "Resolve NOMES de INTERESSE (classe interests, Graph type=adinterest). Chame ANTES de alterar_publico. O retorno traz {id,name,classe}. NUNCA invente id e NUNCA coloque id de comportamento nesta classe. Lauro de Freitas, Praia do Forte e Linha Verde SAO GEO. Aluguel de casa costuma devolver aluguel de carro: nao use.",
     parametros: {"type":"object","properties":{"nomes":{"type":"array","items":{"type":"string"},"description":"Lista de termos (ate 20 por chamada)."},"limit_por_query":{"type":"integer","description":"Default 8."},"locale":{"type":"string","description":"Default pt_BR."}},"required":["nomes"]},
-    superficies: ["chat"],
+    superficies: ["chat","job"],
+    efeito: "leitura",
+    setor: "Atos na conta Meta",
+  },
+  buscar_comportamentos: {
+    descricao:
+      "Resolve NOMES de COMPORTAMENTO (classe behaviors, Graph adTargetingCategory). Use para renda, bens de valor, dispositivos. O id volta com classe=behaviors e so entra no flexible_spec nessa chave, nunca em interests.",
+    parametros: {"type":"object","properties":{"nomes":{"type":"array","items":{"type":"string"}},"limit_por_query":{"type":"integer"},"locale":{"type":"string"}},"required":["nomes"]},
+    superficies: ["chat","job"],
+    efeito: "leitura",
+    setor: "Atos na conta Meta",
+  },
+  buscar_setores_de_trabalho: {
+    descricao:
+      "Resolve CARGO (work_positions) ou SETOR (industries). Passe classe=work_positions ou classe=industries. O id volta com a classe e nao pode ser gravado em interests.",
+    parametros: {"type":"object","properties":{"nomes":{"type":"array","items":{"type":"string"}},"classe":{"type":"string","enum":["work_positions","industries"]},"limit_por_query":{"type":"integer"},"locale":{"type":"string"}},"required":["nomes"]},
+    superficies: ["chat","job"],
+    efeito: "leitura",
+    setor: "Atos na conta Meta",
+  },
+  ler_objeto: {
+    descricao:
+      "Le AO VIVO na Meta a ficha inteira de uma campanha, conjunto, anuncio ou criativo. Pede os campos por nome (promoted_object, targeting, creative). Nao le o espelho. Se a ficha for grande, peca parte=targeting, promoted_object ou creative.",
+    parametros: {"type":"object","properties":{"id":{"type":"string","description":"Id numerico da Meta."},"nivel":{"type":"string","enum":["campanha","conjunto","anuncio","criativo"]},"parte":{"type":"string","enum":["tudo","cabecalho","targeting","promoted_object","creative"]}},"required":["id","nivel"]},
+    superficies: ["chat","job"],
+    efeito: "leitura",
+    setor: "Atos na conta Meta",
+  },
+  conferir_contra_plano: {
+    descricao:
+      "Compara os conjuntos do plano vigente com a ficha ao vivo. Devolve igual, diferente (os dois valores) e ausente. Sem nota e sem adjetivo. Se a leitura falhar, consulta_falhou — isso nao e 'esta tudo certo'.",
+    parametros: {"type":"object","properties":{"campanha":{"type":"string","description":"Nome da campanha com plano vigente. Vazio confere todos os planos vigentes da empresa."}}},
+    superficies: ["chat","job"],
+    efeito: "leitura",
+    setor: "Atos na conta Meta",
+  },
+  gravar_plano: {
+    descricao:
+      "Grava o plano da campanha (o que a planilha combina): por conjunto, nome, verba diaria, idade, geo, segmentacao com id e classe, whatsapp e criativos esperados. Versiona. Nao escreve na Meta.",
+    parametros: {"type":"object","properties":{"campanha_nome":{"type":"string"},"campanha_external_id":{"type":"string"},"conjuntos":{"type":"array"}},"required":["campanha_nome","conjuntos"]},
+    superficies: ["chat","job"],
+    efeito: "escrita",
+    setor: "Atos na conta Meta",
+  },
+  buscar_segmentacao: {
+    descricao:
+      "Resolve um termo de segmentacao e devolve id, nome e CLASSE (interests, behaviors, work_positions, industries). A classe decide a chave do flexible_spec. Id sem esta chamada, nesta conversa, e recusado no card.",
+    parametros: {"type":"object","properties":{"nomes":{"type":"array","items":{"type":"string"}},"classe":{"type":"string","enum":["interests","behaviors","work_positions","industries"]},"limit_por_query":{"type":"integer"},"locale":{"type":"string"}},"required":["nomes","classe"]},
+    superficies: ["chat","job"],
     efeito: "leitura",
     setor: "Atos na conta Meta",
   },
@@ -459,7 +507,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
     descricao:
       "Cria pedido de aprovacao para escrita na conta Meta. O card fica pendente ate um administrador aprovar. Nao publica sozinho.",
     parametros: {"type":"object","properties":{"action_type":{"type":"string","enum":["pausar_criativo","ativar_criativo","escalar_criativo","pausar_campanha","ativar_campanha","pausar_conjunto","ativar_conjunto","alterar_orcamento","renomear_campanha","renomear_conjunto","renomear_criativo","alterar_categoria_especial_campanha","ajustar_posicionamentos_do_conjunto","alterar_geo_do_conjunto","alterar_publico_do_conjunto","alterar_idade_do_conjunto","vincular_instagram_dos_anuncios","criar_campanha","criar_conjunto_a_partir_de","criar_anuncio_a_partir_de","escalar_duplicar"]},"target_name":{"type":"string"},"justificativa":{"type":"string"},"mecanismo":{"type":"string"},"metrica_sucesso":{"type":"string"},"janela_leitura":{"type":"string"},"reversa":{"type":"string"},"risco":{"type":"string"},"params":{"type":"object","description":"Campos da acao. alvo_external_id: id da Meta do objeto alvo, quando o nome nao for unico. Nome livre em nome / nome_novo / novo_nome. GEO no criar_conjunto E no alterar_geo_do_conjunto: params.cidades, params.bairros ou params.geo_locations, com as keys de buscar_geolocalizacao. RAIO: buscar_geolocalizacao com raio_km e params.geo_locations = geo_locations_sugerido (custom_locations com latitude/longitude/radius). Key de bairro nao e circulo. PUBLICO no alterar_publico_do_conjunto: params.interesses [{id,name}] de buscar_interesses; params.advantage_audience 0|1 (padrao 0). IDADE no criar_conjunto e no alterar_idade_do_conjunto: params.idade_min e params.idade_max. Acima de 65 o card SAI com teto 65 (aviso_idade); nao recuse a emissao por causa do teto. Faixa estreita desliga Advantage+. O numero ao lado de idade nao e orcamento. alterar_orcamento: params.novo_orcamento_diario_reais em REAIS/dia (alias: orcamento_diario_reais). CONJ.N no nome nao e dinheiro. Preferir a tool dedicada."}},"required":["action_type","target_name","justificativa","metrica_sucesso","reversa"]},
-    superficies: ["chat"],
+    superficies: ["chat", "job"],
     efeito: "escrita",
     setor: "Atos na conta Meta",
   },

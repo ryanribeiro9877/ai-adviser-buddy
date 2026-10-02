@@ -91,9 +91,13 @@ export async function carregarFerramentas(
   supa: { from: (t: string) => any },
 ): Promise<CatalogoFerramentas> {
   try {
-    const { data } = await supa.from("agent_ferramentas")
+    const { data, error } = await supa.from("agent_ferramentas")
       .select("chave,descricao,parametros,doutrina,superficies,parametros_omitidos,efeito,setor")
       .eq("vigente", true);
+    if (error) {
+      const fb = catalogoFerramentasFallback();
+      return { ...fb, degradado: true };
+    }
     const linhas = (data ?? []) as FerramentaRegistro[];
     if (!linhas.length) return catalogoFerramentasFallback();
     const porChave = new Map<string, FerramentaRegistro>();

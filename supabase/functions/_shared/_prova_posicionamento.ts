@@ -73,7 +73,7 @@ check("FB+IG: sem explore", !(fbIg.targeting?.instagram_positions as string[])?.
 check("FB+IG: sem explore_home", !(fbIg.targeting?.instagram_positions as string[])?.includes("explore_home"));
 check("FB+IG: sem threads_positions", fbIg.targeting?.threads_positions === undefined);
 
-// PROVA 5b: sanitize Advantage+ remove age_max e clamp age_min
+// PROVA 5b: faixa estreita desliga Advantage+ e mantem a idade pedida
 const aPlusSujo = sanitizarTargetingCreateAdset({
   age_min: 35,
   age_max: 54,
@@ -81,8 +81,13 @@ const aPlusSujo = sanitizarTargetingCreateAdset({
   instagram_positions: ["stream", "explore", "reels"],
   publisher_platforms: ["facebook", "instagram", "threads"],
 });
-check("A+: age_min clamp 25", aPlusSujo.targeting.age_min === 25, aPlusSujo.targeting);
-check("A+: sem age_max", aPlusSujo.targeting.age_max === undefined, aPlusSujo.targeting);
+check("faixa estreita mantem age_min", aPlusSujo.targeting.age_min === 35, aPlusSujo.targeting);
+check("faixa estreita mantem age_max", aPlusSujo.targeting.age_max === 54, aPlusSujo.targeting);
+check(
+  "faixa estreita desliga Advantage+",
+  (aPlusSujo.targeting.targeting_automation as { advantage_audience?: number })?.advantage_audience === 0,
+  aPlusSujo.targeting,
+);
 check("A+: sem explore", !(aPlusSujo.targeting.instagram_positions as string[])?.includes("explore"));
 check("A+: sem threads pub", !(aPlusSujo.targeting.publisher_platforms as string[])?.includes("threads"));
 

@@ -163,5 +163,9 @@ export function linhasPreviaDoCard(
   if (merged.campanha) out.push({ rotulo: "Campanha", valor: merged.campanha });
   if (merged.conjunto) out.push({ rotulo: "Conjunto", valor: merged.conjunto });
   if (merged.criativo) out.push({ rotulo: "Criativo", valor: merged.criativo });
+  const bag = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+  const validado = String(bag.validado_na_meta_em ?? "").trim();
+  if (validado) out.push({ rotulo: "Validado na Meta em", valor: validado });
+  else if (bag.validacao === "nao_testado") out.push({ rotulo: "Validação", valor: "não testado na Meta" });
   return out;
 }

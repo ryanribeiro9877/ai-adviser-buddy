@@ -33,6 +33,49 @@ export function advantageAudienceLigado(targeting: Record<string, unknown> | nul
   return v === 1 || v === true || v === "1";
 }
 
+/**
+ * Uma decisao so: a faixa pedida vence o default de ligar Advantage+.
+ * Faixa estreita desliga o Advantage+ e mantem age_min/age_max.
+ * Faixa compativel (min 18–25 e teto 65) pode ficar ligada e omite age_max.
+ */
+export function decidirAdvantageEIdade(input: {
+  age_min?: unknown;
+  age_max?: unknown;
+  advantage_audience?: unknown;
+}): {
+  advantage_audience: 0 | 1 | null;
+  age_min: number | null;
+  age_max: number | null;
+  ajustes: string[];
+} {
+  const min = parseIdade(input.age_min);
+  const max = parseIdade(input.age_max);
+  const bruto = input.advantage_audience;
+  const declarado: 0 | 1 | null =
+    bruto === 1 || bruto === true || bruto === "1" ? 1
+    : bruto === 0 || bruto === false || bruto === "0" ? 0
+    : null;
+  if (min == null && max == null) {
+    return { advantage_audience: declarado, age_min: null, age_max: null, ajustes: [] };
+  }
+  const age_min = min ?? IDADE_PISO;
+  const age_max = max ?? IDADE_TETO;
+  if (!faixaCompativelComAdvantagePlus(age_min, age_max) || declarado === 0) {
+    return {
+      advantage_audience: 0,
+      age_min,
+      age_max,
+      ajustes: [declarado === 0 ? "advantage_desligado_explicito" : "advantage_desligado_faixa_estreita"],
+    };
+  }
+  return {
+    advantage_audience: 1,
+    age_min,
+    age_max: null,
+    ajustes: ["advantage_ligado_faixa_compativel"],
+  };
+}
+
 export function faixaCompativelComAdvantagePlus(age_min: number, age_max: number): boolean {
   return age_min >= IDADE_PISO && age_min <= IDADE_MIN_MAX_ADVANTAGE_PLUS && age_max === IDADE_TETO;
 }

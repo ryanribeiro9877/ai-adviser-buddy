@@ -14,6 +14,7 @@ import { OperacaoChat } from "@/components/operacao-chat";
 import { ApprovalsQueue } from "@/components/approvals-queue";
 import { RecomendacaoCard } from "@/components/recomendacao-card";
 import { rotuloFamiliaRecomendacao } from "@/lib/recomendacao-texto";
+import { updateQueGravou } from "@/lib/escrita-honesta";
 
 export const Route = createFileRoute("/_authenticated/recomendacoes")({
   component: Operacao,
@@ -78,7 +79,13 @@ function Recomendacoes() {
   }, [q.data, statusFilter, familyFilter]);
 
   const update = async (id: string, status: "accepted" | "dismissed") => {
-    await supabase.from("ai_recommendations").update({ status }).eq("id", id);
+    const gravou = await updateQueGravou(
+      supabase.from("ai_recommendations").update({ status }).eq("id", id).select("id"),
+    );
+    if (!gravou.ok) {
+      toast.error(gravou.motivo);
+      return;
+    }
     await logAudit({
       companyId: selectedCompany!.id,
       action: `recommendation.${status}`,

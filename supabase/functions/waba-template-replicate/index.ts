@@ -86,7 +86,11 @@ Deno.serve(async (req) => {
   const { data: cfg } = await supa.from("mcp_config").select("api_key").eq("id", 1).maybeSingle();
   if (!cfg?.api_key) return json({ error: "cascade_key_unavailable" }, 500);
 
-  const { data: comp } = await supa.from("companies").select("id").ilike("name", "%legal%").limit(1).maybeSingle();
+  let bodyPre: any = {};
+  try { bodyPre = await req.clone().json(); } catch { /* */ }
+  const companyIdPedido = String(bodyPre?.company_id ?? "").trim();
+  if (!companyIdPedido) return json({ error: "company_id obrigatorio. O template nao se escolhe pelo nome da empresa." }, 400);
+  const { data: comp } = await supa.from("companies").select("id").eq("id", companyIdPedido).maybeSingle();
   if (!comp) return json({ error: "empresa não encontrada" }, 500);
   const { data: adm } = await supa.from("user_roles").select("user_id").eq("role", "admin").limit(1).maybeSingle();
   const actor = adm?.user_id ?? null;
@@ -173,9 +177,13 @@ Deno.serve(async (req) => {
   if (categoria !== "UTILITY") return json({ error: "v1 cria apenas UTILITY (economia R$0,06 vs R$0,45; MARKETING fora de escopo por decisão)" }, 400);
   if (!OR_KEY) return json({ error: "OPENROUTER_API_KEY ausente — redator indisponível" }, 500);
 
-  // referência de estilo: um UTILITY aprovado da casa
+  // referencia de estilo: o template gravado na config desta empresa, nunca o de outra marca
+  const templateId = String((conf as { waba_template_id?: string } | null)?.waba_template_id ?? "").trim();
+  if (!templateId) {
+    return json({ error: "waba_template_id ausente em meta_execution_config desta empresa. Nao ha fallback para outro template." }, 400);
+  }
   const { data: ref } = await supa.from("waba_templates").select("name,components")
-    .eq("status", "APPROVED").eq("category", "UTILITY").not("components", "is", null).limit(1).maybeSingle();
+    .eq("id", templateId).eq("status", "APPROVED").maybeSingle();
   const refBody = (() => {
     try { return (ref?.components ?? []).find((x: any) => x.type === "BODY")?.text ?? ""; } catch { return ""; }
   })();

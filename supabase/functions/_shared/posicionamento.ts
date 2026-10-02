@@ -10,7 +10,9 @@
 //    (@jcr2_legaleviver quando o id estiver comprovado).
 // 4) Instagram Explore / explore_home: DESCONTINUADOS pela Meta API (erro 2490589,
 //    21/08/2026) — nunca enviar.
-// Puro e sem efeito colateral de import, para prova isolada.
+// Idade e Advantage+ tem uma funcao so, em idade_targeting.ts.
+
+import { decidirAdvantageEIdade } from "./idade_targeting.ts";
 
 export const PLATAFORMAS_PUBLICACAO_SUPORTADAS = [
   "facebook",
@@ -246,42 +248,23 @@ export function sanitizarTargetingCreateAdset(
   const autoRaw = (novo.targeting_automation && typeof novo.targeting_automation === "object")
     ? { ...(novo.targeting_automation as Record<string, unknown>) }
     : {};
-  const aPlusOn =
-    autoRaw.advantage_audience === 1 ||
-    autoRaw.advantage_audience === true ||
-    autoRaw.advantage_audience === "1";
-
-  // Default Meta v23+: se nao declarou, Advantage+ liga — alinhar payload.
-  if (autoRaw.advantage_audience === undefined || autoRaw.advantage_audience === null) {
+  const decisao = decidirAdvantageEIdade({
+    age_min: novo.age_min,
+    age_max: novo.age_max,
+    advantage_audience: autoRaw.advantage_audience,
+  });
+  ajustes.push(...decisao.ajustes);
+  if (decisao.advantage_audience === 0 || decisao.advantage_audience === 1) {
+    autoRaw.advantage_audience = decisao.advantage_audience;
+  } else if (autoRaw.advantage_audience === undefined || autoRaw.advantage_audience === null) {
     autoRaw.advantage_audience = 1;
     ajustes.push("advantage_audience_default_1");
   }
-
-  const aPlus = aPlusOn || autoRaw.advantage_audience === 1;
-  if (aPlus) {
-    autoRaw.advantage_audience = 1;
-    let amin = Number(novo.age_min ?? 18);
-    if (!Number.isFinite(amin) || amin < 18) amin = 18;
-    if (amin > 25) {
-      ajustes.push(`age_min_clamp_${amin}_para_25_advantage_plus`);
-      amin = 25;
-    }
-    novo.age_min = amin;
-    if (novo.age_max !== undefined) {
-      ajustes.push("age_max_removido_advantage_plus");
-      delete novo.age_max;
-    }
-    // age_range opcional; se existir e max!=65 ou min>25, normaliza.
-    if (novo.age_range && typeof novo.age_range === "object") {
-      const ar = { ...(novo.age_range as Record<string, unknown>) };
-      let rmin = Number(ar.min ?? amin);
-      if (!Number.isFinite(rmin) || rmin < 18) rmin = 18;
-      if (rmin > 25) rmin = 25;
-      ar.min = rmin;
-      ar.max = 65;
-      novo.age_range = ar;
-      ajustes.push("age_range_normalizado_advantage_plus");
-    }
+  if (decisao.age_min != null) novo.age_min = decisao.age_min;
+  if (decisao.age_max == null && (novo.age_min != null || novo.age_max != null) && decisao.advantage_audience === 1) {
+    delete novo.age_max;
+  } else if (decisao.age_max != null) {
+    novo.age_max = decisao.age_max;
   }
 
   novo.targeting_automation = autoRaw;

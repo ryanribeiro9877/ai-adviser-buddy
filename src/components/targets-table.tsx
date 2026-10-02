@@ -146,7 +146,7 @@ export function TargetsTable({ companyId }: { companyId: string }) {
       [`edicao_${n}`]: { anterior, novo, em: new Date().toISOString(), via: "ui" },
     };
 
-    const { error } = await supabase
+    const { error, data: gravadas } = await supabase
       .from("targets")
       .update({
         valor: novo,
@@ -154,9 +154,10 @@ export function TargetsTable({ companyId }: { companyId: string }) {
         updated_at: new Date().toISOString(),
         memoria: novaMemoria as Json,
       })
-      .eq("id", row.id);
+      .eq("id", row.id)
+      .select("id");
 
-    if (error) {
+    if (error || !gravadas?.length) {
       // RLS: o UPDATE de não-admin falha aqui.
       toast.error("Sem permissão para editar metas (apenas administradores).");
       setSaving(false);

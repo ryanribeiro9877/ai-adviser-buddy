@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useApp } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
 import { Card } from "@/components/ui/card";
 import {
   Table,
@@ -25,17 +26,27 @@ function Auditoria() {
     queryKey: ["audit", selectedCompany?.id],
     enabled: !!selectedCompany,
     queryFn: async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("audit_log")
         .select("*, profiles:user_id(email, full_name)")
         .eq("company_id", selectedCompany!.id)
         .order("created_at", { ascending: false })
         .limit(200);
+      if (error) throw error;
       return data ?? [];
     },
   });
 
   if (!selectedCompany) return <EmptyCompany />;
+  if (q.isError) {
+    return (
+      <FalhaDeCarga
+        oQue="o histórico de auditoria"
+        erro={q.error}
+        onTentarDeNovo={() => q.refetch()}
+      />
+    );
+  }
   const items = q.data ?? [];
 
   return (

@@ -302,7 +302,9 @@ function EmpresasPage() {
                   <BadgeEstado estado={estado} />
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
-                  {doProvedor.length === 0
+                  {integrations.isError
+                    ? "Falha ao ler as contas — isto não é uma lista vazia."
+                    : doProvedor.length === 0
                     ? "Nenhuma conta"
                     : `${doProvedor.length} ${doProvedor.length === 1 ? "conta" : "contas"} · ${resumo}`}
                 </div>

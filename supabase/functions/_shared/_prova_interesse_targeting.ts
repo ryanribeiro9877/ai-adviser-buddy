@@ -2,7 +2,9 @@
 import {
   aplicarPublicoNoTargeting,
   ehTermoGeoNaoInteresse,
+  idsConferemComResolucao,
   itemParaInteresse,
+  montarFlexibleSpec,
   normalizarInteressesDoPedido,
   parseAdvantageAudience,
   recusarMatchInteresse,
@@ -32,16 +34,21 @@ assert(recusarMatchInteresse("imoveis", "Investimento imobiliario") === null, "n
 const semId = normalizarInteressesDoPedido({ interesses: ["imoveis", "condominios"] });
 assert(semId.erro === "interesses_sem_id_meta", "recusa nomes sem id");
 
+const semClasse = normalizarInteressesDoPedido({
+  interesses: [{ id: "6110813675983", name: "Bens de valor medio e alto" }],
+});
+assert(semClasse.erro === "classe_obrigatoria", "id sem classe nao vira interest");
+
 const geo = normalizarInteressesDoPedido({
-  interesses: [{ id: "6003139266461", name: "Lauro de Freitas" }],
+  interesses: [{ id: "6003139266461", name: "Lauro de Freitas", classe: "interests" }],
 });
 assert(geo.erro === "termo_e_geo_nao_interesse", "recusa geo disfarçado de interesse");
 
 const ok = normalizarInteressesDoPedido({
   interesses: [
-    { id: "6003139266461", name: "Investimento imobiliario" },
-    { id: "6003348452981", name: "Imobiliario" },
-    { id: "6003139266461", name: "dup" },
+    { id: "6003139266461", name: "Investimento imobiliario", classe: "interests" },
+    { id: "6003348452981", name: "Imobiliario", classe: "interests" },
+    { id: "6003139266461", name: "dup", classe: "interests" },
   ],
 });
 assert(ok.interesses.length === 2, "dedupe por id");
@@ -51,7 +58,7 @@ const vazio = validarPublicoDoPedido({});
 assert(vazio.ok === false, "sem interesses recusa");
 
 const val = validarPublicoDoPedido({
-  interesses: [{ id: "6003139266461", name: "Investimento imobiliario" }],
+  interesses: [{ id: "6003139266461", name: "Investimento imobiliario", classe: "interests" }],
 });
 assert(val.ok === true, "valida nucleo");
 if (val.ok) {
@@ -72,7 +79,7 @@ const base = {
   interests: [{ id: "1", name: "velho" }],
 };
 const merged = aplicarPublicoNoTargeting(base, {
-  interesses: [{ id: "6003139266461", name: "Investimento imobiliario" }],
+  interesses: [{ id: "6003139266461", name: "Investimento imobiliario", classe: "interests" }],
   advantage_audience: 0,
 });
 assert((merged as any).age_min === 18, "mantem idade");
@@ -81,5 +88,19 @@ assert((merged as any).publisher_platforms[0] === "facebook", "mantem plataforma
 assert((merged as any).targeting_automation.advantage_audience === 0, "desliga advantage");
 assert((merged as any).interests === undefined, "remove interests legado");
 assert((merged.flexible_spec as any)[0].interests[0].id === "6003139266461", "flexible_spec OR");
+
+const comportamentos = montarFlexibleSpec([
+  { id: "6110813675983", name: "Bens de valor medio e alto", classe: "behaviors" },
+  { id: "6046096201583", name: "Bens de valor alto", classe: "behaviors" },
+]);
+assert(comportamentos.length === 1, "dois comportamentos no mesmo bloco");
+assert(comportamentos[0].behaviors?.length === 2, "chave behaviors");
+assert(comportamentos[0].interests === undefined, "id de comportamento nao cai em interests");
+
+const porta = idsConferemComResolucao(
+  [{ id: "6110813675983", name: "x", classe: "interests" }],
+  [{ id: "6110813675983", classe: "behaviors" }],
+);
+assert(porta.ok === false && porta.erro === "classe_diverge_da_resolucao", "portao recusa classe trocada");
 
 console.log("OK interesse_targeting prova");

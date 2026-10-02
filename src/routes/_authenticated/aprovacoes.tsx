@@ -4,6 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useApp, logAudit } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
+import { FalhaDeCarga } from "@/components/falha-de-carga";
+import { updateQueGravou } from "@/lib/escrita-honesta";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,21 +30,25 @@ function Aprovacoes() {
     queryKey: ["approvals", selectedCompany?.id],
     enabled: !!selectedCompany,
     queryFn: async () => {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("approval_requests")
         .select("*")
         .eq("company_id", selectedCompany!.id)
         .order("created_at", { ascending: false });
+      if (error) throw error;
       return data ?? [];
     },
   });
 
   const review = async (id: string, status: "approved" | "rejected") => {
-    const { error } = await supabase
-      .from("approval_requests")
-      .update({ status, reviewed_by: user.id, reviewed_at: new Date().toISOString() })
-      .eq("id", id);
-    if (error) return toast.error(error.message);
+    const gravou = await updateQueGravou(
+      supabase
+        .from("approval_requests")
+        .update({ status, reviewed_by: user.id, reviewed_at: new Date().toISOString() })
+        .eq("id", id)
+        .select("id"),
+    );
+    if (!gravou.ok) return toast.error(gravou.motivo);
     await logAudit({
       companyId: selectedCompany!.id,
       action: `approval.${status}`,
@@ -68,6 +74,15 @@ function Aprovacoes() {
   };
 
   if (!selectedCompany) return <EmptyCompany />;
+  if (q.isError) {
+    return (
+      <FalhaDeCarga
+        oQue="os pedidos de aprovação"
+        erro={q.error}
+        onTentarDeNovo={() => q.refetch()}
+      />
+    );
+  }
   const items = q.data ?? [];
   const pending = items.filter((i) => i.status === "pending");
   const others = items.filter((i) => i.status !== "pending");

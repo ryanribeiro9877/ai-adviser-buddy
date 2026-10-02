@@ -471,6 +471,8 @@ import {
   reaisPedidoAlterarOrcamento,
 } from "../_shared/orcamento_reais.ts";
 import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
+import { canonicalizarAcaoDoCard } from "../_shared/acao_do_card.ts";
+import { textoLembreteDeCriacao } from "../_shared/lembrete_criacao.ts";
 import {
   aplicarGeoNoTargeting,
   normalizarGeoDoPedido,
@@ -1424,6 +1426,25 @@ async function marcarFalhaNoCard(
     .select("ultima_falha")
     .eq("id", cardId)
     .maybeSingle();
+
+  if (!dados.bloqueado) {
+    const { data: card } = await supa
+      .from("approval_requests")
+      .select("id,company_id,action,payload,conversation_id")
+      .eq("id", cardId)
+      .maybeSingle();
+    if (card?.company_id) {
+      await supa.from("recusas_meta").insert({
+        company_id: card.company_id,
+        approval_id: cardId,
+        conversa_id: card.conversation_id ?? null,
+        acao: card.action ?? null,
+        recusa: t.recusa,
+        motivo: t.motivo_para_o_gestor,
+        payload: card.payload ?? null,
+      });
+    }
+  }
 
   await supa
     .from("approval_requests")
@@ -3400,6 +3421,15 @@ Deno.serve(async (req) => {
 
   // v5.49: corrige daily_budget 100x (centavos enviados como reais). So altera se o valor
   // atual na Graph for exatamente alvo*100 (ex.: pediu R$ 30, gravou 300000 centavos).
+  if (body?.modo === "corrigir_orcamento_adsets" || body?.modo === "definir_whatsapp_conjunto" || body?.modo === "reparar_criativos_ctwa") {
+    if (!body?.approval_id) {
+      return json({
+        error: "escrita_sem_card_recusada",
+        detalhe: "Este modo escreve na Meta. Ele so roda com approval_id de um card aprovado. Nao ha conta, conjunto nem telefone fixos no codigo.",
+      }, 403);
+    }
+  }
+
   if (body?.modo === "corrigir_orcamento_adsets") {
     const companyId = String(body?.company_id ?? "").trim();
     const reais = Number(body?.reais ?? 0);
@@ -3461,10 +3491,13 @@ Deno.serve(async (req) => {
   // v5.42: troca o WhatsApp do conjunto CTWA (Gerenciador trava o campo apos criar ads).
   // Tenta formatos Graph + pausa temporaria do conjunto se o PATCH direto falhar.
   if (body?.modo === "definir_whatsapp_conjunto") {
-    const companyId = String(body?.company_id ?? "57f755b9-c23d-4f58-a488-8173d697c010").trim();
-    const adsetId = String(body?.adset_external_id ?? "120249671521030182").trim();
-    const pageId = String(body?.page_id ?? "105656372312257").trim();
-    let wa = digitosWhatsApp(body?.whatsapp_phone_number ?? "71991088073");
+    const companyId = String(body?.company_id ?? "").trim();
+    const adsetId = String(body?.adset_external_id ?? "").trim();
+    const pageId = String(body?.page_id ?? "").trim();
+    if (!companyId || !adsetId || !pageId) {
+      return json({ error: "company_id, adset_external_id e page_id sao obrigatorios. Nada disso tem valor fixo." }, 400);
+    }
+    let wa = digitosWhatsApp(body?.whatsapp_phone_number ?? "");
     if (wa && wa.length === 11 && wa.startsWith("71")) wa = `55${wa}`;
     if (wa && wa.length === 10 && wa.startsWith("71")) wa = `55${wa}`;
     const ativ = ativarTokenEmpresa(companyId);
@@ -3637,13 +3670,14 @@ Deno.serve(async (req) => {
   // v5.41: repara anuncios CTWA ja criados com CONTACT_US+wa.me (erro de apresentacao).
   // Atualiza promoted_object do conjunto + troca o creative_id de cada anuncio.
   if (body?.modo === "reparar_criativos_ctwa") {
-    const companyId = String(body?.company_id ?? "57f755b9-c23d-4f58-a488-8173d697c010").trim();
-    const adsetId = String(body?.adset_external_id ?? "120249671521030182").trim();
-    const pageId = String(body?.page_id ?? "105656372312257").trim();
-    const conta = String(body?.ad_account ?? "act_1622612945584817").trim();
-    const waDigits = digitosWhatsApp(
-      body?.whatsapp_phone_number ?? "5571991088073",
-    );
+    const companyId = String(body?.company_id ?? "").trim();
+    const adsetId = String(body?.adset_external_id ?? "").trim();
+    const pageId = String(body?.page_id ?? "").trim();
+    const conta = String(body?.ad_account ?? "").trim();
+    if (!companyId || !adsetId || !pageId || !conta) {
+      return json({ error: "company_id, adset_external_id, page_id e ad_account sao obrigatorios. Nada disso tem valor fixo." }, 400);
+    }
+    const waDigits = digitosWhatsApp(body?.whatsapp_phone_number ?? "");
     const adsIn: Array<{ ad_id: string; video_id?: string; message?: string; name?: string }> =
       Array.isArray(body?.ads) ? body.ads : [];
     const ativ = ativarTokenEmpresa(companyId);
@@ -4135,7 +4169,9 @@ Deno.serve(async (req) => {
   ) {
     async function corpo(): Promise<Record<string, unknown>> {
 
-    const acao = String(r.action);
+    const canon = canonicalizarAcaoDoCard(String(r.action), (r.payload ?? {}) as Record<string, unknown>);
+    const acao = canon.acao;
+    if (canon.alias) r.payload = canon.payload;
     const alvoExt = String(r.payload?.target_external_id ?? "");
     const alvoNome = String(r.payload?.target_name ?? r.summary);
     const sistema = r.reviewed_by ?? r.requested_by;
@@ -4798,8 +4834,7 @@ Deno.serve(async (req) => {
               reconciliacao_estado: reconciliacao?.estado ?? null,
               reconciliacao_conferida: reconciliacao?.estado === "conferido",
               reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
-              lembrete:
-                "Objeto criado PAUSADO (v4.3). A aprovacao CRIOU o objeto e NAO iniciou entrega nem gasto. Para comecar a entregar, o gestor precisa ATIVAR manualmente no Gerenciador - conferindo a arvore inteira antes.",
+              lembrete: textoLembreteDeCriacao(String(pl.body?.status ?? r.payload?.status_inicial ?? "ACTIVE")),
             },
           })
           .eq("id", r.id);
@@ -5014,11 +5049,26 @@ Deno.serve(async (req) => {
 
     // ==================== CAMINHO v1: MODIFICAR EXISTENTE ====================
     if (!EXECUTAVEIS.includes(acao)) {
+      if (opts?.persistencia !== "ritmo") {
+        await supa.from("approval_requests").update({
+          executed_at: new Date().toISOString(),
+          execution_result: {
+            ok: false,
+            resultado: "falha",
+            motivo: `acao_desconhecida:${acao}`,
+            detalhe: "O executor nao conhece esta acao. O card foi fechado para nao ficar aprovado em silencio.",
+          },
+        }).eq("id", r.id);
+      }
+      await audit(r.company_id, sistema, "meta_action_failed", r.id, {
+        motivo: "acao_desconhecida",
+        acao,
+      });
       return ({
         id: r.id,
         acao,
-        resultado: "pulado",
-        motivo: "ação não automatizada (decisão manual)",
+        resultado: "falha",
+        motivo: `acao_desconhecida:${acao}`,
       });
 
     }

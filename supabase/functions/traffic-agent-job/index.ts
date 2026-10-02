@@ -258,9 +258,9 @@
 //   - Worker de background do Supabase tem teto de parede (~400s). JOB_LIMIT_MS=330s com
 //     reserva; se estourar, a sintese fecha com o que tem e DECLARA o corte (licao 10).
 //     Job preso >15min vira error via cron expira-chat-jobs-hora.
-//   - Subagentes sao READ-ONLY: propose_action NAO existe aqui. Acao continua no chat
-//     sincrono, com aprovacao de admin. Decisao deliberada de v1, nao esquecimento.
-//   - As funcoes de ferramenta sao COPIA FIEL do traffic-chat v27.1 (sem propose/cards).
+//   - O job emite CARD de modificacao (propose_action). O card nao escreve na Meta:
+//     a aprovacao do admin continua obrigatoria.
+//   - As funcoes de leitura sao copia do traffic-chat. O propose do job e o caminho curto.
 //     Risco conhecido: copia diverge com o tempo (licao do CORS do JurisAI). Pendencia
 //     registrada: extrair para _shared/traffic-tools.ts quando os dois estabilizarem.
 //   - Sem prompt caching na v1 (prompts diferem por subagente; avaliar depois com medida).
@@ -371,6 +371,10 @@ import {
   montarRelacaoGeoDeCampanha,
   soAtivosDoPedido,
 } from "../_shared/coleta_completa.ts";
+import { parseArgumentosDeFerramenta } from "../_shared/leitura_honesta.ts";
+import { montarFlexibleSpec, recusarIdsNaoResolvidosNaConversa, validarPublicoDoPedido } from "../_shared/interesse_targeting.ts";
+import { carimboDeValidacao, validarSomenteNaMeta } from "../_shared/prevoo_meta.ts";
+import { tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import {
   tDetalheAnuncios,
   casarCampanhas,
@@ -1336,14 +1340,32 @@ async function resolveCompany(name?: string): Promise<{ id: string; name: string
 // Pendencia registrada: extrair para _shared/traffic-tools.ts.
 // ============================================================================
 async function t_overview(companyId: string) {
-  const { data: camps } = await supa.from("campaigns").select("external_id,name,status,category,spend,external_account_id").eq("company_id", companyId);
+  const campsQ = await supa.from("campaigns").select("external_id,name,status,category,spend,external_account_id").eq("company_id", companyId);
+  if (campsQ.error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_overview.campaigns",
+      motivo: campsQ.error.message,
+      aviso: "A consulta falhou. Isto NAO e zero campanhas. Relate a falha.",
+    };
+  }
+  const camps = campsQ.data;
   const ativos = (camps ?? []).filter((c) => c.status === "active");
   const from = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
-  const { data: snaps } = await supa.from("metric_snapshots")
+  const snapsQ = await supa.from("metric_snapshots")
     // `campaign_id` entrou em 04/09/2026 para escopar o gasto por base; `leads` saiu (coluna
     // aposentada, era somada e nunca usada).
     .select("campaign_id,spend,impressions,link_clicks,form_leads,messaging_started,snapshot_date")
     .eq("company_id", companyId).gte("snapshot_date", from);
+  if (snapsQ.error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_overview.metric_snapshots",
+      motivo: snapsQ.error.message,
+      aviso: "A consulta de gasto falhou. Isto NAO e gasto zero. Relate a falha.",
+    };
+  }
+  const snaps = snapsQ.data;
   const s = (snaps ?? []).reduce((a, r) => ({
     spend: a.spend + Number(r.spend || 0), imp: a.imp + Number(r.impressions || 0),
     link: a.link + Number(r.link_clicks || 0), forms: a.forms + Number(r.form_leads || 0),
@@ -1360,13 +1382,29 @@ async function t_overview(companyId: string) {
   };
 }
 async function t_alerts(companyId: string) {
-  const { data } = await supa.from("alerts").select("severity,title,description,created_at,resolved")
+  const { data, error } = await supa.from("alerts").select("severity,title,description,created_at,resolved")
     .eq("company_id", companyId).eq("resolved", false).order("created_at", { ascending: false }).limit(20);
+  if (error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_alerts",
+      motivo: error.message,
+      aviso: "A consulta de alertas falhou. Isto NAO e 'nenhum alerta'. Relate a falha.",
+    };
+  }
   return { alertas_ativos: data ?? [] };
 }
 async function t_recos(companyId: string) {
-  const { data } = await supa.from("ai_recommendations").select("category,impact,title,description,status,created_at")
+  const { data, error } = await supa.from("ai_recommendations").select("category,impact,title,description,status,created_at")
     .eq("company_id", companyId).eq("status", "new").order("created_at", { ascending: false }).limit(20);
+  if (error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_recommendations",
+      motivo: error.message,
+      aviso: "A consulta de recomendacoes falhou. Isto NAO e fila vazia. Relate a falha.",
+    };
+  }
   return { recomendacoes_pendentes: data ?? [], nota: "regua destas recomendacoes e custo de MIDIA, nao contrato pago." };
 }
 async function t_rpc(nome: string, parametros: Record<string, unknown>) {
@@ -1377,7 +1415,15 @@ async function t_funnel(companyId: string, date_from?: string, date_to?: string)
   let q = supa.from("metric_snapshots").select("campaign_id,snapshot_date,spend,impressions,clicks,link_clicks,landing_page_views,form_leads,messaging_started").eq("company_id", companyId);
   if (date_from) q = q.gte("snapshot_date", date_from);
   if (date_to) q = q.lte("snapshot_date", date_to);
-  const { data } = await q;
+  const { data, error } = await q;
+  if (error) {
+    return {
+      consulta_falhou: true,
+      onde: "get_funnel",
+      motivo: error.message,
+      aviso: "O funil nao foi lido. Isto NAO e funil zerado. Relate a falha.",
+    };
+  }
   const linhas = data ?? [];
   const s = linhas.reduce((a, r) => ({
     spend: a.spend + Number(r.spend || 0), imp: a.imp + Number(r.impressions || 0), clk: a.clk + Number(r.clicks || 0),
@@ -2330,6 +2376,69 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
           supa,
         });
       case "get_waba_template_insights": return await t_waba_template_insights(ctx.companyId, Number(args?.days ?? 30));
+      case "propose_action": {
+        const action = String(args?.action_type ?? "");
+        const permitidas = ["alterar_publico_do_conjunto", "alterar_orcamento", "pausar_conjunto", "ativar_conjunto", "pausar_campanha", "ativar_campanha"];
+        if (!permitidas.includes(action)) {
+          return {
+            erro: "acao_nao_disponivel_no_job",
+            detalhe: "O job emite card de modificacao. O card nao escreve na Meta. Criacao continua no chat.",
+          };
+        }
+        const justificativa = String(args?.justificativa ?? "").trim();
+        const reversa = String(args?.reversa ?? "").trim();
+        const sucesso = String(args?.metrica_sucesso ?? "").trim();
+        const alvoId = String(args?.params?.alvo_external_id ?? args?.target_external_id ?? "").trim();
+        if (!justificativa || !reversa || !sucesso || !alvoId) {
+          return { erro: "card_incompleto", detalhe: "justificativa, reversa, metrica_sucesso e params.alvo_external_id sao obrigatorios." };
+        }
+        const params = (args?.params && typeof args.params === "object") ? { ...args.params } : {};
+        if (action === "alterar_publico_do_conjunto") {
+          const pub = validarPublicoDoPedido(params);
+          if (!pub.ok) return { erro: pub.erro, detalhe: pub.detalhe };
+          const classeOk = await recusarIdsNaoResolvidosNaConversa(supa as never, {
+            companyId: ctx.companyId,
+            termos: pub.params.interesses as { id: string; name: string; classe: "interests" | "behaviors" | "work_positions" | "industries" }[],
+          });
+          if (!classeOk.ok) return { erro: classeOk.erro, detalhe: classeOk.detalhe };
+          Object.assign(params, pub.params);
+        }
+        const tok = tokenAdsPorCompanyId(ctx.companyId);
+        if (!tok) return { erro: "prevoo_sem_token", detalhe: "Sem token o card nao nasce." };
+        const body: Record<string, string> = action.startsWith("pausar")
+          ? { status: "PAUSED" }
+          : action.startsWith("ativar")
+          ? { status: "ACTIVE" }
+          : action === "alterar_orcamento"
+          ? { daily_budget: String(Math.round(Number(params.novo_orcamento_diario_reais ?? 0) * 100)) }
+          : { targeting: JSON.stringify({ flexible_spec: montarFlexibleSpec(params.interesses as never) }) };
+        const pre = await validarSomenteNaMeta({ token: tok.token, caminho: `/${alvoId}`, body });
+        if (!pre.ok) {
+          const recusa = pre.recusa.toLowerCase();
+          if (!recusa.includes("execution_options") && !recusa.includes("validate_only")) {
+            return { erro: "prevoo_recusado", detalhe: pre.recusa, corpo: pre.corpo, aviso: "O card nao nasceu. Corrija e tente de novo. Nao reexecute na Meta." };
+          }
+          params.validacao = "nao_testado";
+        } else {
+          Object.assign(params, carimboDeValidacao(pre.validado_em));
+        }
+        const { data: ins, error } = await supa.from("approval_requests").insert({
+          company_id: ctx.companyId,
+          action,
+          summary: String(args?.target_name ?? action),
+          entity_type: action.includes("campanha") ? "campaign" : "adset",
+          payload: { ...params, target_external_id: alvoId, target_name: args?.target_name ?? null, justificativa, reversa, metrica_sucesso: sucesso, proposto_por: "traffic-agent-job" },
+          status: "pending",
+        }).select("id").single();
+        if (error) return { consulta_falhou: true, onde: "propose_action", motivo: error.message, aviso: "O card nao foi gravado." };
+        return {
+          ok: true,
+          approval_id: ins?.id,
+          validado_na_meta_em: pre.ok ? pre.validado_em : null,
+          validacao: params.validacao ?? (pre.ok ? "validado" : "nao_testado"),
+          aviso: "Card pendente. Nada foi escrito na Meta. Validado nao e garantido.",
+        };
+      }
       default: return { erro: `tool desconhecida: ${name}` };
     }
   } catch (e) { return { erro: String((e as any)?.message ?? e) }; }
@@ -2360,8 +2469,8 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "AUDITORIA DE COMPLIANCE: amostre as legendas de maior gasto ate o teto de ferramentas e valide o PAR legenda+peca quando houver drive_file_id. Declare cobertura e lacunas — nao tente auditar o universo inteiro numa rodada.",
   },
   estrutura_conta: {
-    tools: ["get_estrutura_conjuntos", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_estrutura_conjuntos: 1, get_conhecimento: 1, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 5,
+    tools: ["get_estrutura_conjuntos", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard", "ler_objeto", "conferir_contra_plano", "buscar_segmentacao", "propose_action"],
+    maxPorTool: { get_estrutura_conjuntos: 4, get_conhecimento: 1, ler_pipeboard: 8, listar_ferramentas_pipeboard: 1, ler_objeto: 8, conferir_contra_plano: 4, buscar_segmentacao: 8, propose_action: 4 }, maxToolsTotal: 16,
     missao: "ESTRUTURA da conta: CBO vs ABO, orcamento por conjunto, estrategia de lance, targeting, pegada e destino. Relatorio curto, com os riscos visiveis.",
   },
   whatsapp_waba: {
@@ -3038,14 +3147,28 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
       for (const tc of msg.tool_calls) {
         const nomeTc = String(tc.function?.name ?? "");
         const jaUsou = usadas.filter((t) => t === nomeTc).length;
-        const limite = cfg.maxPorTool[nomeTc] ?? 2;
+        const leituraAoVivo = nomeTc === "ler_objeto" || nomeTc === "ler_pipeboard" || nomeTc === "buscar_segmentacao" || nomeTc === "buscar_interesses" || nomeTc === "buscar_comportamentos" || nomeTc === "conferir_contra_plano";
+        const limite = cfg.maxPorTool[nomeTc] ?? (leituraAoVivo ? 8 : 2);
         if (usadas.length >= cfg.maxToolsTotal || jaUsou >= limite || !cfg.tools.includes(nomeTc)) {
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
             erro: "consulta_nao_realizada",
             aviso: "Teto de consultas deste especialista atingido ou ferramenta fora do seu escopo. O dado NAO foi lido - nao trate como zero. Feche o relatorio com o que tem e registre em LACUNAS." }) });
           continue;
         }
-        let args: any = {}; try { args = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* */ }
+        const argsParsed = parseArgumentosDeFerramenta(tc.function?.arguments);
+        if (!argsParsed.ok) {
+          messages.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            content: JSON.stringify({
+              erro: argsParsed.erro,
+              detalhe: argsParsed.detalhe,
+              nudge: argsParsed.nudge,
+            }),
+          });
+          continue;
+        }
+        const args: any = argsParsed.args;
         const result = await runTool(nomeTc, args, ctx);
         usadas.push(nomeTc);
         /**
@@ -3065,7 +3188,7 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
         // A doutrina de uso entra colada ao retorno, e so aqui: e o unico ponto do fluxo em
         // que a ferramenta comprovadamente rodou. Fora daqui ela seria contexto pago a toa.
         messages.push({ role: "tool", tool_call_id: tc.id,
-          content: retornoComDoutrina(catFerr, nomeTc, JSON.stringify(result).slice(0, 14000)) });
+          content: retornoComDoutrina(catFerr, nomeTc, JSON.stringify(result).slice(0, nomeTc === "ler_objeto" || nomeTc === "conferir_contra_plano" ? 48000 : 14000)) });
       }
       continue;
     }
@@ -3283,7 +3406,7 @@ function montarSysSintese(companyName: string, estilo: string, memoria: string, 
   const contrato = escopo
     ? `\n${escopo.bloco_contrato}\nFIDELIDADE: responda EXCLUSIVAMENTE as perguntas obrigatorias do contrato, na ordem. Nao abra secao de historico SALT/conta inteira se o contrato proibir. Se um especialista trouxe dado fora do universo, ignore no corpo e no maximo cite em uma linha FORA DO PEDIDO. Distinga objective da campanha vs optimization_goal do conjunto.\n`
     : "";
-  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor (Roberto) em portugues brasileiro.
+  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()}. Responde ao gestor desta empresa em portugues brasileiro. O nome da pessoa, se houver, vem da configuracao da empresa — nao invente um nome.
 PERFIL EMPRESARIAL: ${perfil}.
 ESCOPO RIGIDO: somente trafego pago (midia, criativo, publico, orcamento, custo). Bancos, esteira interna, politica de credito, atendimento humano e conversao final do CRM estao FORA - se a pergunta tocar nisso, declare fora de escopo e siga.
 ${contrato}REGRAS INEGOCIAVEIS: (R1) todo numero desta conta vem dos RELATORIOS INTERNOS abaixo, coletados agora por especialistas - se um numero nao esta neles, escreva 'nao coletado nesta rodada' (nunca invente). (R1b) conhecimento de plataforma (conceitos Meta) voce explica normalmente, separado de dado da conta. (R1c) PROIBIDO pedir ao gestor que envie outra pergunta ou 'peca de novo' — a coleta e o bloco continuam no sistema. (R2) nunca afirme configuracao da conta sem dado. (R3) distinga zero / nao existe / nao coletado - os relatorios marcam LACUNAS. (R3b - CORTE NAO E INEXISTENCIA) relatorios INCOMPLETOS: se o especialista JA trouxe anuncios/serie, use esses numeros; PROIBIDO substituir coleta feita por 'nao foi retornado nesta rodada'. (R4) nao misture janelas. (R4b) HOJE e a data da primeira linha - ultimo dia coletado costuma ser ONTEM. (R5) amostra pequena = hipotese. (R6) ordem das datas antes de causalidade. (R8) voce NAO executa acoes. (R9) incoerencia entre numeros: aponte. Sem jargao interno.
