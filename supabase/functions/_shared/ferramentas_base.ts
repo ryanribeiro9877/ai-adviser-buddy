@@ -554,7 +554,7 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
   registrar_veredito_peca_em_revisao: {
     descricao:
       "PROPOE veredito de compliance de uma peca em revisao emitindo um CARD DE APROVACAO. Valores: liberado_como_esta (se aprovado, desliga bloqueia_uso), ajustar_peca ou nao_usar (mantem o bloqueio).",
-    parametros: {"type":"object","properties":{"drive_file_id":{"type":"string"},"veredito":{"type":"string","enum":["liberado_como_esta","ajustar_peca","nao_usar"]},"veredito_por":{"type":"string","description":"Opcional: quem pediu o veredito (ex.: Roberto). Registro informativo, NAO assinatura."},"nota":{"type":"string","description":"Opcional: condicao ou justificativa que acompanha a proposta."}},"required":["drive_file_id","veredito"]},
+    parametros: {"type":"object","properties":{"drive_file_id":{"type":"string"},"veredito":{"type":"string","enum":["liberado_como_esta","ajustar_peca","nao_usar"]},"veredito_por":{"type":"string","description":"Opcional: quem pediu o veredito. Registro informativo, NAO assinatura."},"nota":{"type":"string","description":"Opcional: condicao ou justificativa que acompanha a proposta."}},"required":["drive_file_id","veredito"]},
     superficies: ["chat"],
     efeito: "escrita",
     setor: "Conformidade",
