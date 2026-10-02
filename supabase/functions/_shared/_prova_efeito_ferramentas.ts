@@ -62,6 +62,10 @@ const MIGRATIONS = [
     "supabase/migrations/20261002190000_quatro_capacidades_nascimento.sql",
     RAIZ,
   ),
+  new URL(
+    "supabase/migrations/20261002225000_carrossel_e_acao_graph.sql",
+    RAIZ,
+  ),
 ];
 
 // Os 9 setores de public.agents. Setor fora desta lista nao e erro de digitacao inofensivo: a
@@ -94,6 +98,7 @@ const DONO_DA_ESCRITA: Record<string, string> = {
   alterar_idade_do_conjunto: "AG-06",
   criar_conjunto: "AG-06",
   criar_criativo: "AG-06",
+  criar_criativo_carrossel: "AG-06",
   trocar_criativo_do_anuncio: "AG-06",
   alterar_orcamento: "AG-06",
   gravar_plano: "AG-06",
@@ -198,9 +203,10 @@ for (const chave of Object.keys(DONO_DA_ESCRITA)) {
 // 6) O total. 57 em 03/09/2026; 58 com alterar_geo; 59 com get_seguidores_instagram_ads;
 //    60 com alterar_orcamento; 62 com buscar_interesses + alterar_publico_do_conjunto;
 //    72: as 63 de 18/09, as 6 de leitura/plano de 02/10 e criar_conjunto, criar_criativo, trocar_criativo_do_anuncio.
+//    73: criar_criativo_carrossel.
 ok(
-  doSnapshot.length === 72,
-  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 72 — classifique a nova e atualize este numero`,
+  doSnapshot.length === 73,
+  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 73 — classifique a nova e atualize este numero`,
 );
 
 // ===== Tabela viva (opcional) =====

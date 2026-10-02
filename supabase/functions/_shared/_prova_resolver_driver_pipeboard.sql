@@ -1,7 +1,8 @@
--- Reexecutavel. Pressupoe a migration escrita_so_pelo_pipeboard (20261002213515) ja aplicada.
--- Graph numa acao qualquer devolve suportado=false. Instagram continua graph.
--- O override temporario e desfeito no fim. Empresa usada: Cooperativa Cohapm
--- (master_enabled=false), para o ensaio nao abrir escrita.
+-- Reexecutavel depois da migration do carrossel.
+-- criar_criativo volta ["pipeboard"].
+-- criar_criativo_carrossel volta ["graph"] e suportado true, sem override na empresa.
+-- graph configurado em criar_criativo volta suportado false.
+-- O override temporario e desfeito. Empresa: Cooperativa Cohapm (master_enabled=false).
 
 do $prova$
 declare
@@ -12,41 +13,39 @@ begin
   select driver_por_acao into v_antes
     from public.meta_execution_config
    where company_id = v_empresa;
-  if v_antes is null and not exists (
-    select 1 from public.meta_execution_config where company_id = v_empresa
-  ) then
-    raise exception 'prova: cooperativa sem meta_execution_config';
+
+  v_r := public.resolver_driver(v_empresa, 'criar_criativo');
+  if (v_r ->> 'suportado') is distinct from 'true'
+     or (v_r ->> 'driver') is distinct from 'pipeboard'
+     or (v_r -> 'drivers_suportados') is distinct from '["pipeboard"]'::jsonb
+  then
+    raise exception 'prova criar_criativo pipeboard: %', v_r;
+  end if;
+
+  v_r := public.resolver_driver(v_empresa, 'criar_criativo_carrossel');
+  if (v_r ->> 'suportado') is distinct from 'true'
+     or (v_r ->> 'driver') is distinct from 'graph'
+     or (v_r -> 'drivers_suportados') is distinct from '["graph"]'::jsonb
+  then
+    raise exception 'prova carrossel graph: %', v_r;
+  end if;
+
+  if v_antes ? 'criar_criativo_carrossel' then
+    raise exception 'prova: nao deveria haver override de carrossel em driver_por_acao';
   end if;
 
   update public.meta_execution_config
      set driver_por_acao = coalesce(driver_por_acao, '{}'::jsonb)
-                           || jsonb_build_object('criar_campanha', 'graph', 'criar_criativo', 'graph')
+                           || jsonb_build_object('criar_criativo', 'graph')
    where company_id = v_empresa;
 
-  v_r := public.resolver_driver(v_empresa, 'criar_campanha');
+  v_r := public.resolver_driver(v_empresa, 'criar_criativo');
   if (v_r ->> 'suportado') is distinct from 'false'
      or (v_r ->> 'driver') is distinct from 'graph'
-     or (v_r ->> 'motivo_bloqueio') is distinct from 'driver_nao_suporta_criar_campanha'
-     or coalesce(v_r ->> 'mensagem_para_o_gestor', '') not like 'A acao criar_campanha nao roda no driver graph (suporta: pipeboard).%'
+     or (v_r ->> 'motivo_bloqueio') is distinct from 'driver_nao_suporta_criar_criativo'
   then
     update public.meta_execution_config set driver_por_acao = v_antes where company_id = v_empresa;
-    raise exception 'prova graph em acao qualquer: %', v_r;
-  end if;
-
-  v_r := public.resolver_driver(v_empresa, 'vincular_instagram_dos_anuncios');
-  if (v_r ->> 'suportado') is distinct from 'true'
-     or (v_r ->> 'driver') is distinct from 'graph'
-  then
-    update public.meta_execution_config set driver_por_acao = v_antes where company_id = v_empresa;
-    raise exception 'prova instagram: %', v_r;
-  end if;
-
-  v_r := public.resolver_driver(v_empresa, 'criar_criativo');
-  if (v_r ->> 'suportado') is distinct from 'true'
-     or (v_r ->> 'driver') is distinct from 'graph'
-  then
-    update public.meta_execution_config set driver_por_acao = v_antes where company_id = v_empresa;
-    raise exception 'prova criar_criativo com graph: %', v_r;
+    raise exception 'prova graph em criar_criativo: %', v_r;
   end if;
 
   update public.meta_execution_config

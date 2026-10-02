@@ -7,6 +7,7 @@ const TITULO_POR_ACAO: Record<string, string> = {
   criar_conjunto_a_partir_de: "Card de criação de conjunto",
   criar_conjunto: "Card de criação de conjunto",
   criar_criativo: "Card de criação de criativo",
+  criar_criativo_carrossel: "Card de criação de carrossel",
   trocar_criativo_do_anuncio: "Card de trocar criativo do anúncio",
   criar_anuncio_a_partir_de: "Card de criação de anúncio",
   escalar_duplicar: "Card de escala de conjunto",
@@ -35,6 +36,7 @@ const ACOES_CRIACAO = new Set([
   "criar_conjunto_a_partir_de",
   "criar_conjunto",
   "criar_criativo",
+  "criar_criativo_carrossel",
   "criar_anuncio_a_partir_de",
   "escalar_duplicar",
 ]);
@@ -87,7 +89,7 @@ export function previaDoCardAprovacao(
       conjunto: campo(payload, "nome_novo") ?? conjunto ?? undefined,
     };
   }
-  if (acao === "criar_criativo") {
+  if (acao === "criar_criativo" || acao === "criar_criativo_carrossel") {
     return {
       criativo: campo(payload, "nome_novo", "nome") ?? criativo ?? undefined,
     };

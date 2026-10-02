@@ -14,8 +14,8 @@ export function driverDe(cfg: { driver_escrita?: unknown } | null | undefined): 
 
 // ESP-29: driver POR ACAO. Precedencia: override (driver_por_acao[acao]) > empresa
 // (driver_escrita) > pipeboard. So normaliza o transporte do ultimo passo; a matriz
-// de capacidade (graph so em vincular_instagram_dos_anuncios; criar_criativo aceita
-// os dois porque o carrossel ainda sai pela Graph) e conferida no RPC resolver_driver.
+// de capacidade (graph so em vincular_instagram_dos_anuncios e
+// criar_criativo_carrossel; criar_criativo e pipeboard-only) e conferida no RPC.
 export function driverParaAcao(
   cfg: { driver_escrita?: unknown; driver_por_acao?: unknown } | null | undefined,
   acao: string,

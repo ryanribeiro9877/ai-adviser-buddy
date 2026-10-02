@@ -1,10 +1,12 @@
 // supabase/functions/meta-actions/index.ts (v5.66)
+// v5.67 (02/10/2026) - CARROSSEL E ACAO, NAO SPEC. criar_criativo_carrossel sai pela
+//   Graph; criar_criativo e pipeboard-only. specTemCarrossel nao escolhe mais driver.
+//   Dois ou mais slides em criar_criativo sao recusados antes do card, apontando a acao
+//   certa. Menos de dois slides em criar_criativo_carrossel tambem. O Pipeboard aceita
+//   child_attachments e devolve No media provided (dry_run, 02/10/2026).
 // v5.66 (02/10/2026) - ESCRITA SAI PELO PIPEBOARD. O ultimo elo de driverParaAcao
 //   deixa de ser graph: sem override e sem driver_escrita explicito, o passo e pipeboard.
-//   Graph explicito continua valendo no codigo (o ramo nao sai). A trava que impede o card
-//   e resolver_driver: so vincular_instagram_dos_anuncios e graph-only. Carrossel ficou na
-//   Graph porque create_ad_creative com child_attachments e dry_run devolveu
-//   "No media provided" (02/10/2026, id nulo). forcarGraph permanece so nesse spec.
+//   Graph explicito continua valendo no codigo (o ramo nao sai).
 // v5.65 (18/09/2026) - ALTERAR IDADE DO CONJUNTO PUBLICADO. O gestor perguntou
 //   se da para mudar age_min/age_max em conjunto ACTIVE ja criado. A Meta aceita
 //   POST /{adset_id} targeting (mesmo update_adset da geo/publico). Entra
@@ -127,7 +129,7 @@
 // v5.23 (12/08/2026) - ESP-29: driver de transporte resolvido POR ACAO (driverParaAcao):
 //   override em meta_execution_config.driver_por_acao > driver_escrita (empresa) > pipeboard.
 //   pode_executar_acao/resolver_driver aplicam a matriz de capacidade
-//   (graph so em vincular_instagram_dos_anuncios; carrossel continua na Graph por forcarGraph).
+//   (graph so em vincular_instagram_dos_anuncios e criar_criativo_carrossel).
 // v5.32 (21/08/2026) - NOME LIVRE: criar/renomear aceitam nome_novo/novo_nome free-form.
 //   nome_partes deixa de ser obrigatorio; padrao estruturado e so metadado/sugestao opcional.
 // v5.22 (12/08/2026) - ESP-39: testes vs escala em campanhas separadas (negocio).
@@ -488,7 +490,7 @@ import {
   normalizarGeoDoPedido,
   paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
-import { montarCriativoDeClique } from "../_shared/criativo_whatsapp.ts";
+import { montarCriativoCarrossel, montarCriativoDeClique, recusarContagemDeSlides } from "../_shared/criativo_whatsapp.ts";
 import { validarSpecConjunto } from "../_shared/conjunto_spec.ts";
 import {
   fronteiraDePersonalizacao,
@@ -571,7 +573,7 @@ const EXECUTAVEIS = [
 ];
 /** Renomear e a mesma escrita nos tres niveis: o campo `name` do objeto que ja existe. */
 const RENOMEACOES = ["renomear_campanha", "renomear_conjunto", "renomear_criativo"];
-const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_anuncio_a_partir_de", "escalar_duplicar"];
+const CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_criativo_carrossel", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
 const supa = createClient(SUPABASE_URL, SERVICE_ROLE, { auth: { persistSession: false } });
 
@@ -710,7 +712,7 @@ async function escreverCriacao(
   } else if (acao === "criar_conjunto_a_partir_de" || acao === "criar_conjunto" || acao === "escalar_duplicar") {
     tool = "create_adset";
     args = argsAdsetDeGraph(conta, body);
-  } else if (acao === "criar_criativo") {
+  } else if (acao === "criar_criativo" || acao === "criar_criativo_carrossel") {
     return escreverCreative(driver, conta, path, body, pbToken);
   } else {
     return {
@@ -743,15 +745,24 @@ async function escreverCreative(
   body: Record<string, string>,
   pbToken: string,
 ): Promise<ResultadoEscrita> {
-  // Carrossel: em 02/10/2026 create_ad_creative com child_attachments e dry_run=true
-  // devolveu "No media provided. Specify image_hash, image_hashes, video_id, videos,
-  // images, or object_story_id." O schema lista child_attachments e mesmo assim nao
-  // conta como midia. id nulo, nada persistido. Por isso o spec com 2+ slides segue
-  // na Graph. Imagem e video deste mesmo caminho respeitam o driver resolvido.
-  const forcarGraph = specTemCarrossel(body.object_story_spec);
-  const driverEfetivo: DriverEscrita = forcarGraph ? "graph" : driver;
+  // O nome da acao ja escolheu o driver. Spec com 2+ slides no Pipeboard nao e
+  // escrito: vira recusa nomeada, nao o "No media provided" mudo do conector.
+  if (driver !== "graph" && specTemCarrossel(body.object_story_spec)) {
+    return {
+      status: 400,
+      body: {
+        erro: "carrossel_na_acao_errada",
+        detalhe:
+          "Dois ou mais slides nao entram por este driver. Use criar_criativo_carrossel. O Pipeboard aceita child_attachments e devolve No media provided.",
+      },
+      id: null,
+      driver,
+      ok: false,
+      erro: "carrossel_na_acao_errada",
+    };
+  }
 
-  if (driverEfetivo !== "pipeboard") {
+  if (driver !== "pipeboard") {
     const cc = await g(path, "POST", body);
     const id = (cc.body as any)?.id ?? null;
     return {
@@ -1832,8 +1843,13 @@ export async function montarCriacao(
     return { path: `/${conta}/adsets`, body: spec.corpo, resumo_legivel: spec.resumo };
   }
 
-  if (acao === "criar_criativo") {
-    const criativoNovo = montarCriativoDeClique((p ?? {}) as Record<string, unknown>);
+  if (acao === "criar_criativo" || acao === "criar_criativo_carrossel") {
+    const pedido = (p ?? {}) as Record<string, unknown>;
+    const recusaSlides = recusarContagemDeSlides(acao, pedido);
+    if (recusaSlides) return { erro: recusaSlides.erro, detalhe: recusaSlides.detalhe };
+    const criativoNovo = acao === "criar_criativo_carrossel"
+      ? montarCriativoCarrossel(pedido)
+      : montarCriativoDeClique(pedido);
     if (!criativoNovo.ok) return { erro: criativoNovo.erro, detalhe: criativoNovo.detalhe };
     return { path: `/${conta}/adcreatives`, body: criativoNovo.body, resumo_legivel: criativoNovo.resumo };
   }
@@ -3504,7 +3520,7 @@ async function espelhar(
         : { ok: true, tabela: "ad_sets" };
     }
 
-    if (acao === "criar_criativo") {
+    if (acao === "criar_criativo" || acao === "criar_criativo_carrossel") {
       return { ok: true };
     }
 
@@ -4380,7 +4396,8 @@ Deno.serve(async (req) => {
     // (driver_escrita) > pipeboard, mesmo criterio de resolver_driver/pode_executar_acao.
     // Diz por ONDE o ultimo passo sai, nunca SE sai. Graph numa acao fora da excecao
     // nao nasce card: a lista de permitidos recusa.
-    const driver = driverParaAcao(conf, acao);
+    // O nome decide. Carrossel nao herda o pipeboard da empresa e nao olha o spec.
+    const driver = acao === "criar_criativo_carrossel" ? "graph" : driverParaAcao(conf, acao);
 
     // ==================== CAMINHO DE CRIACAO (v2) ====================
     if (CRIACAO.includes(acao)) {
@@ -4965,7 +4982,7 @@ Deno.serve(async (req) => {
         const releitura = await conferirOQueFicou({
           approvalId: String(r.id),
           objetoId: String(novoId),
-          nivel: acao === "criar_criativo" ? "criativo" : (nivelDaAcao(acao) ?? "conjunto"),
+          nivel: acao === "criar_criativo" || acao === "criar_criativo_carrossel" ? "criativo" : (nivelDaAcao(acao) ?? "conjunto"),
           enviado: bodyFinal as Record<string, unknown>,
           anterior: null,
         });
@@ -4995,7 +5012,7 @@ Deno.serve(async (req) => {
               reconciliacao_estado: reconciliacao?.estado ?? null,
               reconciliacao_conferida: reconciliacao?.estado === "conferido",
               reconciliacao_erro_leitura: reconciliacao?.erro_leitura ?? null,
-              lembrete: acao === "criar_criativo"
+              lembrete: acao === "criar_criativo" || acao === "criar_criativo_carrossel"
                 ? "Criativo criado. Criativo e imutavel e sozinho nao gasta. Para coloca-lo num anuncio que ja roda, use trocar_criativo_do_anuncio e releia effective_status antes de declarar pronto."
                 : textoLembreteDeCriacao(String(pl.body?.status ?? r.payload?.status_inicial ?? "ACTIVE")),
             },

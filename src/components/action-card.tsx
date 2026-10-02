@@ -102,6 +102,7 @@ const ACTION_META: Record<string, { icon: typeof Pause }> = {
   criar_conjunto_a_partir_de: { icon: Plus },
   criar_conjunto: { icon: Plus },
   criar_criativo: { icon: Plus },
+  criar_criativo_carrossel: { icon: Plus },
   trocar_criativo_do_anuncio: { icon: Pencil },
   criar_anuncio_a_partir_de: { icon: Plus },
   alterar_categoria_especial_campanha: { icon: Pencil },

@@ -949,7 +949,7 @@ import {
   normalizarRaioKm,
   paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
-import { montarCriativoDeClique } from "../_shared/criativo_whatsapp.ts";
+import { montarCriativoCarrossel, montarCriativoDeClique } from "../_shared/criativo_whatsapp.ts";
 import { validarSpecConjunto } from "../_shared/conjunto_spec.ts";
 import { validarTrocaCriativo } from "../_shared/troca_criativo.ts";
 import {
@@ -1013,6 +1013,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   alterar_orcamento: 8,
   criar_conjunto: 8,
   criar_criativo: 16,
+  criar_criativo_carrossel: 8,
   trocar_criativo_do_anuncio: 8,
   listar_ferramentas_pipeboard: 2,
   ler_pipeboard: 5,
@@ -1032,7 +1033,7 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
 // propose_action de criacao nao consome o teto global do turno (so o teto por ferramenta).
 // Assim releituras opcionais nao "roubam" as vagas dos cards quando o slate ja esta no chat.
-const ACOES_CRIACAO_NO_TETO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_anuncio_a_partir_de", "escalar_duplicar"];
+const ACOES_CRIACAO_NO_TETO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_criativo_carrossel", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 // v29.09 (23/09/2026): teto 2 + o carve-out so do PRIMEIRO card faziam
 // "emita os proximos cards" sair um por janela. O segundo propose morria
 // em "nao foi lido nesta janela" assim que o primeiro nascia (deadline 55s
@@ -3268,6 +3269,26 @@ async function t_criar_conjunto(
   }, cards, mcpKey, complianceCache);
 }
 
+async function t_criar_criativo_carrossel(
+  companyId: string,
+  convId: string,
+  requestedBy: string,
+  args: any,
+  cards: CardInfo[],
+  mcpKey: string,
+  complianceCache?: Map<string, any>,
+) {
+  const nome = String(args?.nome ?? args?.nome_novo ?? args?.target_name ?? "carrossel").trim();
+  return await t_propose_criacao(companyId, convId, requestedBy, {
+    action_type: "criar_criativo_carrossel",
+    target_name: nome,
+    justificativa: String(args?.justificativa ?? "").trim() || `Criar carrossel "${nome}" com dois ou mais slides.`,
+    reversa: String(args?.reversa ?? "").trim() || "Criativo e imutavel. Se um slide estiver errado, crie outro carrossel e troque o anuncio.",
+    metrica_sucesso: String(args?.metrica_sucesso ?? "").trim() || "O criativo nasce na Graph com os slides do pedido. O Pipeboard nao monta child_attachments.",
+    params: args?.params && typeof args.params === "object" ? { ...args.params, nome } : { ...args, nome },
+  }, cards, mcpKey, complianceCache);
+}
+
 async function t_criar_criativo(
   companyId: string,
   convId: string,
@@ -3630,7 +3651,7 @@ async function t_vincular_instagram_anuncios(
 // v25: proposta das acoes de CRIACAO. Separada de t_propose_action porque a semantica e
 // oposta: lÃ¡ o alvo e o objeto a modificar; aqui o "alvo" e o MOLDE a replicar (ou, no caso
 // de campanha, o nome do objeto que vai nascer).
-const ACOES_CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_anuncio_a_partir_de", "escalar_duplicar"];
+const ACOES_CRIACAO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_criativo_carrossel", "criar_anuncio_a_partir_de", "escalar_duplicar"];
 
 /** Summary visivel do card: so nomes. Ensaio (compliance, visao, ESP) vai no payload. */
 function summaryPreviaCriacao(nomes: {
@@ -3751,11 +3772,14 @@ async function t_propose_criacao(
     }, cards);
   }
 
-  if (action === "criar_criativo") {
-    const criativo = montarCriativoDeClique({
+  if (action === "criar_criativo" || action === "criar_criativo_carrossel") {
+    const pedidoCriativo = {
       ...(params as Record<string, unknown>),
       nome: params?.nome ?? params?.nome_novo ?? nomeAlvo,
-    });
+    };
+    const criativo = action === "criar_criativo_carrossel"
+      ? montarCriativoCarrossel(pedidoCriativo)
+      : montarCriativoDeClique(pedidoCriativo);
     if (!criativo.ok) return { erro: criativo.erro, detalhe: criativo.detalhe };
     const tokPre = tokenAdsPorCompanyId(companyId);
     if (!tokPre) return { erro: "prevoo_sem_token", detalhe: "Sem token desta empresa o card nao nasce." };
@@ -5474,7 +5498,7 @@ async function gravarCard(companyId: string, convId: string, requestedBy: string
   cards.push({ approval_id: ins.id, action, entity_type: entityType, target_name: String(payload.nome_novo ?? ""), summary, params: payload, status: "pending" });
   const aviso = action === "criar_conjunto"
     ? "Pedido PENDENTE. Nada foi criado. Ao aprovar, o conjunto nasce PAUSADO. Ativar e outra decisao: ativar_conjunto."
-    : action === "criar_criativo"
+    : action === "criar_criativo" || action === "criar_criativo_carrossel"
     ? "Pedido PENDENTE. Nasce um criativo, nao um anuncio, e criativo e imutavel. Para corrigir texto, botao ou saudacao, crie outro e use trocar_criativo_do_anuncio."
     : "Pedido PENDENTE. Nada foi criado na Meta ainda. Ao ser aprovado, campanha/conjunto/anuncio nascem ACTIVE (a aprovacao do card autoriza entrega). Para religar objeto ja PAUSED use ativar_campanha, ativar_conjunto ou ativar_criativo. O pedido expira em 24h se nao for decidido.";
   return { ok: true, approval_id: ins.id, resumo: summary, expira_em: ins.expires_at, aviso };
@@ -6616,6 +6640,7 @@ async function runTool(name: string, args: any, ctx: any) {
       case "alterar_geo_do_conjunto": return await t_alterar_geo_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "criar_conjunto": return await t_criar_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey, ctx.complianceCache);
       case "criar_criativo": return await t_criar_criativo(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey, ctx.complianceCache);
+      case "criar_criativo_carrossel": return await t_criar_criativo_carrossel(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey, ctx.complianceCache);
       case "trocar_criativo_do_anuncio": return await t_trocar_criativo_do_anuncio(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_publico_do_conjunto": return await t_alterar_publico_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
       case "alterar_idade_do_conjunto": return await t_alterar_idade_do_conjunto(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);

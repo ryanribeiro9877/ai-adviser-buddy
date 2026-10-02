@@ -138,8 +138,61 @@ export type CriativoMontado = {
   pergunta: string;
 };
 
+function specDoPedido(pedido: Record<string, unknown>): Record<string, unknown> | null {
+  const bruto = pedido.object_story_spec;
+  if (bruto && typeof bruto === "object" && !Array.isArray(bruto)) return bruto as Record<string, unknown>;
+  if (typeof bruto !== "string" || !bruto.trim()) return null;
+  try {
+    const parsed = JSON.parse(bruto);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Quantos slides o pedido traz. Zero quando nao ha carrossel. */
+export function contarSlidesDoPedido(pedido: Record<string, unknown> | null | undefined): number {
+  const p = pedido ?? {};
+  if (Array.isArray(p.child_attachments)) return p.child_attachments.length;
+  const spec = specDoPedido(p);
+  const kids = (spec?.link_data as { child_attachments?: unknown } | undefined)?.child_attachments;
+  return Array.isArray(kids) ? kids.length : 0;
+}
+
+/**
+ * O nome da acao decide. criar_criativo com 2+ slides e recusado antes do card,
+ * senão o carrossel sai pelo Pipeboard e morre em "No media provided".
+ * criar_criativo_carrossel com menos de 2 slides tambem e recusado, senão o nome
+ * vira atalho para forcar Graph em criativo comum.
+ */
+export function recusarContagemDeSlides(
+  acao: string,
+  pedido: Record<string, unknown> | null | undefined,
+): RecusaCriativo | null {
+  const n = contarSlidesDoPedido(pedido);
+  if (acao === "criar_criativo" && n >= 2) {
+    return {
+      ok: false,
+      erro: "carrossel_na_acao_errada",
+      detalhe:
+        "Dois ou mais slides nao entram em criar_criativo. Use criar_criativo_carrossel. O Pipeboard aceita o parametro child_attachments e devolve No media provided (medido em dry_run em 02/10/2026).",
+    };
+  }
+  if (acao === "criar_criativo_carrossel" && n < 2) {
+    return {
+      ok: false,
+      erro: "carrossel_sem_slides_suficientes",
+      detalhe:
+        "criar_criativo_carrossel exige dois ou mais slides. Criativo de uma peca usa criar_criativo.",
+    };
+  }
+  return null;
+}
+
 export function montarCriativoDeClique(p: Record<string, unknown> | null | undefined): CriativoMontado | RecusaCriativo {
   const pedido = p ?? {};
+  const recusaSlides = recusarContagemDeSlides("criar_criativo", pedido);
+  if (recusaSlides) return recusaSlides;
   const videoId = String(pedido.video_id ?? pedido.meta_video_id ?? "").trim();
   const imageHash = String(pedido.image_hash ?? pedido.meta_image_hash ?? "").trim();
   if (!!videoId === !!imageHash) {
@@ -257,5 +310,96 @@ export function montarCriativoDeClique(p: Record<string, unknown> | null | undef
     resumo: linhas.join(". "),
     saudacao: welcome?.saudacao ?? "",
     pergunta: welcome?.pergunta ?? "",
+  };
+}
+
+export function montarCriativoCarrossel(p: Record<string, unknown> | null | undefined): CriativoMontado | RecusaCriativo {
+  const pedido = p ?? {};
+  const recusaSlides = recusarContagemDeSlides("criar_criativo_carrossel", pedido);
+  if (recusaSlides) return recusaSlides;
+  const n = contarSlidesDoPedido(pedido);
+  if (n > 10) {
+    return {
+      ok: false,
+      erro: "carrossel_tamanho_invalido",
+      detalhe: `Carrossel exige 2 a 10 slides; recebi ${n}.`,
+    };
+  }
+  const pageId = String(pedido.page_id ?? "").trim();
+  if (!pageId) {
+    return { ok: false, erro: "page_id_obrigatorio", detalhe: "Criativo sem page_id nao tem emissor." };
+  }
+  const ig = String(pedido.instagram_actor_id ?? pedido.instagram_user_id ?? "").trim();
+  if (!ig) {
+    return {
+      ok: false,
+      erro: "instagram_actor_id_obrigatorio",
+      detalhe: "Sem instagram_actor_id o anuncio so roda no Facebook.",
+    };
+  }
+  const message = String(pedido.message ?? pedido.legenda ?? pedido.texto ?? "").trim();
+  if (!message) {
+    return { ok: false, erro: "message_obrigatoria", detalhe: "O texto principal do anuncio e obrigatorio." };
+  }
+  const linkPai = String(pedido.link ?? pedido.destino_url ?? "").trim();
+  const ctaTipo = String(pedido.call_to_action_type ?? "LEARN_MORE").trim() || "LEARN_MORE";
+  const bruto = Array.isArray(pedido.child_attachments)
+    ? pedido.child_attachments
+    : ((specDoPedido(pedido)?.link_data as { child_attachments?: unknown[] } | undefined)?.child_attachments ?? []);
+  const cards: Record<string, unknown>[] = [];
+  for (let i = 0; i < bruto.length; i++) {
+    const c = bruto[i] as Record<string, unknown> | null;
+    if (!c || typeof c !== "object") {
+      return { ok: false, erro: "carrossel_slide_invalido", detalhe: `Slide ${i + 1} nao e objeto.` };
+    }
+    const hash = String(c.image_hash ?? c.meta_image_hash ?? "").trim();
+    if (!hash) {
+      return {
+        ok: false,
+        erro: "carrossel_slide_sem_image_hash",
+        detalhe: `Slide ${i + 1} sem image_hash. Faca upload_midia de cada peca antes.`,
+      };
+    }
+    const link = String(c.link ?? linkPai).trim();
+    if (!link) {
+      return {
+        ok: false,
+        erro: "carrossel_slide_sem_link",
+        detalhe: `Slide ${i + 1} sem link e sem link pai no pedido.`,
+      };
+    }
+    const card: Record<string, unknown> = {
+      image_hash: hash,
+      link,
+      call_to_action: { type: ctaTipo, value: { link } },
+    };
+    const name = String(c.name ?? c.headline ?? "").trim();
+    const description = String(c.description ?? "").trim();
+    if (name) card.name = name;
+    if (description) card.description = description;
+    cards.push(card);
+  }
+  const nome = String(pedido.nome ?? pedido.nome_novo ?? pedido.name ?? "carrossel").trim() || "carrossel";
+  const spec: Record<string, unknown> = {
+    page_id: pageId,
+    [campoIdentidadeInstagramPorFormato(ig)]: ig,
+    link_data: {
+      message,
+      link: linkPai || String((cards[0]?.link ?? "")),
+      child_attachments: cards,
+      multi_share_optimized: true,
+      call_to_action: { type: ctaTipo, value: { link: linkPai || String(cards[0]?.link ?? "") } },
+    },
+  };
+  const body: Record<string, string> = {
+    name: nome,
+    object_story_spec: JSON.stringify(spec),
+  };
+  return {
+    ok: true,
+    body,
+    resumo: `Carrossel "${nome}" com ${cards.length} slides. Pagina ${pageId}, Instagram ${ig}. Sai pela Graph: o Pipeboard aceita child_attachments e devolve No media provided.`,
+    saudacao: "",
+    pergunta: "",
   };
 }
