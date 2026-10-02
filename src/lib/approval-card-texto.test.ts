@@ -3,6 +3,7 @@ import {
   ehCardDeCriacao,
   linhasPreviaDoCard,
   previaDoCardAprovacao,
+  textoDaExecucao,
   tituloDoCardAprovacao,
 } from "./approval-card-texto";
 
@@ -97,5 +98,26 @@ describe("previaDoCardAprovacao", () => {
   it("ehCardDeCriacao", () => {
     expect(ehCardDeCriacao("criar_anuncio_a_partir_de")).toBe(true);
     expect(ehCardDeCriacao("pausar_campanha")).toBe(false);
+  });
+});
+
+describe("textoDaExecucao", () => {
+  it("divergente nao fecha como executado limpo", () => {
+    const t = textoDaExecucao({
+      releitura: "gravado_diferente",
+      campos_releitura: [{ campo: "targeting.custom_audiences", veredito: "divergente" }],
+    });
+    expect(t.tom).toBe("alerta");
+    expect(t.texto).toContain("custom_audiences");
+    expect(t.texto.toLowerCase()).not.toContain("executado");
+  });
+
+  it("normalizado continua conferido e nomeia o campo", () => {
+    const t = textoDaExecucao({
+      releitura: "conferido",
+      campos_releitura: [{ campo: "targeting.geo_locations.location_types", veredito: "normalizado" }],
+    });
+    expect(t.tom).toBe("ok");
+    expect(t.texto).toContain("location_types");
   });
 });

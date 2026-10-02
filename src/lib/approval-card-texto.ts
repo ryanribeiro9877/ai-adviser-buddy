@@ -147,6 +147,41 @@ function nomesDoSummary(summary?: string | null): {
   return out;
 }
 
+export function textoDaExecucao(resultado: unknown): { tom: "ok" | "alerta" | "falha"; texto: string } {
+  const r = resultado && typeof resultado === "object" ? resultado as Record<string, unknown> : {};
+  const releitura = String(r.releitura ?? "");
+  const campos = Array.isArray(r.campos_releitura) ? r.campos_releitura as { campo?: string; veredito?: string }[] : [];
+  const lista = campos
+    .map((c) => `${c.campo ?? "campo"} (${c.veredito ?? "?"})`)
+    .join("; ");
+  if (releitura === "gravado_diferente") {
+    return {
+      tom: "alerta",
+      texto: `Gravado diferente do pedido${lista ? `: ${lista}` : ""}. Isso não é execução limpa.`,
+    };
+  }
+  if (releitura === "releitura_falhou") {
+    return {
+      tom: "falha",
+      texto: "A Meta aceitou a escrita, mas a releitura falhou. Não dá para dizer que ficou como foi pedido.",
+    };
+  }
+  if (releitura === "conferido") {
+    const norm = campos.filter((c) => c.veredito === "normalizado");
+    const extra = norm.length
+      ? ` A Meta normalizou: ${norm.map((c) => c.campo).join(", ")}.`
+      : "";
+    return { tom: "ok", texto: `Conferido na Meta.${extra}` };
+  }
+  if (r.ok === false) {
+    return {
+      tom: "falha",
+      texto: "A execução terminou com escrita parcial. Confira no Gerenciador antes de tentar de novo.",
+    };
+  }
+  return { tom: "ok", texto: "Executado." };
+}
+
 export function linhasPreviaDoCard(
   action: string | null | undefined,
   payload: unknown,

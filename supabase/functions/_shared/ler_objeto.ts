@@ -91,6 +91,8 @@ export async function lerObjetoAoVivo(opts: {
   id: string;
   nivel: NivelObjeto;
   parte?: ParteFicha;
+  /** Quando vier, a Graph devolve só estes campos. A releitura pede o que foi enviado. */
+  campos?: string;
 }): Promise<Record<string, unknown>> {
   const id = String(opts.id ?? "").trim();
   if (!/^\d{5,}$/.test(id)) {
@@ -101,7 +103,7 @@ export async function lerObjetoAoVivo(opts: {
       aviso: "Passe o id numerico da Meta. Sem id nao ha ficha, e ausencia nao e objeto vazio.",
     };
   }
-  const fields = CAMPOS[opts.nivel];
+  const fields = String(opts.campos ?? "").trim() || CAMPOS[opts.nivel];
   const qs = new URLSearchParams({ fields, access_token: opts.token });
   let r: Response;
   try {
@@ -134,6 +136,9 @@ export async function lerObjetoAoVivo(opts: {
       motivo: String(err?.message ?? `http_${r.status}`).slice(0, 300),
       aviso: "A leitura ao vivo falhou. Nao conclua a partir do espelho.",
     };
+  }
+  if (opts.campos) {
+    return { ...body, nivel: opts.nivel, fonte: "graph_ao_vivo", sem_corte: true, campos: fields };
   }
   const parte = opts.parte ?? "tudo";
   const ficha = partirFicha(body, parte);

@@ -28,8 +28,25 @@ import { cn } from "@/lib/utils";
 import {
   ehCardDeCriacao,
   linhasPreviaDoCard,
+  textoDaExecucao,
   tituloDoCardAprovacao,
 } from "@/lib/approval-card-texto";
+
+function TextoDaExecucao({
+  quando,
+  resultado,
+}: {
+  quando: string;
+  resultado: { ok?: boolean; [k: string]: unknown } | null | undefined;
+}) {
+  const t = textoDaExecucao(resultado);
+  const classe = t.tom === "ok" ? "text-muted-foreground" : "text-destructive";
+  return (
+    <p className={`mt-2 text-xs ${classe}`}>
+      {t.texto} {quando}
+    </p>
+  );
+}
 
 /** ultima_falha: veredito da ÚLTIMA tentativa de execução que falhou. Escrita pela edge
  *  meta-actions (marcarFalhaNoCard). NULL = nenhuma tentativa falhou. Ortogonal a executed_at. */
@@ -366,16 +383,10 @@ export function ActionCard({
           {approval.status === "approved" &&
             !approval.ultima_falha &&
             (approval.executed_at ? (
-              approval.execution_result && approval.execution_result.ok === false ? (
-                <p className="mt-2 text-xs text-destructive">
-                  A execução terminou com escrita parcial em {fmtWhen(approval.executed_at)} —
-                  confira no Gerenciador antes de tentar de novo.
-                </p>
-              ) : (
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Executado em {fmtWhen(approval.executed_at)}.
-                </p>
-              )
+              <TextoDaExecucao
+                quando={fmtWhen(approval.executed_at)}
+                resultado={approval.execution_result}
+              />
             ) : (
               <p className="mt-2 text-xs text-muted-foreground">Aprovado — aguardando execução.</p>
             ))}

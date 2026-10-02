@@ -374,6 +374,8 @@ import {
 import { parseArgumentosDeFerramenta } from "../_shared/leitura_honesta.ts";
 import { montarFlexibleSpec, recusarIdsNaoResolvidosNaConversa, validarPublicoDoPedido } from "../_shared/interesse_targeting.ts";
 import { carimboDeValidacao, validarSomenteNaMeta } from "../_shared/prevoo_meta.ts";
+import { rodarConferenciaDePlanos } from "../_shared/conferir_plano.ts";
+import { lerObjetoAoVivo } from "../_shared/ler_objeto.ts";
 import { tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import {
   tDetalheAnuncios,
@@ -6509,6 +6511,23 @@ Deno.serve(async (req) => {
 
   let body: any = {};
   try { body = await req.json(); } catch { /* */ }
+
+  if (String(body?.modo ?? "") === "conferir_planos") {
+    const r = await rodarConferenciaDePlanos({
+      supa,
+      lerConjunto: async (companyId, id) => {
+        const tok = tokenAdsPorCompanyId(companyId);
+        if (!tok) return { consulta_falhou: true, motivo: "token ausente para a empresa" };
+        return await lerObjetoAoVivo({
+          token: tok.token,
+          id,
+          nivel: "conjunto",
+          campos: "id,name,daily_budget,targeting,promoted_object,destination_type,optimization_goal,status,effective_status",
+        });
+      },
+    });
+    return json({ ...r, modo: "conferir_planos" });
+  }
 
   // v2.5 (04/08/2026) - MODO VIGIA DO DRIVE: {"modo":"drive_watch","company_id":"..."}.
   // Existe para o cron ter o que chamar. Roda SO a varredura das pastas monitoradas e a visao

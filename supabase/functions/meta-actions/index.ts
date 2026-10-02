@@ -473,6 +473,7 @@ import {
 import { classificarPapelCampanha } from "../_shared/nomenclatura.ts";
 import { canonicalizarAcaoDoCard } from "../_shared/acao_do_card.ts";
 import { textoLembreteDeCriacao } from "../_shared/lembrete_criacao.ts";
+import { gravarDivergenciasMeta, relerDepoisDaEscrita } from "../_shared/releitura_pos_escrita.ts";
 import {
   aplicarGeoNoTargeting,
   normalizarGeoDoPedido,
@@ -1391,8 +1392,34 @@ function resultadoAtoRitmo(saida: { resultado?: unknown } | null | undefined): "
   const r = String(saida?.resultado ?? "");
   if (r === "SIMULADO" || r === "simulado") return "simulado";
   if (r === "bloqueado" || r === "pulado") return "bloqueado";
-  if (r === "EXECUTADO" || r === "CRIADO" || r === "ok") return "ok";
+  if (
+    r === "EXECUTADO" || r === "CRIADO" || r === "ok" ||
+    r === "conferido" || r === "gravado_diferente" || r === "releitura_falhou"
+  ) return "ok";
   return "falhou";
+}
+
+async function conferirOQueFicou(opts: {
+  approvalId: string;
+  objetoId: string;
+  nivel: string;
+  enviado: Record<string, unknown>;
+  anterior: Record<string, unknown> | null;
+}) {
+  const rel = await relerDepoisDaEscrita({
+    token: TOKEN,
+    objetoId: opts.objetoId,
+    nivel: opts.nivel,
+    enviado: opts.enviado,
+    anterior: opts.anterior,
+  });
+  const persistencia = await gravarDivergenciasMeta(supa as never, {
+    approvalId: opts.approvalId,
+    objetoId: opts.objetoId,
+    campos: rel.campos,
+  });
+  const visiveis = rel.campos.filter((c) => c.veredito !== "igual");
+  return { ...rel, persistencia, visiveis };
 }
 
 async function persistirSaidaRitmo(atoId: string, saida: Record<string, unknown>) {
@@ -3421,6 +3448,44 @@ Deno.serve(async (req) => {
 
   // v5.49: corrige daily_budget 100x (centavos enviados como reais). So altera se o valor
   // atual na Graph for exatamente alvo*100 (ex.: pediu R$ 30, gravou 300000 centavos).
+  if (body?.modo === "provar_releitura") {
+    const companyId = String(body?.company_id ?? "").trim();
+    const adsetId = String(body?.adset_external_id ?? "").trim();
+    if (!companyId || !adsetId) return json({ error: "company_id e adset_external_id obrigatorios" }, 400);
+    const ativ = ativarTokenEmpresa(companyId);
+    if (!ativ.ok) return json({ error: ativ.motivo }, 400);
+    const antes = await g(`/${adsetId}?fields=id,name,status,targeting`);
+    const statusAtual = String((antes.body as { status?: string })?.status ?? "");
+    if (antes.status !== 200) return json({ error: "leitura_falhou", graph: antes }, 502);
+    if (statusAtual !== "PAUSED") return json({ error: "so em conjunto PAUSED", status: statusAtual }, 400);
+    const tgt = ((antes.body as { targeting?: Record<string, unknown> })?.targeting ?? {}) as Record<string, unknown>;
+    const geo = {
+      ...((tgt.geo_locations && typeof tgt.geo_locations === "object") ? tgt.geo_locations as Record<string, unknown> : {}),
+      location_types: ["home"],
+    };
+    const enviado = { ...tgt, geo_locations: geo };
+    const post = await g(`/${adsetId}`, "POST", { targeting: JSON.stringify(enviado) });
+    if (post.status !== 200) return json({ error: "post_falhou", graph: post }, 502);
+    const rel = await relerDepoisDaEscrita({
+      token: TOKEN,
+      objetoId: adsetId,
+      nivel: "conjunto",
+      enviado: { targeting: enviado },
+      anterior: (antes.body && typeof antes.body === "object") ? antes.body as Record<string, unknown> : null,
+    });
+    const restaura = await g(`/${adsetId}`, "POST", { targeting: JSON.stringify(tgt) });
+    const loc = rel.campos.find((c) => c.campo.endsWith("location_types"));
+    return json({
+      ok: restaura.status === 200 && loc?.veredito === "normalizado",
+      conjunto: (antes.body as { name?: string })?.name ?? null,
+      carimbo: rel.carimbo,
+      location_types: loc ?? null,
+      campos: rel.campos.filter((c) => c.veredito !== "igual"),
+      restaurado: restaura.status === 200,
+      restaura_status: restaura.status,
+    });
+  }
+
   if (body?.modo === "corrigir_orcamento_adsets" || body?.modo === "definir_whatsapp_conjunto" || body?.modo === "reparar_criativos_ctwa") {
     if (!body?.approval_id) {
       return json({
@@ -4763,6 +4828,7 @@ Deno.serve(async (req) => {
         },
       );
 
+      let carimboReleitura: string | null = null;
       if (sucesso) {
         executadasNaHora++;
         executadasNaHoraPorEmpresa.set(r.company_id, executadasNaHora);
@@ -4811,6 +4877,14 @@ Deno.serve(async (req) => {
                 : "NAO consegui olhar o objeto na Graph. Isto NAO afirma que o objeto esta errado - nada foi concluido sobre valor nenhum. O objeto EXISTE na Meta (a escrita voltou id).",
           });
         }
+        const releitura = await conferirOQueFicou({
+          approvalId: String(r.id),
+          objetoId: String(novoId),
+          nivel: nivelDaAcao(acao) ?? "conjunto",
+          enviado: bodyFinal as Record<string, unknown>,
+          anterior: null,
+        });
+        carimboReleitura = releitura.carimbo;
         if (opts?.persistencia !== "ritmo") {
         await supa
           .from("approval_requests")
@@ -4820,7 +4894,9 @@ Deno.serve(async (req) => {
             // pode continuar exibindo o erro velho como se fosse o estado atual.
             ultima_falha: null,
             execution_result: {
-              ok: true,
+              ok: releitura.carimbo === "conferido",
+              releitura: releitura.carimbo,
+              campos_releitura: releitura.visiveis,
               id_criado: novoId,
               objeto: objetoLido,
               adcreative_criado: creativeCriado,
@@ -4886,7 +4962,7 @@ Deno.serve(async (req) => {
       return ({
         id: r.id,
         acao,
-        resultado: sucesso ? "CRIADO" : "falha_meta",
+        resultado: sucesso ? (carimboReleitura ?? "CRIADO") : "falha_meta",
         id_criado: novoId,
         status: (objetoLido as any)?.status ?? null,
         aviso: pl.criativo?.aviso ?? null,
@@ -5679,6 +5755,7 @@ Deno.serve(async (req) => {
         pipeboard_conexao: driver === "pipeboard" ? pipeboardMonitor : null,
       },
     );
+    let carimboReleituraUpdate: string | null = null;
     if (sucesso) {
       executadasNaHora++;
       executadasNaHoraPorEmpresa.set(r.company_id, executadasNaHora);
@@ -5862,6 +5939,14 @@ Deno.serve(async (req) => {
           }
         }
       }
+      const releitura = await conferirOQueFicou({
+        approvalId: String(r.id),
+        objetoId: String(alvoExt),
+        nivel: nivelDaAcao(acao) ?? "conjunto",
+        enviado: (post ?? {}) as Record<string, unknown>,
+        anterior: (antes.body && typeof antes.body === "object") ? antes.body as Record<string, unknown> : null,
+      });
+      carimboReleituraUpdate = releitura.carimbo;
       if (opts?.persistencia !== "ritmo") {
       await supa
         .from("approval_requests")
@@ -5869,7 +5954,9 @@ Deno.serve(async (req) => {
           executed_at: new Date().toISOString(),
           ultima_falha: null, // sucesso apaga a falha da tentativa anterior
           execution_result: {
-            ok: true,
+            ok: releitura.carimbo === "conferido",
+            releitura: releitura.carimbo,
+            campos_releitura: releitura.visiveis,
             antes: antes.body,
             depois: alvoLido,
             driver_escrita: driver,
@@ -5886,7 +5973,7 @@ Deno.serve(async (req) => {
       id: r.id,
       acao,
       alvo: alvoNome,
-      resultado: sucesso ? "EXECUTADO" : "falha_meta",
+      resultado: sucesso ? (carimboReleituraUpdate ?? "EXECUTADO") : "falha_meta",
       antes: (antes.body as any)?.status,
       depois: (alvoLido as any)?.status ?? null,
       driver_escrita: driver,
