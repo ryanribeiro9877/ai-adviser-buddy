@@ -6624,12 +6624,12 @@ async function runTool(name: string, args: any, ctx: any) {
 // Regra de uso de UMA ferramenta desceu para a camada 2 ou 3. Nada de doutrina de incidente
 // foi descartado: o que saiu daqui esta no registro, e o que era a MESMA regra escrita em tres
 // lugares passou a existir uma vez so.
-function systemPrompt(companyName: string, memoria: string, estilo: string, indiceConhecimento: string, companyId?: string) {
+function systemPrompt(companyName: string, memoria: string, estilo: string, indiceConhecimento: string, companyId?: string, nomeGestor = "gestor") {
   const legal = empresaEhCredito(companyId) || norm(companyName).includes("legal");
   const perfil = legal
     ? "Empresa de credito consignado; aplique regras financeiras/Categoria Especial quando os dados da campanha confirmarem esse produto. Fatos de outras empresas do portfolio NAO se aplicam."
     : "Empresa NAO e de credito consignado. Nao aplique consignado, CET, FIN-*, benchmarks, identidades, produtos ou contas de outra empresa. Use so brand_identity/config/memoria DESTA empresa.";
-  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()} (fuso de Brasilia). Responde ao gestor desta empresa em portugues brasileiro. O nome da pessoa, se houver, vem da configuracao da empresa — nao invente um nome.
+  return `Voce e o Gestor de Trafego IA da ${companyName}. Hoje e ${today()} (fuso de Brasilia). Responde a ${nomeGestor} em portugues brasileiro. Nao use o nome de outra empresa.
 PERFIL EMPRESARIAL: ${perfil}
 HOJE e essa data e mais nenhuma: NUNCA redefina 'hoje' a partir do ultimo dia com dado. A coleta fecha em D-1, entao o ultimo dia coletado costuma ser ONTEM; chamar esse dia de 'hoje' e ERRO. Ao declarar uma janela, diga a data de hoje e, separadamente, qual foi o ultimo dia com dado.
 
@@ -7567,8 +7567,10 @@ Deno.serve(async (req) => {
   // v20: prompt caching. O bloco de agentes vai DEPOIS do bloco marcado, e nao dentro dele:
   // o prefixo cacheado precisa ser byte a byte o mesmo entre turnos, e a lista de agentes muda
   // a cada pergunta. Misturar os dois trocaria o desconto de 0,1x por nada.
+  const { data: cfgGestor } = await supa.from("meta_execution_config").select("gestor_nome").eq("company_id", company.id).maybeSingle();
+  const nomeGestor = String((cfgGestor as { gestor_nome?: string } | null)?.gestor_nome ?? "").trim() || "gestor";
   const cacheSystem = [
-    { type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento, company.id),
+    { type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento, company.id, nomeGestor),
       cache_control: { type: "ephemeral" } },
     ...(blocoAgentes ? [{ type: "text", text: blocoAgentes }] : []),
   ];
