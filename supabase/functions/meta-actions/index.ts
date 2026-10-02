@@ -1,4 +1,10 @@
-// supabase/functions/meta-actions/index.ts (v5.65)
+// supabase/functions/meta-actions/index.ts (v5.66)
+// v5.66 (02/10/2026) - ESCRITA SAI PELO PIPEBOARD. O ultimo elo de driverParaAcao
+//   deixa de ser graph: sem override e sem driver_escrita explicito, o passo e pipeboard.
+//   Graph explicito continua valendo no codigo (o ramo nao sai). A trava que impede o card
+//   e resolver_driver: so vincular_instagram_dos_anuncios e graph-only. Carrossel ficou na
+//   Graph porque create_ad_creative com child_attachments e dry_run devolveu
+//   "No media provided" (02/10/2026, id nulo). forcarGraph permanece so nesse spec.
 // v5.65 (18/09/2026) - ALTERAR IDADE DO CONJUNTO PUBLICADO. O gestor perguntou
 //   se da para mudar age_min/age_max em conjunto ACTIVE ja criado. A Meta aceita
 //   POST /{adset_id} targeting (mesmo update_adset da geo/publico). Entra
@@ -119,8 +125,9 @@
 //   Hard-block de identidades proibidas em resolverIdentidadeInstagram. Campo do spec
 //   continua pelo FORMATO do id (IBA 1784... → instagram_user_id; legado → instagram_actor_id).
 // v5.23 (12/08/2026) - ESP-29: driver de transporte resolvido POR ACAO (driverParaAcao):
-//   override em meta_execution_config.driver_por_acao > driver_escrita (empresa) > graph.
-//   pode_executar_acao/resolver_driver aplicam a matriz de capacidade (renomear=pipeboard-only).
+//   override em meta_execution_config.driver_por_acao > driver_escrita (empresa) > pipeboard.
+//   pode_executar_acao/resolver_driver aplicam a matriz de capacidade
+//   (graph so em vincular_instagram_dos_anuncios; carrossel continua na Graph por forcarGraph).
 // v5.32 (21/08/2026) - NOME LIVRE: criar/renomear aceitam nome_novo/novo_nome free-form.
 //   nome_partes deixa de ser obrigatorio; padrao estruturado e so metadado/sugestao opcional.
 // v5.22 (12/08/2026) - ESP-39: testes vs escala em campanhas separadas (negocio).
@@ -704,7 +711,7 @@ async function escreverCriacao(
     tool = "create_adset";
     args = argsAdsetDeGraph(conta, body);
   } else if (acao === "criar_criativo") {
-    return escreverCreative("graph", conta, path, body, pbToken);
+    return escreverCreative(driver, conta, path, body, pbToken);
   } else {
     return {
       status: 0,
@@ -736,8 +743,11 @@ async function escreverCreative(
   body: Record<string, string>,
   pbToken: string,
 ): Promise<ResultadoEscrita> {
-  // Carrossel: Pipeboard create_ad_creative nao monta child_attachments completo.
-  // Forca Graph quando o object_story_spec traz 2+ slides.
+  // Carrossel: em 02/10/2026 create_ad_creative com child_attachments e dry_run=true
+  // devolveu "No media provided. Specify image_hash, image_hashes, video_id, videos,
+  // images, or object_story_id." O schema lista child_attachments e mesmo assim nao
+  // conta como midia. id nulo, nada persistido. Por isso o spec com 2+ slides segue
+  // na Graph. Imagem e video deste mesmo caminho respeitam o driver resolvido.
   const forcarGraph = specTemCarrossel(body.object_story_spec);
   const driverEfetivo: DriverEscrita = forcarGraph ? "graph" : driver;
 
@@ -4367,8 +4377,9 @@ Deno.serve(async (req) => {
     const flagsOk = conf.master_enabled === true && conf.action_flags?.[acao] === true;
     const rateOk = executadasNaHora < conf.max_actions_per_hour;
     // v5/ESP-29: driver resolvido POR ACAO — override (driver_por_acao) > empresa
-    // (driver_escrita) > graph, mesmo criterio de resolver_driver/pode_executar_acao.
-    // Diz por ONDE o ultimo passo sai, nunca SE sai.
+    // (driver_escrita) > pipeboard, mesmo criterio de resolver_driver/pode_executar_acao.
+    // Diz por ONDE o ultimo passo sai, nunca SE sai. Graph numa acao fora da excecao
+    // nao nasce card: a lista de permitidos recusa.
     const driver = driverParaAcao(conf, acao);
 
     // ==================== CAMINHO DE CRIACAO (v2) ====================

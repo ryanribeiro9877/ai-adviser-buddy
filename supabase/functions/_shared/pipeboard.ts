@@ -7,15 +7,15 @@ const PIPEBOARD_URL = "https://meta-ads.mcp.pipeboard.co/";
 export type DriverEscrita = "graph" | "pipeboard";
 
 export function driverDe(cfg: { driver_escrita?: unknown } | null | undefined): DriverEscrita {
-  // CHECK no banco so permite graph|pipeboard. Qualquer outra coisa cai em graph
-  // (default seguro) em vez de inventar string livre.
-  return cfg?.driver_escrita === "pipeboard" ? "pipeboard" : "graph";
+  // So "graph" explicito fica na Graph. Ausente, pipeboard ou qualquer outro valor
+  // cai em pipeboard: e o driver de escrita. A trava de capacidade mora em resolver_driver.
+  return cfg?.driver_escrita === "graph" ? "graph" : "pipeboard";
 }
 
 // ESP-29: driver POR ACAO. Precedencia: override (driver_por_acao[acao]) > empresa
-// (driver_escrita) > graph. Mesmo criterio do RPC resolver_driver. So normaliza o
-// transporte do ultimo passo; a matriz de capacidade (ex.: renomear_campanha e
-// pipeboard-only) e conferida no RPC pode_executar_acao/resolver_driver.
+// (driver_escrita) > pipeboard. So normaliza o transporte do ultimo passo; a matriz
+// de capacidade (graph so em vincular_instagram_dos_anuncios; criar_criativo aceita
+// os dois porque o carrossel ainda sai pela Graph) e conferida no RPC resolver_driver.
 export function driverParaAcao(
   cfg: { driver_escrita?: unknown; driver_por_acao?: unknown } | null | undefined,
   acao: string,
@@ -27,7 +27,7 @@ export function driverParaAcao(
   const bruto = override != null && String(override).trim() !== ""
     ? String(override)
     : (cfg?.driver_escrita as unknown);
-  return bruto === "pipeboard" ? "pipeboard" : "graph";
+  return bruto === "graph" ? "graph" : "pipeboard";
 }
 
 export async function pipeboardToken(
