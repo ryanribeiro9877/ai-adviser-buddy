@@ -26,6 +26,8 @@ import { caminhoNosso, textoSemMiniatura, urlDoDrive } from "@/lib/miniatura";
 import { FrescorDoEspelho } from "@/components/frescor-do-espelho";
 import { PreviaAnuncio } from "@/components/previa-anuncio";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { BibliotecaDeCriativosPainel } from "@/components/biblioteca-de-criativos";
 import { matchesStatus, validateFilterSearch } from "@/lib/filters";
 import { Image as ImageIcon, ExternalLink } from "lucide-react";
 
@@ -230,6 +232,12 @@ function Anuncios() {
         <FrescorDoEspelho companyId={selectedCompany.id} />
       </div>
 
+      <Tabs defaultValue="ar">
+        <TabsList>
+          <TabsTrigger value="ar">No ar</TabsTrigger>
+          <TabsTrigger value="biblioteca">Biblioteca</TabsTrigger>
+        </TabsList>
+        <TabsContent value="ar" className="space-y-4">
       <div className="flex gap-2">
         <Button type="button" size="sm" variant={ordem === "recentes" ? "default" : "outline"} onClick={() => setOrdem("recentes")}>
           Mais recentes
@@ -321,6 +329,11 @@ function Anuncios() {
         aberto={!!previa}
         onFechar={() => setPrevia(null)}
       />
+        </TabsContent>
+        <TabsContent value="biblioteca">
+          <BibliotecaDeCriativosPainel />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

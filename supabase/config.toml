@@ -141,3 +141,7 @@ verify_jwt = false
 # verify_jwt fica ligado: sem sessão o gateway nem chega na função.
 [functions.ad-preview]
 verify_jwt = true
+
+# Biblioteca de criativos: só leitura. O navegador manda o JWT.
+[functions.listar-ativos-orfaos]
+verify_jwt = true
