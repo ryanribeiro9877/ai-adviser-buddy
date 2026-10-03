@@ -129,4 +129,42 @@ const vantagem = compararEnviadoComGravado({
 });
 assert(campo(vantagem, "advantage_audience")?.veredito === "igual", "advantage_audience 0 sobrevive");
 
+const criativo = compararEnviadoComGravado({
+  enviado: {
+    name: "AD_C1_SETEMBRO_05",
+    adset_id: "120250316784130182",
+    status: "ACTIVE",
+    creative: JSON.stringify({ creative_id: "1107373791650428" }),
+  },
+  gravado: {
+    name: "AD_C1_SETEMBRO_05",
+    adset_id: "120250316784130182",
+    status: "ACTIVE",
+    creative: { id: "1107373791650428" },
+  },
+});
+const criativoId = criativo.find((c) => c.campo === "creative.creative_id");
+assert(criativoId?.veredito === "igual", `creative.id igual a creative_id devia ser igual, veio ${criativoId?.veredito}`);
+assert(String(criativoId?.valor_gravado) === "1107373791650428", "valor gravado e o id da Graph");
+assert(carimboDaReleitura(criativo, true) === "conferido", "alias creative_id/id nao fecha o card como falha");
+
+const criativoTrocado = compararEnviadoComGravado({
+  enviado: { creative: JSON.stringify({ creative_id: "111" }) },
+  gravado: { creative: { id: "222" } },
+});
+assert(campo(criativoTrocado, "creative_id")?.veredito === "divergente", "creative.id diferente continua divergente");
+assert(carimboDaReleitura(criativoTrocado, true) === "gravado_diferente", "criativo trocado nao fecha limpo");
+
+const criativoAusente = compararEnviadoComGravado({
+  enviado: { creative: JSON.stringify({ creative_id: "111" }) },
+  gravado: { name: "sem criativo" },
+});
+assert(campo(criativoAusente, "creative_id")?.veredito === "divergente", "criativo ausente continua divergente");
+
+const idDoAnuncio = compararEnviadoComGravado({
+  enviado: { creative_id: "111" },
+  gravado: { id: "111", name: "anuncio" },
+});
+assert(campo(idDoAnuncio, "creative_id")?.veredito === "divergente", "id do anuncio nao substitui creative_id na raiz");
+
 console.log("OK releitura_pos_escrita");

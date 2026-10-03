@@ -138,6 +138,25 @@ function empurrar(
   saida.push({ campo, valor_enviado, valor_gravado, veredito });
 }
 
+/**
+ * O POST de anúncio manda `creative: { creative_id }`. A Graph devolve `creative: { id }`
+ * com o mesmo número. Sem este alias a releitura marca divergência e o card fecha como
+ * escrita parcial mesmo com o criativo certo no anúncio.
+ */
+function valorGravadoDaChave(
+  chave: string,
+  caminhoPai: string,
+  gra: Record<string, unknown>,
+): unknown {
+  const direto = gra[chave];
+  if (direto != null && direto !== "") return direto;
+  const noCriativo = caminhoPai === "creative" || caminhoPai.endsWith(".creative");
+  if (chave === "creative_id" && noCriativo && gra.id != null && String(gra.id).trim() !== "") {
+    return gra.id;
+  }
+  return direto;
+}
+
 function compararNo(
   enviado: unknown,
   gravado: unknown,
@@ -167,7 +186,14 @@ function compararNo(
       : null;
     for (const k of Object.keys(env)) {
       if (IGNORAR.has(k)) continue;
-      compararNo(env[k], gra[k], ant ? ant[k] : undefined, caminho ? `${caminho}.${k}` : k, saida, true);
+      compararNo(
+        env[k],
+        valorGravadoDaChave(k, caminho, gra),
+        ant ? ant[k] : undefined,
+        caminho ? `${caminho}.${k}` : k,
+        saida,
+        true,
+      );
     }
     if (checarOmissao && ant) {
       for (const k of Object.keys(ant)) {

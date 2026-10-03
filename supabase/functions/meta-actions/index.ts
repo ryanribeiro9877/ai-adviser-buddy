@@ -1,4 +1,8 @@
-// supabase/functions/meta-actions/index.ts (v5.66)
+// supabase/functions/meta-actions/index.ts (v5.68)
+// v5.68 (03/10/2026) - RELEITURA DE ANUNCIO. O POST manda creative.creative_id e a
+//   Graph devolve creative.id. A conferencia tratava isso como divergencia, fechava
+//   ok=false e o card dizia escrita parcial com o anuncio ja criado. O alias so vale
+//   dentro de creative; id diferente ou criativo ausente continua divergente.
 // v5.67 (02/10/2026) - CARROSSEL E ACAO, NAO SPEC. criar_criativo_carrossel sai pela
 //   Graph; criar_criativo e pipeboard-only. specTemCarrossel nao escolhe mais driver.
 //   Dois ou mais slides em criar_criativo sao recusados antes do card, apontando a acao
