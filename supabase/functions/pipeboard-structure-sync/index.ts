@@ -3,8 +3,12 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { pipeboardCall, pipeboardListTools, pipeboardToken } from "../_shared/pipeboard.ts";
+import { recuperarMiniaturas } from "../_shared/miniatura_criativo.ts";
 import {
+  argumentosComCampos,
   buildStructureArgs,
+  CAMPOS_ANUNCIO_PIPEBOARD,
+  CAMPOS_CRIATIVO_PIPEBOARD,
   collectStructureRows,
   firstStructureObject,
   mapPipeboardAd,
@@ -74,7 +78,7 @@ async function listAll(
   schema: ToolDef | null,
   accountId: string,
   token: string,
-  options: { campaignId?: string; adsetId?: string; deadline?: number } = {},
+  options: { campaignId?: string; adsetId?: string; deadline?: number; fields?: string } = {},
 ) {
   const { deadline, ...listOpts } = options;
   const rows: any[] = [];
@@ -106,6 +110,7 @@ async function enrich(
   idField: "campaign_id" | "adset_id" | "ad_id",
   token: string,
   deadline?: number,
+  campos?: string,
 ) {
   if (!detailSchema) return rows;
   const output: any[] = [];
@@ -121,8 +126,9 @@ async function enrich(
         if (!id) return row;
         try {
           const properties = detailSchema.inputSchema?.properties ?? {};
-          const args: Record<string, unknown> = {};
+          let args: Record<string, unknown> = {};
           if (Object.hasOwn(properties, idField)) args[idField] = id;
+          if (campos) args = argumentosComCampos(properties, args, campos);
           const detail = firstStructureObject(await callRetry(detailName, args, token));
           return detail ? { ...row, ...detail, id: detail.id ?? id } : row;
         } catch (error) {
@@ -141,6 +147,7 @@ async function enrichCreatives(
   creativeSchema: ToolDef | null,
   token: string,
   deadline?: number,
+  campos?: string,
 ) {
   if (!creativeSchema) return rows;
   const output: any[] = [];
@@ -156,8 +163,9 @@ async function enrichCreatives(
         if (!creativeId) return row;
         try {
           const properties = creativeSchema.inputSchema?.properties ?? {};
-          const args: Record<string, unknown> = {};
+          let args: Record<string, unknown> = {};
           if (Object.hasOwn(properties, "creative_id")) args.creative_id = creativeId;
+          if (campos) args = argumentosComCampos(properties, args, campos);
           const creative = firstStructureObject(await callRetry("get_creative_details", args, token));
           return creative ? { ...row, creative: { id: creativeId, ...creative } } : row;
         } catch {
@@ -198,6 +206,13 @@ Deno.serve(async (req) => {
   } catch {
     // defaults
   }
+  if (body?.recuperar_miniaturas === true) {
+    const limite = Math.min(25, Math.max(1, Number(body?.lote ?? 12) || 12));
+    const relatorio = await recuperarMiniaturas(supa, { limite, deadline: Date.now() + PRAZO_MS });
+    const selectFalhou = relatorio.erros.length > 0 && relatorio.processados === 0 && relatorio.candidatos === 0;
+    return json({ ok: !selectFalhou, source: "graph+storage", ...relatorio }, selectFalhou ? 500 : 200);
+  }
+
   const level = String(body?.level ?? "campaigns") as Level;
   if (!["campaigns", "adsets", "ads"].includes(level)) {
     return json({ error: "level_invalido", aceitos: ["campaigns", "adsets", "ads"] }, 400);
@@ -371,6 +386,7 @@ Deno.serve(async (req) => {
           ...(await listAll("get_ads", tool(tools, "get_ads"), accountId, token, {
             campaignId: campaignExternalId,
             deadline: prazoAte,
+            fields: CAMPOS_ANUNCIO_PIPEBOARD,
           })),
         );
       }
@@ -383,11 +399,18 @@ Deno.serve(async (req) => {
           "ad_id",
           token,
           prazoAte,
+          CAMPOS_ANUNCIO_PIPEBOARD,
         )
         : listedRows;
       if (restam <= 20_000) truncado = true;
       const rows = restam > 12_000
-        ? await enrichCreatives(detailed, tool(tools, "get_creative_details"), token, prazoAte)
+        ? await enrichCreatives(
+          detailed,
+          tool(tools, "get_creative_details"),
+          token,
+          prazoAte,
+          CAMPOS_CRIATIVO_PIPEBOARD,
+        )
         : detailed;
       const unique = uniqueById(rows, "ad_id");
       const rejected: string[] = [];
@@ -409,7 +432,17 @@ Deno.serve(async (req) => {
         ? await supa.from("ads").upsert(mapped, { onConflict: "provider,external_id" })
         : { error: null };
       if (error) throw error;
-      reports.push({ company_id: companyId, account_id: accountId, level, found: rows.length, unique: unique.length, upserted: mapped.length, rejected });
+      const miniaturas = await recuperarMiniaturas(supa, { limite: 6, deadline: prazoAte });
+      reports.push({
+        company_id: companyId,
+        account_id: accountId,
+        level,
+        found: rows.length,
+        unique: unique.length,
+        upserted: mapped.length,
+        rejected,
+        miniaturas,
+      });
     } catch (error) {
       const msg = String((error as Error).message ?? error);
       reports.push({

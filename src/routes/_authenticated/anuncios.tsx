@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { GlobalFilters } from "@/components/global-filters";
 import { useGlobalFilters } from "@/hooks/use-filters";
 import { useAds, useCampaignBreakdown } from "@/hooks/use-breakdown";
+import { useDrivePorVideo, useMiniaturasAssinadas } from "@/hooks/use-miniaturas";
 import {
   fmtBRL,
   fmtInt,
@@ -21,7 +22,9 @@ import {
   type OrdemDaLista,
   type TipoConta,
 } from "@/lib/breakdown";
+import { caminhoNosso, textoSemMiniatura, urlDoDrive } from "@/lib/miniatura";
 import { FrescorDoEspelho } from "@/components/frescor-do-espelho";
+import { PreviaAnuncio } from "@/components/previa-anuncio";
 import { Button } from "@/components/ui/button";
 import { matchesStatus, validateFilterSearch } from "@/lib/filters";
 import { Image as ImageIcon, ExternalLink } from "lucide-react";
@@ -49,27 +52,42 @@ function AdCard({
   ad,
   campanhaStatus,
   campanhaEfetivo,
+  src,
+  driveUrl,
+  onVer,
 }: {
   ad: AdRow;
   campanhaStatus: string | null;
   campanhaEfetivo: string | null;
+  src: string | null;
+  driveUrl: string | null;
+  onVer: () => void;
 }) {
   const st = seloDeEntrega({
     status: ad.status,
     effectiveStatus: ad.effective_status,
     campaignStatus: campanhaStatus,
     campaignEffective: campanhaEfetivo,
+    exigeEfetivo: true,
   });
-  const thumb = ad.thumbnail_url || ad.image_url;
+  const problema = String(ad.effective_status ?? "").toUpperCase() === "WITH_ISSUES";
   return (
-    <Card className="p-4 flex flex-col">
+    <Card className={`p-4 flex flex-col ${problema ? "border-destructive ring-1 ring-destructive/40" : ""}`}>
       <div className="aspect-video rounded-lg overflow-hidden bg-accent/40 flex items-center justify-center">
-        {thumb ? (
-          <img src={thumb} alt={ad.name} className="h-full w-full object-cover" loading="lazy" />
+        {src ? (
+          <img src={src} alt={ad.name} className="h-full w-full object-cover" loading="lazy" />
         ) : (
-          <ImageIcon className="h-6 w-6 text-muted-foreground" />
+          <div data-testid="lugar-vazio" className="px-4 text-center">
+            <div className="text-sm font-medium line-clamp-3">{ad.name}</div>
+            <p className="mt-1 text-xs text-muted-foreground">{textoSemMiniatura(ad.miniatura_motivo)}</p>
+          </div>
         )}
       </div>
+      {problema && (
+        <p className="mt-3 text-xs text-destructive">
+          Com problema na Meta. Pode derrubar a entrega do conjunto inteiro.
+        </p>
+      )}
       <div className="mt-3 flex items-start justify-between gap-2">
         <div className="font-semibold text-sm line-clamp-2">{ad.name}</div>
         <Badge variant={st.variant} className="shrink-0">
@@ -84,34 +102,58 @@ function AdCard({
       </div>
       <div className="grid grid-cols-4 gap-2 mt-3">
         <Stat label="Gasto" value={fmtBRL(ad.spend)} />
-        {/* Formulário e conversa aparecem separados: o anúncio não tem "lead" genérico, e a
-            coluna que somava os dois parou de ser atualizada em julho de 2026. */}
         <Stat label="Formulários" value={fmtInt(ad.form_leads)} />
         <Stat label="Conversas" value={fmtInt(ad.messaging_started)} />
         <Stat label="CTR" value={ctr(ad)} />
       </div>
-      {ad.permalink_url && (
-        <a
-          href={ad.permalink_url}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-3 inline-flex items-center gap-1 text-xs text-primary hover:underline"
-        >
-          <ExternalLink className="h-3.5 w-3.5" /> Ver post
-        </a>
-      )}
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Button type="button" size="sm" variant="outline" onClick={onVer}>
+          Ver anúncio
+        </Button>
+        {driveUrl && (
+          <a
+            href={driveUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          >
+            <ExternalLink className="h-3.5 w-3.5" /> Abrir no Drive
+          </a>
+        )}
+        {ad.permalink_url && (
+          <a
+            href={ad.permalink_url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+          >
+            <ExternalLink className="h-3.5 w-3.5" /> Ver post
+          </a>
+        )}
+      </div>
     </Card>
   );
+}
+
+function estadoDoFiltro(ad: AdRow, camp: { status: string; effective: string | null } | undefined) {
+  return {
+    status: ad.status,
+    effectiveStatus: ad.effective_status,
+    campaignStatus: camp?.status,
+    campaignEffective: camp?.effective,
+    exigeEfetivo: true,
+  };
 }
 
 function Anuncios() {
   const { selectedCompany } = useApp();
   const { filters } = useGlobalFilters();
   const [ordem, setOrdem] = useState<OrdemDaLista>("recentes");
+  const [previa, setPrevia] = useState<AdRow | null>(null);
   const adsQ = useAds(selectedCompany?.id ?? null);
   const metaQ = useCampaignBreakdown(selectedCompany?.id ?? null);
+  const drivesQ = useDrivePorVideo(selectedCompany?.id ?? null);
 
-  // tipo (categoria) vem da campanha-mãe (ads não carregam categoria).
   const tipoByCampaign = useMemo(() => {
     const m = new Map<string, TipoConta>();
     for (const c of metaQ.data ?? []) m.set(c.campaign_id, c.tipo);
@@ -131,25 +173,51 @@ function Anuncios() {
     return TIPO_ORDER.filter((t) => present.has(t));
   }, [metaQ.data]);
 
+  const daEmpresa = useMemo(() => {
+    return (adsQ.data ?? []).filter(
+      (a) => filters.tipo === "all" || tipoByCampaign.get(a.campaign_id ?? "") === filters.tipo,
+    );
+  }, [adsQ.data, filters.tipo, tipoByCampaign]);
+
+  const comProblema = useMemo(
+    () => daEmpresa.filter((a) => String(a.effective_status ?? "").toUpperCase() === "WITH_ISSUES"),
+    [daEmpresa],
+  );
+
   const ads = useMemo(() => {
-    const filtrados = (adsQ.data ?? []).filter((a) => {
+    const filtrados = daEmpresa.filter((a) => {
+      if (String(a.effective_status ?? "").toUpperCase() === "WITH_ISSUES") return false;
       const camp = campanhaById.get(a.campaign_id ?? "");
-      return (
-        matchesStatus(
-          statusParaFiltro({
-            status: a.status,
-            effectiveStatus: a.effective_status,
-            campaignStatus: camp?.status,
-            campaignEffective: camp?.effective,
-          }),
-          filters.status,
-        ) && (filters.tipo === "all" || tipoByCampaign.get(a.campaign_id ?? "") === filters.tipo)
-      );
+      return matchesStatus(statusParaFiltro(estadoDoFiltro(a, camp)), filters.status);
     });
     return ordenarLinhas(filtrados, ordem);
-  }, [adsQ.data, filters.status, filters.tipo, tipoByCampaign, campanhaById, ordem]);
+  }, [daEmpresa, filters.status, campanhaById, ordem]);
+
+  const caminhos = useMemo(() => {
+    const ids = new Set<string>();
+    for (const ad of [...comProblema, ...ads]) {
+      const caminho = caminhoNosso(ad.thumbnail_url);
+      if (caminho) ids.add(caminho);
+    }
+    return [...ids];
+  }, [comProblema, ads]);
+  const assinadasQ = useMiniaturasAssinadas(caminhos);
+  const assinadas = assinadasQ.data ?? {};
+
+  function srcDe(ad: AdRow): string | null {
+    const caminho = caminhoNosso(ad.thumbnail_url);
+    return caminho ? assinadas[caminho] ?? null : null;
+  }
+
+  function driveDe(ad: AdRow): string | null {
+    const video = ad.meta_video_id;
+    if (!video) return null;
+    return urlDoDrive(drivesQ.data?.get(video) ?? null);
+  }
 
   if (!selectedCompany) return <EmptyCompany />;
+
+  const mostrarGrade = !adsQ.isLoading && !adsQ.isError && (ads.length > 0 || comProblema.length > 0);
 
   return (
     <div className="space-y-4">
@@ -185,29 +253,74 @@ function Anuncios() {
           erro={adsQ.error}
           onTentarDeNovo={() => adsQ.refetch()}
         />
-      ) : ads.length === 0 ? (
+      ) : !mostrarGrade ? (
         <Card className="p-10 text-center">
           <ImageIcon className="h-8 w-8 mx-auto text-muted-foreground/60" />
-          <div className="mt-3 font-medium">Nenhum anúncio para esta empresa</div>
+          <div className="mt-3 font-medium">
+            {(adsQ.data?.length ?? 0) > 0 ? "Nenhum anúncio entregando com este filtro" : "Nenhum anúncio para esta empresa"}
+          </div>
           <p className="mt-1 text-sm text-muted-foreground max-w-md mx-auto">
-            Esta empresa não tem criativos com entrega no período.
+            {(adsQ.data?.length ?? 0) > 0
+              ? "O filtro Ativas só mostra anúncio que está entregando. Pausado, encerrado ou sem estado coletado fica de fora."
+              : "Esta empresa não tem criativos com entrega no período."}
           </p>
         </Card>
       ) : (
-        <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {ads.map((ad) => {
-            const camp = campanhaById.get(ad.campaign_id ?? "");
-            return (
-              <AdCard
-                key={ad.id}
-                ad={ad}
-                campanhaStatus={camp?.status ?? null}
-                campanhaEfetivo={camp?.effective ?? null}
-              />
-            );
-          })}
-        </div>
+        <>
+          {comProblema.length > 0 && (
+            <section data-testid="anuncios-com-problema" className="space-y-3">
+              <h2 className="text-sm font-semibold text-destructive">
+                Com problemas na Meta · {comProblema.length}
+              </h2>
+              <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {comProblema.map((ad) => {
+                  const camp = campanhaById.get(ad.campaign_id ?? "");
+                  return (
+                    <AdCard
+                      key={ad.id}
+                      ad={ad}
+                      campanhaStatus={camp?.status ?? null}
+                      campanhaEfetivo={camp?.effective ?? null}
+                      src={srcDe(ad)}
+                      driveUrl={driveDe(ad)}
+                      onVer={() => setPrevia(ad)}
+                    />
+                  );
+                })}
+              </div>
+            </section>
+          )}
+          {ads.length > 0 ? (
+            <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {ads.map((ad) => {
+                const camp = campanhaById.get(ad.campaign_id ?? "");
+                return (
+                  <AdCard
+                    key={ad.id}
+                    ad={ad}
+                    campanhaStatus={camp?.status ?? null}
+                    campanhaEfetivo={camp?.effective ?? null}
+                    src={srcDe(ad)}
+                    driveUrl={driveDe(ad)}
+                    onVer={() => setPrevia(ad)}
+                  />
+                );
+              })}
+            </div>
+          ) : (
+            <Card className="p-6 text-center text-sm text-muted-foreground">
+              Nenhum anúncio entregando com este filtro.
+            </Card>
+          )}
+        </>
       )}
+
+      <PreviaAnuncio
+        adId={previa?.id ?? null}
+        nome={previa?.name ?? ""}
+        aberto={!!previa}
+        onFechar={() => setPrevia(null)}
+      />
     </div>
   );
 }

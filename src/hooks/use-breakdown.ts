@@ -131,7 +131,7 @@ export function useAds(companyId: string | null) {
           .select(
             // `leads` saiu: coluna sem base declarada e sem escritor vivo. Formulario e conversa
             // vem separados, cada um com o nome do que e.
-            "id,name,status,effective_status,object_type,call_to_action_type,title,body,thumbnail_url,image_url,permalink_url,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,sales,revenue,campaign_id,created_at,last_synced_at",
+            "id,name,status,effective_status,object_type,call_to_action_type,title,body,thumbnail_url,image_url,miniatura_motivo,meta_video_id,permalink_url,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,sales,revenue,campaign_id,created_at,last_synced_at",
           )
           .eq("company_id", companyId!)
           .is("ausente_na_graph_em", null)
@@ -148,6 +148,8 @@ export function useAds(companyId: string | null) {
         body: r.body ?? null,
         thumbnail_url: r.thumbnail_url ?? null,
         image_url: r.image_url ?? null,
+        miniatura_motivo: r.miniatura_motivo ?? null,
+        meta_video_id: r.meta_video_id ?? null,
         permalink_url: r.permalink_url ?? null,
         spend: num(r.spend),
         impressions: num(r.impressions),

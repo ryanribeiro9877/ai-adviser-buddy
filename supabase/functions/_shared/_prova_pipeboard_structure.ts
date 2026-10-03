@@ -1,10 +1,13 @@
 import {
+  argumentosComCampos,
   buildStructureArgs,
+  CAMPOS_CRIATIVO_PIPEBOARD,
   collectStructureRows,
   firstStructureObject,
   mapPipeboardAd,
   mapPipeboardAdset,
   mapPipeboardCampaign,
+  urlDaMiniatura,
 } from "./pipeboard_structure.ts";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -120,6 +123,7 @@ const ad = mapPipeboardAd(
       object_story_spec: {
         page_id: "105656372312257",
         video_data: {
+          video_id: "999001",
           message: "Corpo do anuncio",
           title: "Titulo do anuncio",
           image_url: "https://cdn/img.jpg",
@@ -141,8 +145,9 @@ assert(ad.body === "Corpo do anuncio", "legenda do criativo");
 assert(ad.title === "Titulo do anuncio", "titulo do criativo");
 assert(ad.call_to_action_type === "CONTACT_US", "CTA do criativo");
 assert(ad.destination_url === "https://wa.me/5571993451315", "destino WhatsApp do criativo");
-assert(ad.image_url === "https://cdn/img.jpg", "image_url do criativo");
-assert(ad.thumbnail_url === "https://cdn/thumb.jpg", "thumbnail do criativo");
+assert(!("thumbnail_url" in ad), "nao grava a URL da Meta no espelho");
+assert(!("image_url" in ad), "nao grava image_url de CDN");
+assert(ad.meta_video_id === "999001", "video_id do criativo para o Drive");
 assert(ad.preview_url === "https://fb.me/preview", "preview do anuncio");
 
 const dinamico = mapPipeboardAd(
@@ -170,5 +175,31 @@ const dinamico = mapPipeboardAd(
 );
 assert(dinamico.body === "Legenda digitada no Gerenciador", "body sai de asset_feed_spec.bodies");
 assert(dinamico.title === "Titulo do feed", "title sai de asset_feed_spec.titles");
+
+const comFields = buildStructureArgs(
+  { properties: { account_id: {}, fields: {}, access_token: {} } },
+  "1622612945584817",
+  { fields: CAMPOS_CRIATIVO_PIPEBOARD },
+);
+assert(String(comFields.fields).includes("thumbnail_url"), "pede thumbnail_url pelo nome");
+assert(String(comFields.fields).includes("image_url"), "pede image_url pelo nome");
+assert(String(comFields.fields).includes("image_hash"), "pede image_hash pelo nome");
+assert(String(comFields.fields).includes("object_story_spec"), "pede object_story_spec pelo nome");
+assert(!("access_token" in comFields), "fields nao reabre access_token");
+const semFields = buildStructureArgs(
+  { properties: { account_id: {} } },
+  "1622612945584817",
+  { fields: CAMPOS_CRIATIVO_PIPEBOARD },
+);
+assert(!("fields" in semFields), "nao manda fields se o schema nao aceita");
+const viaHelper = argumentosComCampos({ fields: {} }, { creative_id: "c1" }, CAMPOS_CRIATIVO_PIPEBOARD);
+assert(viaHelper.fields === CAMPOS_CRIATIVO_PIPEBOARD, "helper repassa a lista");
+assert(
+  urlDaMiniatura({
+    thumbnail_url: "https://cdn/capa.jpg",
+    image_url: "https://cdn/outra.jpg",
+  }) === "https://cdn/capa.jpg",
+  "a capa do video ganha da image_url",
+);
 
 console.log("ok: _prova_pipeboard_structure");

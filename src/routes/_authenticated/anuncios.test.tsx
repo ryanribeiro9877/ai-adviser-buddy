@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { AdRow, CampaignRow, TipoConta } from "@/lib/breakdown";
 import { withFilterDefaults, type FilterSearch } from "@/lib/filters";
@@ -21,6 +21,11 @@ let carregando = false;
 let falhou = false;
 let modoRecebido = "";
 let tiposRecebidos: TipoConta[] = [];
+let drives = new Map<string, string>();
+const invoke = vi.fn(async () => ({
+  data: { ok: true, src: "https://www.facebook.com/ads/api/preview_iframe.php?d=1" },
+  error: null,
+}));
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (opts: Record<string, unknown>) => ({ options: opts }),
@@ -47,6 +52,18 @@ vi.mock("@/components/frescor-do-espelho", () => ({
   FrescorDoEspelho: () => <div data-testid="frescor" />,
 }));
 
+vi.mock("@/integrations/supabase/client", () => ({
+  supabase: { functions: { invoke: (...args: unknown[]) => invoke(...args) } },
+}));
+
+vi.mock("@/hooks/use-miniaturas", () => ({
+  useMiniaturasAssinadas: (paths: string[]) => ({
+    data: Object.fromEntries(paths.map((p) => [p, `https://signed.local/${p}`])),
+    isError: false,
+  }),
+  useDrivePorVideo: () => ({ data: drives }),
+}));
+
 vi.mock("@/components/global-filters", () => ({
   GlobalFilters: ({ mode, typesPresent }: { mode: string; typesPresent: TipoConta[] }) => {
     modoRecebido = mode;
@@ -70,6 +87,8 @@ function anuncio(over: Partial<AdRow> = {}): AdRow {
     body: null,
     thumbnail_url: null,
     image_url: null,
+    miniatura_motivo: null,
+    meta_video_id: null,
     permalink_url: null,
     spend: 200,
     impressions: 10000,
@@ -131,6 +150,8 @@ beforeEach(() => {
   falhou = false;
   modoRecebido = "";
   tiposRecebidos = [];
+  drives = new Map();
+  invoke.mockClear();
 });
 
 describe("sem empresa", () => {
@@ -191,9 +212,9 @@ describe("cartão do criativo", () => {
   it("mostra nome, status em pt-BR e os resultados SEPARADOS por base", () => {
     // O cartao nao tem mais "Leads"/"CPL": o anuncio nao produz "lead" generico, e a coluna
     // que somava formulario com conversa parou de ser atualizada em julho de 2026.
-    anuncios = [anuncio({ name: "Vídeo Julho", spend: 200, form_leads: 10, messaging_started: 4 })];
+    anuncios = [anuncio({ name: "Vídeo Julho", spend: 200, form_leads: 10, messaging_started: 4, effective_status: "ACTIVE" })];
     render(<Anuncios />);
-    expect(screen.getByText("Vídeo Julho")).toBeInTheDocument();
+    expect(screen.getAllByText("Vídeo Julho").length).toBeGreaterThan(0);
     expect(screen.getByText("Ativo")).toBeInTheDocument();
     expect(screen.getByText(`R$${NB}200,00`)).toBeInTheDocument();
     expect(screen.getByText("Formulários")).toBeInTheDocument();
@@ -214,17 +235,27 @@ describe("cartão do criativo", () => {
     expect(screen.getByText("3.00%")).toBeInTheDocument();
   });
 
-  it("sem imagem mostra o marcador, sem quebrar o cartão", () => {
-    anuncios = [anuncio({ thumbnail_url: null, image_url: null })];
+  it("sem imagem reserva o lugar com o nome e o motivo", () => {
+    anuncios = [anuncio({ thumbnail_url: null, image_url: null, name: "Criativo A", miniatura_motivo: "sem_imagem:99" })];
     const { container } = render(<Anuncios />);
     expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByTestId("lugar-vazio")).toHaveTextContent("Criativo A");
+    expect(screen.getByText("A Meta não devolveu imagem deste criativo")).toBeInTheDocument();
   });
 
-  it("usa a miniatura quando existe, com alt do nome", () => {
-    anuncios = [anuncio({ thumbnail_url: "https://x/thumb.jpg", name: "Criativo A" })];
+  it("URL da Meta não vira a imagem do cartão", () => {
+    anuncios = [anuncio({ thumbnail_url: "https://scontent.xx.fbcdn.net/capa.jpg", name: "Criativo A" })];
+    const { container } = render(<Anuncios />);
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("Miniatura ainda não coletada")).toBeInTheDocument();
+  });
+
+  it("usa o arquivo nosso, com URL assinada e alt do nome", () => {
+    const caminho = "57f755b9-c23d-4f58-a488-8173d697c010/123.jpg";
+    anuncios = [anuncio({ thumbnail_url: caminho, name: "Criativo A" })];
     const { container } = render(<Anuncios />);
     const img = container.querySelector("img")!;
-    expect(img.getAttribute("src")).toBe("https://x/thumb.jpg");
+    expect(img.getAttribute("src")).toBe(`https://signed.local/${caminho}`);
     expect(img.getAttribute("alt")).toBe("Criativo A");
   });
 
@@ -241,18 +272,48 @@ describe("cartão do criativo", () => {
     render(<Anuncios />);
     expect(screen.queryByRole("link", { name: /Ver post/ })).not.toBeInTheDocument();
   });
+
+  it("abre no Drive só quando o vídeo da peça fecha a junção", () => {
+    drives = new Map([["vid-1234567890", "1abCDefghij"]]);
+    anuncios = [
+      anuncio({ id: "a", name: "Com arquivo", meta_video_id: "vid-1234567890" }),
+      anuncio({ id: "b", name: "Sem arquivo", meta_video_id: "outro-video" }),
+    ];
+    render(<Anuncios />);
+    const link = screen.getByRole("link", { name: /Abrir no Drive/ });
+    expect(link).toHaveAttribute("href", "https://drive.google.com/file/d/1abCDefghij/view");
+    expect(screen.getAllByRole("link", { name: /Abrir no Drive/ })).toHaveLength(1);
+  });
+
+  it("Ver anúncio pede a prévia do anúncio clicado", async () => {
+    anuncios = [anuncio({ id: "ad-uuid-1", name: "Criativo A" })];
+    render(<Anuncios />);
+    fireEvent.click(screen.getByRole("button", { name: "Ver anúncio" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    expect(invoke).toHaveBeenCalledWith("ad-preview", {
+      body: { ad_id: "ad-uuid-1", formato: "feed" },
+    });
+    expect(await screen.findByTitle("Prévia de Criativo A")).toHaveAttribute(
+      "src",
+      "https://www.facebook.com/ads/api/preview_iframe.php?d=1",
+    );
+  });
 });
 
 describe("filtros", () => {
   it("status filtra pelas variantes de pausa da Meta", () => {
     anuncios = [
-      anuncio({ id: "a", status: "ACTIVE", name: "Criativo em veiculacao" }),
-      anuncio({ id: "b", status: "ADSET_PAUSED", name: "Pausado pelo conjunto" }),
+      anuncio({ id: "a", status: "ACTIVE", effective_status: "ACTIVE", name: "Criativo em veiculacao" }),
+      anuncio({ id: "b", status: "ACTIVE", effective_status: null, name: "Post do Instagram: agosto" }),
+      anuncio({ id: "c", status: "ACTIVE", effective_status: "WITH_ISSUES", name: "AD_10 com problema" }),
     ];
     busca = { status: "active" };
     render(<Anuncios />);
-    expect(screen.getByText("Criativo em veiculacao")).toBeInTheDocument();
-    expect(screen.queryByText("Pausado pelo conjunto")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Criativo em veiculacao").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Post do Instagram: agosto")).not.toBeInTheDocument();
+    expect(screen.getByTestId("anuncios-com-problema")).toHaveTextContent("AD_10 com problema");
+    expect(screen.getByText("Com problema na Meta. Pode derrubar a entrega do conjunto inteiro.")).toBeInTheDocument();
+    expect(screen.getByText(/^Com problemas$/)).toBeInTheDocument();
   });
 
   it("o TIPO vem da campanha-mãe — o anúncio não carrega categoria", () => {
@@ -267,7 +328,7 @@ describe("filtros", () => {
     ];
     busca = { tipo: "leadgen" };
     render(<Anuncios />);
-    expect(screen.getByText("De leadgen")).toBeInTheDocument();
+    expect(screen.getAllByText("De leadgen").length).toBeGreaterThan(0);
     expect(screen.queryByText("De mensagem")).not.toBeInTheDocument();
   });
 
@@ -285,7 +346,7 @@ describe("filtros", () => {
     anuncios = [anuncio({ id: "orfao", campaign_id: null, name: "Sem campanha" })];
     busca = {};
     render(<Anuncios />);
-    expect(screen.getByText("Sem campanha")).toBeInTheDocument();
+    expect(screen.getAllByText("Sem campanha").length).toBeGreaterThan(0);
   });
 });
 

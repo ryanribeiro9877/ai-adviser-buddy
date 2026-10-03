@@ -128,6 +128,9 @@ export type Database = {
           spend: number | null;
           status: string | null;
           thumbnail_url: string | null;
+          miniatura_motivo: string | null;
+          miniatura_tentada_em: string | null;
+          meta_video_id: string | null;
           title: string | null;
         };
         Insert: {
@@ -160,6 +163,9 @@ export type Database = {
           spend?: number | null;
           status?: string | null;
           thumbnail_url?: string | null;
+          miniatura_motivo?: string | null;
+          miniatura_tentada_em?: string | null;
+          meta_video_id?: string | null;
           title?: string | null;
         };
         Update: {
@@ -192,7 +198,37 @@ export type Database = {
           spend?: number | null;
           status?: string | null;
           thumbnail_url?: string | null;
+          miniatura_motivo?: string | null;
+          miniatura_tentada_em?: string | null;
+          meta_video_id?: string | null;
           title?: string | null;
+        };
+        Relationships: [];
+      };
+      media_uploads: {
+        Row: {
+          id: string;
+          company_id: string;
+          drive_file_id: string;
+          meta_video_id: string | null;
+          status: string;
+          enviado_em: string | null;
+        };
+        Insert: {
+          id?: string;
+          company_id: string;
+          drive_file_id: string;
+          meta_video_id?: string | null;
+          status?: string;
+          enviado_em?: string | null;
+        };
+        Update: {
+          id?: string;
+          company_id?: string;
+          drive_file_id?: string;
+          meta_video_id?: string | null;
+          status?: string;
+          enviado_em?: string | null;
         };
         Relationships: [];
       };

@@ -239,6 +239,8 @@ export type AdRow = {
   body: string | null;
   thumbnail_url: string | null;
   image_url: string | null;
+  miniatura_motivo: string | null;
+  meta_video_id: string | null;
   permalink_url: string | null;
   spend: number;
   impressions: number;
@@ -407,6 +409,9 @@ export type EstadoParaSelo = {
   effectiveStatus?: string | null;
   campaignStatus?: string | null;
   campaignEffective?: string | null;
+  // Anúncio: "Ativo" só quando effective_status diz que entrega. Campanha e
+  // conjunto ainda caem no configurado quando o efetivo não foi coletado.
+  exigeEfetivo?: boolean;
 };
 
 // O selo da tela e o estado de entrega. Configurado ACTIVE dentro de campanha
@@ -421,6 +426,9 @@ export function seloDeEntrega(input: EstadoParaSelo): { label: string; variant: 
   if (proprio === "ACTIVE" && campanha && campanha !== "ACTIVE") {
     if (campanha === "PAUSED" || campanha === "CAMPAIGN_PAUSED") return metaStatus("CAMPAIGN_PAUSED");
     return metaStatus(campanha);
+  }
+  if (input.exigeEfetivo && proprio === "ACTIVE") {
+    return { label: "Entrega não coletada", variant: "outline" };
   }
   return metaStatus(proprio);
 }

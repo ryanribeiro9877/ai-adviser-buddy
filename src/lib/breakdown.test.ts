@@ -172,6 +172,19 @@ describe("metaStatus — effective_status do Meta em pt-BR", () => {
     expect(seloDeEntrega({ status: "ACTIVE", effectiveStatus: "ACTIVE" }).label).toBe("Ativo");
   });
 
+  it("anuncio sem effective_status nao e Ativo, mesmo com status ACTIVE", () => {
+    expect(
+      seloDeEntrega({ status: "ACTIVE", effectiveStatus: null, exigeEfetivo: true }).label,
+    ).toBe("Entrega não coletada");
+    expect(
+      statusParaFiltro({ status: "ACTIVE", effectiveStatus: null, exigeEfetivo: true }),
+    ).not.toBe("ACTIVE");
+  });
+
+  it("campanha sem a flag continua usando o status configurado", () => {
+    expect(seloDeEntrega({ status: "ACTIVE", effectiveStatus: null }).label).toBe("Ativo");
+  });
+
   it("conjunto novo com gasto zero fica na frente dos que ja gastaram", () => {
     const linhas = ordenarLinhas(
       [

@@ -6,7 +6,27 @@ type ListOptions = {
   after?: string;
   limit?: number;
   statusFilter?: string;
+  fields?: string;
 };
+
+// A Graph omite o que nao foi pedido pelo nome. O conector faz o mesmo: sem `fields`,
+// o criativo volta so com id e a miniatura nunca entra no espelho.
+export const CAMPOS_ANUNCIO_PIPEBOARD =
+  "id,name,status,effective_status,adset_id,campaign_id,preview_shareable_link,creative{id,thumbnail_url,image_url,image_hash,object_story_spec,video_id,object_type,body,title,asset_feed_spec}";
+
+export const CAMPOS_CRIATIVO_PIPEBOARD =
+  "id,thumbnail_url,image_url,image_hash,object_story_spec,video_id,object_type,body,title,asset_feed_spec";
+
+export function argumentosComCampos(
+  properties: Record<string, unknown> | null | undefined,
+  args: Record<string, unknown>,
+  campos: string,
+): Record<string, unknown> {
+  if (properties && Object.hasOwn(properties, "fields")) {
+    return { ...args, fields: campos };
+  }
+  return args;
+}
 
 const text = (value: unknown) => String(value ?? "").trim();
 const numeric = (value: unknown): number | null => {
@@ -81,6 +101,7 @@ export function buildStructureArgs(
   if (options.after && has("cursor")) args.cursor = options.after;
   if (has("limit")) args.limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
   if (options.statusFilter && has("status_filter")) args.status_filter = options.statusFilter;
+  if (options.fields && has("fields")) args.fields = options.fields;
   delete args.access_token;
   return args;
 }
@@ -237,7 +258,44 @@ export function extractCreativeFields(creative: any) {
     ]),
     image_url: text(data?.image_url) || text(creative?.image_url) || null,
     thumbnail_url: text(creative?.thumbnail_url) || null,
+    video_id: videoIdDoCriativo(creative),
   };
+}
+
+// A capa do video e o que a grade mostra. thumbnail_url da Meta e esse frame;
+// image_url do video_data e o mesmo quadro quando o campo de cima nao vem.
+export function urlDaMiniatura(creative: any): string | null {
+  const spec = parseJson(creative?.object_story_spec) ?? {};
+  const candidatos = [
+    creative?.thumbnail_url,
+    spec?.video_data?.image_url,
+    creative?.image_url,
+    spec?.link_data?.picture,
+    spec?.link_data?.image_url,
+    spec?.photo_data?.url,
+    spec?.photo_data?.image_url,
+  ];
+  for (const candidato of candidatos) {
+    const s = text(candidato);
+    if (s.startsWith("https://")) return s;
+  }
+  return null;
+}
+
+export function videoIdDoCriativo(creative: any): string | null {
+  const spec = parseJson(creative?.object_story_spec) ?? {};
+  const id = text(creative?.video_id) || text(spec?.video_data?.video_id);
+  return id || null;
+}
+
+export function hashDaImagem(creative: any): string | null {
+  const spec = parseJson(creative?.object_story_spec) ?? {};
+  const hash =
+    text(creative?.image_hash) ||
+    text(spec?.link_data?.image_hash) ||
+    text(spec?.photo_data?.image_hash) ||
+    text(spec?.video_data?.image_hash);
+  return hash || null;
 }
 
 export function mapPipeboardAd(
@@ -270,8 +328,9 @@ export function mapPipeboardAd(
     destination_url: creativeFields.destination_url,
     body: creativeFields.body,
     title: creativeFields.title,
-    image_url: creativeFields.image_url,
-    thumbnail_url: creativeFields.thumbnail_url,
+    // URL de CDN da Meta expira em dias. thumbnail_url no banco e caminho no
+    // storage, gravado por miniatura_criativo — nunca a URL que acabou de vir.
+    ...(creativeFields.video_id ? { meta_video_id: creativeFields.video_id } : {}),
     preview_url: text(row?.preview_shareable_link) || text(row?.preview_url) || null,
     last_synced_at: new Date().toISOString(),
     config_coletada_em: new Date().toISOString(),
