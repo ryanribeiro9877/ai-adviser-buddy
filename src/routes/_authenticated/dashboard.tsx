@@ -31,6 +31,7 @@ import { CampaignsTable } from "@/components/campaigns-table";
 import { WeeklyReport } from "@/components/weekly-report";
 import { Button } from "@/components/ui/button";
 import { FalhaDeCarga } from "@/components/falha-de-carga";
+import { FrescorDoEspelho } from "@/components/frescor-do-espelho";
 import { useAccountBreakdown, useCampaignBreakdown } from "@/hooks/use-breakdown";
 import {
   fmtBRL,
@@ -135,6 +136,7 @@ function Dashboard() {
             ? ` · ${selectedAccount.account_name}`
             : ""}
         </p>
+        <FrescorDoEspelho companyId={selectedCompany.id} />
       </div>
 
       {/* Barra de filtros */}

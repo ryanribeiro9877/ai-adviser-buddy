@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { TypeBadge } from "@/components/type-badge";
-import { fmtBRL, resultForCampaign, type CampaignRow } from "@/lib/breakdown";
+import { fmtBRL, resultForCampaign, seloDeEntrega, type CampaignRow } from "@/lib/breakdown";
 
 export function CampaignsTable({
   campaigns,
@@ -77,11 +77,8 @@ export function CampaignsTable({
                     )}
                   </TableCell>
                   <TableCell>
-                    <Badge
-                      variant={c.status === "active" ? "default" : "secondary"}
-                      className="capitalize"
-                    >
-                      {c.status || "—"}
+                    <Badge variant={seloDeEntrega({ status: c.status, effectiveStatus: c.effective_status }).variant}>
+                      {seloDeEntrega({ status: c.status, effectiveStatus: c.effective_status }).label}
                     </Badge>
                   </TableCell>
                 </TableRow>

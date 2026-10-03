@@ -44,6 +44,10 @@ vi.mock("@/components/weekly-report", () => ({
   WeeklyReport: () => <div data-testid="weekly" />,
 }));
 
+vi.mock("@/components/frescor-do-espelho", () => ({
+  FrescorDoEspelho: () => <div data-testid="frescor" />,
+}));
+
 import { Route } from "./dashboard";
 
 const Dashboard = (Route.options as unknown as { component: () => ReactNode }).component;
@@ -99,6 +103,7 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
     custo_por_resultado: null,
     cpc_link: null,
     last_synced_at: null,
+    effective_status: null,
     ...over,
   };
 }

@@ -27,9 +27,37 @@ function parseJson(value: unknown): any {
   return current;
 }
 
-function normalizeStatus(value: unknown): string | null {
-  const status = text(value).toLowerCase();
+const STATUS_SO_EFETIVO = new Set([
+  "CAMPAIGN_PAUSED",
+  "ADSET_PAUSED",
+  "WITH_ISSUES",
+  "PENDING_REVIEW",
+  "DISAPPROVED",
+  "PREAPPROVED",
+  "PENDING_BILLING_INFO",
+  "IN_PROCESS",
+]);
+
+function caixaMeta(value: unknown): string | null {
+  const status = text(value).toUpperCase();
   return status || null;
+}
+
+// status = configurado no objeto. effective_status = o que a Meta aplica.
+// Um valor que so existe como efetivo (CAMPAIGN_PAUSED) nao entra em status:
+// a coluna voltaria a misturar os dois conceitos e o check do banco recusaria
+// a linha, derrubando o lote inteiro por um campo que tem casa propria.
+export function partirStatus(row: any): { status?: string; effective_status?: string } {
+  const configurado = caixaMeta(row?.status);
+  const efetivo = caixaMeta(row?.effective_status);
+  const out: { status?: string; effective_status?: string } = {};
+  if (efetivo) out.effective_status = efetivo;
+  if (configurado && STATUS_SO_EFETIVO.has(configurado)) {
+    if (!out.effective_status) out.effective_status = configurado;
+  } else if (configurado) {
+    out.status = configurado;
+  }
+  return out;
 }
 
 function firstId(value: any): string {
@@ -97,7 +125,7 @@ export function mapPipeboardCampaign(row: any, companyId: string, accountId: str
     external_account_id: accountId.replace(/^act_/, ""),
     name: text(row?.name) || externalId,
     objective: text(row?.objective) || null,
-    status: normalizeStatus(row?.effective_status ?? row?.status),
+    ...partirStatus(row),
     daily_budget: numeric(row?.daily_budget),
     lifetime_budget: numeric(row?.lifetime_budget),
     bid_strategy: text(row?.bid_strategy) || null,
@@ -130,7 +158,7 @@ export function mapPipeboardAdset(
     campaign_id: campaignId,
     external_id: externalId,
     name: text(row?.name) || externalId,
-    status: text(row?.effective_status ?? row?.status).toUpperCase() || null,
+    ...partirStatus(row),
     daily_budget: numeric(row?.daily_budget),
     lifetime_budget: numeric(row?.lifetime_budget),
     bid_strategy: text(row?.bid_strategy) || null,
@@ -236,7 +264,7 @@ export function mapPipeboardAd(
     external_id: externalId,
     name: text(row?.name) || externalId,
     creative_id: firstId(row?.creative ?? row?.creative_id) || null,
-    status: text(row?.effective_status ?? row?.status).toUpperCase() || null,
+    ...partirStatus(row),
     object_type: creativeFields.object_type,
     call_to_action_type: creativeFields.call_to_action_type,
     destination_url: creativeFields.destination_url,

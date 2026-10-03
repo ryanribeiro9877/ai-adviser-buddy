@@ -23,10 +23,13 @@ import {
   fmtInt,
   fmtPct,
   fmtDec,
+  seloDeEntrega,
+  statusParaFiltro,
   TIPO_ORDER,
   type CampaignRow,
   type TipoConta,
 } from "@/lib/breakdown";
+import { FrescorDoEspelho } from "@/components/frescor-do-espelho";
 import { matchesStatus, resolveRange, validateFilterSearch } from "@/lib/filters";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
@@ -55,14 +58,6 @@ function ctr(c: CampaignRow): string {
   return c.impressions > 0 ? fmtPct((c.clicks / c.impressions) * 100) : "—";
 }
 
-// Status "active"/"paused" (Meta) -> rótulo pt-BR
-function statusLabel(s: string): string {
-  const k = s.toLowerCase();
-  if (k === "active") return "Ativa";
-  if (k === "paused") return "Pausada";
-  if (k === "archived") return "Arquivada";
-  return s || "—";
-}
 
 function Campanhas() {
   const { selectedCompany, isAdmin, user } = useApp();
@@ -86,7 +81,10 @@ function Campanhas() {
     () =>
       allRows.filter(
         (c) =>
-          matchesStatus(c.status, filters.status) &&
+          matchesStatus(
+            statusParaFiltro({ status: c.status, effectiveStatus: c.effective_status }),
+            filters.status,
+          ) &&
           (filters.tipo === "all" || c.tipo === filters.tipo),
       ),
     [allRows, filters.status, filters.tipo],
@@ -148,6 +146,7 @@ function Campanhas() {
             </span>
             .
           </p>
+          <FrescorDoEspelho companyId={selectedCompany.id} />
         </div>
       </div>
 
@@ -199,7 +198,11 @@ function Campanhas() {
                   </TableRow>
                 )}
                 {rows.map((c) => {
-                  const isActive = c.status.toLowerCase() === "active";
+                  const isActive = c.status.toUpperCase() === "ACTIVE";
+                  const st = seloDeEntrega({
+                    status: c.status,
+                    effectiveStatus: c.effective_status,
+                  });
                   return (
                     <TableRow key={c.campaign_id}>
                       <TableCell className="font-medium max-w-[260px] truncate">
@@ -213,9 +216,7 @@ function Campanhas() {
                       </TableCell>
                       <TableCell className="text-sm">Meta Ads</TableCell>
                       <TableCell>
-                        <Badge variant={isActive ? "default" : "secondary"}>
-                          {statusLabel(c.status)}
-                        </Badge>
+                        <Badge variant={st.variant}>{st.label}</Badge>
                       </TableCell>
                       <TableCell className="text-right tabular-nums">{fmtBRL(c.spend)}</TableCell>
                       <TableCell className="text-right tabular-nums">{ctr(c)}</TableCell>

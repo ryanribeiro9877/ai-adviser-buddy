@@ -35,6 +35,10 @@ vi.mock("@/components/global-filters", () => ({
   GlobalFilters: () => <div data-testid="filtros" />,
 }));
 
+vi.mock("@/components/frescor-do-espelho", () => ({
+  FrescorDoEspelho: () => <div data-testid="frescor" />,
+}));
+
 import { Route } from "./conjuntos";
 
 const Conjuntos = (Route.options as unknown as { component: () => ReactNode }).component;

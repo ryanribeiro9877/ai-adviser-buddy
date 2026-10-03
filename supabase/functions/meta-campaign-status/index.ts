@@ -1268,7 +1268,8 @@ Deno.serve(async (req) => {
     ).values(),
   ];
 
-  const reais = new Map<string, string>(); // campaign_id -> effective_status
+  const reais = new Map<string, { status: string; effective: string }>();
+  const estadosConjunto: { external_id: string; status: string; effective_status: string }[] = [];
   const nomesReais = new Map<string, string>(); // campaign_id -> name (nome real na Meta)
   const config = new Map<string, ConfigCampanha>(); // campaign_id -> configuracao lida da Graph
   const acessiveis: string[] = [];
@@ -1293,6 +1294,7 @@ Deno.serve(async (req) => {
 
   const CAMPOS = [
     "name",
+    "status",
     "effective_status",
     // v3 (GT-09): configuracao. Sao campos do OBJETO campanha, nao de insights.
     "special_ad_categories",
@@ -1329,7 +1331,10 @@ Deno.serve(async (req) => {
       okConta = true;
       const campIds = campanhasPorConta.get(c) ?? [];
       for (const x of p?.data ?? []) {
-        reais.set(String(x.id), String(x.effective_status ?? ""));
+        reais.set(String(x.id), {
+          status: String(x.status ?? "").trim().toUpperCase(),
+          effective: String(x.effective_status ?? "").trim().toUpperCase(),
+        });
         if (x.name != null) nomesReais.set(String(x.id), String(x.name));
         config.set(String(x.id), lerConfig(x));
         campIds.push(String(x.id));
@@ -1349,7 +1354,7 @@ Deno.serve(async (req) => {
     if (okConta) {
       // v7: conjuntos da conta — sem isso o espelho nao marca orfao de adset (ex.: TESTE-GT02).
       const adsetIds: string[] = [];
-      let urlSets = `${GRAPH}/act_${c}/adsets?fields=id&limit=200&access_token=${encodeURIComponent(tokInfo.token)}`;
+      let urlSets = `${GRAPH}/act_${c}/adsets?fields=id,status,effective_status&limit=200&access_token=${encodeURIComponent(tokInfo.token)}`;
       let pagSets = 0;
       while (urlSets && pagSets < 5) {
         const r = await fetch(urlSets);
@@ -1362,7 +1367,14 @@ Deno.serve(async (req) => {
           break;
         }
         for (const x of p?.data ?? []) {
-          if (x?.id) adsetIds.push(String(x.id));
+          if (x?.id) {
+            adsetIds.push(String(x.id));
+            estadosConjunto.push({
+              external_id: String(x.id),
+              status: String(x.status ?? "").trim().toUpperCase(),
+              effective_status: String(x.effective_status ?? "").trim().toUpperCase(),
+            });
+          }
         }
         urlSets = p?.paging?.next ?? "";
         pagSets++;
@@ -1370,7 +1382,7 @@ Deno.serve(async (req) => {
       adsetsPorConta.set(c, adsetIds);
 
       const anuncios: AnuncioGraph[] = [];
-      const CAMPOS_ADS = "id,name,effective_status,adset_id,campaign_id,creative{id}";
+      const CAMPOS_ADS = "id,name,status,effective_status,adset_id,campaign_id,creative{id}";
       let urlAds = `${GRAPH}/act_${c}/ads?fields=${CAMPOS_ADS}&limit=200&access_token=${encodeURIComponent(tokInfo.token)}`;
       let pagAds = 0;
       while (urlAds && pagAds < 5) {
@@ -1786,10 +1798,18 @@ Deno.serve(async (req) => {
     const graphAd = graphPorAd.get(adId);
     const creativeId = graphAd?.creative_id ?? (loc.creative_id ? String(loc.creative_id) : null);
     const patch: Record<string, unknown> = {};
-    // Espelha effective_status da Graph em ads.status (antes só ia para snapshots).
-    // Sem isto o inventário Click-to-WA lia status stale do Pipeboard e marcava
-    // "Em campanha ativa" com adset/campanha já pausados na Meta.
-    if (graphAd?.status) patch.status = graphAd.status;
+    // status = configurado. effective_status = o que a Meta aplica.
+    // graphAd.status na lista antiga era o efetivo; nao gravar isso por cima do configurado.
+    if (adStatus.valores.has(adId)) {
+      const configurado = String(adStatus.valores.get(adId) ?? "").trim().toUpperCase();
+      if (configurado) patch.status = configurado;
+    }
+    if (adEffectiveStatus.valores.has(adId)) {
+      const efetivo = String(adEffectiveStatus.valores.get(adId) ?? "").trim().toUpperCase();
+      if (efetivo) patch.effective_status = efetivo;
+    } else if (graphAd?.status) {
+      patch.effective_status = String(graphAd.status).trim().toUpperCase();
+    }
     let tentouUrlTags = false;
     let tentouDestino = false;
     let tentouCopia = false;
@@ -1884,8 +1904,11 @@ Deno.serve(async (req) => {
       const patch: Record<string, unknown> = cfgCamp
         ? { ...cfgCamp, config_coletada_em: agora, categoria_especial_verificada_em: agora }
         : {};
-      const novo = real.toUpperCase() === "ACTIVE" ? "active" : "paused";
-      if (novo !== loc.status) patch.status = novo;
+      const configurado = real.status;
+      const efetivo = real.effective;
+      if (configurado && configurado !== String(loc.status ?? "").toUpperCase()) patch.status = configurado;
+      if (efetivo) patch.effective_status = efetivo;
+      const novo = efetivo || configurado;
 
       // ESPELHO DO NOME: o nome pode ter mudado na Meta (renomear_campanha, ou edicao manual no
       // Gerenciador) sem o espelho acompanhar. A reconciliacao ja sincroniza status; o nome segue
@@ -1921,7 +1944,7 @@ Deno.serve(async (req) => {
       continue;
     }
     // sem correspondencia na Meta (conta inacessivel ou campanha removida)
-    if (loc.status !== "active") {
+    if (String(loc.status ?? "").toUpperCase() !== "ACTIVE") {
       iguais++;
       continue;
     }
@@ -1937,7 +1960,7 @@ Deno.serve(async (req) => {
       ? Math.floor((Date.now() - new Date(ultimo.snapshot_date).getTime()) / 864e5)
       : 9999;
     if (dias > 45) {
-      await supa.from("campaigns").update({ status: "paused" }).eq("id", loc.id);
+      await supa.from("campaigns").update({ status: "PAUSED" }).eq("id", loc.id);
       porInatividade.push({
         campanha: loc.name,
         conta: loc.external_account_id,
@@ -1952,8 +1975,15 @@ Deno.serve(async (req) => {
   // ============ v15: DICAS DA META (recommendations) ============
   // So objetos ACTIVE: dica mid-flight importa onde ha entrega. Campo sondado isolado.
   const campanhasAtivasIds = [...reais.entries()]
-    .filter(([, st]) => /ACTIVE/i.test(String(st ?? "")))
+    .filter(([, st]) => st.effective === "ACTIVE")
     .map(([id]) => id);
+  if (estadosConjunto.length) {
+    const { error: erroEstado } = await supa.rpc("gravar_estado_efetivo", {
+      p_tabela: "ad_sets",
+      p: estadosConjunto,
+    });
+    if (erroEstado) throw new Error(`gravar_estado_efetivo: ${erroEstado.message}`);
+  }
   const anunciosAtivos = anunciosGraph.filter((a) => /ACTIVE/i.test(String(a.status ?? "")));
   const adsetsAtivosIds = [
     ...new Set(
@@ -2176,7 +2206,7 @@ Deno.serve(async (req) => {
     .from("campaigns")
     .select("id", { count: "exact", head: true })
     .eq("provider", "meta_ads")
-    .eq("status", "active");
+    .or("status.eq.ACTIVE,status.eq.active");
 
   // v3: config_gravada e a cobertura REAL da coleta de configuracao. Comparar com
   // campanhas_no_sistema mostra quantas seguem sem config por conta inacessivel (GT-19) - e a

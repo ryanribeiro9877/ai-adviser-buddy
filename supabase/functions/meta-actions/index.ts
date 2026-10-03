@@ -1140,7 +1140,7 @@ async function pedidoDoEspelho(
       .eq("external_id", externalId)
       .maybeSingle();
     if (!data) return null;
-    // campaigns guarda status em minusculo; o comparador normaliza caixa dos dois lados.
+    // status no espelho e maiusculo; o comparador normaliza caixa dos dois lados.
     return {
       pedido: { name: data.name, status: data.status, objective: data.objective },
       fonte: "espelho campaigns",
@@ -3361,9 +3361,9 @@ export async function montarCriacao(
 // campanha sem entrega - logo o sistema ficava cego para o que ele mesmo acabou de criar,
 // exatamente durante a montagem da estrutura. As 3 campanhas de 31/07 ficaram 3 dias fora do
 // banco, e foi essa cegueira que fez o agente e o gestor operarem sobre estado falso.
-// CAIXA DO STATUS (nao mexer sem ler): campaigns usa MINUSCULO nesta base (24 'paused' +
-// 2 'active'), ad_sets e ads usam MAIUSCULO. Gravar a caixa errada faz a linha piscar a cada
-// sync. Seguimos a convencao de cada tabela; a divergencia entre elas e item separado (GT-09).
+// CAIXA DO STATUS: as tres tabelas guardam o configurado em MAIUSCULAS, como a Meta
+// devolve. O efetivo (CAMPAIGN_PAUSED, WITH_ISSUES, ...) vai em effective_status.
+// Gravar o efetivo por cima de status faz a tela dizer Ativo quando a campanha esta pausada.
 // CONTA: campaigns.external_account_id e ad_sets/ads.account_id guardam o id SEM o prefixo act_.
 // FALHA DE ESPELHO NAO DERRUBA A EXECUCAO: o objeto JA existe na Meta nesse ponto. Mas tambem
 // nao e silenciosa - vai para o audit_log e para o execution_result do card.
@@ -3386,7 +3386,9 @@ async function espelhar(
   // estava aqui foi escrito na v4.2, quando o objeto nascia ativo, e virou VERDE FALSO no
   // instante em que a v4.3 passou a criar pausado - default digitado a mao aponta para o
   // contrato do dia em que foi escrito, e este mudou duas vezes em quatro dias.
-  const statusMeta = String(objeto?.status ?? statusEnviado ?? "PAUSED") || "PAUSED";
+  const statusMeta = String(objeto?.status ?? statusEnviado ?? "PAUSED").trim().toUpperCase() || "PAUSED";
+  const efetivoMeta = String(objeto?.effective_status ?? "").trim().toUpperCase();
+  const efetivo = efetivoMeta ? { effective_status: efetivoMeta } : {};
   try {
     if (acao === "criar_campanha") {
       const { error } = await supa.from("campaigns").upsert(
@@ -3395,7 +3397,8 @@ async function espelhar(
           provider: "meta_ads",
           name: String(objeto?.name ?? p?.nome_novo ?? ""),
           objective: String(objeto?.objective ?? p?.objetivo ?? "OUTCOME_LEADS"),
-          status: statusMeta.toLowerCase(), // campaigns = minusculo
+          status: statusMeta,
+          ...efetivo,
           // v5.4: o literal `0` que estava aqui era um PALPITE apresentado como fato ("ABO:
           // orcamento vive no conjunto"). Em 07/08/2026 ele gravou 0 para uma campanha que a Meta
           // criou com R$ 10,00/dia, e o espelho passou dias afirmando o contrario do real. Agora
@@ -3436,7 +3439,8 @@ async function espelhar(
           campaign_id: camp?.id ?? null, // null e aceito (FK ON DELETE SET NULL)
           external_id: novoId,
           name: String(objeto?.name ?? p?.nome_novo ?? p?.nome ?? ""),
-          status: statusMeta.toUpperCase(), // ad_sets = MAIUSCULO
+          status: statusMeta,
+          ...efetivo,
           daily_budget: objeto?.daily_budget != null
             ? Number(objeto.daily_budget)
             : Math.round(Number(p?.orcamento_diario_reais ?? 0) * 100),
@@ -3476,7 +3480,8 @@ async function espelhar(
           external_id: novoId,
           name: String(objeto?.name ?? p?.nome_novo ?? ""),
           creative_id: creativeUsado,
-          status: statusMeta.toUpperCase(), // ads = MAIUSCULO
+          status: statusMeta,
+          ...efetivo,
           criado_pelo_sistema: true,
           criado_por_approval_id: approvalId,
           nome_partes: p?.nome_partes ?? null,
@@ -3509,7 +3514,8 @@ async function espelhar(
       const { error } = await supa
         .from("ad_sets")
         .update({
-          status: statusMeta.toUpperCase(),
+          status: statusMeta,
+          ...efetivo,
           targeting: objeto?.targeting ?? p?.targeting_aprovado ?? null,
         })
         .eq("company_id", companyId)
@@ -6071,38 +6077,31 @@ Deno.serve(async (req) => {
           },
         );
       }
-      // Espelho de status apos ativar/pausar — evita UI stale ate o proximo sync.
-      if (
-        acao === "pausar_criativo" ||
-        acao === "ativar_criativo" ||
-        acao === "pausar_campanha" ||
-        acao === "ativar_campanha" ||
-        acao === "pausar_conjunto" ||
-        acao === "ativar_conjunto"
-      ) {
-        const statusLido = String(
-          (alvoLido as any)?.status ?? post?.status ?? "",
-        ).trim();
-        if (statusLido) {
-          if (acao === "pausar_criativo" || acao === "ativar_criativo") {
-            await supa
-              .from("ads")
-              .update({ status: statusLido.toUpperCase() })
-              .eq("provider", "meta_ads")
-              .eq("external_id", alvoExt);
-          } else if (acao === "pausar_campanha" || acao === "ativar_campanha") {
-            await supa
-              .from("campaigns")
-              .update({ status: statusLido.toLowerCase() })
-              .eq("provider", "meta_ads")
-              .eq("external_id", alvoExt);
-          } else {
-            await supa
-              .from("ad_sets")
-              .update({ status: statusLido.toUpperCase() })
-              .eq("provider", "meta_ads")
-              .eq("external_id", alvoExt);
-          }
+      // A releitura ja pagou a chamada a Meta. Grava status e effective_status
+      // no espelho em vez de comparar e descartar. Sem isto a tela fica no
+      // mundo de antes da escrita ate o cron do dia seguinte.
+      const nivelEspelho = nivelDaAcao(acao);
+      if (nivelEspelho && alvoExt && alvoLido && typeof alvoLido === "object") {
+        const statusLido = String((alvoLido as any)?.status ?? post?.status ?? "").trim().toUpperCase();
+        const efetivoLido = String((alvoLido as any)?.effective_status ?? "").trim().toUpperCase();
+        const patch: Record<string, string> = { last_synced_at: new Date().toISOString() };
+        if (statusLido) patch.status = statusLido;
+        if (efetivoLido) patch.effective_status = efetivoLido;
+        if (statusLido === "DELETED" || efetivoLido === "DELETED") {
+          patch.ausente_na_graph_em = new Date().toISOString();
+        }
+        if (statusLido || efetivoLido) {
+          const tabela = nivelEspelho === "campanha"
+            ? "campaigns"
+            : nivelEspelho === "conjunto"
+            ? "ad_sets"
+            : "ads";
+          await supa
+            .from(tabela)
+            .update(patch)
+            .eq("company_id", r.company_id)
+            .eq("provider", "meta_ads")
+            .eq("external_id", alvoExt);
         }
       }
       const releitura = await conferirOQueFicou({

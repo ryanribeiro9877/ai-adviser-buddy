@@ -15,6 +15,7 @@ import type { ReactNode } from "react";
 let resposta: { data: unknown; error: unknown } = { data: [], error: null };
 const orderMock = vi.fn();
 const eqMock = vi.fn();
+const isMock = vi.fn();
 const selectMock = vi.fn();
 const fromMock = vi.fn();
 
@@ -22,22 +23,25 @@ vi.mock("@/integrations/supabase/client", () => ({
   supabase: {
     from: (t: string) => {
       fromMock(t);
-      return {
-        select: (cols: string) => {
-          selectMock(cols);
-          return {
-            eq: (col: string, val: unknown) => {
-              eqMock(col, val);
-              return {
-                order: (col2: string, opts: unknown) => {
-                  orderMock(col2, opts);
-                  return Promise.resolve(resposta);
-                },
-              };
-            },
-          };
-        },
+      const api: Record<string, unknown> = {};
+      api.select = (cols: string) => {
+        selectMock(cols);
+        return api;
       };
+      api.eq = (col: string, val: unknown) => {
+        eqMock(col, val);
+        return api;
+      };
+      api.is = (col: string, val: unknown) => {
+        isMock(col, val);
+        return api;
+      };
+      api.order = (col: string, opts: unknown) => {
+        orderMock(col, opts);
+        return api;
+      };
+      api.range = () => Promise.resolve(resposta);
+      return api;
     },
   },
 }));
@@ -60,6 +64,7 @@ beforeEach(() => {
   selectMock.mockReset();
   eqMock.mockReset();
   orderMock.mockReset();
+  isMock.mockReset();
 });
 
 describe("useAccountBreakdown", () => {
@@ -235,10 +240,12 @@ describe("useAds", () => {
 });
 
 describe("useAdSets", () => {
-  it("consulta a tabela ad_sets", async () => {
+  it("consulta a tabela ad_sets, esconde o que saiu da conta e ordena pelos mais recentes", async () => {
     const { result } = montar(() => useAdSets(EMPRESA));
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(fromMock).toHaveBeenCalledWith("ad_sets");
+    expect(isMock).toHaveBeenCalledWith("ausente_na_graph_em", null);
+    expect(orderMock).toHaveBeenCalledWith("created_at", { ascending: false });
   });
 
   it("PRESERVA null nos orcamentos (null = sem orcamento no conjunto, provavel CBO)", async () => {

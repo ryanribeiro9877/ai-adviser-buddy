@@ -48,7 +48,8 @@ const campaign = mapPipeboardCampaign(
     id: "cmp-1",
     name: "Campanha",
     objective: "OUTCOME_ENGAGEMENT",
-    effective_status: "ACTIVE",
+    status: "active",
+    effective_status: "CAMPAIGN_PAUSED",
     daily_budget: "12345",
     bid_strategy: "LOWEST_COST_WITHOUT_CAP",
   },
@@ -58,7 +59,8 @@ const campaign = mapPipeboardCampaign(
 assert(campaign.company_id === "company-1", "campaign company_id");
 assert(campaign.external_account_id === "1622612945584817", "campaign account");
 assert(campaign.daily_budget === 12345, "budget deve continuar em centavos");
-assert(campaign.status === "active", "status normalizado");
+assert(campaign.status === "ACTIVE", "status configurado em maiusculas");
+assert(campaign.effective_status === "CAMPAIGN_PAUSED", "efetivo separado do configurado");
 assert(campaign.fonte_config === "pipeboard:meta", "fonte campaign");
 
 const adset = mapPipeboardAdset(

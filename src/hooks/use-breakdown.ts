@@ -11,19 +11,44 @@ import {
   type TipoConta,
 } from "@/lib/breakdown";
 
+const PAGINA = 1000;
+
+// O PostgREST corta em silencio no teto da API. Paginar ate a pagina curta
+// e, se mesmo assim nao acabar, falhar — lista truncada que nao se anuncia
+// e pior do que erro.
+async function lerTudo<T>(
+  pedir: (
+    de: number,
+    ate: number,
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+): Promise<T[]> {
+  const tudo: T[] = [];
+  for (let pagina = 0; pagina < 50; pagina++) {
+    const de = pagina * PAGINA;
+    const { data, error } = await pedir(de, de + PAGINA - 1);
+    if (error) throw error;
+    const linhas = data ?? [];
+    tudo.push(...linhas);
+    if (linhas.length < PAGINA) return tudo;
+  }
+  throw new Error("a lista passou de 50 mil linhas e a tela nao corta em silencio");
+}
+
 // Contas de uma empresa (v_account_breakdown), já normalizadas para números.
 export function useAccountBreakdown(companyId: string | null) {
   return useQuery({
     queryKey: ["v_account_breakdown", companyId],
     enabled: !!companyId,
     queryFn: async (): Promise<AccountRow[]> => {
-      const { data, error } = await supabase
-        .from("v_account_breakdown")
-        .select("*")
-        .eq("company_id", companyId!)
-        .order("spend", { ascending: false });
-      if (error) throw error;
-      return (data ?? []).map((r) => ({
+      const data = await lerTudo((de, ate) =>
+        supabase
+          .from("v_account_breakdown")
+          .select("*")
+          .eq("company_id", companyId!)
+          .order("spend", { ascending: false })
+          .range(de, ate),
+      );
+      return data.map((r) => ({
         account_id: r.account_id ?? "",
         account_name: r.account_name ?? "(sem nome)",
         company_id: r.company_id ?? "",
@@ -51,13 +76,16 @@ export function useCampaignBreakdown(companyId: string | null) {
     queryKey: ["v_campaign_breakdown", companyId],
     enabled: !!companyId,
     queryFn: async (): Promise<CampaignRow[]> => {
-      const { data, error } = await supabase
-        .from("v_campaign_breakdown")
-        .select("*")
-        .eq("company_id", companyId!)
-        .order("spend", { ascending: false });
-      if (error) throw error;
-      return (data ?? []).map((r) => ({
+      const data = await lerTudo((de, ate) =>
+        supabase
+          .from("v_campaign_breakdown")
+          .select("*")
+          .eq("company_id", companyId!)
+          .is("ausente_na_graph_em", null)
+          .order("spend", { ascending: false })
+          .range(de, ate),
+      );
+      return data.map((r) => ({
         company_id: r.company_id ?? "",
         empresa: r.empresa ?? "",
         account_id: r.account_id ?? "",
@@ -85,6 +113,7 @@ export function useCampaignBreakdown(companyId: string | null) {
         custo_por_resultado: r.custo_por_resultado == null ? null : num(r.custo_por_resultado),
         cpc_link: r.cpc_link == null ? null : num(r.cpc_link),
         last_synced_at: r.last_synced_at ?? null,
+        effective_status: r.effective_status ?? null,
       }));
     },
   });
@@ -96,17 +125,20 @@ export function useAds(companyId: string | null) {
     queryKey: ["ads", companyId],
     enabled: !!companyId,
     queryFn: async (): Promise<AdRow[]> => {
-      const { data, error } = await supabase
-        .from("ads")
-        .select(
-          // `leads` saiu: coluna sem base declarada e sem escritor vivo. Formulario e conversa
-          // vem separados, cada um com o nome do que e.
-          "id,name,status,object_type,call_to_action_type,title,body,thumbnail_url,image_url,permalink_url,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,sales,revenue,campaign_id",
-        )
-        .eq("company_id", companyId!)
-        .order("spend", { ascending: false });
-      if (error) throw error;
-      return (data ?? []).map((r) => ({
+      const data = await lerTudo((de, ate) =>
+        supabase
+          .from("ads")
+          .select(
+            // `leads` saiu: coluna sem base declarada e sem escritor vivo. Formulario e conversa
+            // vem separados, cada um com o nome do que e.
+            "id,name,status,effective_status,object_type,call_to_action_type,title,body,thumbnail_url,image_url,permalink_url,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,sales,revenue,campaign_id,created_at,last_synced_at",
+          )
+          .eq("company_id", companyId!)
+          .is("ausente_na_graph_em", null)
+          .order("created_at", { ascending: false })
+          .range(de, ate),
+      );
+      return data.map((r) => ({
         id: r.id,
         name: r.name ?? "(sem nome)",
         status: r.status ?? "",
@@ -127,26 +159,34 @@ export function useAds(companyId: string | null) {
         sales: num(r.sales),
         revenue: num(r.revenue),
         campaign_id: r.campaign_id ?? null,
+        effective_status: r.effective_status ?? null,
+        created_at: r.created_at ?? null,
+        last_synced_at: r.last_synced_at ?? null,
       }));
     },
   });
 }
 
-// Conjuntos de anúncios de uma empresa (tabela ad_sets), maior gasto primeiro.
+// Conjuntos de anúncios de uma empresa. Os que a Meta nao devolve mais ficam de fora.
+// A ordem padrao e a chegada no espelho: conjunto novo tem gasto zero e nao pode
+// ir para o fim da lista.
 export function useAdSets(companyId: string | null) {
   return useQuery({
     queryKey: ["ad_sets", companyId],
     enabled: !!companyId,
     queryFn: async (): Promise<AdSetRow[]> => {
-      const { data, error } = await supabase
-        .from("ad_sets")
-        .select(
-          "id,name,status,daily_budget,lifetime_budget,bid_strategy,targeting,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,sales,revenue,campaign_id",
-        )
-        .eq("company_id", companyId!)
-        .order("spend", { ascending: false });
-      if (error) throw error;
-      return (data ?? []).map((r) => ({
+      const data = await lerTudo((de, ate) =>
+        supabase
+          .from("ad_sets")
+          .select(
+            "id,name,status,effective_status,daily_budget,lifetime_budget,bid_strategy,targeting,spend,impressions,reach,clicks,link_clicks,form_leads,messaging_started,sales,revenue,campaign_id,created_at,last_synced_at",
+          )
+          .eq("company_id", companyId!)
+          .is("ausente_na_graph_em", null)
+          .order("created_at", { ascending: false })
+          .range(de, ate),
+      );
+      return data.map((r) => ({
         id: r.id,
         name: r.name ?? "(sem nome)",
         status: r.status ?? "",
@@ -164,6 +204,9 @@ export function useAdSets(companyId: string | null) {
         sales: num(r.sales),
         revenue: num(r.revenue),
         campaign_id: r.campaign_id ?? null,
+        effective_status: r.effective_status ?? null,
+        created_at: r.created_at ?? null,
+        last_synced_at: r.last_synced_at ?? null,
       }));
     },
   });

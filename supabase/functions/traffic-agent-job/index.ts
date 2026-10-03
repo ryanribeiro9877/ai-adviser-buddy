@@ -1108,12 +1108,12 @@ async function enriquecerEscopoComDatas(companyId: string, escopo: EscopoPedido)
   }
   let q = supa.from("campaigns").select("id,name,status").eq("company_id", companyId);
   const { data: camps } = await q;
-  let alvo = (camps ?? []).filter((c) => c.status === "active");
+  let alvo = (camps ?? []).filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
   if (escopo.nomes_hint.length) {
     const hints = escopo.nomes_hint.map((h) => norm(h));
     const filtrado = (camps ?? []).filter((c) => hints.some((h) => norm(c.name).includes(norm(h)) || norm(c.name).includes(h.toLowerCase())));
-    if (filtrado.length) alvo = filtrado.filter((c) => c.status === "active").length
-      ? filtrado.filter((c) => c.status === "active")
+    if (filtrado.length) alvo = filtrado.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE").length
+      ? filtrado.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE")
       : filtrado;
   }
   if (!alvo.length) return escopo;
@@ -1352,7 +1352,7 @@ async function t_overview(companyId: string) {
     };
   }
   const camps = campsQ.data;
-  const ativos = (camps ?? []).filter((c) => c.status === "active");
+  const ativos = (camps ?? []).filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
   const from = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
   const snapsQ = await supa.from("metric_snapshots")
     // `campaign_id` entrou em 04/09/2026 para escopar o gasto por base; `leads` saiu (coluna
@@ -1479,7 +1479,7 @@ async function t_ads_ranking(companyId: string, opts: {
   const to = opts.date_to?.slice(0, 10);
   const { data: ads } = await supa.from("ads").select("external_id,name,campaign_id,adset_external_id,status").eq("company_id", companyId);
   let campQ = supa.from("campaigns").select("id,name,category,status,objective,external_id").eq("company_id", companyId);
-  if (somenteAtivas) campQ = campQ.eq("status", "active");
+  if (somenteAtivas) campQ = campQ.or("status.eq.ACTIVE,status.eq.active");
   const { data: camps } = await campQ;
   let campList = camps ?? [];
   const needle = String(opts.campaign_id || opts.name_like || "").trim();

@@ -64,6 +64,7 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
     custo_por_resultado: 20,
     cpc_link: 1.5,
     last_synced_at: null,
+    effective_status: null,
     ...over,
   };
 }

@@ -10,6 +10,9 @@ import {
   fmtBudget,
   summarizeTargeting,
   metaStatus,
+  ordenarLinhas,
+  seloDeEntrega,
+  statusParaFiltro,
   TIPO_META,
   TIPO_ORDER,
   type CampaignRow,
@@ -145,6 +148,44 @@ describe("metaStatus — effective_status do Meta em pt-BR", () => {
     expect(metaStatus("Paused").label).toBe("Pausado");
   });
 
+  it("ACTIVE dentro de campanha pausada nao e Ativo", () => {
+    // JUR_WA_CONJ.03: status ACTIVE, campanha paused, effective_status ainda nulo.
+    expect(
+      seloDeEntrega({ status: "ACTIVE", campaignStatus: "paused" }).label,
+    ).toBe("Campanha pausada");
+    expect(
+      statusParaFiltro({ status: "ACTIVE", campaignStatus: "PAUSED" }),
+    ).not.toBe("ACTIVE");
+  });
+
+  it("effective_status manda, mesmo se o configurado e ACTIVE", () => {
+    expect(
+      seloDeEntrega({
+        status: "ACTIVE",
+        effectiveStatus: "CAMPAIGN_PAUSED",
+        campaignStatus: "ACTIVE",
+      }).label,
+    ).toBe("Campanha pausada");
+  });
+
+  it("so rotula Ativo quando a entrega e ACTIVE", () => {
+    expect(seloDeEntrega({ status: "ACTIVE", effectiveStatus: "ACTIVE" }).label).toBe("Ativo");
+  });
+
+  it("conjunto novo com gasto zero fica na frente dos que ja gastaram", () => {
+    const linhas = ordenarLinhas(
+      [
+        { name: "velho", created_at: "2026-08-30T08:46:05Z", spend: 1372 },
+        { name: "CONJ.1 novo", created_at: "2026-10-03T08:45:56Z", spend: 0 },
+        { name: "CONJ.4 novo", created_at: "2026-10-03T08:45:56Z", spend: 0 },
+      ],
+      "recentes",
+    );
+    expect(linhas[0].name).toBe("CONJ.1 novo");
+    expect(linhas[2].name).toBe("velho");
+    expect(ordenarLinhas(linhas, "gasto")[0].name).toBe("velho");
+  });
+
   it("status novo do Meta aparece cru, em vez de sumir", () => {
     // Preferivel mostrar "ALGO_NOVO" a esconder: o gestor ve que ha um estado
     // que a tela ainda nao traduz.
@@ -222,6 +263,7 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
     custo_por_resultado: null,
     cpc_link: null,
     last_synced_at: null,
+    effective_status: null,
     ...over,
   };
 }

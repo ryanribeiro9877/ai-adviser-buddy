@@ -65,6 +65,7 @@ function campanhaMeta(over: Partial<CampaignRow> = {}): CampaignRow {
     custo_por_resultado: 999,
     cpc_link: 999,
     last_synced_at: null,
+    effective_status: null,
     ...over,
   };
 }

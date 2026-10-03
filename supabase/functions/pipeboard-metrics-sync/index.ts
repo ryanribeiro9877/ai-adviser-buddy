@@ -100,6 +100,15 @@ function videoActionValue(row: any, fieldNames: string[]): number {
   return 0;
 }
 
+function hojeEmSaoPaulo(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
+
 function mapRow(row: any, companyId: string, accountFallback: string) {
   const source = row?.metrics && typeof row.metrics === "object" ? { ...row, ...row.metrics } : row;
   const adId = String(source?.ad_id ?? source?.ad_external_id ?? "").trim();
@@ -112,6 +121,8 @@ function mapRow(row: any, companyId: string, accountFallback: string) {
     ad_external_id: adId,
     campaign_external_id:
       String(source?.campaign_id ?? source?.campaign_external_id ?? "").trim() || null,
+    adset_external_id:
+      String(source?.adset_id ?? source?.adset_external_id ?? "").trim() || null,
     account_id: String(source?.account_id ?? source?.ad_account_id ?? accountFallback).replace(
       /^act_/,
       "",
@@ -173,6 +184,9 @@ function mapRow(row: any, companyId: string, accountFallback: string) {
     video_avg_time_watched: number(videoActionValue(source, ["video_avg_time_watched_actions", "video_avg_time_watched"])) || null,
     video_plays: integer(videoActionValue(source, ["video_play_actions", "video_plays"])) || null,
     fonte: FONTE,
+    // Dia corrente ainda muda na Meta. A tela diz "parcial" em vez de fingir fechamento.
+    parcial: snapshotDate === hojeEmSaoPaulo(),
+    atualizado_em: new Date().toISOString(),
   };
 }
 

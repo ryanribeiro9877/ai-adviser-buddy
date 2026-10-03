@@ -17,6 +17,8 @@ export type Database = {
           company_id: string | null;
           created_at: string;
           daily_budget: number | null;
+          effective_status: string | null;
+          ausente_na_graph_em: string | null;
           external_id: string;
           form_leads: number | null;
           id: string;
@@ -43,6 +45,8 @@ export type Database = {
           company_id?: string | null;
           created_at?: string;
           daily_budget?: number | null;
+          effective_status?: string | null;
+          ausente_na_graph_em?: string | null;
           external_id: string;
           form_leads?: number | null;
           id?: string;
@@ -69,6 +73,8 @@ export type Database = {
           company_id?: string | null;
           created_at?: string;
           daily_budget?: number | null;
+          effective_status?: string | null;
+          ausente_na_graph_em?: string | null;
           external_id?: string;
           form_leads?: number | null;
           id?: string;
@@ -100,6 +106,8 @@ export type Database = {
           company_id: string | null;
           created_at: string;
           creative_id: string | null;
+          effective_status: string | null;
+          ausente_na_graph_em: string | null;
           external_id: string;
           form_leads: number | null;
           id: string;
@@ -1671,11 +1679,17 @@ export type Database = {
           status: string | null;
           tipo: string | null;
           unidade_do_resultado: string | null;
+          effective_status: string | null;
+          ausente_na_graph_em: string | null;
         };
         Relationships: [];
       };
     };
     Functions: {
+      pedir_sync_da_empresa: {
+        Args: { p_company_id: string };
+        Returns: Json;
+      };
       decide_approval: {
         Args: { p_id: string; p_decision: string; p_reason: string | null };
         Returns: Json;

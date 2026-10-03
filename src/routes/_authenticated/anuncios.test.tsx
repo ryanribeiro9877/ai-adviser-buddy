@@ -43,6 +43,10 @@ vi.mock("@/components/metric-card", () => ({
 
 // A barra de filtros tem teste próprio; aqui só interessa COM QUE parâmetros ela
 // é montada — é isso que decide se o aviso de acumulado aparece.
+vi.mock("@/components/frescor-do-espelho", () => ({
+  FrescorDoEspelho: () => <div data-testid="frescor" />,
+}));
+
 vi.mock("@/components/global-filters", () => ({
   GlobalFilters: ({ mode, typesPresent }: { mode: string; typesPresent: TipoConta[] }) => {
     modoRecebido = mode;
@@ -77,6 +81,9 @@ function anuncio(over: Partial<AdRow> = {}): AdRow {
     sales: 0,
     revenue: 0,
     campaign_id: "cmp_1",
+    effective_status: null,
+    created_at: null,
+    last_synced_at: null,
     ...over,
   };
 }
@@ -110,6 +117,7 @@ function campanha(over: Partial<CampaignRow> = {}): CampaignRow {
     custo_por_resultado: null,
     cpc_link: null,
     last_synced_at: null,
+    effective_status: null,
     ...over,
   };
 }

@@ -75,6 +75,7 @@ export type CampaignRow = {
   custo_por_resultado: number | null;
   cpc_link: number | null;
   last_synced_at: string | null;
+  effective_status: string | null;
 };
 
 // Coerção segura string|number|null -> number
@@ -250,6 +251,9 @@ export type AdRow = {
   sales: number;
   revenue: number;
   campaign_id: string | null;
+  effective_status: string | null;
+  created_at: string | null;
+  last_synced_at: string | null;
 };
 
 // --- Conjuntos de anúncios (tabela ad_sets) ------------------------------------
@@ -290,6 +294,9 @@ export type AdSetRow = {
   sales: number;
   revenue: number;
   campaign_id: string | null;
+  effective_status: string | null;
+  created_at: string | null;
+  last_synced_at: string | null;
 };
 
 // Orçamento do Meta vem em centavos (5000 = R$ 50,00). 0/null => sem orçamento
@@ -388,7 +395,55 @@ export function metaStatus(s: string): { label: string; variant: BadgeVariant } 
       return { label: "Em revisão", variant: "outline" };
     case "ARCHIVED":
       return { label: "Arquivado", variant: "secondary" };
+    case "DELETED":
+      return { label: "Excluído", variant: "outline" };
     default:
       return { label: s || "—", variant: "outline" };
   }
+}
+
+export type EstadoParaSelo = {
+  status?: string | null;
+  effectiveStatus?: string | null;
+  campaignStatus?: string | null;
+  campaignEffective?: string | null;
+};
+
+// O selo da tela e o estado de entrega. Configurado ACTIVE dentro de campanha
+// pausada nao e "Ativo": ou a coluna effective_status ja diz, ou a campanha-mae diz.
+export function seloDeEntrega(input: EstadoParaSelo): { label: string; variant: BadgeVariant } {
+  const efetivo = String(input.effectiveStatus ?? "").trim();
+  if (efetivo) return metaStatus(efetivo);
+  const proprio = String(input.status ?? "").trim().toUpperCase();
+  const campanha = String(input.campaignEffective || input.campaignStatus || "")
+    .trim()
+    .toUpperCase();
+  if (proprio === "ACTIVE" && campanha && campanha !== "ACTIVE") {
+    if (campanha === "PAUSED" || campanha === "CAMPAIGN_PAUSED") return metaStatus("CAMPAIGN_PAUSED");
+    return metaStatus(campanha);
+  }
+  return metaStatus(proprio);
+}
+
+// Filtro "Ativas" significa entregando. Configurado ACTIVE dentro de campanha
+// pausada nao passa, mesmo que a coluna status ainda diga ACTIVE.
+export function statusParaFiltro(input: EstadoParaSelo): string {
+  return seloDeEntrega(input).label === "Ativo" ? "ACTIVE" : "PAUSED";
+}
+
+export type OrdemDaLista = "recentes" | "gasto";
+
+export function ordenarLinhas<T extends { created_at?: string | null; spend: number; name?: string }>(
+  linhas: T[],
+  ordem: OrdemDaLista,
+): T[] {
+  const copia = linhas.slice();
+  copia.sort((a, b) => {
+    if (ordem === "gasto" && b.spend !== a.spend) return b.spend - a.spend;
+    const ta = a.created_at ? Date.parse(a.created_at) : 0;
+    const tb = b.created_at ? Date.parse(b.created_at) : 0;
+    if (tb !== ta) return tb - ta;
+    return String(a.name ?? "").localeCompare(String(b.name ?? ""), "pt-BR");
+  });
+  return copia;
 }

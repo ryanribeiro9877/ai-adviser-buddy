@@ -1413,7 +1413,7 @@ async function t_overview(companyId: string) {
   }
   const camps = campsQ.data;
   const vivos = (camps ?? []).filter((c) => statusObjetoOperacional(c.status));
-  const ativos = vivos.filter((c) => c.status === "active");
+  const ativos = vivos.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
   const from = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
   const snapsQ = await supa.from("metric_snapshots")
     // `campaign_id` entrou em 04/09/2026 para escopar o gasto por base; `leads` saiu (coluna
@@ -1699,7 +1699,7 @@ async function t_ads_ranking(companyId: string, days = 30, ordenar_por = "gasto"
   const ads = adsQ.data;
   let campQ = supa.from("campaigns").select("id,name,category,status,external_id").eq("company_id", companyId);
   const needle = String(name_like ?? "").trim();
-  const { data: camps } = needle ? await campQ : await campQ.eq("status", "active");
+  const { data: camps } = needle ? await campQ : await campQ.or("status.eq.ACTIVE,status.eq.active");
   let campList = (camps ?? []).filter((c) => statusObjetoOperacional(c.status));
   if (needle) {
     campList = casarCampanhas(campList, needle) as typeof campList;
@@ -2808,7 +2808,7 @@ async function t_propose_action(companyId: string, convId: string, requestedBy: 
   let bruto: AlvoRow[] = [];
   const nivelAlvo: "anuncio" | "conjunto" | "campanha" = isAd ? "anuncio" : isAdset ? "conjunto" : "campanha";
   if (isAd) {
-    const { data: camps } = await supa.from("campaigns").select("id").eq("company_id", companyId).eq("status", "active");
+    const { data: camps } = await supa.from("campaigns").select("id").eq("company_id", companyId).or("status.eq.ACTIVE,status.eq.active");
     const campIds = (camps ?? []).map((c) => c.id);
     const { data: ads } = await supa.from("ads").select("id,name,external_id,campaign_id,status").eq("company_id", companyId);
     // Com external_id o gestor JA apontou o objeto; exigir campanha ativa so esconderia o alvo.

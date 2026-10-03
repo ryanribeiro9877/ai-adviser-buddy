@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useApp } from "@/lib/app-context";
 import { EmptyCompany } from "@/components/metric-card";
 import { FalhaDeCarga } from "@/components/falha-de-carga";
@@ -13,11 +13,16 @@ import {
   fmtBRL,
   fmtInt,
   fmtPct,
-  metaStatus,
+  ordenarLinhas,
+  seloDeEntrega,
+  statusParaFiltro,
   TIPO_ORDER,
   type AdRow,
+  type OrdemDaLista,
   type TipoConta,
 } from "@/lib/breakdown";
+import { FrescorDoEspelho } from "@/components/frescor-do-espelho";
+import { Button } from "@/components/ui/button";
 import { matchesStatus, validateFilterSearch } from "@/lib/filters";
 import { Image as ImageIcon, ExternalLink } from "lucide-react";
 
@@ -40,8 +45,21 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function AdCard({ ad }: { ad: AdRow }) {
-  const st = metaStatus(ad.status);
+function AdCard({
+  ad,
+  campanhaStatus,
+  campanhaEfetivo,
+}: {
+  ad: AdRow;
+  campanhaStatus: string | null;
+  campanhaEfetivo: string | null;
+}) {
+  const st = seloDeEntrega({
+    status: ad.status,
+    effectiveStatus: ad.effective_status,
+    campaignStatus: campanhaStatus,
+    campaignEffective: campanhaEfetivo,
+  });
   const thumb = ad.thumbnail_url || ad.image_url;
   return (
     <Card className="p-4 flex flex-col">
@@ -89,6 +107,7 @@ function AdCard({ ad }: { ad: AdRow }) {
 function Anuncios() {
   const { selectedCompany } = useApp();
   const { filters } = useGlobalFilters();
+  const [ordem, setOrdem] = useState<OrdemDaLista>("recentes");
   const adsQ = useAds(selectedCompany?.id ?? null);
   const metaQ = useCampaignBreakdown(selectedCompany?.id ?? null);
 
@@ -99,20 +118,36 @@ function Anuncios() {
     return m;
   }, [metaQ.data]);
 
+  const campanhaById = useMemo(() => {
+    const m = new Map<string, { status: string; effective: string | null }>();
+    for (const c of metaQ.data ?? []) {
+      m.set(c.campaign_id, { status: c.status, effective: c.effective_status });
+    }
+    return m;
+  }, [metaQ.data]);
+
   const typesPresent = useMemo<TipoConta[]>(() => {
     const present = new Set(metaQ.data?.map((c) => c.tipo) ?? []);
     return TIPO_ORDER.filter((t) => present.has(t));
   }, [metaQ.data]);
 
-  const ads = useMemo(
-    () =>
-      (adsQ.data ?? []).filter(
-        (a) =>
-          matchesStatus(a.status, filters.status) &&
-          (filters.tipo === "all" || tipoByCampaign.get(a.campaign_id ?? "") === filters.tipo),
-      ),
-    [adsQ.data, filters.status, filters.tipo, tipoByCampaign],
-  );
+  const ads = useMemo(() => {
+    const filtrados = (adsQ.data ?? []).filter((a) => {
+      const camp = campanhaById.get(a.campaign_id ?? "");
+      return (
+        matchesStatus(
+          statusParaFiltro({
+            status: a.status,
+            effectiveStatus: a.effective_status,
+            campaignStatus: camp?.status,
+            campaignEffective: camp?.effective,
+          }),
+          filters.status,
+        ) && (filters.tipo === "all" || tipoByCampaign.get(a.campaign_id ?? "") === filters.tipo)
+      );
+    });
+    return ordenarLinhas(filtrados, ordem);
+  }, [adsQ.data, filters.status, filters.tipo, tipoByCampaign, campanhaById, ordem]);
 
   if (!selectedCompany) return <EmptyCompany />;
 
@@ -124,6 +159,16 @@ function Anuncios() {
           Performance por criativo · {selectedCompany.name}
           {!adsQ.isLoading && ads.length > 0 ? ` · ${ads.length} anúncio(s)` : ""}
         </p>
+        <FrescorDoEspelho companyId={selectedCompany.id} />
+      </div>
+
+      <div className="flex gap-2">
+        <Button type="button" size="sm" variant={ordem === "recentes" ? "default" : "outline"} onClick={() => setOrdem("recentes")}>
+          Mais recentes
+        </Button>
+        <Button type="button" size="sm" variant={ordem === "gasto" ? "default" : "outline"} onClick={() => setOrdem("gasto")}>
+          Maior gasto
+        </Button>
       </div>
 
       <GlobalFilters mode="accumulated" typesPresent={typesPresent} />
@@ -150,9 +195,17 @@ function Anuncios() {
         </Card>
       ) : (
         <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {ads.map((ad) => (
-            <AdCard key={ad.id} ad={ad} />
-          ))}
+          {ads.map((ad) => {
+            const camp = campanhaById.get(ad.campaign_id ?? "");
+            return (
+              <AdCard
+                key={ad.id}
+                ad={ad}
+                campanhaStatus={camp?.status ?? null}
+                campanhaEfetivo={camp?.effective ?? null}
+              />
+            );
+          })}
         </div>
       )}
     </div>
