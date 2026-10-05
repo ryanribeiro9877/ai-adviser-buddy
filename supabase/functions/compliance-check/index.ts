@@ -21,6 +21,7 @@ import {
   empresaEhCredito,
   filtrarRegrasPorEmpresa,
 } from "../_shared/empresa_credito.ts";
+import { blocoDoutrina, carregarBaseDoutrina } from "../_shared/doutrina_agentes.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -183,7 +184,14 @@ Deno.serve(async (req) => {
     `Você é o Guardião de Compliance de anúncios de crédito consignado (${marcaNome}). Identifique VIOLAÇÕES do material contra as regras abaixo. Seja rigoroso mas justo: só aponte violação com base concreta no material; não invente. Responda SOMENTE com JSON válido, sem markdown:\n{"violacoes":[{"code":"...","trecho_ou_elemento":"...","explicacao":"máx 20 palavras"}],"sugestao_reescrita":"legenda corrigida ou null"}\nSe não houver violações: {"violacoes":[],"sugestao_reescrita":null}.\nREGRAS DE INTERPRETAÇÃO OBRIGATÓRIAS (valem sobre ambiguidade nos exemplos):\n- FIN-04: a menção "consulte o CET na sua simulação" (ou "consulte o CET da oferta") SATISFAZ a exigência de CET. NÃO exija percentual numérico de CET. NÃO trate X%/Y%/Z% de exemplos como pendência do anunciante.\n- LGL-04: se a identificação do anunciante estiver na LP/URL de destino, isso é ATENÇÃO no máximo — não invente bloqueio exigindo CNPJ na legenda quando o gestor declarou que fica na LP.\nREGRAS:\n${regrasTxt}`;
   const instruNaoCredito =
     `Você é o Guardião de Compliance de anúncios da cooperativa habitacional / núcleo jurídico (${marcaNome}). NÃO é empresa de crédito consignado. Identifique VIOLAÇÕES só contra as regras listadas. Seja rigoroso mas justo: só aponte violação com base concreta; não invente. Responda SOMENTE com JSON válido, sem markdown:\n{"violacoes":[{"code":"...","trecho_ou_elemento":"...","explicacao":"máx 20 palavras"}],"sugestao_reescrita":"legenda corrigida ou null"}\nSe não houver violações: {"violacoes":[],"sugestao_reescrita":null}.\nPROIBIDO na sugestao_reescrita: inventar CET, consignado CLT, simulação de margem, "Correspondente Bancário", "Legal é Viver", crédito sujeito a análise bancária, ou qualquer oferta financeira de terceiros.\nSe reescrever: preserve temas jurídicos (conta de luz, cobrança indevida, empréstimo abusivo, contratos) e, quando LGL-04 aplicar, sugira razão social/CNPJ/WhatsApp oficial da cooperativa — NÃO de correspondente bancário.\nLGL-04: ausência de CNPJ na legenda é ATENÇÃO no máximo se a identificação estiver no destino/WhatsApp oficial — não invente bloqueio.\nREGRAS APLICÁVEIS A ESTA EMPRESA:\n${regrasTxt}`;
-  const instru = ehCredito ? instruCredito : instruNaoCredito;
+  // Skill gestor-trafego-meta, so credito: contexto para achar violacao na PECA (video/imagem) e
+  // em atributo pessoal. As REGRAS acima e as de interpretacao prevalecem — doutrina nao cria
+  // codigo de violacao novo nem endurece FIN-04/LGL-04.
+  const doutrinaCredito = ehCredito
+    ? blocoDoutrina(await carregarBaseDoutrina(supa), "compliance", { credito: true }) +
+      "\nPRECEDENCIA: so reporte violacao com um code das REGRAS listadas; a doutrina acima orienta a leitura, nao cria regra."
+    : "";
+  const instru = ehCredito ? instruCredito + doutrinaCredito : instruNaoCredito;
 
   const content: any[] = [
     {
@@ -219,7 +227,7 @@ Deno.serve(async (req) => {
     if (!plano) break;
     if (plano.esperarMs) {
       tentativasEmVoo++;
-      await new Promise((r) => setTimeout(r, Math.min(plano.esperarMs, 4000)));
+      await new Promise((r) => setTimeout(r, Math.min(plano.esperarMs ?? 0, 4000)));
     }
     payload = plano.payload;
     resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {

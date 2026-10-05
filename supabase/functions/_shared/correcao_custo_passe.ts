@@ -2,6 +2,7 @@
 // A funcao SQL detecta. Este arquivo grava, avisa e verifica. Nao executa na Meta.
 
 import { bodyOpenRouter, resolverChamadaLlm } from "./llm_roteador.ts";
+import { type BaseDoutrina, baseEmbutida, blocoDoutrina, carregarBaseDoutrina } from "./doutrina_agentes.ts";
 import { recusarCruzamentoLinhaProduto } from "./memoria_conjunto.ts";
 import {
   escolherEscada,
@@ -376,6 +377,7 @@ async function redigir(
   est: Record<string, unknown>,
   colheita: Awaited<ReturnType<typeof colher>>,
   escada: { alavanca: string | null; atos: string[]; motivo: string | null },
+  base: BaseDoutrina = baseEmbutida(),
 ): Promise<Record<string, unknown> | null> {
   if (!chave || !escada.alavanca) return null;
   const rota = resolverChamadaLlm({
@@ -392,6 +394,9 @@ async function redigir(
     "Proibido: orcamento, publico, geo, idade, escala, pausar campanha ou conjunto, renomear.",
     "reversa e obrigatoria. Sem reversa o plano e recusado.",
     "Nao invente peca: use so o acervo recebido.",
+    // Doutrina do papel: decomposicao do custo e aprendizado — o mecanismo do plano tem de
+    // dizer qual fator do custo a alavanca move, sem reabrir a escolha da alavanca.
+    blocoDoutrina(base, "vigia"),
   ].join(" ");
   const user = JSON.stringify({
     estouro: {
@@ -598,7 +603,7 @@ export async function rodarPasseCorrecaoCusto(opts: {
       if (escada.alavanca === "ajustar_posicionamentos_do_conjunto" && !txt(est.formato_midia)) {
         escada = { alavanca: null, atos: [], motivo: "formato_de_midia_nao_medido" };
       }
-      let corpo = await redigir(opts.openRouterKey, est, colheita, escada);
+      let corpo = await redigir(opts.openRouterKey, est, colheita, escada, await carregarBaseDoutrina(opts.supa));
       if (corpo && escada.alavanca && txt(corpo.alavanca) !== escada.alavanca) corpo = null;
       let montado = corpo ?? planoDeterministico(est, escada, colheita, corpo ? null : "llm_sem_json");
       const contextoBase = {

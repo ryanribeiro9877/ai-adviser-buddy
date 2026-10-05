@@ -6,6 +6,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
+import { type BaseDoutrina, blocoDoutrina, carregarBaseDoutrina } from "../_shared/doutrina_agentes.ts";
 
 /**
  * Teto de parede POR CHAMADA do redator.
@@ -120,6 +121,13 @@ type Redacao = {
   falha: string | null;
 };
 
+// Doutrina da skill gestor-trafego-meta (papel "reco"): uma leitura por execucao.
+let DOUTRINA_RECO: Promise<BaseDoutrina> | null = null;
+function doutrinaReco(): Promise<BaseDoutrina> {
+  DOUTRINA_RECO ??= carregarBaseDoutrina(supa);
+  return DOUTRINA_RECO;
+}
+
 async function redigirComLlm(c: Candidate): Promise<Redacao> {
   if (!OPENROUTER_KEY) {
     return {
@@ -135,7 +143,9 @@ REGRAS INEGOCIAVEIS:
 2) Se evidence_json tem base_clique=link, diga "CTR de link" / "CPC de link" — nunca misture com cliques totais.
 3) visualizacoes_lp, thruplay, avg_watch sao resultados validos — cite quando presentes.
 4) Nao proponha execucao na Meta; proponha discussao/diagnostico.
-5) Responda JSON puro: {"title":"...","description":"..."} com title <= 120 chars.`;
+5) Responda JSON puro: {"title":"...","description":"..."} com title <= 120 chars.
+6) A description segue a estrutura da recomendacao da casa (evidencia, mecanismo, criterio de sucesso, prazo de leitura, reversa) com o que evidence_json sustenta; parte sem numero vira "a confirmar", nunca inventada.
+${blocoDoutrina(await doutrinaReco(), "reco")}`;
 
   const user = JSON.stringify({
     signal_key: c.signal_key,

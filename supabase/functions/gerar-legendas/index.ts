@@ -13,6 +13,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
+import { blocoDoutrina, carregarBaseDoutrina } from "../_shared/doutrina_agentes.ts";
 import { inferirMeioDeProduto, inferirMeioDrive, parseMeioDriveArg, type MeioDrive } from "../_shared/pedido_drive_criativos.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -271,7 +272,12 @@ Deno.serve(async (req) => {
     ? `- Proibido: voz Juridico ou La Felicità; promessa medica/cura; inventar procedimento, preco ou resultado clinico; CET/CLT.`
     : `- Proibido: inventar credito/CLT/CET; prometer resultado juridico garantido; direcionar a numero de terceiro nao identificado.`;
 
-  const sys = `Voce e redator de legendas de Meta Ads para ${marcaNome}.
+  // Skill gestor-trafego-meta: regras de copy de credito so em empresa de credito.
+  const doutrinaCredito = ehCredito
+    ? blocoDoutrina(await carregarBaseDoutrina(supa), "legendas", { credito: true })
+    : "";
+
+  const sys = `Voce e redator de legendas de Meta Ads para ${marcaNome}.${doutrinaCredito}
 Framework OBRIGATORIO (ESP-37), nesta ordem em CADA legenda:
 1) HOOK — primeira linha que para o scroll (use tatica de hook distinta em cada variante).
 2) BENEFICIO/PROVA — o que a oferta/orientacao entrega, sem promessa ilegal.

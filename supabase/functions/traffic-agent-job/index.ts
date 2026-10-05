@@ -416,6 +416,14 @@ import {
 } from "../_shared/verificacao_pos_resposta.ts";
 import { analiseDeReserva, blocoFatosParaLeitura, type FatosCampanha, fatosDeDetalhe } from "../_shared/fatos_da_leitura.ts";
 import { lerStreamOpenRouter } from "../_shared/openrouter_stream.ts";
+import {
+  type BaseDoutrina,
+  baseEmbutida,
+  blocoDoutrina,
+  carregarBaseDoutrina,
+  montarDoutrina,
+  type PapelDoutrina,
+} from "../_shared/doutrina_agentes.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -2019,56 +2027,20 @@ function instrucaoDaLeitura(pergunta: string): string {
   return linhas.join("\n");
 }
 
-async function blocoMetodoDaLeitura(pedido: string): Promise<string> {
-  /**
-   * SECOES QUE EXISTEM, por intencao do pedido. A versao anterior pedia "Diagnosticar",
-   * "Breakdown", "Marginal" e "Custo" — nenhuma existe em agent_knowledge — caia no comeco
-   * generico do tema e cortava em 1.500 chars. A pergunta de tendencia x meta x teto chegava
-   * ao modelo sem learning phase, sem fadiga e sem a regra de matar/manter/escalar.
-   * A ordem e a prioridade: o teto corta pelo fim.
-   */
-  const p = deacc(pedido.toLowerCase());
-  const alvos: { tema: string; secao: string }[] = [
-    { tema: "gestor_trafego_meta", secao: "Principios" },
-    { tema: "gestor_trafego_meta", secao: "Anti-alucinacao" },
-  ];
-  const tendencia = /\b(tendenc\w*|estagn\w*|fadiga|cansa\w*|satur\w*|caindo|subindo|evolu\w*)\b/.test(p);
-  const meta = /\b(meta|teto|maximo|por dia|convers\w*|custo|preco|cpl|cpa|escal\w*|orcamento|verba)\b/.test(p);
-  if (tendencia || /\bcriativ/.test(p)) {
-    alvos.push({ tema: "otimizacao", secao: "Learning phase" });
-    alvos.push({ tema: "otimizacao", secao: "Fadiga criativa" });
-    alvos.push({ tema: "otimizacao", secao: "Flutuacao" });
-  }
-  if (meta) {
-    alvos.push({ tema: "otimizacao", secao: "Decisao matar" });
-    alvos.push({ tema: "otimizacao", secao: "Arvore de diagnostico" });
-    alvos.push({ tema: "otimizacao", secao: "Realocacao de orcamento" });
-    alvos.push({ tema: "otimizacao", secao: "Como escalar" });
-  }
-  alvos.push({ tema: "otimizacao", secao: "Nivel de avaliacao" });
-  alvos.push({ tema: "unidade_economica", secao: "Armadilhas de leitura" });
-  const partes: string[] = [];
-  let usados = 0;
-  const TETO = 14_000;
-  const POR_SECAO = 2_600;
-  const vistos = new Set<string>();
-  for (const alvo of alvos) {
-    if (usados >= TETO) break;
-    const hit = await t_conhecimento(alvo.tema, alvo.secao) as Record<string, unknown>;
-    if (hit.erro || !hit.conteudo) continue;
-    const chave = `${hit.tema}/${hit.secao}`;
-    if (vistos.has(chave)) continue;
-    vistos.add(chave);
-    const corpo = String(hit.conteudo ?? "").trim();
-    const aviso = hit.aviso_validade
-      ? " [revalidacao vencida: use como METODO de julgamento; nao cite numero/limite dela como regra vigente da Meta]"
-      : "";
-    const recorte = corpo.slice(0, Math.min(POR_SECAO, TETO - usados));
-    const bloco = `### ${hit.tema} / ${hit.secao}${aviso}\n${recorte}`;
-    partes.push(bloco);
-    usados += bloco.length;
-  }
-  return partes.join("\n\n");
+/**
+ * Metodo da leitura = papel "leitura" do mapa unico de doutrina (`_shared/doutrina_agentes.ts`).
+ *
+ * Historico: 05/10/2026 manha — pedia "Diagnosticar", "Breakdown", "Marginal", secoes que nao
+ * existiam, e caia no texto generico cortado em 1.500 chars. 05/10 tarde — mirou as secoes
+ * reais dos temas antigos (vencidos). Agora vem da skill v2: metas conjuntas (viabilidade,
+ * tendencia em janela curta, criativo que estreia), doutrina de diagnostico e mecanica.
+ */
+async function blocoMetodoDaLeitura(pedido: string, companyId?: string): Promise<string> {
+  await precarregarDoutrina();
+  void pedido;
+  return montarDoutrina(DOUTRINA_CACHE?.base ?? baseEmbutida(), "leitura", {
+    credito: empresaEhCredito(companyId),
+  }).texto;
 }
 
 async function interpretarColheita(args: {
@@ -2083,7 +2055,7 @@ async function interpretarColheita(args: {
 }): Promise<{ texto: string; erro?: string; tin: number; tout: number; finish: string }> {
   const metodo = String(args.metodo ?? "").trim();
   const fatos = String(args.fatos ?? "").trim();
-  const sys = `${montarSysSintese(args.companyName, "", "", args.escopo, args.companyId)}
+  const sys = `${montarSysSintese(args.companyName, "", "", args.escopo, args.companyId, true)}
 
 ${instrucaoDaLeitura(args.pergunta)}
 ${metodo ? `\nMETODO DA SKILL gestor-trafego-meta E DA BASE (aplique na leitura como criterio de julgamento; nao recite o texto):\n${metodo}` : ""}`;
@@ -3216,9 +3188,16 @@ async function rodarSubagente(
     ? `Voce e o ${ag.codigo} ${ag.nome}, especialista em ${ag.setor}, atuando pela unidade '${nome}'`
     : `Voce e o subagente '${nome}'`;
   const persona = ag?.papel ? `\n${ag.papel}` : "";
+  // Doutrina do papel direto no prompt: antes o especialista so a via se gastasse uma das suas
+  // 1-2 chamadas em get_conhecimento, e na pratica gastava em leitura de conta.
+  await precarregarDoutrina();
+  const papelDoutrina = PAPEL_DO_SUBAGENTE[nome];
+  const doutrinaSub = papelDoutrina
+    ? doutrina(papelDoutrina, empresaEhCredito(ctx.companyId) || isLegal)
+    : "";
   const sys = `${identidade} do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).${persona}
 MISSAO: ${cfg.missao}
-${cfg.tools.includes("get_conhecimento") ? "BASE TECNICA: se o foco pede analise, tendencia, teto de custo, definicao de metrica ou metodo, a primeira ferramenta e get_conhecimento. Diagnostico e custo: tema=otimizacao e tema=diagnostico_especialista. Metrica: tema=metricas. Metodo: tema=gestor_trafego_meta (secao Diagnosticar). Criativo: tema=criativo_hooks. No maximo duas chamadas. Validade vencida entra no relatorio como nao confirmada.\n" : ""}FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
+${doutrinaSub}${cfg.tools.includes("get_conhecimento") ? `BASE TECNICA: ${doutrinaSub ? "a doutrina do seu papel ja esta acima — nao gaste chamada para reler. " : ""}Se o foco pedir metodo alem dela, get_conhecimento: diagnostico e custo = tema doutrina_diagnostico; meta de volume com teto = metas_conjuntas; metrica = metricas_bases; algoritmo/aprendizado = mecanica_meta; ato/card = contrato_card; WhatsApp = whatsapp_ativos; mapa geral = gestor_trafego_meta; criativo = criativo_hooks. No maximo duas chamadas. Validade vencida entra no relatorio como nao confirmada.\n` : ""}FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
 FIDELIDADE AO PEDIDO: interprete a pergunta de forma fria e literal. Nao amplie a janela, nao traga campanha fora do universo do CONTRATO DO PEDIDO, nao responda o que nao foi perguntado. Se o contrato traz date_from, ele e a janela de toda leitura de desempenho.
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio, registre em LACUNAS e siga so com a sua parte.
 VELOCIDADE: teto ~5 min. Cobriu o FOCO, ESCREVA.
@@ -3562,7 +3541,31 @@ function memoriaDaSintese(
   return sel.texto;
 }
 
-function montarSysSintese(companyName: string, estilo: string, memoria: string, escopo?: EscopoPedido, companyId?: string): string {
+/**
+ * Doutrina da skill gestor-trafego-meta por papel (ver `_shared/doutrina_agentes.ts`).
+ * Uma consulta ao banco por isolate a cada 10 min; sem banco, o espelho embutido. O acessor e
+ * sincrono porque `montarSysSintese` e sincrona — quem chama precarrega no inicio do fluxo.
+ */
+let DOUTRINA_CACHE: { base: BaseDoutrina; em: number } | null = null;
+async function precarregarDoutrina(): Promise<BaseDoutrina> {
+  if (DOUTRINA_CACHE && Date.now() - DOUTRINA_CACHE.em < 600_000) return DOUTRINA_CACHE.base;
+  const base = await carregarBaseDoutrina(supa);
+  DOUTRINA_CACHE = { base, em: Date.now() };
+  return base;
+}
+function doutrina(papel: PapelDoutrina, credito = false): string {
+  return blocoDoutrina(DOUTRINA_CACHE?.base ?? baseEmbutida(), papel, { credito });
+}
+const PAPEL_DO_SUBAGENTE: Record<string, PapelDoutrina> = {
+  desempenho_campanhas: "desempenho",
+  criativos: "criativos",
+  estrutura_conta: "estrutura",
+  alertas_recomendacoes: "sentinela",
+  whatsapp_waba: "whatsapp",
+  compliance: "compliance",
+};
+
+function montarSysSintese(companyName: string, estilo: string, memoria: string, escopo?: EscopoPedido, companyId?: string, semDoutrina = false): string {
   const isLegal = empresaEhCredito(companyId) || norm(companyName).includes("legal");
   const perfil = isLegal
     ? "empresa de credito consignado; regras financeiras so valem quando o produto estiver comprovado; fatos de outras empresas nao se aplicam"
@@ -3579,7 +3582,7 @@ FORMATO (regras vigentes do sistema):
 ${estilo}
 MEMORIA INSTITUCIONAL (fatos verificados):
 ${memoria}
-Responda a pergunta INTEIRA conforme o CONTRATO DO PEDIDO, bloco a bloco na ordem pedida, com numero + fonte + ressalva.`;
+${semDoutrina ? "" : doutrina("sintese", empresaEhCredito(companyId))}Responda a pergunta INTEIRA conforme o CONTRATO DO PEDIDO, bloco a bloco na ordem pedida, com numero + fonte + ressalva.`;
 }
 
 async function chamarSinteseParte(
@@ -4423,6 +4426,7 @@ async function validarRelatorios(
   const sys = `Voce e a COORDENACAO de uma equipe de especialistas de trafego pago. Avalie cada relatorio contra CRITERIOS VERIFICAVEIS, nunca contra gosto:
 (1) COBERTURA: o relatorio atende o foco que foi atribuido ao especialista? (2) FORMA: numeros vem com fonte e janela, e existe a linha LACUNAS? (3) ESCOPO: ele respondeu o que era de OUTRO especialista em vez do proprio dominio? (4) COERENCIA INTERNA: ha contradicao evidente dentro do proprio relatorio? (5) COBERTURA PAGINAVEL: o relatorio aceitou corte de dados ('X de Y exibidos', 'restantes') SEM esgotar as paginas disponiveis, quando o foco exigia a lista inteira? Isso E motivo de devolucao - a ferramenta pagina e o especialista tinha teto sobrando. (6) DETALHAMENTO: se o pedido pede anuncio/serie diaria e desempenho_campanhas declara 'nao retornado nesta rodada' sem ter listado os anuncios, DEVOLVA — declarar LACUNAS nesse caso NAO e suficiente; a tool get_detalhe_anuncios existe. (7) ORIGEM DRIVE: se o pedido pede a pasta dos anuncios ja no ar e o relatorio diz 'sem vinculo' sem origem_drive_dos_anuncios, DEVOLVA.
 NAO devolva por: estilo, tamanho, relatorio marcado INCOMPLETO-cortado (isso e limite de tamanho, nao erro do especialista).
+${(await precarregarDoutrina(), doutrina("coordenacao"))}A doutrina acima so serve aos criterios (2) e (4): numero inventado, base misturada ou "nao existe" sem consulta completa sao motivo de devolucao; o resto nao.
 Responda APENAS JSON valido: {"avaliacoes":[{"nome":"...","veredito":"ok"|"devolver","motivo":"especifico: o que faltou/errou e o que a nova tentativa deve trazer"}]}`;
   const r = await chamarLLM(
     [{ role: "system", content: sys },
@@ -4861,7 +4865,15 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.31";
+  tel.versao = "job-v4.32";
+  {
+    const base = await precarregarDoutrina();
+    const origens = [...base.values()].map((v) => v.origem);
+    tel.doutrina = {
+      temas: base.size,
+      origem: origens.every((o) => o === "banco") ? "banco" : origens.some((o) => o === "banco") ? "misto" : "embutida",
+    };
+  }
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -5174,7 +5186,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       const criterios = extrairCriteriosDoPedido(pergunta);
       const fatos = colheitaRelacao.fatos ?? [];
       const blocoFatos = blocoFatosParaLeitura(fatos, criterios);
-      const metodo = await blocoMetodoDaLeitura(pergunta);
+      const metodo = await blocoMetodoDaLeitura(pergunta, companyId);
       const tentativas: { ms: number; erro?: string; chars: number; finish?: string }[] = [];
       let lido: { texto: string; erro?: string; tin: number; tout: number; finish: string } = {
         texto: "",
@@ -6075,7 +6087,8 @@ corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante 
 
 Responda APENAS um JSON valido, sem cerca markdown, NESTA ORDEM de chaves:
 {"cobertura":"o que nao foi medido, em portugues","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"corpo_md":"narrativa em markdown para o gestor"}
-Escreva cobertura e achados ANTES de corpo_md. Array achados vazio so quando nao houver opiniao com as 5 partes; estouro de orcamento, custo versus teto e concentracao de resultado SAO achados.`;
+Escreva cobertura e achados ANTES de corpo_md. Array achados vazio so quando nao houver opiniao com as 5 partes; estouro de orcamento, custo versus teto e concentracao de resultado SAO achados.
+${(await precarregarDoutrina(), doutrina("relatorio"))}`;
   const timeoutMs = Math.min(150_000, Math.max(args.prazo() - 8_000, 8_000));
   const r = await chamarLLM(
     [
@@ -6351,7 +6364,8 @@ Responda APENAS um JSON valido, sem cerca markdown, com as chaves:
 leitura { texto } (narrativa; objeto, nao string solta), possibilidades {nada_muda, plano, maximo_envelope cada um com d3,d7,d15,d30}, sonho {valor, atingivel_no_prazo, nota}, atos[], recusas[], lacunas[], premissas[].
 Nao envie baseline nem teto_janela — o codigo grava os calculados.
 Cada ato: acao do catalogo Meta, alvo_external_id, quando imediato|apos_janela, evidencia, mecanismo, metrica_sucesso, janela_leitura, reversa.
-Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo novo se manter depois do prazo".`;
+Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo novo se manter depois do prazo".
+${(await precarregarDoutrina(), doutrina("ritmo"))}`;
   const timeoutMs = Math.min(150_000, Math.max(args.prazo() - 8_000, 8_000));
   const r = await chamarLLM(
     [

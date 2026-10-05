@@ -173,7 +173,7 @@ assert(
   /"criativos",\s*\n\s*"criativos_drive"/.test(job),
   "pecas no ar entram antes do inventario Drive",
 );
-assert(job.includes("job-v4.31"), "versao da telemetria andou");
+assert(job.includes("job-v4.32"), "versao da telemetria andou");
 assert(job.includes("interpretarColheita"), "leitura do pedido nao pode pular o modelo");
 assert(job.includes("pedidoExigeInterpretacao"), "colheita distingue tabela de leitura");
 assert(job.includes("tetoDaLeitura"), "leitura usa o teto inteiro da invocacao");
