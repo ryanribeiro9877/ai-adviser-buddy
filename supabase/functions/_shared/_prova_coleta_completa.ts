@@ -173,10 +173,10 @@ assert(
   /"criativos",\s*\n\s*"criativos_drive"/.test(job),
   "pecas no ar entram antes do inventario Drive",
 );
-assert(job.includes("job-v4.30"), "versao da telemetria andou");
+assert(job.includes("job-v4.31"), "versao da telemetria andou");
 assert(job.includes("interpretarColheita"), "leitura do pedido nao pode pular o modelo");
 assert(job.includes("pedidoExigeInterpretacao"), "colheita distingue tabela de leitura");
-assert(job.includes("escadaDeLeitura"), "teto da leitura sobe quando a analise estoura");
+assert(job.includes("tetoDaLeitura"), "leitura usa o teto inteiro da invocacao");
 assert(job.includes("blocoMetodoDaLeitura"), "a leitura consulta a base tecnica");
 assert(!job.includes("A interpretação não fechou nesta rodada"), "codigo de timeout nao vai para o gestor");
 

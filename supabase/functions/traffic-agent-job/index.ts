@@ -414,6 +414,8 @@ import {
   linhaDeVerificacao,
   verificarAntesDeResponder,
 } from "../_shared/verificacao_pos_resposta.ts";
+import { analiseDeReserva, blocoFatosParaLeitura, type FatosCampanha, fatosDeDetalhe } from "../_shared/fatos_da_leitura.ts";
+import { lerStreamOpenRouter } from "../_shared/openrouter_stream.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -1205,23 +1207,21 @@ const SINT_FASE_HARD_MS = 180_000;
  */
 const SINT_TIMEOUT_MS = 150_000;
 /**
- * Teto da LEITURA da colheita. O standard de 60s cortou a análise em
- * `openrouter_timeout_60000` (05/10/2026, La Felicità): a tabela saiu e o texto não.
- * A primeira ida usa o teto medido da síntese (150s). Se o relógio cortar, a segunda
- * sobe até o teto por chamada (330s), limitado ao que ainda cabe na invocação.
- * Cada ida é uma chamada só — o resgate interno de modelo não repete o mesmo teto curto.
+ * Teto da LEITURA da colheita — uma ida com TUDO o que cabe na invocação (até 330s).
+ *
+ * Histórico de 05/10/2026, La Felicità (107 conversas/dia, teto R$ 7,00):
+ *   - a2139484: teto standard de 60s → `openrouter_timeout_60000`, tabela crua na tela;
+ *   - dee35d98: escada 150s + resto. O aborto aos 150s saiu rotulado `openrouter_http_408`
+ *     (sem resgate de hang ele caía no `!resp.ok`), a escada não reconheceu como timeout
+ *     e os ~172s restantes nunca foram usados. Tabela crua de novo.
+ * Partir o relógio em degraus recomeça a leitura do zero a cada degrau; com streaming o que
+ * o modelo já escreveu sobrevive ao corte, então o degrau só desperdiça. 0 = não cabe ida.
  */
-function escadaDeLeitura(prazoRestanteMs: number): number[] {
+function tetoDaLeitura(prazoRestanteMs: number): number {
   const folga = 8_000;
   const disponivel = prazoRestanteMs - folga;
-  if (disponivel < CHAMADA_MINIMA_MS) return [];
-  const primeiro = Math.min(SINT_TIMEOUT_MS, disponivel);
-  const tetos = [primeiro];
-  const depois = disponivel - primeiro;
-  if (primeiro < OPENROUTER_TIMEOUT_MS && depois >= CHAMADA_MINIMA_MS) {
-    tetos.push(Math.min(OPENROUTER_TIMEOUT_MS, depois));
-  }
-  return tetos;
+  if (disponivel < CHAMADA_MINIMA_MS) return 0;
+  return Math.min(OPENROUTER_TIMEOUT_MS, disponivel);
 }
 // Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
 const SINT_CHARS_SEGMENTAR = 70_000;
@@ -1865,7 +1865,7 @@ async function primeiroDiaComEntrega(companyId: string, campaignIds: string[]): 
 async function colherRelacaoNumerica(args: {
   companyId: string;
   pedido: string;
-}): Promise<{ ok: boolean; markdown: string; leitura: string; cobertura: string; campanhas: number }> {
+}): Promise<{ ok: boolean; markdown: string; leitura: string; cobertura: string; campanhas: number; fatos: FatosCampanha[] }> {
   const pedido = args.pedido;
   const hoje = today();
   const janela = resolverJanelaPedido(pedido, hoje);
@@ -1875,7 +1875,7 @@ async function colherRelacaoNumerica(args: {
     .select("id,name,status,external_id")
     .eq("company_id", args.companyId);
   if (error) {
-    return { ok: false, markdown: "", leitura: "", cobertura: `campanhas: ${error.message}`, campanhas: 0 };
+    return { ok: false, markdown: "", leitura: "", cobertura: `campanhas: ${error.message}`, campanhas: 0, fatos: [] };
   }
   type CampAlvo = { id?: string; name?: string; status?: unknown; external_id?: string };
   const operacionais = ((camps ?? []) as CampAlvo[]).filter((c) => statusObjetoOperacional(c.status));
@@ -1902,7 +1902,7 @@ async function colherRelacaoNumerica(args: {
     const porque = citados.length
       ? `nenhuma das campanhas citadas no espelho (${faltando.join("; ")})`
       : "nenhuma campanha da linha no recorte";
-    return { ok: false, markdown: "", leitura: "", cobertura: porque, campanhas: 0 };
+    return { ok: false, markdown: "", leitura: "", cobertura: porque, campanhas: 0, fatos: [] };
   }
   const toFetch = janela.dia_aberto ?? janela.date_to;
   let from = janela.date_from;
@@ -1922,6 +1922,7 @@ async function colherRelacaoNumerica(args: {
   const soAtivos = soAtivosDoPedido(pedido);
   const blocos: string[] = [];
   const blocosLeitura: string[] = [];
+  const fatos: FatosCampanha[] = [];
   const nomesEntraram: string[] = [];
   const falhas: string[] = [];
   const teto = Math.min(12, Math.max(alvos.length, 1));
@@ -1961,6 +1962,10 @@ async function colherRelacaoNumerica(args: {
       nomesEntraram.push(String(camp.name ?? id));
     } else falhas.push(`${camp.name}: sem conjuntos/anuncios no recorte`);
     if (mdLeitura) blocosLeitura.push(mdLeitura);
+    if (comSerie) {
+      const f = fatosDeDetalhe(pacote as Record<string, unknown>, soAtivos);
+      if (f) fatos.push(f);
+    }
   }
   const rotuloLinha = meio === "la_felicita" ? "La Felicità" : meio === "juridico" ? "Jurídico" : meio === "sistema_ocular" ? "Sistema Ocular" : "";
   const pedidoRotulo = citados.length
@@ -1982,14 +1987,23 @@ async function colherRelacaoNumerica(args: {
     leitura,
     cobertura: `${blocos.length} campanha(s); faltando=${faltando.length}; falhas=${falhas.length}; janela ${from}→${toFetch}`,
     campanhas: blocos.length,
+    fatos,
   };
 }
 
 function instrucaoDaLeitura(pergunta: string): string {
   const c = extrairCriteriosDoPedido(pergunta);
   const linhas = [
-    "ESTA RODADA E A ANALISE. Os numeros abaixo ja foram coletados e sao a unica fonte desta conta. A tabela e a serie diaria sao anexadas depois: nao as repita.",
-    "Entregue veredito, evidencia (numero, nivel, janela) e o que muda se a meta nao fecha. Sem narrar intencao. Sem inventar metrica ou benchmark.",
+    "ESTA RODADA E A ANALISE — o gestor pediu INTERPRETACAO, nao a tabela. Os numeros abaixo ja foram coletados e sao a unica fonte desta conta. NAO reproduza a tabela nem a serie dia a dia: cite so os numeros que sustentam cada conclusao.",
+    "O bloco FATOS CALCULADOS ja traz a conta feita em codigo (medias, metades, custo contra o teto, verba que a meta exige). Use esses numeros como estao; nao refaca soma nem divisao. Se um numero que voce precisa nao esta la nem na coleta, escreva 'nao coletado' — nunca estime.",
+    "Responda SO o que o pedido pergunta, aprofundando nas relacoes que ele cita. Nada de secao generica (publico, criativo visual, pixel, conta) que o pedido nao pediu.",
+    "ESTRUTURA OBRIGATORIA, nesta ordem, em markdown com titulos curtos:",
+    "  1. Veredito — 2 a 4 linhas respondendo a pergunta central de forma direta (sim/nao/em que condicao), com o numero que decide.",
+    "  2. Um bloco por criterio do pedido (abaixo), cada um com: situacao atual (numero), distancia ate o criterio, e se a tendencia aproxima ou afasta.",
+    "  3. Criativos — quem puxa, quem estagnou, quem estoura o teto, pelo nome e com conjunto; amostra < 5 conversas e hipotese, diga isso.",
+    "  4. O que fecha a conta — acoes concretas de trafego que os numeros sustentam para atingir os criterios juntos (realocar verba, segurar, pausar, testar), cada uma com o numero que a justifica e o efeito esperado em conversas/dia e custo. Voce recomenda; nao executa.",
+    "  5. Ressalvas — so as que mudam a decisao (poucos dias fechados, fase de aprendizado, dia em aberto).",
+    "Entregue a resposta INTEIRA, sem cortar e sem pedir outra pergunta. Sem narrar intencao. Sem inventar metrica ou benchmark.",
     "Metodo da casa: (1) nivel certo — varios anuncios no conjunto, julgue o conjunto, nao o pedaco; (2) tendencia pela serie, comparando o comeco e o fim da janela, nao a media; (3) custo da conversa = gasto / conversas; dia em aberto fica fora do veredito de custo; (4) criativo que segura volume ou estoura o teto entra pelo nome.",
   ];
   if (c.conversasPorDia != null) {
@@ -2006,35 +2020,51 @@ function instrucaoDaLeitura(pergunta: string): string {
 }
 
 async function blocoMetodoDaLeitura(pedido: string): Promise<string> {
+  /**
+   * SECOES QUE EXISTEM, por intencao do pedido. A versao anterior pedia "Diagnosticar",
+   * "Breakdown", "Marginal" e "Custo" — nenhuma existe em agent_knowledge — caia no comeco
+   * generico do tema e cortava em 1.500 chars. A pergunta de tendencia x meta x teto chegava
+   * ao modelo sem learning phase, sem fadiga e sem a regra de matar/manter/escalar.
+   * A ordem e a prioridade: o teto corta pelo fim.
+   */
   const p = deacc(pedido.toLowerCase());
-  const alvos: { tema: string; secoes: string[] }[] = [
-    { tema: "gestor_trafego_meta", secoes: ["Diagnosticar", "Principios"] },
+  const alvos: { tema: string; secao: string }[] = [
+    { tema: "gestor_trafego_meta", secao: "Principios" },
+    { tema: "gestor_trafego_meta", secao: "Anti-alucinacao" },
   ];
-  if (/\b(tendenc|estagn|criativ|conjunto|breakdown)\b/.test(p)) {
-    alvos.push({ tema: "diagnostico_especialista", secoes: ["Breakdown", "Marginal"] });
+  const tendencia = /\b(tendenc\w*|estagn\w*|fadiga|cansa\w*|satur\w*|caindo|subindo|evolu\w*)\b/.test(p);
+  const meta = /\b(meta|teto|maximo|por dia|convers\w*|custo|preco|cpl|cpa|escal\w*|orcamento|verba)\b/.test(p);
+  if (tendencia || /\bcriativ/.test(p)) {
+    alvos.push({ tema: "otimizacao", secao: "Learning phase" });
+    alvos.push({ tema: "otimizacao", secao: "Fadiga criativa" });
+    alvos.push({ tema: "otimizacao", secao: "Flutuacao" });
   }
-  if (/\b(convers|custo|preco|cpl|cpa|tendenc|estagn|criativ|teto)\b/.test(p)) {
-    alvos.push({ tema: "otimizacao", secoes: ["Diagnostico", "Custo"] });
+  if (meta) {
+    alvos.push({ tema: "otimizacao", secao: "Decisao matar" });
+    alvos.push({ tema: "otimizacao", secao: "Arvore de diagnostico" });
+    alvos.push({ tema: "otimizacao", secao: "Realocacao de orcamento" });
+    alvos.push({ tema: "otimizacao", secao: "Como escalar" });
   }
-  if (alvos.length < 3) {
-    alvos.push({ tema: "metricas", secoes: ["Conversa", "Custo"] });
-  }
+  alvos.push({ tema: "otimizacao", secao: "Nivel de avaliacao" });
+  alvos.push({ tema: "unidade_economica", secao: "Armadilhas de leitura" });
   const partes: string[] = [];
   let usados = 0;
-  const TETO = 4500;
-  for (const alvo of alvos.slice(0, 3)) {
+  const TETO = 14_000;
+  const POR_SECAO = 2_600;
+  const vistos = new Set<string>();
+  for (const alvo of alvos) {
     if (usados >= TETO) break;
-    let hit: Record<string, unknown> = { erro: "vazio" };
-    for (const secao of alvo.secoes) {
-      hit = await t_conhecimento(alvo.tema, secao);
-      if (!hit.erro && hit.conteudo) break;
-    }
-    if (hit.erro || !hit.conteudo) hit = await t_conhecimento(alvo.tema);
+    const hit = await t_conhecimento(alvo.tema, alvo.secao) as Record<string, unknown>;
+    if (hit.erro || !hit.conteudo) continue;
+    const chave = `${hit.tema}/${hit.secao}`;
+    if (vistos.has(chave)) continue;
+    vistos.add(chave);
     const corpo = String(hit.conteudo ?? "").trim();
-    if (!corpo) continue;
-    const aviso = hit.aviso_validade ? " [VENCIDO: declare reverificacao; nao trate como vigente]" : "";
-    const recorte = corpo.slice(0, Math.min(1500, TETO - usados));
-    const bloco = `### ${hit.tema ?? alvo.tema}${hit.secao ? " / " + hit.secao : ""}${aviso}\n${recorte}`;
+    const aviso = hit.aviso_validade
+      ? " [revalidacao vencida: use como METODO de julgamento; nao cite numero/limite dela como regra vigente da Meta]"
+      : "";
+    const recorte = corpo.slice(0, Math.min(POR_SECAO, TETO - usados));
+    const bloco = `### ${hit.tema} / ${hit.secao}${aviso}\n${recorte}`;
     partes.push(bloco);
     usados += bloco.length;
   }
@@ -2046,23 +2076,29 @@ async function interpretarColheita(args: {
   companyId: string;
   pergunta: string;
   leitura: string;
+  fatos?: string;
   escopo?: EscopoPedido;
   timeoutMs: number;
   metodo?: string;
 }): Promise<{ texto: string; erro?: string; tin: number; tout: number; finish: string }> {
   const metodo = String(args.metodo ?? "").trim();
+  const fatos = String(args.fatos ?? "").trim();
   const sys = `${montarSysSintese(args.companyName, "", "", args.escopo, args.companyId)}
 
 ${instrucaoDaLeitura(args.pergunta)}
-${metodo ? `\nMETODO CONSULTADO NA BASE (aplique na leitura; nao recite o texto):\n${metodo}` : ""}`;
+${metodo ? `\nMETODO DA SKILL gestor-trafego-meta E DA BASE (aplique na leitura como criterio de julgamento; nao recite o texto):\n${metodo}` : ""}`;
+  // Fatos primeiro: e onde esta a serie (tendencia) e a conta dos criterios. A coleta crua
+  // vem depois, como conferencia, e e a primeira a ser aparada se o pacote crescer.
+  const coleta = args.leitura.slice(0, fatos ? 24_000 : 48_000);
   const r = await chamarLLM([
     { role: "system", content: sys },
-    { role: "user", content: `PEDIDO DO GESTOR:\n${args.pergunta}\n\nCOLETA (totais; a serie diaria e anexada depois):\n${args.leitura.slice(0, 48_000)}` },
+    { role: "user", content: `PEDIDO DO GESTOR (leia inteiro; cada criterio citado e obrigatorio):\n${args.pergunta}\n\n${fatos ? `${fatos.slice(0, 24_000)}\n\n` : ""}COLETA (totais por conjunto e criativo, para conferencia):\n${coleta}` },
   ], {
     maxTokens: 8_000,
     timeoutMs: args.timeoutMs,
     tipo: "analise",
     resgatarHang: false,
+    stream: true,
     retries: OPENROUTER_RETRY_MAX_SINTESE,
     retryCapMs: OPENROUTER_RETRY_CAP_SINTESE_MS,
   });
@@ -2826,6 +2862,8 @@ async function chamarLLM(messages: any[], opts: {
   tipo?: TipoTarefaLlm; faixaForcada?: FaixaLlm; especialista?: string;
   /** false: um aborto encerra a ida. A escada de leitura sobe o teto numa ida nova. */
   resgatarHang?: boolean;
+  /** true: SSE; texto parcial volta com finish `timeout_parcial` em vez de sumir no aborto. */
+  stream?: boolean;
 }): Promise<any> {
   const rota = resolverChamadaLlm({
     tipo: opts.tipo ?? (opts.model === MODEL_SUB ? "subagente" : "sintese"),
@@ -2865,8 +2903,17 @@ async function chamarLLM(messages: any[], opts: {
     const timer = setTimeout(() => ac.abort(), timeoutMs);
     try {
       const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST", headers, body: JSON.stringify(body), signal: ac.signal,
+        method: "POST", headers, body: JSON.stringify(opts.stream ? { ...body, stream: true } : body), signal: ac.signal,
       });
+      if (opts.stream && resp.ok && resp.body) {
+        // Streaming: o que o modelo ja escreveu sobrevive ao relogio. Em 05/10 a leitura do
+        // La Felicità morreu aos 150s sem um caractere — com stream, o texto parcial fica.
+        const lido = await lerStreamOpenRouter(resp.body, ac.signal);
+        if (lido.cortado && !lido.content) {
+          return { resp: new Response(null, { status: 408 }), text: `openrouter_timeout_${timeoutMs}ms`, aborted: true };
+        }
+        return { resp, text: JSON.stringify(lido.parsed), aborted: false };
+      }
       const text = await resp.text();
       return { resp, text, aborted: false };
     } catch (e) {
@@ -2893,6 +2940,10 @@ async function chamarLLM(messages: any[], opts: {
     }
     if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   }
+  // Sem resgate de hang, o aborto do NOSSO relogio continua sendo timeout. Antes ele caia no
+  // `!resp.ok` abaixo e saia como `openrouter_http_408` — a escada de leitura nao reconhecia
+  // e nao subia o teto (job dee35d98, 05/10/2026: 172s livres jogados fora).
+  if (aborted) return { erro: `openrouter_timeout_${timeoutMs}`, detalhe: text.slice(0, 300) };
   if (!resp.ok && (resp.status === 400 || resp.status === 422) && payload.reasoning) {
     // Degradacao: remove reasoning e retenta (mesmo padrao do traffic-chat v21).
     delete payload.reasoning;
@@ -4810,7 +4861,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.30";
+  tel.versao = "job-v4.31";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -4963,7 +5014,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
     let plano: { nome: string; foco: string }[] = [];
     let degradado = false;
     let relatorios: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
-    let colheitaRelacao: { ok: boolean; markdown: string; leitura?: string; cobertura: string } | null = null;
+    let colheitaRelacao: { ok: boolean; markdown: string; leitura?: string; cobertura: string; fatos?: FatosCampanha[] } | null = null;
     if (ehPedidoRelacaoGeoPublico(pergunta)) {
       await pushProgresso(jobId, "subagentes", "colheita deterministica da geo e do publico-alvo por conjunto");
       colheitaRelacao = await colherRelacaoGeo({ companyId, pedido: pergunta });
@@ -5120,26 +5171,34 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       await pushProgresso(jobId, "sintese", "lendo a coleta — a tabela não é a resposta");
       if (JOB_MODELO_ROTEADO === MODEL) JOB_MODELO_ROTEADO = MODELO_PADRAO;
       const tLeitura = Date.now();
+      const criterios = extrairCriteriosDoPedido(pergunta);
+      const fatos = colheitaRelacao.fatos ?? [];
+      const blocoFatos = blocoFatosParaLeitura(fatos, criterios);
       const metodo = await blocoMetodoDaLeitura(pergunta);
-      const escada = escadaDeLeitura(prazo());
-      const tentativas: { ms: number; erro?: string; chars: number }[] = [];
+      const tentativas: { ms: number; erro?: string; chars: number; finish?: string }[] = [];
       let lido: { texto: string; erro?: string; tin: number; tout: number; finish: string } = {
         texto: "",
-        erro: escada.length ? "sem texto" : "sem_orcamento_de_leitura",
+        erro: "sem_orcamento_de_leitura",
         tin: 0,
         tout: 0,
         finish: "sem_orcamento",
       };
-      for (let i = 0; i < escada.length; i++) {
-        const ms = escada[i];
+      let parcial = false;
+      // Uma ida com o teto INTEIRO que cabe na invocacao (ate 330s), em streaming. A escada
+      // antiga partia o relogio em 150s + resto e recomecava do zero; com stream o que o modelo
+      // escreveu ate o corte fica. Nova ida so se a anterior falhou sem texto E ainda cabe uma.
+      for (let i = 0; i < 2; i++) {
+        const ms = tetoDaLeitura(prazo());
+        if (!ms) break;
         await pushProgresso(
           jobId,
           "sintese",
-          i === 0 ? "escrevendo a análise" : "a análise precisa de mais tempo — nova leitura",
+          i === 0 ? "escrevendo a análise" : "a análise precisa de mais uma leitura",
         );
         const parte = await interpretarColheita({
           companyName, companyId, pergunta,
           leitura: colheitaRelacao.leitura || colheitaRelacao.markdown,
+          fatos: blocoFatos,
           escopo, timeoutMs: ms, metodo,
         });
         lido = {
@@ -5149,21 +5208,51 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           tout: lido.tout + parte.tout,
           finish: parte.finish,
         };
-        tentativas.push({ ms, erro: parte.erro, chars: parte.texto.length });
-        if (parte.texto) break;
-        if (!/openrouter_timeout/i.test(String(parte.erro ?? ""))) break;
+        tentativas.push({ ms, erro: parte.erro, chars: parte.texto.length, finish: parte.finish });
+        if (parte.texto) {
+          parcial = parte.finish === "timeout_parcial" || parte.finish === "length";
+          break;
+        }
+        if (ehErroDeCredencial(String(parte.erro ?? ""))) break;
       }
       tel.leitura_tetos = tentativas;
-      if (lido.texto) {
-        texto = `${lido.texto}\n\n---\n\n${colheitaRelacao.markdown}`;
+      tel.leitura_fatos = { campanhas: fatos.length, chars: blocoFatos.length, metodo_chars: metodo.length };
+      // A tabela so volta quando o gestor PEDIU tabela. Num pedido de analise ela era o que ele
+      // disse que nao queria ("iam ser utilizadas apenas para analise").
+      const querTabela = /\b(tabela|relacao|liste|listar|lista de|mostre os numeros|traga os numeros)\b/
+        .test(deacc(pergunta.toLowerCase()));
+      const base = colheitaRelacao.markdown.split("\n\n")[0];
+      const rodape = querTabela ? `\n\n---\n\n${colheitaRelacao.markdown}` : `\n\n---\n\n_${base.replace(/\n/g, " ")}_`;
+      const reserva = analiseDeReserva(fatos, criterios);
+      if (lido.texto && !(parcial && lido.texto.length < 600 && reserva)) {
+        const avisoParcial = parcial
+          ? "\n\n_O limite de tempo da leitura chegou neste ponto. A conta completa dos critérios segue abaixo, calculada sobre os mesmos números._\n\n" + reserva
+          : "";
+        texto = `${lido.texto}${avisoParcial}${rodape}`;
         tel.sintese = {
-          tipo: "analise",
+          tipo: parcial ? "analise_parcial" : "analise",
           tokens_in: lido.tin,
           tokens_out: lido.tout,
           finish_reason: lido.finish || "stop",
           ms: Date.now() - tLeitura,
           tetos_ms: tentativas.map((t) => t.ms),
         };
+      } else if (reserva) {
+        // Nunca mais "so a coleta": sem texto do modelo, sai a analise calculada em codigo,
+        // que responde os criterios com a conta e nada alem dela.
+        texto = `${reserva}\n\n_Esta análise foi calculada pelo sistema sobre a coleta da janela (a leitura do modelo não fechou a tempo: ${lido.erro ?? "sem texto"}). Ela responde os critérios com a conta; a interpretação qualitativa fica para a próxima leitura._${rodape}`;
+        tel.sintese = {
+          tipo: "analise_reserva",
+          erro: lido.erro ?? "sem texto",
+          tokens_in: lido.tin,
+          tokens_out: lido.tout,
+          finish_reason: "analise_reserva",
+          ms: Date.now() - tLeitura,
+          tetos_ms: tentativas.map((t) => t.ms),
+        };
+        if (JOB_MODELO_ROTEADO === MODEL || JOB_MODELO_ROTEADO === MODELO_PADRAO) {
+          JOB_MODELO_ROTEADO = "coleta";
+        }
       } else {
         texto = `A análise não fechou nesta rodada: o tempo da leitura acabou antes do texto. Os números abaixo são a coleta da janela pedida.\n\n${colheitaRelacao.markdown}`;
         tel.sintese = {
