@@ -1,4 +1,10 @@
-// supabase/functions/traffic-agent-job/index.ts (v4.29)
+// supabase/functions/traffic-agent-job/index.ts (v4.30)
+// v4.30 (05/10/2026) - ANALISE NAO MORRE EM 60s: "campanha ativa do lafelicità, desde
+//   o dia 02/10 até hoje, 107 conversas/dia, teto R$ 7" saiu só a tabela
+//   (openrouter_timeout_60000). A janela caía nos 14 dias, o nome da campanha
+//   não entrava no cabeçalho e a leitura usava o teto standard. A leitura agora
+//   sobe o teto (150s, depois o que ainda cabe até 330s), consulta a base
+//   técnica e responde tendência + metas. O código do timeout não vai ao gestor.
 // v4.29 (01/10/2026) - LEITURA NAO E TABELA: pedido de 5 campanhas (VISTTA, La Felicita,
 //   Juridico), desde a criacao ate ontem, por dia, ativos e inativos. A colheita numerica
 //   casou so ocular (underscore em COHAPM_JURIDICO nao e fronteira de palavra), janela de
@@ -362,7 +368,7 @@ import {
   recorteDriveDoPedido,
   serieCarrosselDrive,
 } from "../_shared/pedido_drive_criativos.ts";
-import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, extrairNomesDeCampanhaCitados, pedidoExigeInterpretacao, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
+import { ehPedidoDetalhamentoCampanha, ehPedidoOrigemDriveDosAnuncios, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, extrairCriteriosDoPedido, extrairNomesDeCampanhaCitados, pedidoExigeInterpretacao, replyLeituraIncompleta } from "../_shared/intencao_turno.ts";
 import {
   aplicarCompactacaoCriativos,
   aplicarCompactacaoEstrutura,
@@ -1025,6 +1031,16 @@ function extrairEscopoPedido(pergunta: string): EscopoPedido {
   if (/\bmais conversas\b|\bgerou mais conversas\b|\bgeraram mais conversas\b/.test(p)) {
     perguntas_obrigatorias.push("Quais criativos geraram mais conversas?");
   }
+  const criteriosPedido = extrairCriteriosDoPedido(raw);
+  if (criteriosPedido.pedeTendencia) {
+    perguntas_obrigatorias.push("A tendência dos criativos é de mais conversas ou de estagnação? Compare o começo e o fim da série da janela, não a média.");
+  }
+  if (criteriosPedido.conversasPorDia != null) {
+    perguntas_obrigatorias.push(`A janela chega a ${criteriosPedido.conversasPorDia} conversas por dia? Quanto falta e em qual criativo.`);
+  }
+  if (criteriosPedido.tetoCustoConversa != null) {
+    perguntas_obrigatorias.push(`Quais criativos e conjuntos ficam dentro do teto de R$ ${criteriosPedido.tetoCustoConversa.toFixed(2)} por conversa, e quais estouram. Sem conversa, declare sem resultado — não invente custo zero.`);
+  }
   if (/\bnumeros?\b/.test(p) && /\bconversas?\b/.test(p) && (/\bjuridico\b|\bfelicita\b|\blafelicita\b|\bwa\b|\bwhatsapp\b/.test(p))) {
     perguntas_obrigatorias.push("Dos numeros cadastrados (juridico e La Felicita), quais receberam mais conversas?");
   }
@@ -1117,6 +1133,15 @@ async function enriquecerEscopoComDatas(companyId: string, escopo: EscopoPedido)
       : filtrado;
   }
   if (!alvo.length) return escopo;
+  const nomes = alvo.map((c) => c.name).join("; ");
+  // Janela explícita do pedido (02/10 até hoje) vence o primeiro snapshot.
+  // Sem isto, "campanha ativa" reabria a série desde a ativação.
+  if (escopo.date_from) {
+    return {
+      ...escopo,
+      bloco_contrato: `${escopo.bloco_contrato}\nCampanhas do universo (resolvidas no banco): ${nomes}`,
+    };
+  }
   const ids = alvo.map((c) => c.id);
   const { data: snaps } = await supa.from("metric_snapshots")
     .select("snapshot_date")
@@ -1126,7 +1151,6 @@ async function enriquecerEscopoComDatas(companyId: string, escopo: EscopoPedido)
     .limit(1);
   const de = snaps?.[0]?.snapshot_date ? String(snaps[0].snapshot_date).slice(0, 10) : undefined;
   if (!de) return escopo;
-  const nomes = alvo.map((c) => c.name).join("; ");
   const bloco = escopo.bloco_contrato
     .replace(/date_from sugerido:.*\n?/, "")
     .replace(
@@ -1180,6 +1204,25 @@ const SINT_FASE_HARD_MS = 180_000;
  * feito onde a medicao existe.
  */
 const SINT_TIMEOUT_MS = 150_000;
+/**
+ * Teto da LEITURA da colheita. O standard de 60s cortou a análise em
+ * `openrouter_timeout_60000` (05/10/2026, La Felicità): a tabela saiu e o texto não.
+ * A primeira ida usa o teto medido da síntese (150s). Se o relógio cortar, a segunda
+ * sobe até o teto por chamada (330s), limitado ao que ainda cabe na invocação.
+ * Cada ida é uma chamada só — o resgate interno de modelo não repete o mesmo teto curto.
+ */
+function escadaDeLeitura(prazoRestanteMs: number): number[] {
+  const folga = 8_000;
+  const disponivel = prazoRestanteMs - folga;
+  if (disponivel < CHAMADA_MINIMA_MS) return [];
+  const primeiro = Math.min(SINT_TIMEOUT_MS, disponivel);
+  const tetos = [primeiro];
+  const depois = disponivel - primeiro;
+  if (primeiro < OPENROUTER_TIMEOUT_MS && depois >= CHAMADA_MINIMA_MS) {
+    tetos.push(Math.min(OPENROUTER_TIMEOUT_MS, depois));
+  }
+  return tetos;
+}
 // Pacote de relatorios acima disto → sintese em blocos + fusao (v3.8).
 const SINT_CHARS_SEGMENTAR = 70_000;
 const SINT_COOLDOWN_POS_429_MS = 6_000;
@@ -1838,12 +1881,12 @@ async function colherRelacaoNumerica(args: {
   const operacionais = ((camps ?? []) as CampAlvo[]).filter((c) => statusObjetoOperacional(c.status));
   let alvos: CampAlvo[] = [];
   let faltando: string[] = [];
+  const meio = inferirMeioDrive(pedido);
   if (citados.length) {
     const casa = casarCampanhasCitadas(operacionais, citados);
     alvos = casa.escolhidas;
     faltando = casa.faltando;
   } else {
-    const meio = inferirMeioDrive(pedido);
     alvos = meio
       ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
       : [];
@@ -1871,12 +1914,15 @@ async function colherRelacaoNumerica(args: {
       from = janelaDetalhe(undefined, toFetch, 14).from;
     }
   }
-  const rotuloJanela = janela.dia_aberto
+  const rotuloJanela = janela.dia_aberto && janela.dia_aberto !== janela.date_to
     ? `${from} → ${janela.date_to} fechada; ${janela.dia_aberto} em aberto (entra na série, fica fora do veredito de custo)`
-    : `${from} → ${toFetch}`;
+    : janela.dia_aberto
+      ? `${from} → ${janela.dia_aberto} (dia em aberto; entra na série e fica fora do veredito de custo)`
+      : `${from} → ${toFetch}`;
   const soAtivos = soAtivosDoPedido(pedido);
   const blocos: string[] = [];
   const blocosLeitura: string[] = [];
+  const nomesEntraram: string[] = [];
   const falhas: string[] = [];
   const teto = Math.min(12, Math.max(alvos.length, 1));
   for (const camp of alvos.slice(0, teto)) {
@@ -1910,13 +1956,21 @@ async function colherRelacaoNumerica(args: {
     const pacote = { ...base, anuncios, restantes: 0, exibidos: anuncios.length };
     const md = montarRelacaoDeDetalhe(pacote, soAtivos, comSerie);
     const mdLeitura = comSerie ? montarRelacaoDeDetalhe(pacote, soAtivos, false) : md;
-    if (md) blocos.push(md);
-    else falhas.push(`${camp.name}: sem conjuntos/anuncios no recorte`);
+    if (md) {
+      blocos.push(md);
+      nomesEntraram.push(String(camp.name ?? id));
+    } else falhas.push(`${camp.name}: sem conjuntos/anuncios no recorte`);
     if (mdLeitura) blocosLeitura.push(mdLeitura);
   }
+  const rotuloLinha = meio === "la_felicita" ? "La Felicità" : meio === "juridico" ? "Jurídico" : meio === "sistema_ocular" ? "Sistema Ocular" : "";
+  const pedidoRotulo = citados.length
+    ? citados.join(" · ")
+    : rotuloLinha
+      ? `linha ${rotuloLinha} (o pedido não trouxe o nome completo da campanha)`
+      : "(nenhuma nomeada; recorte pela linha do pedido)";
   const cabeca = [
-    `Campanhas pedidas: ${citados.length ? citados.join(" · ") : "(nenhuma nomeada; recorte pela linha do pedido)"}.`,
-    `Entraram: ${blocos.length}.`,
+    `Campanhas pedidas: ${pedidoRotulo}.`,
+    `Entraram (${nomesEntraram.length}): ${nomesEntraram.join(" · ") || "0"}.`,
     faltando.length ? `Não encontradas no espelho: ${faltando.join(" · ")}.` : "",
     `Janela: ${rotuloJanela}.`,
   ].filter(Boolean).join("\n");
@@ -1931,6 +1985,62 @@ async function colherRelacaoNumerica(args: {
   };
 }
 
+function instrucaoDaLeitura(pergunta: string): string {
+  const c = extrairCriteriosDoPedido(pergunta);
+  const linhas = [
+    "ESTA RODADA E A ANALISE. Os numeros abaixo ja foram coletados e sao a unica fonte desta conta. A tabela e a serie diaria sao anexadas depois: nao as repita.",
+    "Entregue veredito, evidencia (numero, nivel, janela) e o que muda se a meta nao fecha. Sem narrar intencao. Sem inventar metrica ou benchmark.",
+    "Metodo da casa: (1) nivel certo — varios anuncios no conjunto, julgue o conjunto, nao o pedaco; (2) tendencia pela serie, comparando o comeco e o fim da janela, nao a media; (3) custo da conversa = gasto / conversas; dia em aberto fica fora do veredito de custo; (4) criativo que segura volume ou estoura o teto entra pelo nome.",
+  ];
+  if (c.conversasPorDia != null) {
+    linhas.push(`CRITERIO 1 — volume: ${c.conversasPorDia} conversas por dia. Diga a media dos dias fechados, o melhor dia, o pior dia e se a tendencia recente chega nessa meta.`);
+  }
+  if (c.tetoCustoConversa != null) {
+    linhas.push(`CRITERIO 2 — teto: R$ ${c.tetoCustoConversa.toFixed(2)} por conversa, no maximo. Separe criativo e conjunto dentro do teto dos que estouram. Sem conversa, nao invente custo zero: declare sem resultado.`);
+  }
+  if (c.pedeTendencia) {
+    linhas.push("PERGUNTA CENTRAL: a tendencia dos criativos e render mais conversas ou estagnar? Compare a primeira metade da janela com a segunda. Diga quais criativos puxam e quais estagnaram.");
+  }
+  linhas.push("Cubra so as campanhas que a coleta diz que entraram, pelo nome. Se uma citada nao entrou, declare o nome. Nao troque por outra.");
+  return linhas.join("\n");
+}
+
+async function blocoMetodoDaLeitura(pedido: string): Promise<string> {
+  const p = deacc(pedido.toLowerCase());
+  const alvos: { tema: string; secoes: string[] }[] = [
+    { tema: "gestor_trafego_meta", secoes: ["Diagnosticar", "Principios"] },
+  ];
+  if (/\b(tendenc|estagn|criativ|conjunto|breakdown)\b/.test(p)) {
+    alvos.push({ tema: "diagnostico_especialista", secoes: ["Breakdown", "Marginal"] });
+  }
+  if (/\b(convers|custo|preco|cpl|cpa|tendenc|estagn|criativ|teto)\b/.test(p)) {
+    alvos.push({ tema: "otimizacao", secoes: ["Diagnostico", "Custo"] });
+  }
+  if (alvos.length < 3) {
+    alvos.push({ tema: "metricas", secoes: ["Conversa", "Custo"] });
+  }
+  const partes: string[] = [];
+  let usados = 0;
+  const TETO = 4500;
+  for (const alvo of alvos.slice(0, 3)) {
+    if (usados >= TETO) break;
+    let hit: Record<string, unknown> = { erro: "vazio" };
+    for (const secao of alvo.secoes) {
+      hit = await t_conhecimento(alvo.tema, secao);
+      if (!hit.erro && hit.conteudo) break;
+    }
+    if (hit.erro || !hit.conteudo) hit = await t_conhecimento(alvo.tema);
+    const corpo = String(hit.conteudo ?? "").trim();
+    if (!corpo) continue;
+    const aviso = hit.aviso_validade ? " [VENCIDO: declare reverificacao; nao trate como vigente]" : "";
+    const recorte = corpo.slice(0, Math.min(1500, TETO - usados));
+    const bloco = `### ${hit.tema ?? alvo.tema}${hit.secao ? " / " + hit.secao : ""}${aviso}\n${recorte}`;
+    partes.push(bloco);
+    usados += bloco.length;
+  }
+  return partes.join("\n\n");
+}
+
 async function interpretarColheita(args: {
   companyName: string;
   companyId: string;
@@ -1938,15 +2048,13 @@ async function interpretarColheita(args: {
   leitura: string;
   escopo?: EscopoPedido;
   timeoutMs: number;
+  metodo?: string;
 }): Promise<{ texto: string; erro?: string; tin: number; tout: number; finish: string }> {
+  const metodo = String(args.metodo ?? "").trim();
   const sys = `${montarSysSintese(args.companyName, "", "", args.escopo, args.companyId)}
 
-ESTA RODADA E LEITURA, NAO DESPEJO. Os numeros do usuario abaixo ja foram coletados e sao a unica fonte da conta. Escreva a interpretacao:
-- Cubra cada campanha citada pelo nome. Se a coleta disser que uma nao entrou, declare o nome. Nao troque por outra campanha.
-- A janela e a da coleta. Dia em aberto nao entra no veredito de custo.
-- Por campanha: o que carrega conversa, o que gasta sem resultado, conjunto e criativo, ativo e pausado com historico.
-- Nao repita as tabelas. O sistema anexa os numeros e a serie diaria depois do seu texto.
-- Nao invente metrica. Nao diga que vai consultar. Nao entregue so a tabela.`;
+${instrucaoDaLeitura(args.pergunta)}
+${metodo ? `\nMETODO CONSULTADO NA BASE (aplique na leitura; nao recite o texto):\n${metodo}` : ""}`;
   const r = await chamarLLM([
     { role: "system", content: sys },
     { role: "user", content: `PEDIDO DO GESTOR:\n${args.pergunta}\n\nCOLETA (totais; a serie diaria e anexada depois):\n${args.leitura.slice(0, 48_000)}` },
@@ -1954,6 +2062,7 @@ ESTA RODADA E LEITURA, NAO DESPEJO. Os numeros do usuario abaixo ja foram coleta
     maxTokens: 8_000,
     timeoutMs: args.timeoutMs,
     tipo: "analise",
+    resgatarHang: false,
     retries: OPENROUTER_RETRY_MAX_SINTESE,
     retryCapMs: OPENROUTER_RETRY_CAP_SINTESE_MS,
   });
@@ -2456,9 +2565,9 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
 // especialista nao atende fora do proprio dominio, recusa e registra em LACUNAS).
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
-    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "origem_drive_dos_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "get_seguidores_instagram_ads", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, origem_drive_dos_anuncios: 2, get_ads_ranking: 4, get_estrutura_conjuntos: 2, casar_criativo_performance: 6, computar_perfil_vencedor: 1, get_seguidores_instagram_ads: 2, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 15,
-    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, entrega, custo vs teto vigente, detalhe por anuncio e serie diaria, origem Drive das pecas no ar, seguidores de Instagram atribuidos a anuncio (get_seguidores_instagram_ads, nao o funil), diagnostico de custo e fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir o banco; leitura ao vivo so se faltar numero critico. Relatorio denso.",
+    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "origem_drive_dos_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "get_seguidores_instagram_ads", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard"],
+    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, origem_drive_dos_anuncios: 2, get_ads_ranking: 4, get_estrutura_conjuntos: 2, casar_criativo_performance: 6, computar_perfil_vencedor: 1, get_seguidores_instagram_ads: 2, get_conhecimento: 2, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 17,
+    missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, entrega, custo vs teto vigente, detalhe por anuncio e serie diaria, origem Drive das pecas no ar, seguidores de Instagram atribuidos a anuncio (get_seguidores_instagram_ads, nao o funil), diagnostico de custo e fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir o banco; leitura ao vivo so se faltar numero critico. Em analise, tendencia ou teto de custo, chame get_conhecimento (otimizacao e metricas) antes de fechar o veredito. Relatorio denso.",
   },
   criativos: {
     tools: ["get_criativos_conteudo", "get_ads_ranking", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard"],
@@ -2715,6 +2824,8 @@ async function chamarLLM(messages: any[], opts: {
   tools?: any[]; maxTokens: number; reasoning?: any; model?: string; timeoutMs?: number;
   retries?: number; retryCapMs?: number; sessionId?: string | null;
   tipo?: TipoTarefaLlm; faixaForcada?: FaixaLlm; especialista?: string;
+  /** false: um aborto encerra a ida. A escada de leitura sobe o teto numa ida nova. */
+  resgatarHang?: boolean;
 }): Promise<any> {
   const rota = resolverChamadaLlm({
     tipo: opts.tipo ?? (opts.model === MODEL_SUB ? "subagente" : "sintese"),
@@ -2769,7 +2880,7 @@ async function chamarLLM(messages: any[], opts: {
     }
   }
   let { resp, text, aborted } = await postOnce(payload);
-  if (aborted) {
+  if (aborted && opts.resgatarHang !== false) {
     const planoHang = aplicarResgateTimeout(payload);
     if (planoHang) {
       console.warn(`[openrouter] ${planoHang.motivo}`);
@@ -3056,7 +3167,7 @@ async function rodarSubagente(
   const persona = ag?.papel ? `\n${ag.papel}` : "";
   const sys = `${identidade} do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).${persona}
 MISSAO: ${cfg.missao}
-FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
+${cfg.tools.includes("get_conhecimento") ? "BASE TECNICA: se o foco pede analise, tendencia, teto de custo, definicao de metrica ou metodo, a primeira ferramenta e get_conhecimento. Diagnostico e custo: tema=otimizacao e tema=diagnostico_especialista. Metrica: tema=metricas. Metodo: tema=gestor_trafego_meta (secao Diagnosticar). Criativo: tema=criativo_hooks. No maximo duas chamadas. Validade vencida entra no relatorio como nao confirmada.\n" : ""}FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
 FIDELIDADE AO PEDIDO: interprete a pergunta de forma fria e literal. Nao amplie a janela, nao traga campanha fora do universo do CONTRATO DO PEDIDO, nao responda o que nao foi perguntado. Se o contrato traz date_from, ele e a janela de toda leitura de desempenho.
 ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedir algo de OUTRO dominio, registre em LACUNAS e siga so com a sua parte.
 VELOCIDADE: teto ~5 min. Cobriu o FOCO, ESCREVA.
@@ -4699,7 +4810,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.29";
+  tel.versao = "job-v4.30";
   if (retomada?.escopo) escopo = retomada.escopo as EscopoPedido;
   tel.capacidade = {
     tier: cap.tier, motivo: cap.motivo, max_especialistas: cap.maxEspecialistas,
@@ -5009,11 +5120,40 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       await pushProgresso(jobId, "sintese", "lendo a coleta — a tabela não é a resposta");
       if (JOB_MODELO_ROTEADO === MODEL) JOB_MODELO_ROTEADO = MODELO_PADRAO;
       const tLeitura = Date.now();
-      const lido = await interpretarColheita({
-        companyName, companyId, pergunta,
-        leitura: colheitaRelacao.leitura || colheitaRelacao.markdown,
-        escopo, timeoutMs: sintTimeoutMs,
-      });
+      const metodo = await blocoMetodoDaLeitura(pergunta);
+      const escada = escadaDeLeitura(prazo());
+      const tentativas: { ms: number; erro?: string; chars: number }[] = [];
+      let lido: { texto: string; erro?: string; tin: number; tout: number; finish: string } = {
+        texto: "",
+        erro: escada.length ? "sem texto" : "sem_orcamento_de_leitura",
+        tin: 0,
+        tout: 0,
+        finish: "sem_orcamento",
+      };
+      for (let i = 0; i < escada.length; i++) {
+        const ms = escada[i];
+        await pushProgresso(
+          jobId,
+          "sintese",
+          i === 0 ? "escrevendo a análise" : "a análise precisa de mais tempo — nova leitura",
+        );
+        const parte = await interpretarColheita({
+          companyName, companyId, pergunta,
+          leitura: colheitaRelacao.leitura || colheitaRelacao.markdown,
+          escopo, timeoutMs: ms, metodo,
+        });
+        lido = {
+          texto: parte.texto,
+          erro: parte.erro,
+          tin: lido.tin + parte.tin,
+          tout: lido.tout + parte.tout,
+          finish: parte.finish,
+        };
+        tentativas.push({ ms, erro: parte.erro, chars: parte.texto.length });
+        if (parte.texto) break;
+        if (!/openrouter_timeout/i.test(String(parte.erro ?? ""))) break;
+      }
+      tel.leitura_tetos = tentativas;
       if (lido.texto) {
         texto = `${lido.texto}\n\n---\n\n${colheitaRelacao.markdown}`;
         tel.sintese = {
@@ -5022,9 +5162,10 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           tokens_out: lido.tout,
           finish_reason: lido.finish || "stop",
           ms: Date.now() - tLeitura,
+          tetos_ms: tentativas.map((t) => t.ms),
         };
       } else {
-        texto = `A interpretação não fechou nesta rodada (${lido.erro ?? "sem texto"}). Os números abaixo cobrem o pedido; a leitura do modelo não saiu.\n\n${colheitaRelacao.markdown}`;
+        texto = `A análise não fechou nesta rodada: o tempo da leitura acabou antes do texto. Os números abaixo são a coleta da janela pedida.\n\n${colheitaRelacao.markdown}`;
         tel.sintese = {
           pulada: "analise_vazia",
           erro: lido.erro ?? "sem texto",
@@ -5032,6 +5173,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           tokens_out: lido.tout,
           finish_reason: lido.finish || "analise_vazia",
           ms: Date.now() - tLeitura,
+          tetos_ms: tentativas.map((t) => t.ms),
         };
         if (JOB_MODELO_ROTEADO === MODEL || JOB_MODELO_ROTEADO === MODELO_PADRAO) {
           JOB_MODELO_ROTEADO = "coleta";

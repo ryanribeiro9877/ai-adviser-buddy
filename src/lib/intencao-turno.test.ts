@@ -7,6 +7,7 @@ import {
   ehPerguntaDeLeitura,
   ehLeituraDeDesempenho,
   ehPedidoRelacaoNumerica,
+  extrairCriteriosDoPedido,
   extrairNomesDeCampanhaCitados,
   pedidoExigeInterpretacao,
   ehPedidoRelacaoGeoPublico,
@@ -140,6 +141,20 @@ describe("ehPerguntaDeLeitura", () => {
       "COHAPM_JURIDICO_CONV_WA_2026-08",
     ]);
     expect(ehPedidoDeAto(pedido)).toBe(false);
+  });
+
+  it("analise da campanha ativa, com meta e teto, e leitura e nao tabela", () => {
+    const pedido =
+      "com toda sua inteligência de super gestor de tráfego preciso que, baseado na campanha ativa do lafelicità, você analise todos os dados desde o dia 02/10 até o dia de hoje e me diga se a tendência dos criativos é render mais conversas ou estagnar, tenha em mente que eu preciso atingir 107 conversas por dia, sendo que o teto limite de cada conversa gerada é 7,00 (no máximo). me traga o resultado da análise.";
+    expect(pedidoExigeInterpretacao(pedido)).toBe(true);
+    expect(ehPedidoRelacaoNumerica(pedido)).toBe(true);
+    expect(ehPedidoDeAto(pedido)).toBe(false);
+    expect(extrairCriteriosDoPedido(pedido)).toEqual({
+      conversasPorDia: 107,
+      tetoCustoConversa: 7,
+      pedeTendencia: true,
+    });
+    expect(extrairNomesDeCampanhaCitados(pedido)).toEqual([]);
   });
 });
 

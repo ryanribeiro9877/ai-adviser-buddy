@@ -13,7 +13,7 @@ import {
   soAtivosDoPedido,
 } from "./coleta_completa.ts";
 import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
-import { ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, extrairNomesDeCampanhaCitados, pedidoExigeInterpretacao } from "./intencao_turno.ts";
+import { ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, extrairCriteriosDoPedido, extrairNomesDeCampanhaCitados, pedidoExigeInterpretacao } from "./intencao_turno.ts";
 import { casarCampanhasCitadas, resolverJanelaPedido } from "./leitura_desempenho.ts";
 
 function assert(cond: boolean, msg: string) {
@@ -173,9 +173,12 @@ assert(
   /"criativos",\s*\n\s*"criativos_drive"/.test(job),
   "pecas no ar entram antes do inventario Drive",
 );
-assert(job.includes("job-v4.29"), "versao da telemetria andou");
+assert(job.includes("job-v4.30"), "versao da telemetria andou");
 assert(job.includes("interpretarColheita"), "leitura do pedido nao pode pular o modelo");
 assert(job.includes("pedidoExigeInterpretacao"), "colheita distingue tabela de leitura");
+assert(job.includes("escadaDeLeitura"), "teto da leitura sobe quando a analise estoura");
+assert(job.includes("blocoMetodoDaLeitura"), "a leitura consulta a base tecnica");
+assert(!job.includes("A interpretação não fechou nesta rodada"), "codigo de timeout nao vai para o gestor");
 
 const pedidoCinco = [
   "preciso de todos os dados desde a criação dessas campanhas até o dia de ontem, fechado. Traga custo, impressão, custo por conversa e gasto.",
@@ -204,6 +207,17 @@ const janela = resolverJanelaPedido(pedidoCinco, "2026-10-01");
 assert(janela.desde_criacao, "desde a criacao nao cai em 14 dias");
 assert(janela.date_to === "2026-09-30", `fechado em ontem, veio ${janela.date_to}`);
 assert(janela.dia_aberto === "2026-10-01", "hoje fica em aberto");
+const pedidoLf =
+  "analise todos os dados desde o dia 02/10 até o dia de hoje da campanha ativa do lafelicità e me diga se a tendência dos criativos estagna. preciso atingir 107 conversas por dia e o teto limite de cada conversa gerada é 7,00. me traga o resultado.";
+assert(pedidoExigeInterpretacao(pedidoLf), "analise com meta nao e so tabela");
+assert(ehPedidoRelacaoNumerica(pedidoLf), "criativo + conversa + traga continua colheita");
+const crit = extrairCriteriosDoPedido(pedidoLf);
+assert(crit.conversasPorDia === 107 && crit.tetoCustoConversa === 7 && crit.pedeTendencia, `criterios ${JSON.stringify(crit)}`);
+const janelaLf = resolverJanelaPedido(pedidoLf, "2026-10-05");
+assert(janelaLf.date_from === "2026-10-02", `inicio ${janelaLf.date_from}`);
+assert(janelaLf.date_to === "2026-10-04", `fechado ${janelaLf.date_to}`);
+assert(janelaLf.dia_aberto === "2026-10-05", `aberto ${janelaLf.dia_aberto}`);
+assert(!janelaLf.desde_criacao, "02/10 nao e desde a criacao");
 const comDia = markdownRelacaoPorConjunto({
   campanha: "COHAPM_JURIDICO_CONV",
   janela: "2026-08-01 → 2026-09-30",

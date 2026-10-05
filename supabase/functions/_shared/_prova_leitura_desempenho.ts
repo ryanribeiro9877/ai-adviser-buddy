@@ -4,6 +4,7 @@ import {
   escolherCampanhaUnica,
   parseJanelaDatasPedido,
   janelaDetalhe,
+  resolverJanelaPedido,
 } from "./leitura_desempenho.ts";
 import { FERRAMENTAS_BASE } from "./ferramentas_base.ts";
 import { replyLeituraIncompleta, ehPedidoDetalhamentoCampanha, ehPedidoRelacaoGeoPublico, ehPedidoRelacaoNumerica, ehPedidoDeAto, ehPerguntaDeLeitura, ehLeituraDeDesempenho } from "./intencao_turno.ts";
@@ -29,6 +30,14 @@ assert(j.date_to === "2026-08-27", `to=${j.date_to}`);
 
 const j2 = parseJanelaDatasPedido("de 2026-08-21 a 2026-08-27");
 assert(j2.date_from === "2026-08-21" && j2.date_to === "2026-08-27", "iso");
+
+const desdeHoje = resolverJanelaPedido(
+  "analise desde o dia 02/10 até o dia de hoje",
+  "2026-10-05",
+);
+assert(desdeHoje.date_from === "2026-10-02", `desde dia from=${desdeHoje.date_from}`);
+assert(desdeHoje.date_to === "2026-10-04", `desde dia to=${desdeHoje.date_to}`);
+assert(desdeHoje.dia_aberto === "2026-10-05", `desde dia aberto=${desdeHoje.dia_aberto}`);
 
 const jan = janelaDetalhe("2026-08-21", "2026-08-27");
 assert(jan.from === "2026-08-21" && jan.to === "2026-08-27", "janela explícita");

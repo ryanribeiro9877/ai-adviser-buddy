@@ -426,26 +426,56 @@ export function extrairNomesDeCampanhaCitados(pedido: string): string[] {
   return nomes;
 }
 
+export type CriteriosPedido = {
+  conversasPorDia: number | null;
+  tetoCustoConversa: number | null;
+  pedeTendencia: boolean;
+};
+
+/**
+ * Metas que o gestor escreveu no pedido (volume/dia e teto de custo).
+ * Servem para a leitura responder o criterio, nao para a tabela.
+ */
+export function extrairCriteriosDoPedido(pedido: string): CriteriosPedido {
+  const p = deacc(String(pedido ?? "").toLowerCase());
+  const mDia = p.match(/\b(\d{1,4})\s*conversas?\s+por\s+dia\b/);
+  const mTeto = p.match(/\bteto\b[^.]{0,140}?(\d{1,4})[,.](\d{2})\b/)
+    || p.match(/\bteto\b[^.]{0,80}?r\$\s*(\d{1,4})(?:[,.](\d{2}))?\b/);
+  const teto = mTeto
+    ? Number(`${mTeto[1]}.${mTeto[2] ?? "00"}`)
+    : null;
+  return {
+    conversasPorDia: mDia ? Number(mDia[1]) : null,
+    tetoCustoConversa: teto != null && Number.isFinite(teto) ? teto : null,
+    pedeTendencia: /\b(tendenc\w*|estagn\w*)\b/.test(p),
+  };
+}
+
 /**
  * O gestor pediu leitura, nao o despejo da tabela.
  * Relacao curta ("gastos por conjunto e criativo") continua tabela.
- * "entender como performa", serie desde a criacao, ou varias campanhas nomeadas
- * com esse pedido, exigem interpretacao — foi o que a colheita pulou em 01/10/2026.
+ * "entender como performa", serie desde a criacao, analise/tendencia,
+ * ou meta numerica (conversas/dia, teto de custo) exigem interpretacao.
+ * Foi o que a colheita pulou em 01/10/2026 e o que o timeout de 60s
+ * devolveu cru em 05/10/2026.
  */
 export function pedidoExigeInterpretacao(pedido: string): boolean {
   const p = deacc(String(pedido ?? "").toLowerCase());
   if (!p) return false;
+  const criterios = extrairCriteriosDoPedido(pedido);
   const leitura =
-    /\b(entender|interpret\w*|diagnostic\w*|performando)\b/.test(p) ||
+    /\b(entender|interpret\w*|diagnostic\w*|performando|analis\w*|tendenc\w*|estagn\w*)\b/.test(p) ||
     /\bcomo (essas|estas|a|as) campanhas? (estao |esta )?perform/.test(p) ||
     /\btodos os dados\b/.test(p) ||
     /\bdetermine que\b/.test(p) ||
-    /\bnecessario para entender\b/.test(p);
+    /\bnecessario para entender\b/.test(p) ||
+    /\bme diga se\b/.test(p);
   const serie = /\bpor dia\b/.test(p) || /\bdia a dia\b/.test(p) || /\bserie diaria\b/.test(p);
   const desde =
-    (/\bdesde\b/.test(p) && /\b(criacao|criada|momento|dados reais|trouxe dados)\b/.test(p));
+    (/\bdesde\b/.test(p) && /\b(criacao|criada|momento|dados reais|trouxe dados|o dia|\d{1,2}\/)/.test(p));
   const varias = extrairNomesDeCampanhaCitados(pedido).length >= 2;
   if (leitura) return true;
+  if (criterios.conversasPorDia != null || criterios.tetoCustoConversa != null || criterios.pedeTendencia) return true;
   if (serie && desde) return true;
   if (varias && (serie || desde || leitura)) return true;
   return false;

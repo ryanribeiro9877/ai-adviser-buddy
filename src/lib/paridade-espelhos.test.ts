@@ -328,6 +328,7 @@ function observar(fn: (...a: unknown[]) => unknown, args: unknown[]): string {
 // Tuplas explícitas para funções com aridade > 3 — o produto cartesiano explodiria sem ganho.
 const CHAMADAS_ALT: Partial<Record<number, unknown[][]>> = {
   1: [
+    ["analise a campanha ativa e me diga a tendencia: preciso atingir 107 conversas por dia, teto de 7,00"],
     [
       {
         metrica: "conversas",

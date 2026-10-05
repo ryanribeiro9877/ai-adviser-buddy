@@ -123,6 +123,33 @@ export function isoMaisDias(iso: string, dias: number): string {
  * texto marca hoje como dia em aberto — a série inclui, o veredito não trata como fechado.
  * "desde a criação" deixa date_from vazio para o chamador preencher com o primeiro dia com entrega.
  */
+/**
+ * "desde o dia 02/10" / "desde 02/10" — um início só.
+ * O par "02/10 a 05/10" continua em `parseJanelaDatasPedido`.
+ * "até o dia de hoje" não tem a segunda data, então o par não casa e a
+ * colheita caía nos 14 dias (05/10/2026: 22/09→05/10 em vez de 02/10→05/10).
+ */
+function parseDesdeDia(pedido: string, hoje: string): { date_from?: string; date_to?: string } {
+  const p = deaccLeitura(String(pedido ?? "").toLowerCase());
+  const m = p.match(/\bdesde\s+(?:o\s+)?dia\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/)
+    || p.match(/\bdesde\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/);
+  if (!m) return {};
+  const anoHoje = Number(hoje.slice(0, 4));
+  let ano = normalizarAno(m[3], anoHoje);
+  let date_from = `${ano}-${pad2(m[2])}-${pad2(m[1])}`;
+  if (date_from > hoje) {
+    ano -= 1;
+    date_from = `${ano}-${pad2(m[2])}-${pad2(m[1])}`;
+  }
+  let date_to: string | undefined;
+  if (/\bate\s+(?:o\s+)?dia\s+de\s+ontem\b/.test(p) || /\bate\s+ontem\b/.test(p)) {
+    date_to = isoMaisDias(hoje, -1);
+  } else if (/\bate\s+(?:o\s+)?dia\s+de\s+hoje\b/.test(p) || /\bate\s+hoje\b/.test(p) || /\bdia de hoje\b/.test(p)) {
+    date_to = hoje;
+  }
+  return { date_from, date_to };
+}
+
 export function resolverJanelaPedido(pedido: string, hojeIso?: string): {
   date_from?: string;
   date_to: string;
@@ -132,10 +159,12 @@ export function resolverJanelaPedido(pedido: string, hojeIso?: string): {
   const hoje = (hojeIso || todayIsoBrt()).slice(0, 10);
   const p = deaccLeitura(String(pedido ?? "").toLowerCase());
   const explicita = parseJanelaDatasPedido(pedido, hoje);
+  const desdeDia = explicita.date_from ? {} : parseDesdeDia(pedido, hoje);
+  const dateFrom = explicita.date_from ?? desdeDia.date_from;
   const desde = /\bdesde\b/.test(p) && /\b(criacao|criada|momento|dados reais|trouxe dados)\b/.test(p);
   const ontemFechado = /\bontem\b/.test(p) && /\bfechad/.test(p);
   const pedeHoje = /\bdia de hoje\b/.test(p) || /\bate hoje\b/.test(p);
-  let date_to = explicita.date_to;
+  let date_to = explicita.date_to ?? desdeDia.date_to;
   let dia_aberto: string | null = null;
   if (!date_to) {
     if (ontemFechado) {
@@ -145,10 +174,17 @@ export function resolverJanelaPedido(pedido: string, hojeIso?: string): {
       date_to = hoje;
     }
   }
+  // "até o dia de hoje" com início explícito: a série inclui hoje, o veredito de
+  // custo para no dia anterior. Sem início explícito o comportamento antigo fica.
+  if (dateFrom && pedeHoje && !ontemFechado && date_to === hoje) {
+    const ontem = isoMaisDias(hoje, -1);
+    dia_aberto = hoje;
+    if (ontem >= dateFrom) date_to = ontem;
+  }
   return {
-    date_from: explicita.date_from,
+    date_from: dateFrom,
     date_to,
-    desde_criacao: desde && !explicita.date_from,
+    desde_criacao: desde && !dateFrom,
     dia_aberto,
   };
 }
