@@ -331,7 +331,7 @@ export function replyOmitiuValoresDosConjuntos(texto: string, pedido: string): b
 export function ehPedidoUploadLote(pedido: string): boolean {
   const p = deacc(String(pedido ?? "").toLowerCase());
   const verbo =
-    /\b(suba|subir|envie|enviar|carregue|carregar|uploade?|faca upload|fazer upload|termine de subir|terminar de subir)\b/.test(
+    /\b(suba|subir|envie|enviar|carregue|carregar|uploade?|faca upload|fazer upload|termine de subir|terminar de subir|importe|importar|importa|importem|importacao)\b/.test(
       p,
     );
   const alvo =
@@ -341,7 +341,13 @@ export function ehPedidoUploadLote(pedido: string): boolean {
   const inventario =
     /\b(ja estao na meta|ficaram de fora|quais dos \d+)\b/.test(p) &&
     /\b(video|peca|arquivo|biblioteca|meta)\b/.test(p);
-  return (verbo && alvo) || inventario;
+  // "colete e importe-os na biblioteca da meta": verbo generico so vale com destino Meta
+  // explicito — "colete os dados na meta" e leitura, nao upload.
+  const destinoMeta =
+    /\b(colete|coletar|coloque|colocar|mande|mandar|leve|levar|jogue|jogar|passe|passar)\b/.test(
+      p,
+    ) && /\b((na|para a|pra) biblioteca|para a meta|pra meta)\b/.test(p);
+  return (verbo && alvo) || inventario || destinoMeta;
 }
 
 /** 1–3 pecas restantes: um bloco HTTP deve tentar fecha-las, sem teatro de 8 segmentos. */

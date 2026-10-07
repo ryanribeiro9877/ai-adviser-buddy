@@ -182,6 +182,18 @@ describe("ehPedidoUploadLote", () => {
     expect(ehPedidoUploadLote("qual o gasto de ontem?")).toBe(false);
   });
 
+  it("reconhece importar/colocar na biblioteca (antes fechava na 1a janela)", () => {
+    expect(
+      ehPedidoUploadLote(
+        "os vídeos citados estão dentro da subpasta Empréstimos (servidores e aposentados), verifique, colete e importe-os na biblioteca da meta",
+      ),
+    ).toBe(true);
+    expect(ehPedidoUploadLote("importar os vídeos do drive")).toBe(true);
+    expect(ehPedidoUploadLote("coloque essas peças na biblioteca")).toBe(true);
+    expect(ehPedidoUploadLote("colete os dados de gasto na meta")).toBe(false);
+    expect(ehPedidoUploadLote("mande o ranking dos anúncios")).toBe(false);
+  });
+
   it("reconhece recorte curto (2 pendentes) sem teatro de 8 blocos", () => {
     expect(ehUploadLoteCurto("suba os 2 últimos vídeos que ficaram pendentes")).toBe(true);
     expect(ehUploadLoteCurto("suba os restantes", 2)).toBe(true);

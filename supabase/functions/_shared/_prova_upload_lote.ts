@@ -9,6 +9,8 @@ assert(ehPedidoUploadLote("suba os 2 últimos vídeos que ficaram pendentes"), "
 assert(ehPedidoUploadLote("carregue as pecas na biblioteca"), "pedido carregar biblioteca");
 assert(ehPedidoUploadLote("termine de subir os vídeos e me informe quais dos 34 já estão na meta e quais ficaram de fora"), "pedido 34 na meta");
 assert(!ehPedidoUploadLote("qual o gasto de ontem?"), "pergunta nao e upload");
+assert(ehPedidoUploadLote("os vídeos citados estão dentro da subpasta Empréstimos, verifique, colete e importe-os na biblioteca da meta"), "importar na biblioteca");
+assert(!ehPedidoUploadLote("colete os dados de gasto na meta"), "coleta de dado nao e upload");
 
 const acervo = {
   itens: [
