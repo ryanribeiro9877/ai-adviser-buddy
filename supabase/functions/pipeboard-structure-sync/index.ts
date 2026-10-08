@@ -15,7 +15,7 @@ import {
   mapPipeboardAdset,
   mapPipeboardCampaign,
 } from "../_shared/pipeboard_structure.ts";
-import { campanhasDaConta, fatiaDoPrazo, ordenarContasPorAtividade } from "./ordem.ts";
+import { campanhasDaConta, contasAtivasFora, fatiaDoPrazo, ordenarContasPorAtividade } from "./ordem.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -481,6 +481,7 @@ Deno.serve(async (req) => {
     level,
     truncado,
     ms: Date.now() - comecou,
+    contas_ativas_fora: level === "ads" ? contasAtivasFora(reports, contasComAtiva) : [],
     reports,
   });
 });

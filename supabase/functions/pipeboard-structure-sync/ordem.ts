@@ -37,3 +37,22 @@ export function fatiaDoPrazo(agora: number, prazoAte: number, ativaEstaConta: bo
   if (!ativaEstaConta || ativasRestantes <= 1) return prazoAte;
   return agora + Math.max(0, prazoAte - agora) / ativasRestantes;
 }
+
+// 08/10/2026: a rodada respondia ok:true com truncado=true e a COHAPM "pulado_por_prazo",
+// e o registro gravava "sucesso" — dois dias sem anuncio novo sem ninguem saber.
+// Conta com campanha ativa que nao sincronizou (pulada pelo prazo ou com erro) vai para
+// esta lista; conferir_execucoes_http le o campo, marca a rodada como falha parcial e
+// emite um alerta por conta. Conta sem campanha ativa pulada nao e problema: fica de fora.
+export type ContaFora = { company_id: string; account_id: string; motivo: "pulado_por_prazo" | "erro"; erro?: string };
+
+export function contasAtivasFora(
+  reports: { company_id: string; account_id: string; pulado_por_prazo?: boolean; error?: string; [k: string]: unknown }[],
+  contasComAtiva: Set<string>,
+): ContaFora[] {
+  return reports.flatMap((r): ContaFora[] => {
+    if (!contasComAtiva.has(String(r.account_id).replace(/^act_/, ""))) return [];
+    if (r.pulado_por_prazo) return [{ company_id: r.company_id, account_id: r.account_id, motivo: "pulado_por_prazo" }];
+    if (r.error) return [{ company_id: r.company_id, account_id: r.account_id, motivo: "erro", erro: String(r.error).slice(0, 300) }];
+    return [];
+  });
+}
