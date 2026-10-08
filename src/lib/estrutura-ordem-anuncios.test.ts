@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   campanhasDaConta,
+  fatiaDoPrazo,
   ordenarContasPorAtividade,
 } from "../../supabase/functions/pipeboard-structure-sync/ordem";
 
@@ -41,5 +42,17 @@ describe("ordenarContasPorAtividade", () => {
       { external_id: "x", conta: "3302001729967572", ativa: true },
     ]).map((c) => c.external_id);
     expect(ordem).toEqual(["3302001729967572", "act_1622612945584817", "946388181625874"]);
+  });
+});
+
+describe("fatiaDoPrazo", () => {
+  it("duas contas ativas dividem o tempo que resta", () => {
+    expect(fatiaDoPrazo(0, 120_000, true, 2)).toBe(60_000);
+  });
+  it("a última conta ativa leva todo o resto", () => {
+    expect(fatiaDoPrazo(60_000, 120_000, true, 1)).toBe(120_000);
+  });
+  it("conta sem campanha ativa não reserva fatia", () => {
+    expect(fatiaDoPrazo(0, 120_000, false, 3)).toBe(120_000);
   });
 });

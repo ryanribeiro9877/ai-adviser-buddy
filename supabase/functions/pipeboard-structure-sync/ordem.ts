@@ -28,3 +28,12 @@ export function ordenarContasPorAtividade<T extends { external_id: unknown }>(
   const chave = (r: T) => String(r.external_id).replace(/^act_/, "");
   return [...contas].sort((a, b) => (ativas.get(chave(b)) ?? 0) - (ativas.get(chave(a)) ?? 0));
 }
+
+// Prazo justo: cada conta com campanha ativa que ainda falta rodar leva uma fatia igual
+// do tempo que resta. Sem isto a 3302001729967572 (39 campanhas, 97 anuncios com
+// detalhe e criativo) consumia os 125s sozinha e a COHAPM, segunda da fila, nunca rodava.
+// Conta sem campanha ativa nao reserva fatia: usa o que sobrar, no fim da fila.
+export function fatiaDoPrazo(agora: number, prazoAte: number, ativaEstaConta: boolean, ativasRestantes: number) {
+  if (!ativaEstaConta || ativasRestantes <= 1) return prazoAte;
+  return agora + Math.max(0, prazoAte - agora) / ativasRestantes;
+}

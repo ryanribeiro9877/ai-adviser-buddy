@@ -15,7 +15,7 @@ import {
   mapPipeboardAdset,
   mapPipeboardCampaign,
 } from "../_shared/pipeboard_structure.ts";
-import { campanhasDaConta, ordenarContasPorAtividade } from "./ordem.ts";
+import { campanhasDaConta, fatiaDoPrazo, ordenarContasPorAtividade } from "./ordem.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -319,22 +319,22 @@ Deno.serve(async (req) => {
       row.status !== "disabled" &&
       (!requested.size || requested.has(String(row.external_id).replace(/^act_/, ""))),
   );
+  const contasComAtiva = new Set<string>();
   if (level === "ads") {
     const { data: todas } = await supa.from("campaigns").select("external_account_id,status");
-    active = ordenarContasPorAtividade(
-      active,
-      (todas ?? []).map((c: any) => ({
-        conta: c.external_account_id ? String(c.external_account_id).replace(/^act_/, "") : null,
-        ativa: String(c.status ?? "").toUpperCase() === "ACTIVE",
-      })),
-    );
+    const campanhas = (todas ?? []).map((c: any) => ({
+      conta: c.external_account_id ? String(c.external_account_id).replace(/^act_/, "") : null,
+      ativa: String(c.status ?? "").toUpperCase() === "ACTIVE",
+    }));
+    for (const c of campanhas) if (c.ativa && c.conta) contasComAtiva.add(c.conta);
+    active = ordenarContasPorAtividade(active, campanhas);
   }
 
   const reports: any[] = [];
   const comecou = Date.now();
   const prazoAte = comecou + PRAZO_MS;
   let truncado = false;
-  for (const integration of active) {
+  for (const [idx, integration] of active.entries()) {
     const companyId = String(integration.company_id);
     const accountId = String(integration.external_id).replace(/^act_/, "");
     if (Date.now() > prazoAte) {
@@ -392,21 +392,25 @@ Deno.serve(async (req) => {
         continue;
       }
 
+      const ativasRestantes = active
+        .slice(idx)
+        .filter((r: any) => contasComAtiva.has(String(r.external_id).replace(/^act_/, ""))).length;
+      const prazoConta = fatiaDoPrazo(Date.now(), prazoAte, contasComAtiva.has(accountId), ativasRestantes);
       const listedRows: any[] = [];
       for (const campaignExternalId of campanhasDaConta(maps.campanhasMeta, accountId)) {
-        if (Date.now() > prazoAte) {
+        if (Date.now() > prazoConta) {
           truncado = true;
           break;
         }
         listedRows.push(
           ...(await listAll("get_ads", tool(tools, "get_ads"), accountId, token, {
             campaignId: campaignExternalId,
-            deadline: prazoAte,
+            deadline: prazoConta,
             fields: CAMPOS_ANUNCIO_PIPEBOARD,
           })),
         );
       }
-      const restam = prazoAte - Date.now();
+      const restam = prazoConta - Date.now();
       const detailed = restam > 20_000
         ? await enrich(
           listedRows,
@@ -414,7 +418,7 @@ Deno.serve(async (req) => {
           tool(tools, "get_ad_details"),
           "ad_id",
           token,
-          prazoAte,
+          prazoConta,
           CAMPOS_ANUNCIO_PIPEBOARD,
         )
         : listedRows;
@@ -424,7 +428,7 @@ Deno.serve(async (req) => {
           detailed,
           tool(tools, "get_creative_details"),
           token,
-          prazoAte,
+          prazoConta,
           CAMPOS_CRIATIVO_PIPEBOARD,
         )
         : detailed;
@@ -448,7 +452,7 @@ Deno.serve(async (req) => {
         ? await supa.from("ads").upsert(mapped, { onConflict: "provider,external_id" })
         : { error: null };
       if (error) throw error;
-      const miniaturas = await recuperarMiniaturas(supa, { limite: 6, deadline: prazoAte });
+      const miniaturas = await recuperarMiniaturas(supa, { limite: 6, deadline: prazoConta });
       reports.push({
         company_id: companyId,
         account_id: accountId,
