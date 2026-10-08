@@ -15,6 +15,7 @@ import {
   mapPipeboardAdset,
   mapPipeboardCampaign,
 } from "../_shared/pipeboard_structure.ts";
+import { campanhasDaConta, ordenarContasPorAtividade } from "./ordem.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -180,7 +181,7 @@ async function enrichCreatives(
 
 async function mapsForCompany(supa: any, companyId: string) {
   const [{ data: campaigns }, { data: adsets }] = await Promise.all([
-    supa.from("campaigns").select("id,external_id").eq("company_id", companyId),
+    supa.from("campaigns").select("id,external_id,external_account_id,status").eq("company_id", companyId),
     supa.from("ad_sets").select("id,external_id").eq("company_id", companyId),
   ]);
   return {
@@ -190,6 +191,11 @@ async function mapsForCompany(supa: any, companyId: string) {
     adsets: new Map<string, string>(
       (adsets ?? []).map((row: any) => [String(row.external_id), String(row.id)]),
     ),
+    campanhasMeta: (campaigns ?? []).map((row: any) => ({
+      external_id: String(row.external_id),
+      conta: row.external_account_id ? String(row.external_account_id).replace(/^act_/, "") : null,
+      ativa: String(row.status ?? "").toUpperCase() === "ACTIVE",
+    })),
   };
 }
 
@@ -306,13 +312,23 @@ Deno.serve(async (req) => {
     .eq("provider", "meta_ads")
     .not("external_id", "is", null);
   if (integrationError) return json({ error: integrationError.message }, 500);
-  const active = (integrations ?? []).filter(
+  let active = (integrations ?? []).filter(
     (row: any) =>
       row.company_id &&
       row.external_id &&
       row.status !== "disabled" &&
       (!requested.size || requested.has(String(row.external_id).replace(/^act_/, ""))),
   );
+  if (level === "ads") {
+    const { data: todas } = await supa.from("campaigns").select("external_account_id,status");
+    active = ordenarContasPorAtividade(
+      active,
+      (todas ?? []).map((c: any) => ({
+        conta: c.external_account_id ? String(c.external_account_id).replace(/^act_/, "") : null,
+        ativa: String(c.status ?? "").toUpperCase() === "ACTIVE",
+      })),
+    );
+  }
 
   const reports: any[] = [];
   const comecou = Date.now();
@@ -377,7 +393,7 @@ Deno.serve(async (req) => {
       }
 
       const listedRows: any[] = [];
-      for (const campaignExternalId of maps.campaigns.keys()) {
+      for (const campaignExternalId of campanhasDaConta(maps.campanhasMeta, accountId)) {
         if (Date.now() > prazoAte) {
           truncado = true;
           break;
