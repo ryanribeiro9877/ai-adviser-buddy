@@ -2,8 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-// Tela fina: o valor esta em nao montar os paineis sem empresa (as duas
-// consultariam com companyId undefined) e em passar a empresa CERTA para os dois.
+// Tela fina: o valor esta em nao montar o painel sem empresa (consultaria com
+// companyId undefined) e em passar a empresa CERTA para ele. Infobip saiu da tela
+// em 08/10/2026 (fica para analise posterior).
 
 let empresa: { id: string; name: string; industry: string | null } | null = {
   id: "c1",
@@ -25,11 +26,6 @@ vi.mock("@/components/whatsapp-panel", () => ({
     <div data-testid="waba" data-company={companyId} />
   ),
 }));
-vi.mock("@/components/infobip-panel", () => ({
-  InfobipPanel: ({ companyId }: { companyId: string }) => (
-    <div data-testid="infobip" data-company={companyId} />
-  ),
-}));
 
 import { Route } from "./whatsapp";
 
@@ -47,15 +43,14 @@ describe("sem empresa", () => {
     render(<Pagina />);
     expect(screen.getByTestId("empty-company")).toBeInTheDocument();
     expect(screen.queryByTestId("waba")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("infobip")).not.toBeInTheDocument();
   });
 });
 
 describe("com empresa", () => {
-  it("monta os dois paineis com a MESMA empresa", () => {
+  it("monta o painel com a empresa selecionada e sem Infobip", () => {
     render(<Pagina />);
     expect(screen.getByTestId("waba").dataset.company).toBe("c1");
-    expect(screen.getByTestId("infobip").dataset.company).toBe("c1");
+    expect(screen.queryByText(/Infobip/i)).not.toBeInTheDocument();
   });
 
   it("nomeia a empresa no subtitulo", () => {
