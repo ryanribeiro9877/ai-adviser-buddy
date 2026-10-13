@@ -9,6 +9,7 @@
 import { classificarLinhaProdutoCohapm } from "./memoria_conjunto.ts";
 import { centavosParaReais } from "./orcamento_reais.ts";
 import { inferirMeioDrive, type MeioDrive } from "./pedido_drive_criativos.ts";
+import { brl, reaisDeTexto } from "./resposta_canonica.ts";
 
 export const TETO_PAYLOAD_FERRAMENTA = 11_500;
 
@@ -501,7 +502,7 @@ export function anexarTabelaMarkdownDetalhe(det: Record<string, unknown>): Recor
 function txtOrcamento(item: Record<string, unknown>): string {
   const n = reaisDoItemDeOrcamento(item);
   if (n == null) return "—";
-  return `R$ ${n.toFixed(2)}`;
+  return brl(n);
 }
 
 function markdownLinhasConjuntos(conjuntos: Record<string, unknown>[]): string[] {
@@ -538,9 +539,9 @@ function diaTeveEntrega(o: Record<string, unknown>): boolean {
   const imp = Number(o.impressoes ?? 0);
   const conv = Number(o.conversas ?? 0);
   if (imp > 0 || conv > 0) return true;
-  const bruto = String(o.gasto ?? "").replace(/[^\d,.-]/g, "").replace(",", ".");
-  const n = Number(bruto);
-  return Number.isFinite(n) && n > 0;
+  // "R$ 1.200,00" virava "1.200.00", caia como NaN e o dia de gasto alto sumia da serie.
+  const n = reaisDeTexto(o.gasto);
+  return n != null && n > 0;
 }
 
 function markdownSerie(titulo: string, serie: unknown): string[] {

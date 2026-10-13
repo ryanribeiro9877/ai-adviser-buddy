@@ -400,6 +400,7 @@ import {
   NOTA_OVERVIEW,
 } from "../_shared/leitura_desempenho.ts";
 import { baseDoObjetivo } from "../_shared/metrica_canonica.ts";
+import { brl } from "../_shared/resposta_canonica.ts";
 import {
   FOCO_ORIGEM_DRIVE,
   tOrigemDriveDosAnuncios,
@@ -953,7 +954,6 @@ function json(obj: unknown, status = 200) {
 // Data no fuso da operacao (BRT). Em UTC, depois das 21h de Brasilia a data virava o dia
 // seguinte e o agente passava a tratar amanha como hoje.
 const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
-const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const deacc = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const norm = (s: string) => deacc(s.toLowerCase()).replace(/[-_\s]+/g, "");
 

@@ -52,6 +52,22 @@ export function brl(v: number | null | undefined): string {
   return `${neg ? "-" : ""}R$ ${mil},${dec}`;
 }
 
+/**
+ * Inverso de `brl`: "R$ 1.008,67" -> 1008.67. Le tambem o formato antigo da leitura de
+ * desempenho ("R$ 1008.70"), que continua gravado em execucoes anteriores a 13/10/2026: a
+ * virgula so e decimal quando vem depois do ultimo ponto. Texto sem numero devolve null, nunca 0
+ * — "sem resultado" nao e custo zero.
+ */
+export function reaisDeTexto(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const s = String(v ?? "").replace(/[^\d,.-]/g, "");
+  if (!/\d/.test(s)) return null;
+  const n = s.includes(",") && s.lastIndexOf(",") > s.lastIndexOf(".")
+    ? Number(s.replace(/\./g, "").replace(",", "."))
+    : Number(s.replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
 /** Percentual com duas casas: "1.5" -> "1,50%". */
 export function pct(v: number | null | undefined): string {
   if (v === null || v === undefined || !Number.isFinite(Number(v))) return "indisponivel";

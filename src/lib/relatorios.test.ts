@@ -132,6 +132,28 @@ describe("rankingConjuntosRelatorio", () => {
     expect(r.linhas[0].gasto).toBeCloseTo(51.31);
     expect(r.linhas[0].anuncios).toBe(6);
   });
+
+  // 13/10/2026: a leitura passou a emitir "R$ 1.008,67". O ranking le o gasto desse texto e
+  // repete o custo como veio; o formato antigo ("R$ 1008.70") ainda esta em execucoes gravadas.
+  it("le reais pt-BR com milhar e o formato antigo sem trocar a ordem de grandeza", () => {
+    const r = rankingConjuntosRelatorio([
+      {
+        nome: "CONJ.1_LAF", campanha: "LAF", conjunto_id: "1",
+        totais_janela: { gasto: "R$ 1.008,67", impressoes: 60000, cliques_no_link: 600, resultados_na_base: 8, custo_por_resultado: "R$ 126,08" },
+      },
+      {
+        nome: "CONJ.2_LAF", campanha: "LAF", conjunto_id: "2",
+        totais_janela: { gasto: "R$ 1008.70", impressoes: 100, cliques_no_link: 1, resultados_na_base: 0 },
+      },
+    ]);
+    const porNome = Object.fromEntries(r.linhas.map((l) => [l.nome, l]));
+    expect(porNome["CONJ.1_LAF"].gasto).toBe(1008.67);
+    expect(porNome["CONJ.2_LAF"].gasto).toBe(1008.7);
+    expect(r.markdown).toContain("| R$ 1.008,67 |");
+    expect(r.markdown).toContain("| R$ 126,08 |");
+    expect(r.markdown).toContain("| R$ 1.008,70 |");
+    expect(r.markdown).not.toMatch(/R\$ \d+\.\d{2}\b/);
+  });
 });
 
 describe("injetarRankingConjuntosNoMarkdown", () => {

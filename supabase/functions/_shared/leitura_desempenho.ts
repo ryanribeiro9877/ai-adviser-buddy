@@ -5,6 +5,9 @@
 import { statusObjetoOperacional } from "./memoria_conjunto.ts";
 import { type BaseDeResultado, baseDoObjetivo, custoPorResultado, rotuloDaBase } from "./metrica_canonica.ts";
 import { anexarTabelaMarkdownDetalhe, jsonCabeNoTeto, reaisDeOrcamentoMeta, serieDiariaEnxuta } from "./coleta_completa.ts";
+// 13/10/2026: reais em pt-BR ("R$ 1.008,67"). O formatador local escrevia "R$ 1008.70", que ia
+// cru para totais_janela e para a coluna Custo do relatorio, ao lado de valores ja em pt-BR.
+import { brl } from "./resposta_canonica.ts";
 
 export type CampanhaRef = {
   id?: string;
@@ -30,7 +33,6 @@ export const deaccLeitura = (s: string) =>
 export const normLeitura = (s: string) =>
   deaccLeitura(s.toLowerCase()).replace(/[-_\s]+/g, "");
 
-const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const num = (v: unknown) => Number(v || 0);
 const pct = (n: number, d: number) => d > 0 ? `${(100 * n / d).toFixed(2)}%` : null;
 

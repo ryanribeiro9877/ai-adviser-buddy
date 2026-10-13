@@ -871,6 +871,7 @@ import {
 } from "../_shared/coleta_completa.ts";
 import { tDetalheAnuncios, casarCampanhas, escolherCampanhaUnica, janelaDetalhe, somarSnaps, totaisDe, custosDaContaPorBase, NOTA_OVERVIEW } from "../_shared/leitura_desempenho.ts";
 import { baseDoObjetivo } from "../_shared/metrica_canonica.ts";
+import { brl } from "../_shared/resposta_canonica.ts";
 import { tOrigemDriveDosAnuncios, tCasarCriativoPerformance } from "../_shared/origem_drive_anuncios.ts";
 import { anexarRelatorioUpload, apurarUploadLote, prosaContinuandoUpload } from "../_shared/upload_lote.ts";
 import {
@@ -1227,7 +1228,6 @@ function json(obj: unknown, status = 200) {
 // Data no fuso da operacao (BRT). Em UTC, depois das 21h de Brasilia a data virava o dia
 // seguinte e o agente passava a tratar amanha como hoje.
 const today = () => new Date().toLocaleDateString("en-CA", { timeZone: "America/Sao_Paulo" });
-const brl = (n: number) => "R$ " + (Math.round(n * 100) / 100).toFixed(2);
 const deacc = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
 async function contratoOrcamentoDaConversa(convId: string | null | undefined): Promise<number | null> {
