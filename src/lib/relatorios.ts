@@ -24,6 +24,7 @@ export type ChaveSecaoRelatorio =
   | "custo_vs_teto"
   | "funil_midia"
   | "por_campanha"
+  | "dia_a_dia"
   | "por_conjunto"
   | "criativos_ranking"
   | "conjuntos_ranking"
@@ -80,6 +81,13 @@ export const SECOES_RELATORIO: readonly SecaoRelatorio[] = [
     chave: "por_campanha",
     titulo: "Quebra por campanha",
     descricao: "Desempenho de cada campanha do recorte, na janela pedida.",
+    especialistas: ["desempenho_campanhas"],
+  },
+  {
+    chave: "dia_a_dia",
+    titulo: "Dia a dia por campanha, conjunto e criativo",
+    descricao:
+      "Cada dia da janela separado, com o total no fim: a campanha, cada conjunto e cada criativo.",
     especialistas: ["desempenho_campanhas"],
   },
   {
@@ -989,6 +997,431 @@ export function injetarRankingCampanhasNoMarkdown(args: unknown): string {
   const md = String(o.md ?? o.corpo_md ?? "");
   const tabela = String(o.tabela ?? "");
   return injetarSecaoMarkdownRelatorio(md, "Quebra por campanha", tabela);
+}
+
+/**
+ * Dia a dia por campanha, conjunto e criativo (13/10/2026).
+ *
+ * POR QUE: o relatorio semanal dava so o total da janela. O gestor nao via em que dia o
+ * resultado aconteceu nem qual peca carregou cada dia, e um total errado (0 formularios numa
+ * LP com 63) passava sem nada ao lado para desmentir. Aqui cada dia sai separado, nos tres
+ * niveis, com o total no fim — a partir da mesma metrica por anuncio que alimenta a Quebra por
+ * campanha, entao os totais batem.
+ *
+ * Dia sem linha de metrica vira "—": pode ser sem entrega ou coleta que ainda nao chegou, e
+ * nos dois casos escrever 0 seria afirmar uma coisa que nao foi medida.
+ */
+export type BaseResultadoDiaADia =
+  | "formularios"
+  | "conversas"
+  | "formularios_e_conversas"
+  | "cliques_no_link";
+
+type SomaDiaADia = {
+  gasto: number;
+  impressoes: number;
+  cliques_link: number;
+  visitas: number;
+  formularios: number;
+  conversas: number;
+  linhas: number;
+};
+
+const ROTULO_BASE_DIA_A_DIA: Record<
+  BaseResultadoDiaADia,
+  { coluna: string; custo: string; contado: string; curto: string }
+> = {
+  formularios: {
+    coluna: "Formulários",
+    custo: "Custo por formulário",
+    contado: "formulários enviados",
+    curto: "formulários",
+  },
+  conversas: {
+    coluna: "Conversas",
+    custo: "Custo por conversa",
+    contado: "conversas iniciadas",
+    curto: "conversas",
+  },
+  formularios_e_conversas: {
+    coluna: "Resultados",
+    custo: "Custo por resultado",
+    contado: "formulários enviados + conversas iniciadas",
+    curto: "resultados",
+  },
+  cliques_no_link: {
+    coluna: "Cliques no link",
+    custo: "Custo por clique no link",
+    contado: "cliques no link",
+    curto: "cliques no link",
+  },
+};
+
+const DIAS_DA_SEMANA_RELATORIO = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+
+function ymdDoRelatorio(v: unknown): string | null {
+  const s = String(v ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  return Number.isNaN(Date.parse(`${s}T00:00:00Z`)) ? null : s;
+}
+
+function rotuloDiaRelatorio(ymd: string): string {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  return `${String(d).padStart(2, "0")} ${DIAS_DA_SEMANA_RELATORIO[dow] ?? ""}`.trim();
+}
+
+function fmtInteiroRelatorio(n: number): string {
+  const r = Math.round(Number.isFinite(n) ? n : 0);
+  return `${r < 0 ? "-" : ""}${String(Math.abs(r)).replace(/\B(?=(\d{3})+(?!\d))/g, ".")}`;
+}
+
+/** Nome dentro de celula de tabela: `|` do nome (ex.: "[LF | CONV]") quebraria a linha. */
+function celulaMdRelatorio(v: unknown): string {
+  return String(v ?? "")
+    .replace(/\r?\n/g, " ")
+    .replace(/\|/g, "\\|")
+    .trim();
+}
+
+function numeroDiaADia(v: unknown): number {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function somaDiaADiaVazia(): SomaDiaADia {
+  return {
+    gasto: 0,
+    impressoes: 0,
+    cliques_link: 0,
+    visitas: 0,
+    formularios: 0,
+    conversas: 0,
+    linhas: 0,
+  };
+}
+
+function acumularDiaADia(s: SomaDiaADia, l: Record<string, unknown>): void {
+  s.gasto += numeroDiaADia(l.gasto);
+  s.impressoes += numeroDiaADia(l.impressoes);
+  s.cliques_link += numeroDiaADia(l.cliques_link);
+  s.visitas += numeroDiaADia(l.visitas);
+  s.formularios += numeroDiaADia(l.formularios);
+  s.conversas += numeroDiaADia(l.conversas);
+  s.linhas += 1;
+}
+
+function resultadoNaBaseDiaADia(s: SomaDiaADia, base: BaseResultadoDiaADia): number {
+  if (base === "formularios") return s.formularios;
+  if (base === "conversas") return s.conversas;
+  if (base === "formularios_e_conversas") return s.formularios + s.conversas;
+  return s.cliques_link;
+}
+
+function semEntregaDiaADia(s: SomaDiaADia | undefined): boolean {
+  if (!s || !s.linhas) return true;
+  return s.gasto === 0 && s.impressoes === 0 && s.formularios === 0 && s.conversas === 0;
+}
+
+function celulaDiaADia(
+  s: SomaDiaADia | undefined,
+  base: BaseResultadoDiaADia,
+  comCusto: boolean,
+): string {
+  if (!s || semEntregaDiaADia(s)) return "—";
+  const r = resultadoNaBaseDiaADia(s, base);
+  const partes = [fmtReaisRelatorio(s.gasto), String(r)];
+  if (comCusto && r > 0) partes.push(fmtReaisRelatorio(s.gasto / r));
+  return partes.join(" · ");
+}
+
+type EntidadeDiaADia = { nome: string; porDia: Map<string, SomaDiaADia>; total: SomaDiaADia };
+
+function entidadeDiaADia(nome: string): EntidadeDiaADia {
+  return { nome, porDia: new Map(), total: somaDiaADiaVazia() };
+}
+
+function somarNaEntidade(e: EntidadeDiaADia, dia: string, l: Record<string, unknown>): void {
+  const s = e.porDia.get(dia) ?? somaDiaADiaVazia();
+  acumularDiaADia(s, l);
+  e.porDia.set(dia, s);
+  acumularDiaADia(e.total, l);
+}
+
+function tabelaEntidadesPorDia(
+  rotulo: string,
+  entidades: EntidadeDiaADia[],
+  dias: string[],
+  base: BaseResultadoDiaADia,
+): string[] {
+  const umDia = dias.length === 1;
+  const header = umDia
+    ? [rotulo, rotuloDiaRelatorio(dias[0])]
+    : [rotulo, ...dias.map(rotuloDiaRelatorio), `Total (${dias.length} dias)`];
+  const out = [`| ${header.join(" | ")} |`, `|${header.map(() => "---").join("|")}|`];
+  for (const e of entidades) {
+    const cells = umDia
+      ? [celulaDiaADia(e.total, base, true)]
+      : [
+          ...dias.map((d) => celulaDiaADia(e.porDia.get(d), base, false)),
+          celulaDiaADia(e.total, base, true),
+        ];
+    out.push(`| ${celulaMdRelatorio(e.nome)} | ${cells.join(" | ")} |`);
+  }
+  return out;
+}
+
+function tabelaCampanhaPorDia(
+  porDia: Map<string, SomaDiaADia>,
+  total: SomaDiaADia,
+  dias: string[],
+  base: BaseResultadoDiaADia,
+): string[] {
+  const rot = ROTULO_BASE_DIA_A_DIA[base];
+  const comVisitas = total.visitas > 0;
+  const comResultado = base !== "cliques_no_link";
+  const header = [
+    "Dia",
+    "Gasto",
+    "Impressões",
+    "Cliques no link",
+    ...(comVisitas ? ["Visitas à página"] : []),
+    ...(comResultado ? [rot.coluna] : []),
+    rot.custo,
+  ];
+  const valores = (s: SomaDiaADia): string[] => {
+    const r = resultadoNaBaseDiaADia(s, base);
+    return [
+      fmtReaisRelatorio(s.gasto),
+      fmtInteiroRelatorio(s.impressoes),
+      fmtInteiroRelatorio(s.cliques_link),
+      ...(comVisitas ? [fmtInteiroRelatorio(s.visitas)] : []),
+      ...(comResultado ? [fmtInteiroRelatorio(r)] : []),
+      r > 0 ? fmtReaisRelatorio(s.gasto / r) : "—",
+    ];
+  };
+  const out = [`| ${header.join(" | ")} |`, `|${header.map(() => "---").join("|")}|`];
+  for (const d of dias) {
+    const s = porDia.get(d);
+    const cells = !s || semEntregaDiaADia(s) ? header.slice(1).map(() => "—") : valores(s);
+    out.push(`| ${rotuloDiaRelatorio(d)} | ${cells.join(" | ")} |`);
+  }
+  const negrito = (v: string) => (v === "—" ? v : `**${v}**`);
+  out.push(`| **Total** | ${valores(total).map(negrito).join(" | ")} |`);
+  return out;
+}
+
+function baseDiaADia(v: unknown): BaseResultadoDiaADia {
+  const s = String(v ?? "");
+  return s === "conversas" || s === "formularios_e_conversas" || s === "cliques_no_link"
+    ? s
+    : "formularios";
+}
+
+export function quadroDiaADiaRelatorio(entrada: unknown): {
+  markdown: string;
+  campanhas: number;
+  com_entrega: number;
+} {
+  const vazio = { markdown: "", campanhas: 0, com_entrega: 0 };
+  if (!entrada || typeof entrada !== "object" || Array.isArray(entrada)) return vazio;
+  const o = entrada as Record<string, unknown>;
+  const per =
+    o.periodo && typeof o.periodo === "object" ? (o.periodo as Record<string, unknown>) : {};
+  const inicio = ymdDoRelatorio(per.inicio);
+  const fim = ymdDoRelatorio(per.fim);
+  if (!inicio || !fim || inicio > fim) return vazio;
+  const dias: string[] = [];
+  for (let d = inicio; d <= fim && dias.length < 62; d = addDaysYmd(d, 1)) dias.push(d);
+  const diasSet = new Set(dias);
+  const campanhas = Array.isArray(o.campanhas)
+    ? (o.campanhas as unknown[]).filter(
+        (c): c is Record<string, unknown> =>
+          !!c &&
+          typeof c === "object" &&
+          !Array.isArray(c) &&
+          String((c as Record<string, unknown>).campaign_id ?? "").trim() !== "",
+      )
+    : [];
+  if (!campanhas.length) return vazio;
+  const linhas = Array.isArray(o.linhas)
+    ? (o.linhas as unknown[]).filter(
+        (l): l is Record<string, unknown> => !!l && typeof l === "object",
+      )
+    : [];
+  const umDia = dias.length === 1;
+  const janelaTxt = `${inicio.slice(8, 10)}/${inicio.slice(5, 7)} a ${fim.slice(8, 10)}/${fim.slice(5, 7)}`;
+
+  let comEntrega = 0;
+  const blocos: string[] = [];
+  for (const c of campanhas) {
+    const id = String(c.campaign_id).trim();
+    const nome = String(c.nome ?? "").trim() || id;
+    const base = baseDiaADia(c.base);
+    const rot = ROTULO_BASE_DIA_A_DIA[base];
+    const nomeConjunto = new Map<string, string>();
+    for (const s of Array.isArray(c.conjuntos) ? (c.conjuntos as Record<string, unknown>[]) : []) {
+      const sid = String(s?.conjunto_id ?? "").trim();
+      if (sid) nomeConjunto.set(sid, String(s?.nome ?? "").trim() || sid);
+    }
+    const anuncioPorId = new Map<string, { nome: string; conjunto: string }>();
+    for (const a of Array.isArray(c.anuncios) ? (c.anuncios as Record<string, unknown>[]) : []) {
+      const aid = String(a?.ad_id ?? "").trim();
+      if (aid) {
+        anuncioPorId.set(aid, {
+          nome: String(a?.nome ?? "").trim() || `anúncio ${aid}`,
+          conjunto: String(a?.conjunto_id ?? "").trim(),
+        });
+      }
+    }
+
+    const porDia = new Map<string, SomaDiaADia>();
+    const total = somaDiaADiaVazia();
+    const conjuntos = new Map<string, EntidadeDiaADia>();
+    const anunciosPorConjunto = new Map<string, Map<string, EntidadeDiaADia>>();
+    for (const l of linhas) {
+      if (String(l.campaign_id ?? "").trim() !== id) continue;
+      const dia = ymdDoRelatorio(l.dia);
+      if (!dia || !diasSet.has(dia)) continue;
+      const s = porDia.get(dia) ?? somaDiaADiaVazia();
+      acumularDiaADia(s, l);
+      porDia.set(dia, s);
+      acumularDiaADia(total, l);
+      const aid = String(l.ad_id ?? "").trim();
+      const ad = anuncioPorId.get(aid);
+      const sid = String(l.conjunto_id ?? "").trim() || ad?.conjunto || "sem_conjunto";
+      const conj =
+        conjuntos.get(sid) ??
+        entidadeDiaADia(
+          nomeConjunto.get(sid) ??
+            (sid === "sem_conjunto" ? "(conjunto não identificado)" : `conjunto ${sid}`),
+        );
+      somarNaEntidade(conj, dia, l);
+      conjuntos.set(sid, conj);
+      const ads = anunciosPorConjunto.get(sid) ?? new Map<string, EntidadeDiaADia>();
+      const ent =
+        ads.get(aid) ??
+        entidadeDiaADia(ad?.nome ?? (aid ? `anúncio ${aid}` : "(anúncio não identificado)"));
+      somarNaEntidade(ent, dia, l);
+      ads.set(aid, ent);
+      anunciosPorConjunto.set(sid, ads);
+    }
+
+    const titulo = `### ${celulaMdRelatorio(nome)} (${id})`;
+    if (semEntregaDiaADia(total)) {
+      blocos.push(`${titulo}\n\nSem entrega registrada de ${janelaTxt}.`);
+      continue;
+    }
+    comEntrega += 1;
+    const legenda = umDia
+      ? `Resultado contado: ${rot.contado}. Nas tabelas por conjunto e por criativo: gasto · ${rot.curto} · ${rot.custo.toLowerCase()}. — = sem entrega registrada no dia.`
+      : `Resultado contado: ${rot.contado}. Nas tabelas por conjunto e por criativo, cada dia mostra gasto · ${rot.curto}; o total mostra gasto · ${rot.curto} · ${rot.custo.toLowerCase()}. — = sem entrega registrada no dia.`;
+    const porGasto = (a: EntidadeDiaADia, b: EntidadeDiaADia) =>
+      b.total.gasto !== a.total.gasto
+        ? b.total.gasto - a.total.gasto
+        : a.nome.localeCompare(b.nome, "pt-BR");
+    const ordemConjuntos = [...conjuntos.entries()]
+      .filter(([, e]) => !semEntregaDiaADia(e.total))
+      .sort(([, a], [, b]) => porGasto(a, b));
+    const partes = [
+      titulo,
+      "",
+      legenda,
+      "",
+      "#### Campanha, dia a dia",
+      "",
+      ...tabelaCampanhaPorDia(porDia, total, dias, base),
+      "",
+      "#### Por conjunto",
+      "",
+      ...tabelaEntidadesPorDia(
+        "Conjunto",
+        ordemConjuntos.map(([, e]) => e),
+        dias,
+        base,
+      ),
+    ];
+    for (const [sid, conj] of ordemConjuntos) {
+      const ads = [...(anunciosPorConjunto.get(sid)?.entries() ?? [])]
+        .filter(([, e]) => !semEntregaDiaADia(e.total))
+        .map(([aid, e]) => ({ aid, e }));
+      // Mesmo nome duas vezes no conjunto sao anuncios diferentes: o fim do ID desempata.
+      const contagem = new Map<string, number>();
+      for (const { e } of ads) contagem.set(e.nome, (contagem.get(e.nome) ?? 0) + 1);
+      const entidades = ads
+        .map(({ aid, e }) =>
+          contagem.get(e.nome)! > 1 ? { ...e, nome: `${e.nome} (…${aid.slice(-4)})` } : e,
+        )
+        .sort(porGasto);
+      partes.push(
+        "",
+        `#### Por criativo — ${celulaMdRelatorio(conj.nome)}`,
+        "",
+        ...tabelaEntidadesPorDia("Criativo", entidades, dias, base),
+      );
+    }
+    blocos.push(partes.join("\n"));
+  }
+
+  const cabeca =
+    "Métrica por anúncio e por dia da Meta, somada para conjunto e campanha; os totais batem com a Quebra por campanha.";
+  return {
+    markdown: [cabeca, ...blocos].join("\n\n"),
+    campanhas: campanhas.length,
+    com_entrega: comEntrega,
+  };
+}
+
+/**
+ * Coloca as tabelas do dia a dia na secao propria. A leitura que a IA escreveu na secao fica e
+ * as tabelas entram no fim dela; tabela que a IA tenha colado sai (o numero autoritativo e o
+ * daqui). Sem a secao, ela nasce logo depois da Quebra por campanha.
+ */
+export function injetarDiaADiaNoMarkdown(args: unknown): string {
+  if (args == null || typeof args !== "object" || Array.isArray(args)) {
+    return String(args ?? "");
+  }
+  const o = args as { md?: unknown; tabela?: unknown; corpo_md?: unknown };
+  const texto = String(o.md ?? o.corpo_md ?? "");
+  const tabela = String(o.tabela ?? "").trim();
+  if (!tabela) return texto;
+  const titulo = tituloDaSecaoRelatorio("dia_a_dia");
+  const lines = texto.split(/\r?\n/);
+  const nivel = (l: string) => {
+    const m = /^(#{1,6})[ \t]+\S/.exec(l);
+    return m ? m[1].length : 0;
+  };
+  const fimDaSecao = (start: number) => {
+    for (let i = start + 1; i < lines.length; i++) {
+      const n = nivel(lines[i]);
+      if (n && n <= 2) return i;
+    }
+    return lines.length;
+  };
+  const limpar = (s: string) => s.replace(/\n{3,}/g, "\n\n");
+  const start = lines.findIndex((l) => /^#{1,4}[ \t]+Dia a dia\b/i.test(l));
+  if (start >= 0) {
+    const end = fimDaSecao(start);
+    const leitura = lines.slice(start + 1, end).filter((l) => !/^\s*\|/.test(l));
+    return limpar(
+      [
+        ...lines.slice(0, start),
+        `## ${titulo}`,
+        ...leitura,
+        "",
+        tabela,
+        "",
+        ...lines.slice(end),
+      ].join("\n"),
+    );
+  }
+  const bloco = `## ${titulo}\n\n${tabela}`;
+  const q = lines.findIndex((l) => /^#{1,4}[ \t]+Quebra por campanha\b/i.test(l));
+  if (q >= 0) {
+    const end = fimDaSecao(q);
+    return limpar([...lines.slice(0, end), "", bloco, "", ...lines.slice(end)].join("\n"));
+  }
+  return texto ? `${texto.replace(/\s*$/, "")}\n\n${bloco}\n` : `${bloco}\n`;
 }
 
 export type AchadoRelatorio = {

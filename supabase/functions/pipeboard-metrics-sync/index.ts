@@ -3,6 +3,12 @@
 // depois faz rollup para metric_snapshots.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  formulariosDaLinhaMeta,
+  indicadorEhFormulario,
+  type ResultadoOficial,
+  resultadoOficialDaLinha,
+} from "../_shared/formularios_meta.ts";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { pipeboardCall, pipeboardToken } from "../_shared/pipeboard.ts";
 
@@ -149,10 +155,9 @@ function mapRow(row: any, companyId: string, accountFallback: string) {
           "onsite_conversion_messaging_conversation_started_7d",
         ]),
       ),
-    form_leads:
-      integer(source?.form_leads) ||
-      integer(source?.actions_lead) ||
-      integer(actionValue(source, ["lead", "onsite_conversion.lead_grouped"])),
+    // Lead primeiro; SubmitApplication do site so quando nao ha Lead. O `results` oficial do
+    // passe em lote (lerRankingsEResultados) ainda pode sobrescrever — ver formularios_meta.ts.
+    form_leads: formulariosDaLinhaMeta(source),
     // `leads` NAO e mais gravado (04/09/2026). Este coletor nao era um escritor legitimo da
     // coluna; era um escritor QUEBRADO, e a medicao mostra as duas coisas.
     //
@@ -439,50 +444,89 @@ function buildBulkArgs(
  *
  * MELHOR ESFORCO, SEMPRE. Este passe nunca derruba a coleta: se o lote falhar, as metricas do
  * dia sobem do mesmo jeito e o relatorio diz por que o ranking nao veio.
+ *
+ * `results` ENTROU NESTE PASSE EM 13/10/2026. E o "Resultados" do Gerenciador: o evento que o
+ * conjunto otimiza e quantos houve. A Lafelicita LP otimiza SubmitApplication, evento que a Meta
+ * devolve em `conversions` e nao em `actions`; o form_leads ficou zero em 63 formularios reais.
+ * Quando o indicador oficial e de formulario, ele sobrescreve o form_leads da linha (ver
+ * formularios_meta.ts). So o bulk aceita `fields`, entao e aqui que ele cabe.
+ *
+ * PAGINA. O bulk devolve ate 500 anuncios por chamada e o cursor vem por conta
+ * (`results[].next_cursor`). Sem seguir o cursor, conta grande perderia o resultado oficial dos
+ * anuncios da segunda pagina em diante, calada.
  */
-async function lerRankings(
+const RESULTADOS_MAX_PAGINAS = 20;
+
+type ExtrasDoLote = {
+  rankings: Record<string, string | null> | null;
+  resultado: ResultadoOficial | null;
+};
+
+function cursorDoLote(body: any): string | null {
+  const contas = Array.isArray(body?.results) ? body.results : [];
+  for (const conta of contas) {
+    const c = String(conta?.next_cursor ?? "").trim();
+    if (c) return c;
+  }
+  return nextCursor(body);
+}
+
+async function lerRankingsEResultados(
   accountId: string,
   dateFrom: string,
   dateTo: string,
   token: string,
-): Promise<{ ok: boolean; erro: string | null; mapa: Map<string, Record<string, string | null>> }> {
-  const mapa = new Map<string, Record<string, string | null>>();
-  const response = await callTool("bulk_get_insights", {
-    account_ids: [accountId.replace(/^act_/, "")],
-    level: "ad",
-    since: dateFrom,
-    until: dateTo,
-    time_breakdown: "day",
-    compact: true,
-    fields: [
-      "ad_id",
-      "date_start",
-      "quality_ranking",
-      "engagement_rate_ranking",
-      "conversion_rate_ranking",
-    ],
-  }, token);
-  if (!response.ok) {
-    return { ok: false, erro: response.erro ?? `pipeboard_bulk_${response.status}`, mapa };
+): Promise<{ ok: boolean; erro: string | null; paginas: number; mapa: Map<string, ExtrasDoLote> }> {
+  const mapa = new Map<string, ExtrasDoLote>();
+  let after: string | null = null;
+  let paginas = 0;
+  do {
+    const args: Record<string, unknown> = {
+      account_ids: [accountId.replace(/^act_/, "")],
+      level: "ad",
+      since: dateFrom,
+      until: dateTo,
+      time_breakdown: "day",
+      compact: true,
+      fields: [
+        "ad_id",
+        "date_start",
+        "quality_ranking",
+        "engagement_rate_ranking",
+        "conversion_rate_ranking",
+        "results",
+      ],
+    };
+    if (after) args.after = after;
+    const response = await callTool("bulk_get_insights", args, token);
+    paginas += 1;
+    if (!response.ok) {
+      return { ok: false, erro: response.erro ?? `pipeboard_bulk_${response.status}`, paginas, mapa };
+    }
+    for (const bruto of collectRows(response.body)) {
+      const linha = bruto?.metrics && typeof bruto.metrics === "object"
+        ? { ...bruto, ...bruto.metrics }
+        : bruto;
+      const adId = String(linha?.ad_id ?? "").trim();
+      const dia = isoDate(linha?.date_start ?? linha?.period ?? linha?.date);
+      if (!adId || !dia) continue;
+      const q = rank(linha?.quality_ranking);
+      const e = rank(linha?.engagement_rate_ranking);
+      const c = rank(linha?.conversion_rate_ranking);
+      const rankings = q === null && e === null && c === null
+        ? null
+        : { quality_ranking: q, engagement_rate_ranking: e, conversion_rate_ranking: c };
+      const resultado = resultadoOficialDaLinha(linha);
+      if (!rankings && !resultado) continue;
+      mapa.set(`${adId}:${dia}`, { rankings, resultado });
+    }
+    const proximo = cursorDoLote(response.body);
+    after = proximo && proximo !== after ? proximo : null;
+  } while (after && paginas < RESULTADOS_MAX_PAGINAS);
+  if (after) {
+    return { ok: false, erro: `teto_de_${RESULTADOS_MAX_PAGINAS}_paginas_com_cursor_restante`, paginas, mapa };
   }
-  for (const bruto of collectRows(response.body)) {
-    const linha = bruto?.metrics && typeof bruto.metrics === "object"
-      ? { ...bruto, ...bruto.metrics }
-      : bruto;
-    const adId = String(linha?.ad_id ?? "").trim();
-    const dia = isoDate(linha?.date_start ?? linha?.period ?? linha?.date);
-    if (!adId || !dia) continue;
-    const q = rank(linha?.quality_ranking);
-    const e = rank(linha?.engagement_rate_ranking);
-    const c = rank(linha?.conversion_rate_ranking);
-    if (q === null && e === null && c === null) continue;
-    mapa.set(`${adId}:${dia}`, {
-      quality_ranking: q,
-      engagement_rate_ranking: e,
-      conversion_rate_ranking: c,
-    });
-  }
-  return { ok: true, erro: null, mapa };
+  return { ok: true, erro: null, paginas, mapa };
 }
 
 function probeResult(name: string, response: any, schema: ToolDef | null) {
@@ -676,16 +720,37 @@ Deno.serve(async (req) => {
     // mesma recusa no lote; nao se gasta mais uma chamada com ela.
     let rankingsAplicados = 0;
     let rankingErro: string | null = accountError ? "conta_ja_com_erro_na_coleta" : null;
+    let loteMapa = new Map<string, ExtrasDoLote>();
+    let lotePaginas = 0;
     if (!accountError && rowsByKey.size) {
-      const rankings = await lerRankings(accountId, dateFrom, dateTo, token);
-      rankingErro = rankings.erro;
-      for (const [chave, valores] of rankings.mapa) {
-        const linha = rowsByKey.get(chave);
-        if (!linha) continue;
-        linha.quality_ranking = valores.quality_ranking;
-        linha.engagement_rate_ranking = valores.engagement_rate_ranking;
-        linha.conversion_rate_ranking = valores.conversion_rate_ranking;
+      const lote = await lerRankingsEResultados(accountId, dateFrom, dateTo, token);
+      rankingErro = lote.erro;
+      loteMapa = lote.mapa;
+      lotePaginas = lote.paginas;
+    }
+    // Resultado oficial de formulario manda no form_leads. Os contadores de corrigidos e de
+    // indicadores fora da classificacao vao para o relatorio da coleta: sao o que permite ver,
+    // sem abrir o banco, quando a conta passa a usar um evento que esta regra ainda nao conhece.
+    let resultadosOficiais = 0;
+    let formulariosCorrigidos = 0;
+    const indicadoresNaoClassificados = new Set<string>();
+    for (const [chave, extras] of loteMapa) {
+      const linha = rowsByKey.get(chave);
+      if (!linha) continue;
+      if (extras.rankings) {
+        linha.quality_ranking = extras.rankings.quality_ranking;
+        linha.engagement_rate_ranking = extras.rankings.engagement_rate_ranking;
+        linha.conversion_rate_ranking = extras.rankings.conversion_rate_ranking;
         rankingsAplicados += 1;
+      }
+      const oficial = extras.resultado;
+      if (!oficial) continue;
+      resultadosOficiais += 1;
+      if (indicadorEhFormulario(oficial.indicador)) {
+        if (linha.form_leads !== oficial.valor) formulariosCorrigidos += 1;
+        linha.form_leads = oficial.valor;
+      } else if (/custom/i.test(oficial.indicador)) {
+        indicadoresNaoClassificados.add(oficial.indicador);
       }
     }
 
@@ -721,6 +786,10 @@ Deno.serve(async (req) => {
       unique_rows: rows.length,
       rankings_aplicados: rankingsAplicados,
       rankings_erro: rankingErro,
+      lote_paginas: lotePaginas,
+      resultados_oficiais_lidos: resultadosOficiais,
+      formularios_corrigidos_pelo_oficial: formulariosCorrigidos,
+      indicadores_personalizados_nao_classificados: [...indicadoresNaoClassificados],
       upserted,
       upserted_producao: upsertedProd,
       error: accountError,

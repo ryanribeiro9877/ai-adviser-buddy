@@ -34,6 +34,7 @@
 // relatorio diz `teto_atingido` em vez de omitir.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { formulariosDaLinhaMeta } from "../_shared/formularios_meta.ts";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { pipeboardCall, pipeboardToken } from "../_shared/pipeboard.ts";
 
@@ -212,7 +213,8 @@ function mapear(seg: any, companyId: string, recorte: Recorte, contaPadrao: stri
     clicks: inteiro(seg?.clicks),
     link_clicks: inteiro(acao(seg, ["link_click"])),
     landing_page_views: inteiro(acao(seg, ["landing_page_view"])),
-    form_leads: inteiro(acao(seg, ["lead", "onsite_conversion.lead_grouped"])),
+    // Mesma regra do pipeboard-metrics-sync: Lead e, sem ele, o SubmitApplication do site.
+    form_leads: formulariosDaLinhaMeta(seg),
     messaging_started: inteiro(
       acao(seg, [
         "onsite_conversion.messaging_conversation_started_7d",

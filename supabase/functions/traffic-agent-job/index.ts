@@ -310,17 +310,20 @@ import {
   flattenCampanhasPipeboard,
   hojeYmdBrasilia,
   humanizarMarkdownRelatorio,
+  injetarDiaADiaNoMarkdown,
   injetarRankingCampanhasNoMarkdown,
   injetarRankingConjuntosNoMarkdown,
   janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   ordenarCampanhasRelatorioPorGasto,
   periodoDaJanela,
+  quadroDiaADiaRelatorio,
   rankingCampanhasRelatorio,
   rankingConjuntosRelatorio,
   recortarAlertasDoRecorte,
   recortarOverviewDoRecorte,
   titulosDasSecoes,
+  type BaseResultadoDiaADia,
   type CampanhaAoVivoBruta,
   type CampanhaRelatorio,
   type JanelaAnalise,
@@ -5453,6 +5456,122 @@ async function metricasNaJanelaPorCampanha(
   return out;
 }
 
+/**
+ * Entrada do quadro "dia a dia" (13/10/2026): metrica por anuncio e por dia das campanhas do
+ * recorte, com o nome de cada conjunto e anuncio e a base de resultado de cada campanha.
+ *
+ * Le ad_metric_snapshots com o mesmo filtro de fonte do rollup que alimenta a Quebra por
+ * campanha — por isso os totais das duas secoes batem. Anuncio que a estrutura ainda nao
+ * espelhou continua entrando (a linha de metrica traz campanha e conjunto); so o nome cai
+ * para o ID.
+ *
+ * BASE: a dos conjuntos com entrega, pelo optimization_goal (Click-to-WhatsApp tem objetivo de
+ * engajamento e otimiza conversa; pela campanha sozinha cairia em clique). Conjuntos que medem
+ * formulario e conversa na mesma campanha viram a base combinada, declarada na legenda.
+ */
+const DIA_A_DIA_PAGINA = 1000;
+const DIA_A_DIA_MAX_LINHAS = 40_000;
+
+async function entradaDiaADiaDoRecorte(
+  companyId: string,
+  ids: string[],
+  nomes: string[],
+  periodo: { inicio: string; fim: string },
+): Promise<{ entrada: Record<string, unknown>; erro: string | null; linhas: number }> {
+  const lista = ids.map((x) => String(x ?? "").trim()).filter(Boolean);
+  const vazia = (erro: string | null) => ({ entrada: { periodo, campanhas: [], linhas: [] }, erro, linhas: 0 });
+  if (!lista.length) return vazia(null);
+  const { data: camps, error: eCamp } = await supa
+    .from("campaigns")
+    .select("id,external_id,name,category,objective")
+    .eq("company_id", companyId)
+    .in("external_id", lista);
+  if (eCamp) return vazia(`campanhas: ${eCamp.message}`);
+  const campPorExt = new Map<string, Record<string, unknown>>();
+  for (const c of (camps ?? []) as Record<string, unknown>[]) {
+    campPorExt.set(String(c.external_id ?? ""), c);
+  }
+  const uuids = [...campPorExt.values()].map((c) => String(c.id ?? "")).filter(Boolean);
+  const [setsRes, adsRes] = await Promise.all([
+    uuids.length
+      ? supa.from("ad_sets").select("external_id,name,optimization_goal,campaign_id").eq("company_id", companyId).in("campaign_id", uuids)
+      : Promise.resolve({ data: [], error: null }),
+    uuids.length
+      ? supa.from("ads").select("external_id,name,adset_external_id,campaign_id").eq("company_id", companyId).in("campaign_id", uuids)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (setsRes.error) return vazia(`conjuntos: ${setsRes.error.message}`);
+  if (adsRes.error) return vazia(`anuncios: ${adsRes.error.message}`);
+
+  const linhas: Record<string, unknown>[] = [];
+  for (let de = 0; de < DIA_A_DIA_MAX_LINHAS; de += DIA_A_DIA_PAGINA) {
+    const { data, error } = await supa
+      .from("ad_metric_snapshots")
+      .select("ad_external_id,adset_external_id,campaign_external_id,snapshot_date,spend,impressions,link_clicks,landing_page_views,form_leads,messaging_started")
+      .eq("company_id", companyId)
+      .in("campaign_external_id", lista)
+      .or("fonte.is.null,fonte.like.pipeboard*")
+      .gte("snapshot_date", periodo.inicio)
+      .lte("snapshot_date", periodo.fim)
+      .order("snapshot_date", { ascending: true })
+      .order("ad_external_id", { ascending: true })
+      .range(de, de + DIA_A_DIA_PAGINA - 1);
+    if (error) return vazia(`metrica por anuncio: ${error.message}`);
+    const pagina = (data ?? []) as Record<string, unknown>[];
+    for (const s of pagina) {
+      linhas.push({
+        dia: String(s.snapshot_date ?? "").slice(0, 10),
+        campaign_id: String(s.campaign_external_id ?? ""),
+        conjunto_id: s.adset_external_id != null ? String(s.adset_external_id) : null,
+        ad_id: String(s.ad_external_id ?? ""),
+        gasto: Number(s.spend ?? 0),
+        impressoes: Number(s.impressions ?? 0),
+        cliques_link: Number(s.link_clicks ?? 0),
+        visitas: Number(s.landing_page_views ?? 0),
+        formularios: Number(s.form_leads ?? 0),
+        conversas: Number(s.messaging_started ?? 0),
+      });
+    }
+    if (pagina.length < DIA_A_DIA_PAGINA) break;
+  }
+
+  const sets = (setsRes.data ?? []) as Record<string, unknown>[];
+  const ads = (adsRes.data ?? []) as Record<string, unknown>[];
+  const campanhas = lista.map((ext, i) => {
+    const c = campPorExt.get(ext);
+    const uuid = String(c?.id ?? "");
+    const setsDaCamp = sets.filter((s) => String(s.campaign_id ?? "") === uuid);
+    const comEntrega = new Set(
+      linhas.filter((l) => l.campaign_id === ext).map((l) => String(l.conjunto_id ?? "")),
+    );
+    const daBase = setsDaCamp.some((s) => comEntrega.has(String(s.external_id ?? "")))
+      ? setsDaCamp.filter((s) => comEntrega.has(String(s.external_id ?? "")))
+      : setsDaCamp;
+    const bases = new Set(daBase.map((s) =>
+      baseDoObjetivo(c?.category as string | null, s.optimization_goal as string | null, c?.objective as string | null)
+    ));
+    const base: BaseResultadoDiaADia = bases.size === 1
+      ? [...bases][0]
+      : bases.has("formularios") && bases.has("conversas")
+        ? "formularios_e_conversas"
+        : baseDoObjetivo(c?.category as string | null, null, c?.objective as string | null);
+    return {
+      campaign_id: ext,
+      nome: String(c?.name ?? nomes[i] ?? ext),
+      base,
+      conjuntos: setsDaCamp.map((s) => ({ conjunto_id: String(s.external_id ?? ""), nome: String(s.name ?? "") })),
+      anuncios: ads
+        .filter((a) => String(a.campaign_id ?? "") === uuid)
+        .map((a) => ({
+          ad_id: String(a.external_id ?? ""),
+          nome: String(a.name ?? ""),
+          conjunto_id: a.adset_external_id != null ? String(a.adset_external_id) : null,
+        })),
+    };
+  });
+  return { entrada: { periodo, campanhas, linhas }, erro: null, linhas: linhas.length };
+}
+
 async function campanhasAoVivoDaEmpresa(companyId: string): Promise<{
   itens: CampanhaAoVivoBruta[];
   erro?: string;
@@ -5574,7 +5693,7 @@ function ferramentaColheitaFalhou(v: unknown): boolean {
 }
 
 function prioridadePecaColheita(nome: string): number {
-  if (nome === "ranking_campanhas" || nome === "ranking_conjuntos") return 0;
+  if (nome === "ranking_campanhas" || nome === "ranking_conjuntos" || nome === "serie_dia_a_dia") return 0;
   if (nome.startsWith("get_campaign_detail") || nome.startsWith("comparativo_") || nome === "get_funnel_janela") return 1;
   if (nome.startsWith("get_ads_ranking")) return 2;
   if (nome.startsWith("get_waba") || nome.includes("teto") || nome.includes("pacing") || nome.includes("alerta") || nome.includes("recomend") || nome.includes("dicas")) return 3;
@@ -5695,7 +5814,12 @@ function montarTextoColheita(pecas: PecaColheita[]): string {
   const linhas: string[] = [];
   for (const p of ord) {
     const compacto = compactarDadoColheita(p.nome, p.dado);
-    const dadoTxt = jsonCurtoRelatorio(compacto, p.nome.startsWith("get_detalhe_anuncios") ? 12_000 : RELATORIO_TETO_JSON);
+    const teto = p.nome === "serie_dia_a_dia"
+      ? 24_000
+      : p.nome.startsWith("get_detalhe_anuncios")
+        ? 12_000
+        : RELATORIO_TETO_JSON;
+    const dadoTxt = jsonCurtoRelatorio(compacto, teto);
     const chunk = `${p.nome} [${p.ok ? "ok" : "falhou"}]: ${dadoTxt}`;
     if (usados + chunk.length <= RELATORIO_TETO_COLHEITA) {
       linhas.push(chunk);
@@ -5851,6 +5975,7 @@ async function colherBaseRelatorio(args: {
   temWaba: boolean;
   markdownConjuntos: string;
   markdownCampanhas: string;
+  markdownDiaADia: string;
   ms: number;
 }> {
   const t0 = Date.now();
@@ -6039,6 +6164,21 @@ async function colherBaseRelatorio(args: {
     nota: "Todas as campanhas do recorte na janela fechada. Nao cortar. Cascas Traffic/Sales/MM_LITE ja sairam.",
   });
 
+  const diaADia = await entradaDiaADiaDoRecorte(args.companyId, recorteIds, recorteNomes, args.periodo);
+  const quadroDiaADia = diaADia.erro ? null : quadroDiaADiaRelatorio(diaADia.entrada);
+  marcar(
+    "serie_dia_a_dia",
+    quadroDiaADia
+      ? {
+        campanhas: quadroDiaADia.campanhas,
+        com_entrega: quadroDiaADia.com_entrega,
+        linhas_lidas: diaADia.linhas,
+        markdown: quadroDiaADia.markdown,
+        nota: "Cada dia da janela separado, por campanha, por conjunto e por criativo, com total no fim. Mesma fonte da Quebra por campanha. Celula 'gasto · resultado na base'; total 'gasto · resultado · custo'; '—' = sem entrega registrada no dia.",
+      }
+      : { erro: diaADia.erro },
+  );
+
   const falhas = pecas.filter((p) => !p.ok).map((p) => p.nome);
   const ok = pecas.filter((p) => p.ok).length;
   const temDesempenho = ids.every((id) =>
@@ -6063,6 +6203,7 @@ async function colherBaseRelatorio(args: {
     temWaba: !!pecaWaba?.ok,
     markdownConjuntos: rankingConjuntos.markdown,
     markdownCampanhas: rankingCampanhas.markdown,
+    markdownDiaADia: quadroDiaADia?.markdown ?? "",
     ms: Date.now() - t0,
   };
 }
@@ -6083,7 +6224,7 @@ LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: no
 
 NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio. Peca marcada [ok] na BASE foi lida: nao diga que nao foi coletada. Campanha se identifica pelo ID da Meta do recorte. Nome igual, prefixo compartilhado ou o mesmo mes no nome (SETEMBRO, SET26, AGOSTO) e OUTRA campanha: nao cite, nao some, nao compare.
 
-corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Quebra por campanha: NAO cole a tabela — so o titulo ## Quebra por campanha; o sistema injeta as linhas da base (todas as ativas do recorte). Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
+corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Dia a dia por campanha, conjunto e criativo; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista (exceto Dia a dia, que pode ser maior). Dia a dia por campanha, conjunto e criativo: NAO cole tabela — o sistema injeta as tabelas completas logo abaixo do seu texto. Escreva a leitura UM A UM, nesta ordem e separada por entidade: a campanha (como gasto, resultado e custo andaram do primeiro ao ultimo dia; melhor dia, pior dia e dias sem resultado, com o numero de cada um), depois CADA conjunto com a mesma leitura, depois, dentro de cada conjunto, os criativos que carregaram o gasto ou o resultado (dia em que aconteceu e numero). Numeros SO da peca serie_dia_a_dia da BASE; o resultado de cada celula ja esta na base da campanha declarada na legenda. "—" e sem entrega registrada no dia, nao zero. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Quebra por campanha: NAO cole a tabela — so o titulo ## Quebra por campanha; o sistema injeta as linhas da base (todas as ativas do recorte). Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
 
 Responda APENAS um JSON valido, sem cerca markdown, NESTA ORDEM de chaves:
 {"cobertura":"o que nao foi medido, em portugues","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"corpo_md":"narrativa em markdown para o gestor"}
@@ -6152,12 +6293,22 @@ async function processarRelatorio(relatorioId: string, mcpKey: string): Promise<
     }
 
     const nomes = resolvidas.nomes.map((n, i) => `${n} (${resolvidas.ids[i]})`).join("; ");
+    // Dia a dia entra em toda agenda que ja pedia leitura por campanha, conjunto ou criativo —
+    // inclusive as criadas antes da secao existir — logo depois da Quebra por campanha.
+    const querDiaADia = secoes.includes("dia_a_dia")
+      || secoes.includes("por_campanha")
+      || secoes.includes("por_conjunto")
+      || secoes.includes("criativos_ranking");
+    const secoesDoTexto = querDiaADia && !secoes.includes("dia_a_dia")
+      ? secoes.flatMap((s) => (s === "por_campanha" ? [s, "dia_a_dia"] : [s]))
+      : secoes;
+    if (querDiaADia && !secoesDoTexto.includes("dia_a_dia")) secoesDoTexto.push("dia_a_dia");
     const pergunta = `RELATORIO AUTONOMO (nao e conversa).
 Empresa: ${companyName}.
 Periodo FECHADO: ${periodo.inicio} a ${periodo.fim} (America/Sao_Paulo; hoje nao entra).
 Campanhas do recorte (unicas permitidas; a identidade e o ID da Meta entre parenteses, nao o mes nem o prefixo do nome): ${nomes}.
 Duas campanhas com o mesmo nome, ou uma cujo nome contem a outra (SET26 e SET26- SETEMBRO, dois AGOSTO), sao objetos diferentes na Meta. So escreva sobre o ID listado.
-Secoes obrigatorias (use estes titulos humanos no markdown): ${titulosDasSecoes(secoes).join("; ")}.
+Secoes obrigatorias (use estes titulos humanos no markdown): ${titulosDasSecoes(secoesDoTexto).join("; ")}.
 ${resolvidas.cobertura}
 Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contrato fora. Nao misture bases de resultado. Nao execute acao. Escreva para o gestor, nao para o log da ferramenta.`;
 
@@ -6273,6 +6424,14 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
       corpo = injetarRankingConjuntosNoMarkdown({
         md: corpo,
         tabela: colheita.markdownConjuntos,
+      });
+    }
+    // Por ultimo: as tabelas do dia a dia tem subtitulos (### campanha, #### conjunto) e as
+    // injecoes acima fecham a secao delas no proximo titulo de qualquer nivel.
+    if (querDiaADia) {
+      corpo = injetarDiaADiaNoMarkdown({
+        md: corpo,
+        tabela: colheita.markdownDiaADia,
       });
     }
     await supa.from("relatorio_gerados").update({

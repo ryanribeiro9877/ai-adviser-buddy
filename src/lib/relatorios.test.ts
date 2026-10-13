@@ -9,8 +9,10 @@ import {
   flattenCampanhasPipeboard,
   humanizarMarkdownRelatorio,
   filtrarConjuntosDoRecorte,
+  injetarDiaADiaNoMarkdown,
   injetarRankingCampanhasNoMarkdown,
   injetarRankingConjuntosNoMarkdown,
+  quadroDiaADiaRelatorio,
   janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   normalizarAchados,
@@ -483,5 +485,207 @@ describe("normalizarAchados / preset", () => {
     const p = presetDiarioOperacional();
     expect(p.horaLocal).toBe("08:00");
     expect(p.secoes).toEqual([...CHAVES_SECAO_RELATORIO]);
+  });
+});
+
+// Dia a dia: cada dia da janela separado, por campanha, conjunto e criativo, com total no fim.
+// Os números do caso vêm do formato da Lafelicità LP (06–12/10/2026): dois conjuntos, criativo
+// repetido nos dois, dias sem entrega no meio. Dia sem linha é "—", nunca zero inventado.
+describe("quadroDiaADiaRelatorio", () => {
+  const linha = (p: Partial<Record<string, unknown>>) => ({
+    dia: "2026-10-06",
+    campaign_id: "120250380225140182",
+    conjunto_id: "s-prof",
+    ad_id: "a1",
+    gasto: 0,
+    impressoes: 0,
+    cliques_link: 0,
+    visitas: 0,
+    formularios: 0,
+    conversas: 0,
+    ...p,
+  });
+  const entradaLp = {
+    periodo: { inicio: "2026-10-06", fim: "2026-10-12" },
+    campanhas: [
+      {
+        campaign_id: "120250380225140182",
+        nome: "COHAPM_LAFELICITA_LEADS_LP_2026-10",
+        base: "formularios",
+        conjuntos: [
+          { conjunto_id: "s-prof", nome: "TOFU_PROFISSOES-ALTA-RENDA_SETORES_8CIDADES" },
+          { conjunto_id: "s-alto", nome: "TOFU_ALTO-PADRAO_SEGUNDA-CASA-VIAGEM_SSA-LF-CAM-FSA" },
+        ],
+        anuncios: [
+          { ad_id: "a1", nome: "VID_VENHA-CONFERIR_M4_V1", conjunto_id: "s-prof" },
+          { ad_id: "a2", nome: "IMG_FRONTAL-ESCASSEZ_M5_V1", conjunto_id: "s-prof" },
+          { ad_id: "a3", nome: "VID_VENHA-CONFERIR_M4_V1", conjunto_id: "s-alto" },
+        ],
+      },
+    ],
+    linhas: [
+      linha({
+        dia: "2026-10-06",
+        ad_id: "a1",
+        gasto: 10,
+        impressoes: 500,
+        cliques_link: 5,
+        visitas: 1,
+      }),
+      linha({ dia: "2026-10-06", ad_id: "a3", conjunto_id: "s-alto", gasto: 20, impressoes: 800 }),
+      linha({
+        dia: "2026-10-07",
+        ad_id: "a1",
+        gasto: 100.5,
+        impressoes: 3000,
+        cliques_link: 40,
+        visitas: 6,
+        formularios: 9,
+      }),
+      linha({
+        dia: "2026-10-07",
+        ad_id: "a3",
+        conjunto_id: "s-alto",
+        gasto: 30,
+        impressoes: 1000,
+        formularios: 3,
+      }),
+      linha({ dia: "2026-10-12", ad_id: "a1", gasto: 200, impressoes: 4000, formularios: 14 }),
+      linha({ dia: "2026-10-12", ad_id: "a2", gasto: 50.25, impressoes: 1500 }),
+      linha({
+        dia: "2026-10-12",
+        ad_id: "a3",
+        conjunto_id: "s-alto",
+        gasto: 300,
+        impressoes: 5000,
+        formularios: 14,
+      }),
+    ],
+  };
+
+  it("campanha dia a dia: uma linha por dia da janela e o total que fecha", () => {
+    const { markdown } = quadroDiaADiaRelatorio(entradaLp);
+    expect(markdown).toContain("### COHAPM_LAFELICITA_LEADS_LP_2026-10 (120250380225140182)");
+    expect(markdown).toContain(
+      "| Dia | Gasto | Impressões | Cliques no link | Visitas à página | Formulários | Custo por formulário |",
+    );
+    expect(markdown).toContain("| 06 ter | R$ 30,00 | 1.300 | 5 | 1 | 0 | — |");
+    expect(markdown).toContain("| 07 qua | R$ 130,50 | 4.000 | 40 | 6 | 12 | R$ 10,88 |");
+    expect(markdown).toContain("| 08 qui | — | — | — | — | — | — |");
+    expect(markdown).toContain("| 12 seg | R$ 550,25 | 10.500 | 0 | 0 | 28 | R$ 19,65 |");
+    expect(markdown).toContain(
+      "| **Total** | **R$ 710,75** | **15.800** | **45** | **7** | **40** | **R$ 17,77** |",
+    );
+  });
+
+  it("por conjunto: dias em colunas, gasto · resultado, total com custo; maior gasto primeiro", () => {
+    const { markdown } = quadroDiaADiaRelatorio(entradaLp);
+    expect(markdown).toContain(
+      "| Conjunto | 06 ter | 07 qua | 08 qui | 09 sex | 10 sáb | 11 dom | 12 seg | Total (7 dias) |",
+    );
+    const prof =
+      "| TOFU_PROFISSOES-ALTA-RENDA_SETORES_8CIDADES | R$ 10,00 · 0 | R$ 100,50 · 9 | — | — | — | — | R$ 250,25 · 14 | R$ 360,75 · 23 · R$ 15,68 |";
+    const alto =
+      "| TOFU_ALTO-PADRAO_SEGUNDA-CASA-VIAGEM_SSA-LF-CAM-FSA | R$ 20,00 · 0 | R$ 30,00 · 3 | — | — | — | — | R$ 300,00 · 14 | R$ 350,00 · 17 · R$ 20,59 |";
+    expect(markdown).toContain(prof);
+    expect(markdown).toContain(alto);
+    expect(markdown.indexOf(prof)).toBeLessThan(markdown.indexOf(alto));
+  });
+
+  it("por criativo dentro de cada conjunto, sem custo quando não houve resultado", () => {
+    const { markdown } = quadroDiaADiaRelatorio(entradaLp);
+    expect(markdown).toContain("#### Por criativo — TOFU_PROFISSOES-ALTA-RENDA_SETORES_8CIDADES");
+    expect(markdown).toContain(
+      "| VID_VENHA-CONFERIR_M4_V1 | R$ 10,00 · 0 | R$ 100,50 · 9 | — | — | — | — | R$ 200,00 · 14 | R$ 310,50 · 23 · R$ 13,50 |",
+    );
+    expect(markdown).toContain(
+      "| IMG_FRONTAL-ESCASSEZ_M5_V1 | — | — | — | — | — | — | R$ 50,25 · 0 | R$ 50,25 · 0 |",
+    );
+    expect(markdown).toContain(
+      "#### Por criativo — TOFU_ALTO-PADRAO_SEGUNDA-CASA-VIAGEM_SSA-LF-CAM-FSA",
+    );
+  });
+
+  it("declara a base contada e o que é o travessão", () => {
+    const { markdown } = quadroDiaADiaRelatorio(entradaLp);
+    expect(markdown).toMatch(/Resultado contado: formulários enviados/);
+    expect(markdown).toMatch(/— = sem entrega registrada no dia/);
+  });
+
+  it("campanha sem nenhuma linha na janela diz isso, sem tabela de zeros", () => {
+    const { markdown, com_entrega } = quadroDiaADiaRelatorio({ ...entradaLp, linhas: [] });
+    expect(com_entrega).toBe(0);
+    expect(markdown).toContain("Sem entrega registrada de 06/10 a 12/10.");
+    expect(markdown).not.toContain("| Dia |");
+  });
+
+  it("base conversa troca as colunas e some com visitas quando não houve", () => {
+    const { markdown } = quadroDiaADiaRelatorio({
+      periodo: { inicio: "2026-10-12", fim: "2026-10-12" },
+      campanhas: [
+        {
+          campaign_id: "120250394932500182",
+          nome: "COHAPM_JURIDICO_CONV_WA_2026-10",
+          base: "conversas",
+          conjuntos: [{ conjunto_id: "j1", nome: "[LF | CONV] JUR_WA_CONJ.1" }],
+          anuncios: [{ ad_id: "x1", nome: "AD_C1_JUROS_ALTO", conjunto_id: "j1" }],
+        },
+      ],
+      linhas: [
+        linha({
+          dia: "2026-10-12",
+          campaign_id: "120250394932500182",
+          conjunto_id: "j1",
+          ad_id: "x1",
+          gasto: 40,
+          impressoes: 900,
+          cliques_link: 12,
+          conversas: 5,
+        }),
+      ],
+    });
+    expect(markdown).toContain(
+      "| Dia | Gasto | Impressões | Cliques no link | Conversas | Custo por conversa |",
+    );
+    expect(markdown).not.toContain("Visitas à página");
+    // Janela de um dia: a coluna do dia já é o total, com custo.
+    expect(markdown).toContain("| Conjunto | 12 seg |");
+    expect(markdown).toContain("| [LF \\| CONV] JUR_WA_CONJ.1 | R$ 40,00 · 5 · R$ 8,00 |");
+  });
+
+  it("entrada inválida não derruba o relatório", () => {
+    expect(quadroDiaADiaRelatorio(null).markdown).toBe("");
+    expect(quadroDiaADiaRelatorio({ periodo: { inicio: "x", fim: "y" } }).markdown).toBe("");
+  });
+});
+
+describe("injetarDiaADiaNoMarkdown", () => {
+  const tabela = "### Campanha X (1)\n\n| Dia | Gasto |\n|---|---|\n| 06 ter | R$ 1,00 |";
+
+  it("mantém a leitura escrita e anexa as tabelas no fim da seção", () => {
+    const md = injetarDiaADiaNoMarkdown({
+      md: "## Quebra por campanha\ntab\n\n## Dia a dia por campanha, conjunto e criativo\nO melhor dia foi 12/10.\n| colada | pela IA |\n\n## Fadiga de criativo\nok",
+      tabela,
+    });
+    expect(md).toContain("O melhor dia foi 12/10.");
+    expect(md).not.toContain("| colada | pela IA |");
+    expect(md.indexOf("O melhor dia foi 12/10.")).toBeLessThan(md.indexOf("### Campanha X (1)"));
+    expect(md.indexOf("### Campanha X (1)")).toBeLessThan(md.indexOf("## Fadiga de criativo"));
+  });
+
+  it("sem a seção, entra logo depois da Quebra por campanha", () => {
+    const md = injetarDiaADiaNoMarkdown({
+      md: "## Quebra por campanha\n| # |\n\n## Conjuntos e estrutura\nx",
+      tabela,
+    });
+    expect(md).toContain("## Dia a dia por campanha, conjunto e criativo");
+    expect(md.indexOf("## Dia a dia")).toBeGreaterThan(md.indexOf("## Quebra por campanha"));
+    expect(md.indexOf("## Dia a dia")).toBeLessThan(md.indexOf("## Conjuntos e estrutura"));
+  });
+
+  it("tabela vazia não mexe no texto", () => {
+    expect(injetarDiaADiaNoMarkdown({ md: "## Resumo executivo\nx", tabela: "" })).toBe(
+      "## Resumo executivo\nx",
+    );
   });
 });

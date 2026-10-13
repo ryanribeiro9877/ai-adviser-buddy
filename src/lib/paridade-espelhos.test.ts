@@ -365,6 +365,35 @@ const CHAMADAS_ALT: Partial<Record<number, unknown[][]>> = {
     ],
     [{ orcamento_diario_reais: 30 }],
     [{ novo_orcamento_diario_reais: 80 }],
+    // quadroDiaADiaRelatorio: periodo + campanha + linha por anuncio e dia.
+    [
+      {
+        periodo: { inicio: "2026-10-06", fim: "2026-10-07" },
+        campanhas: [
+          {
+            campaign_id: "120250380225140182",
+            nome: "COHAPM_LAFELICITA_LEADS_LP_2026-10",
+            base: "formularios",
+            conjuntos: [{ conjunto_id: "s1", nome: "TOFU_PROFISSOES" }],
+            anuncios: [{ ad_id: "a1", nome: "VID_VENHA-CONFERIR_M4_V1", conjunto_id: "s1" }],
+          },
+        ],
+        linhas: [
+          {
+            dia: "2026-10-07",
+            campaign_id: "120250380225140182",
+            conjunto_id: "s1",
+            ad_id: "a1",
+            gasto: 100.5,
+            impressoes: 3000,
+            cliques_link: 40,
+            visitas: 6,
+            formularios: 9,
+            conversas: 0,
+          },
+        ],
+      },
+    ],
   ],
   5: [
     [
