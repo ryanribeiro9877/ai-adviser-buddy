@@ -3,11 +3,14 @@ function deacc(s: string): string {
   return s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
+// 14/10/2026: `\bative\b` nao casa dentro de "desative". "desative os anuncios: ..." do Sistema
+// Ocular nao era ato, o turno nao foi devolvido ao modelo e nenhum card saiu em dois pedidos.
+// "desligue" fica de fora: "desligue o Advantage+" / "as melhorias" nao e card.
 export const RE_PEDIDO_DE_ATO =
-  /\b(crie|criar|cria|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
+  /\b(crie|criar|cria|suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|desative|desativar|inative|inativar|reative|reativar|suspenda|suspender|altere|alterar|aumente|aumentar|reduza|reduzir|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|monte|montar|quero subir|vamos criar)\b/;
 
 const RE_VERBO_FORTE_ATO =
-  /\b(suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|quero subir|vamos criar)\b/;
+  /\b(suba|subir|lance|lancar|proponha|propor|duplique|duplicar|escale|escalar|pause|pausar|ative|ativar|desative|desativar|inative|inativar|reative|reativar|suspenda|suspender|emita|emitir|emissao|emitindo|aprove|aprovar|replique|replicar|quero subir|vamos criar)\b/;
 
 /** "monte um ranking" / "crie um relatorio" — o objeto do verbo e entrega de leitura. */
 const RE_VERBO_COM_ENTREGA_ANALITICA =

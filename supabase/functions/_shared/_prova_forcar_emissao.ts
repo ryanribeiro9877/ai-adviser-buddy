@@ -217,4 +217,48 @@ function ok(cond: boolean, msg: string) {
   );
 }
 
+// 14/10/2026, Sistema Ocular: "desative os anúncios: CAR_02_... IMG_CARD-04_..." duas vezes e
+// nenhum card. `\bative\b` nao casa dentro de "desative", o pedido nao era ato, o turno nao foi
+// devolvido ao modelo e a segunda resposta escreveu "cada linha e um card pendente" sem UMA
+// chamada de propose_action. "pause" no mesmo texto forcava.
+{
+  const lista =
+    "\n\nCAR_02_INDIVIDUAL-ARMANI_V1\nIMG_CARD-04_CASAL-ARMANI_V1\nCAR_03_INDIVIDUAL-VOGUE_V1\n VID_02_CASAL-RAYBAN-VOGUE_V1\nVID_01_INDIVIDUAL-ARMANI_V1\nIMG_CARD-02_CASAL-RAYBAN-VOGUE_V1\nIMG_CARD-01_INDIVIDUAL-ARMANI_V1";
+  for (
+    const verbo of [
+      "desative os anúncios:",
+      "desativar os anúncios",
+      "inative os anúncios:",
+      "suspenda os anúncios:",
+      "reative os anúncios:",
+    ]
+  ) {
+    ok(
+      deveForcarEmissao({ pedido: verbo + lista, chamouPropose: false, cardsEmitidos: 0 }),
+      `"${verbo}" nao forcou propose_action`,
+    );
+  }
+  ok(
+    !deveForcarEmissao({ pedido: "desative os anúncios:" + lista, chamouPropose: true, cardsEmitidos: 0 }),
+    "propose_action chamada e recusada nao pode insistir",
+  );
+  ok(
+    !deveForcarEmissao({
+      pedido: "desative os comentarios de todos esses posts que estão sendo turbinados",
+      chamouPropose: false,
+      cardsEmitidos: 0,
+    }),
+    "desativar comentario voltou a virar pressao por card",
+  );
+  ok(
+    !deveForcarEmissao({ pedido: "quais anúncios inativos ainda gastaram ontem?", chamouPropose: false, cardsEmitidos: 0 }),
+    "'inativos' na pergunta virou ato",
+  );
+  // "desligue" fica de fora de proposito: "desligue o Advantage+" / "as melhorias" nao e card.
+  ok(
+    !deveForcarEmissao({ pedido: "como desligo as melhorias automáticas do criativo?", chamouPropose: false, cardsEmitidos: 0 }),
+    "desligar melhoria virou pressao por card",
+  );
+}
+
 console.log("ok: _prova_forcar_emissao");

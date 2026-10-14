@@ -54,6 +54,7 @@ const FALAS = [
   "separa mais 6 videos diferentes entre si com legendas",
   "emite os 3 cards do conjunto 2",
   "emite os N",
+  "desative os anúncios:\n\nCAR_02_INDIVIDUAL-ARMANI_V1\nIMG_CARD-04_CASAL-ARMANI_V1",
   "gera as legendas do CONJ.4 com 8 videos",
   "sobe os ultimos 3 pendentes",
   "qual o gasto de ontem?",

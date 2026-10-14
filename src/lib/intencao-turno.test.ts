@@ -143,6 +143,23 @@ describe("ehPerguntaDeLeitura", () => {
     expect(ehPedidoDeAto(pedido)).toBe(false);
   });
 
+  it("desative os anuncios e ato e forca propose_action (Sistema Ocular, 14/10)", () => {
+    const pedido =
+      "desative os anúncios:\n\nCAR_02_INDIVIDUAL-ARMANI_V1\nIMG_CARD-04_CASAL-ARMANI_V1\nCAR_03_INDIVIDUAL-VOGUE_V1";
+    expect(ehPedidoDeAto(pedido)).toBe(true);
+    expect(ehPerguntaDeLeitura(pedido)).toBe(false);
+    expect(deveForcarEmissao({ pedido, chamouPropose: false, cardsEmitidos: 0 })).toBe(true);
+    expect(ehPedidoDeAto("reative os anúncios do conjunto 2")).toBe(true);
+    expect(ehPedidoDeAto("quais anúncios inativos gastaram ontem?")).toBe(false);
+    expect(
+      deveForcarEmissao({
+        pedido: "desative os comentarios de todos esses posts que estão sendo turbinados",
+        chamouPropose: false,
+        cardsEmitidos: 0,
+      }),
+    ).toBe(false);
+  });
+
   it("analise da campanha ativa, com meta e teto, e leitura e nao tabela", () => {
     const pedido =
       "com toda sua inteligência de super gestor de tráfego preciso que, baseado na campanha ativa do lafelicità, você analise todos os dados desde o dia 02/10 até o dia de hoje e me diga se a tendência dos criativos é render mais conversas ou estagnar, tenha em mente que eu preciso atingir 107 conversas por dia, sendo que o teto limite de cada conversa gerada é 7,00 (no máximo). me traga o resultado da análise.";
