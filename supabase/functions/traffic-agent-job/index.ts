@@ -376,8 +376,10 @@ import {
   aplicarCompactacaoCriativos,
   aplicarCompactacaoEstrutura,
   esgotarPaginasRpc,
+  metricasDoPedido,
   montarRelacaoDeDetalhe,
   montarRelacaoGeoDeCampanha,
+  pedidoPedeDiaADia,
   soAtivosDoPedido,
 } from "../_shared/coleta_completa.ts";
 import { parseArgumentosDeFerramenta } from "../_shared/leitura_honesta.ts";
@@ -388,9 +390,11 @@ import { lerObjetoAoVivo } from "../_shared/ler_objeto.ts";
 import { tokenAdsPorCompanyId } from "../_shared/meta_company_tokens.ts";
 import {
   tDetalheAnuncios,
+  campanhasNomeadasNoPedido,
   casarCampanhas,
   casarCampanhasCitadas,
   escolherCampanhaUnica,
+  normLeitura,
   janelaDetalhe,
   parseJanelaDatasPedido,
   resolverJanelaPedido,
@@ -1881,7 +1885,8 @@ async function colherRelacaoNumerica(args: {
   const hoje = today();
   const janela = resolverJanelaPedido(pedido, hoje);
   const citados = extrairNomesDeCampanhaCitados(pedido);
-  const comSerie = pedidoExigeInterpretacao(pedido) || /\bpor dia\b/.test(deacc(pedido.toLowerCase())) || janela.desde_criacao;
+  const comSerie = pedidoExigeInterpretacao(pedido) || pedidoPedeDiaADia(pedido) || janela.desde_criacao;
+  const metricas = metricasDoPedido(pedido);
   const { data: camps, error } = await supa.from("campaigns")
     .select("id,name,status,external_id")
     .eq("company_id", args.companyId);
@@ -1890,13 +1895,23 @@ async function colherRelacaoNumerica(args: {
   }
   type CampAlvo = { id?: string; name?: string; status?: unknown; external_id?: string };
   const operacionais = ((camps ?? []) as CampAlvo[]).filter((c) => statusObjetoOperacional(c.status));
+  // 14/10/2026: nome completo no meio da frase tambem recorta. Antes so o nome sozinho na linha
+  // contava, e "dentro da campanha COHAPM_..._LP_2026-10 faça..." trouxe as 11 da linha La Felicità.
+  const nomeados = campanhasNomeadasNoPedido(operacionais, pedido);
   let alvos: CampAlvo[] = [];
   let faltando: string[] = [];
+  let pedidas: string[] = [];
   const meio = inferirMeioDrive(pedido);
-  if (citados.length) {
-    const casa = casarCampanhasCitadas(operacionais, citados);
-    alvos = casa.escolhidas;
+  if (nomeados.length || citados.length) {
+    const nNomeados = nomeados.map((c) => normLeitura(String(c.name ?? "")));
+    const resto = citados.filter((c) => {
+      const n = normLeitura(c);
+      return !nNomeados.some((x) => x === n || x.startsWith(n) || n.startsWith(x));
+    });
+    const casa = casarCampanhasCitadas(operacionais.filter((c) => !nomeados.includes(c)), resto);
+    alvos = [...nomeados, ...casa.escolhidas];
     faltando = casa.faltando;
+    pedidas = [...new Set([...nomeados.map((c) => String(c.name ?? "")), ...resto])];
   } else {
     alvos = meio
       ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
@@ -1910,7 +1925,7 @@ async function colherRelacaoNumerica(args: {
     }
   }
   if (!alvos.length) {
-    const porque = citados.length
+    const porque = pedidas.length
       ? `nenhuma das campanhas citadas no espelho (${faltando.join("; ")})`
       : "nenhuma campanha da linha no recorte";
     return { ok: false, markdown: "", leitura: "", cobertura: porque, campanhas: 0, fatos: [] };
@@ -1929,7 +1944,9 @@ async function colherRelacaoNumerica(args: {
     ? `${from} → ${janela.date_to} fechada; ${janela.dia_aberto} em aberto (entra na série, fica fora do veredito de custo)`
     : janela.dia_aberto
       ? `${from} → ${janela.dia_aberto} (dia em aberto; entra na série e fica fora do veredito de custo)`
-      : `${from} → ${toFetch}`;
+      : janela.ultimos_dias
+        ? `${from} → ${toFetch} (últimos ${janela.ultimos_dias} dias fechados; hoje, ${hoje}, ainda está em coleta e fica fora)`
+        : `${from} → ${toFetch}`;
   const soAtivos = soAtivosDoPedido(pedido);
   const blocos: string[] = [];
   const blocosLeitura: string[] = [];
@@ -1966,8 +1983,8 @@ async function colherRelacaoNumerica(args: {
     }
     if (!base) continue;
     const pacote = { ...base, anuncios, restantes: 0, exibidos: anuncios.length };
-    const md = montarRelacaoDeDetalhe(pacote, soAtivos, comSerie);
-    const mdLeitura = comSerie ? montarRelacaoDeDetalhe(pacote, soAtivos, false) : md;
+    const md = montarRelacaoDeDetalhe(pacote, soAtivos, comSerie, metricas);
+    const mdLeitura = comSerie ? montarRelacaoDeDetalhe(pacote, soAtivos, false, metricas) : md;
     if (md) {
       blocos.push(md);
       nomesEntraram.push(String(camp.name ?? id));
@@ -1979,8 +1996,8 @@ async function colherRelacaoNumerica(args: {
     }
   }
   const rotuloLinha = meio === "la_felicita" ? "La Felicità" : meio === "juridico" ? "Jurídico" : meio === "sistema_ocular" ? "Sistema Ocular" : "";
-  const pedidoRotulo = citados.length
-    ? citados.join(" · ")
+  const pedidoRotulo = pedidas.length
+    ? pedidas.join(" · ")
     : rotuloLinha
       ? `linha ${rotuloLinha} (o pedido não trouxe o nome completo da campanha)`
       : "(nenhuma nomeada; recorte pela linha do pedido)";
@@ -2099,7 +2116,11 @@ async function colherRelacaoGeo(args: {
   const operacionais = ((camps ?? []) as Array<{ id?: string; name?: string; status?: unknown; external_id?: string }>)
     .filter((c) => statusObjetoOperacional(c.status));
   const meio = inferirMeioDrive(pedido);
-  let alvos = meio
+  // Campanha citada pelo nome completo manda no recorte (mesmo defeito da relacao numerica).
+  const nomeados = campanhasNomeadasNoPedido(operacionais, pedido);
+  let alvos = nomeados.length
+    ? nomeados
+    : meio
     ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
     : [];
   if (!alvos.length && meio) {
@@ -2108,14 +2129,16 @@ async function colherRelacaoGeo(args: {
   }
   if (!alvos.length) alvos = operacionais;
   const p = deacc(pedido.toLowerCase());
-  if (!/\binstagr/.test(p)) {
-    alvos = alvos.filter((c) => !/publicacao do instagram|post do instagram/i.test(String(c.name ?? "")));
-  }
-  if (!/\bsalt\b/.test(p)) {
-    alvos = alvos.filter((c) => !/\[salt\]/i.test(String(c.name ?? "")));
-  }
-  if (soAtivosDoPedido(pedido)) {
-    alvos = alvos.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
+  if (!nomeados.length) {
+    if (!/\binstagr/.test(p)) {
+      alvos = alvos.filter((c) => !/publicacao do instagram|post do instagram/i.test(String(c.name ?? "")));
+    }
+    if (!/\bsalt\b/.test(p)) {
+      alvos = alvos.filter((c) => !/\[salt\]/i.test(String(c.name ?? "")));
+    }
+    if (soAtivosDoPedido(pedido)) {
+      alvos = alvos.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
+    }
   }
   if (!alvos.length) {
     return { ok: false, markdown: "", cobertura: "nenhuma campanha da linha no recorte de geo", campanhas: 0 };
@@ -4868,7 +4891,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.32";
+  tel.versao = "job-v4.33";
   {
     const base = await precarregarDoutrina();
     const origens = [...base.values()].map((v) => v.origem);

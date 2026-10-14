@@ -152,20 +152,49 @@ function parseDesdeDia(pedido: string, hoje: string): { date_from?: string; date
   return { date_from, date_to };
 }
 
+const DIAS_POR_EXTENSO: Record<string, number> = {
+  dois: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10,
+  quinze: 15, trinta: 30,
+};
+
+/**
+ * "ultimos 3 dias" = tres dias FECHADOS terminando ontem, como o `last_3d` da Meta.
+ * 14/10/2026: o pedido "comparativo dos ultimos 3 dias" caiu nos 14 dias padrao (01/10 → 14/10).
+ * Hoje so entra, em aberto, se o gestor pedir ("ate hoje"): o dia ainda esta em coleta.
+ */
+function parseUltimosDias(p: string): number | null {
+  const m = p.match(/\bultimos\s+(\d{1,3}|[a-z]+)\s+dias\b/);
+  if (!m) return null;
+  const n = /^\d+$/.test(m[1]) ? Number(m[1]) : DIAS_POR_EXTENSO[m[1]] ?? null;
+  return n != null && n >= 1 && n <= 90 ? n : null;
+}
+
 export function resolverJanelaPedido(pedido: string, hojeIso?: string): {
   date_from?: string;
   date_to: string;
   desde_criacao: boolean;
   dia_aberto: string | null;
+  ultimos_dias?: number;
 } {
   const hoje = (hojeIso || todayIsoBrt()).slice(0, 10);
   const p = deaccLeitura(String(pedido ?? "").toLowerCase());
   const explicita = parseJanelaDatasPedido(pedido, hoje);
   const desdeDia = explicita.date_from ? {} : parseDesdeDia(pedido, hoje);
+  const pedeHoje = /\bdia de hoje\b/.test(p) || /\bate hoje\b/.test(p);
+  const ultimos = explicita.date_from || desdeDia.date_from ? null : parseUltimosDias(p);
+  if (ultimos != null) {
+    const ontem = isoMaisDias(hoje, -1);
+    return {
+      date_from: isoMaisDias(pedeHoje ? hoje : ontem, -(ultimos - 1)),
+      date_to: ontem,
+      desde_criacao: false,
+      dia_aberto: pedeHoje ? hoje : null,
+      ultimos_dias: ultimos,
+    };
+  }
   const dateFrom = explicita.date_from ?? desdeDia.date_from;
   const desde = /\bdesde\b/.test(p) && /\b(criacao|criada|momento|dados reais|trouxe dados)\b/.test(p);
   const ontemFechado = /\bontem\b/.test(p) && /\bfechad/.test(p);
-  const pedeHoje = /\bdia de hoje\b/.test(p) || /\bate hoje\b/.test(p);
   let date_to = explicita.date_to ?? desdeDia.date_to;
   let dia_aberto: string | null = null;
   if (!date_to) {
@@ -232,6 +261,38 @@ export function casarCampanhasCitadas<T extends CampanhaRef>(
     if (i >= 0) pool.splice(i, 1);
   }
   return { escolhidas, faltando };
+}
+
+/**
+ * Campanhas cujo nome COMPLETO aparece no pedido, em qualquer ponto da frase.
+ *
+ * 14/10/2026: "dentro da campanha COHAPM_LAFELICITA_LEADS_LP_2026-10 faça um comparativo..."
+ * nao casava nada — `extrairNomesDeCampanhaCitados` so le nome sozinho na linha — e a colheita
+ * caiu nas 11 campanhas da linha La Felicità. Aqui o nome vem do espelho, nao de um padrao de
+ * nomenclatura, entao `[SALT] [LF | CONV ...]` tambem recorta.
+ *
+ * O nome mais longo entra primeiro e consome o trecho: `SET26` nao casa dentro de
+ * `SET26- SETEMBRO`. Campanhas com o MESMO nome entram juntas: o pedido nao as distingue.
+ */
+export function campanhasNomeadasNoPedido<T extends CampanhaRef>(camps: T[], pedido: string): T[] {
+  let texto = normLeitura(String(pedido ?? ""));
+  if (!texto) return [];
+  const porNome = new Map<string, T[]>();
+  for (const c of camps) {
+    const n = normLeitura(String(c.name ?? ""));
+    if (n.length < 12) continue;
+    const arr = porNome.get(n) ?? [];
+    arr.push(c);
+    porNome.set(n, arr);
+  }
+  const achados: { pos: number; camps: T[] }[] = [];
+  for (const n of [...porNome.keys()].sort((a, b) => b.length - a.length)) {
+    const pos = texto.indexOf(n);
+    if (pos < 0) continue;
+    achados.push({ pos, camps: porNome.get(n)! });
+    texto = texto.slice(0, pos) + "\u0000".repeat(n.length) + texto.slice(pos + n.length);
+  }
+  return achados.sort((a, b) => a.pos - b.pos).flatMap((a) => a.camps);
 }
 
 function linhaMetrica(s: Record<string, unknown>, hoje: string) {

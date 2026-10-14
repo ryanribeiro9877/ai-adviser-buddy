@@ -207,7 +207,54 @@ export function statusEhAtivo(status: unknown): boolean {
   return String(status ?? "").trim().toUpperCase() === "ACTIVE";
 }
 
-/** Série diária enxuta: o que o gestor pede numa relação (gasto, impressão, conversa). */
+const deaccPedido = (s: string) =>
+  String(s ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+/**
+ * O gestor quer os dias separados ("por dia", "dia a dia", "cada um dos dias").
+ * 14/10/2026: "trazendo os dados de cada um dos dias separadamente" saiu sem série,
+ * porque a colheita so ligava a série com "por dia" literal.
+ */
+export function pedidoPedeDiaADia(pedido: string): boolean {
+  const p = deaccPedido(pedido);
+  return /\b(por dia|dia a dia|dia por dia|serie diaria|diariamente|cada dia)\b/.test(p) ||
+    /\bcada (um )?(dos )?dias\b/.test(p);
+}
+
+/** Metricas que a relacao sabe mostrar como coluna, na ordem em que aparecem na tabela. */
+export type MetricaRelacao =
+  | "gasto"
+  | "impressoes"
+  | "cliques_no_link"
+  | "formularios"
+  | "conversas"
+  | "custo_por_resultado";
+
+const ORDEM_METRICAS: MetricaRelacao[] = [
+  "gasto", "impressoes", "cliques_no_link", "formularios", "conversas", "custo_por_resultado",
+];
+
+/**
+ * Colunas que o pedido nomeou. Vazio = o gestor nao escolheu, e a tabela de sempre continua.
+ * 14/10/2026: "gastos, impressões e cliques no link" saiu com Conversas e Preço/conversa,
+ * e sem o clique no link, que era o que a LP mede.
+ */
+export function metricasDoPedido(pedido: string): MetricaRelacao[] {
+  const p = deaccPedido(pedido);
+  const pede: Record<MetricaRelacao, boolean> = {
+    gasto: /\b(gastos?|gastou|gastando|investimento|investido)\b/.test(p),
+    impressoes: /\bimpress(ao|oes)\b/.test(p),
+    cliques_no_link: /\bcliques? (no|nos|de|em) links?\b/.test(p) || /\blink clicks?\b/.test(p),
+    formularios: /\b(formularios?|leads?|cadastros?)\b/.test(p),
+    conversas: /\bconversas?\b/.test(p),
+    custo_por_resultado:
+      /\b(precos?|custos?) (por|de cada|da|de) (conversas?|resultados?|leads?|formularios?|cadastros?)\b/.test(p) ||
+      /\b(cpl|cpa)\b/.test(p),
+  };
+  return ORDEM_METRICAS.filter((m) => pede[m]);
+}
+
+/** Série diária enxuta: o que o gestor pede numa relação (gasto, impressão, clique, conversa). */
 export function serieDiariaEnxuta(dias: unknown[]): Record<string, unknown>[] {
   return (Array.isArray(dias) ? dias : []).map((d) => {
     const o = d && typeof d === "object" ? d as Record<string, unknown> : {};
@@ -215,6 +262,7 @@ export function serieDiariaEnxuta(dias: unknown[]): Record<string, unknown>[] {
       dia: o.dia ?? o.snapshot_date ?? null,
       gasto: o.gasto ?? null,
       impressoes: o.impressoes ?? o.impressions ?? null,
+      cliques_no_link: o.cliques_no_link ?? o.link_clicks ?? null,
       conversas: o.conversas ?? o.messaging_started ?? null,
       formularios: o.formularios ?? o.form_leads ?? null,
     };
@@ -440,6 +488,7 @@ export function montarRelacaoDeDetalhe(
   det: Record<string, unknown>,
   soAtivos: boolean,
   comSerie = false,
+  metricas?: MetricaRelacao[],
 ): string | null {
   if (!det || typeof det !== "object") return null;
   if (typeof det.erro === "string" || det.ambiguo === true) return null;
@@ -460,9 +509,11 @@ export function montarRelacaoDeDetalhe(
   const tot = det.totais_campanha_janela && typeof det.totais_campanha_janela === "object"
     ? det.totais_campanha_janela as Record<string, unknown>
     : null;
-  const totais = tot
-    ? `Totais na janela: gasto ${tot.gasto ?? "—"} · impressões ${tot.impressoes ?? "—"} · conversas ${tot.conversas ?? "—"} · preço/conversa ${tot.custo_por_resultado ?? "—"}.`
-    : "";
+  const totais = !tot
+    ? ""
+    : metricas?.length
+    ? `Totais na janela: ${metricas.map((m) => `${ROTULO_TOTAL_METRICA[m]} ${txtCelula(tot[m])}`).join(" · ")}.`
+    : `Totais na janela: gasto ${tot.gasto ?? "—"} · impressões ${tot.impressoes ?? "—"} · conversas ${tot.conversas ?? "—"} · preço/conversa ${tot.custo_por_resultado ?? "—"}.`;
   const md = markdownRelacaoPorConjunto({
     campanha: String(camp.nome ?? camp.name ?? "campanha"),
     campanha_status: camp.status != null ? String(camp.status) : undefined,
@@ -473,6 +524,7 @@ export function montarRelacaoDeDetalhe(
     anuncios,
     soAtivos,
     comSerie,
+    metricas,
   });
   return totais ? `${totais}\n\n${md}` : md;
 }
@@ -505,17 +557,64 @@ function txtOrcamento(item: Record<string, unknown>): string {
   return brl(n);
 }
 
-function markdownLinhasConjuntos(conjuntos: Record<string, unknown>[]): string[] {
+/**
+ * Valor dentro de celula de tabela. 14/10/2026: o conjunto "[SALT] [LF | CONV | OBRA + GEO +
+ * LISTA | WA]..." abria quatro colunas a mais e a linha saia com o nome no lugar do gasto.
+ */
+function txtCelula(v: unknown): string {
+  if (v == null || v === "") return "—";
+  return String(v).replace(/\r?\n/g, " ").replace(/\|/g, "\\|").trim();
+}
+
+type Totais = Record<string, unknown> | null;
+type ColunaTotal = { rotulo: string; valor: (tot: Totais, item: Record<string, unknown>) => unknown };
+
+/** A tabela de sempre, quando o pedido nao nomeia metrica. */
+const COLUNAS_PADRAO: ColunaTotal[] = [
+  { rotulo: "Gasto", valor: (t, i) => t?.gasto ?? i.gasto },
+  { rotulo: "Impressões", valor: (t) => t?.impressoes },
+  { rotulo: "Conversas", valor: (t) => t?.conversas ?? t?.resultados_na_base },
+  { rotulo: "Preço/conversa", valor: (t) => t?.custo_por_resultado },
+];
+
+const COLUNA_METRICA: Record<MetricaRelacao, ColunaTotal> = {
+  gasto: { rotulo: "Gasto", valor: (t, i) => t?.gasto ?? i.gasto },
+  impressoes: { rotulo: "Impressões", valor: (t) => t?.impressoes },
+  cliques_no_link: { rotulo: "Cliques no link", valor: (t) => t?.cliques_no_link },
+  formularios: { rotulo: "Formulários", valor: (t) => t?.formularios },
+  conversas: { rotulo: "Conversas", valor: (t) => t?.conversas },
+  custo_por_resultado: { rotulo: "Custo por resultado", valor: (t) => t?.custo_por_resultado },
+};
+
+const ROTULO_TOTAL_METRICA: Record<MetricaRelacao, string> = {
+  gasto: "gasto",
+  impressoes: "impressões",
+  cliques_no_link: "cliques no link",
+  formularios: "formulários",
+  conversas: "conversas",
+  custo_por_resultado: "custo por resultado",
+};
+
+function colunasDe(metricas?: MetricaRelacao[]): ColunaTotal[] {
+  return metricas?.length ? metricas.map((m) => COLUNA_METRICA[m]) : COLUNAS_PADRAO;
+}
+
+function totaisDoItem(item: Record<string, unknown>): Totais {
+  return item.totais_janela && typeof item.totais_janela === "object"
+    ? item.totais_janela as Record<string, unknown>
+    : null;
+}
+
+function markdownLinhasConjuntos(conjuntos: Record<string, unknown>[], metricas?: MetricaRelacao[]): string[] {
+  const cols = colunasDe(metricas);
   const linhas = [
-    "| Conjunto | Status | Orçamento/dia | Gasto | Impressões | Conversas | Preço/conversa | Destino |",
-    "|---|---|---:|---:|---:|---:|---:|---|",
+    `| Conjunto | Status | Orçamento/dia | ${cols.map((c) => c.rotulo).join(" | ")} | Destino |`,
+    `|---|---|---:|${cols.map(() => "---:").join("|")}|---|`,
   ];
   for (const c of conjuntos) {
-    const tot = c.totais_janela && typeof c.totais_janela === "object"
-      ? c.totais_janela as Record<string, unknown>
-      : null;
+    const tot = totaisDoItem(c);
     linhas.push(
-      `| ${c.nome ?? c.conjunto ?? "—"} | ${c.status ?? "—"} | ${txtOrcamento(c)} | ${tot?.gasto ?? c.gasto ?? "—"} | ${tot?.impressoes ?? "—"} | ${tot?.conversas ?? tot?.resultados_na_base ?? "—"} | ${tot?.custo_por_resultado ?? "—"} | ${c.destination_type ?? "—"} |`,
+      `| ${txtCelula(c.nome ?? c.conjunto)} | ${txtCelula(c.status)} | ${txtOrcamento(c)} | ${cols.map((col) => txtCelula(col.valor(tot, c))).join(" | ")} | ${txtCelula(c.destination_type)} |`,
     );
   }
   return linhas;
@@ -544,18 +643,32 @@ function diaTeveEntrega(o: Record<string, unknown>): boolean {
   return n != null && n > 0;
 }
 
-function markdownSerie(titulo: string, serie: unknown): string[] {
+const SERIE_PADRAO: MetricaRelacao[] = ["gasto", "impressoes", "conversas"];
+
+/**
+ * Um dia por linha e, com dois dias ou mais, o total no fim — o gestor compara os dias e
+ * quer a soma da janela sem fazer a conta. Custo por resultado nao tem coluna diaria.
+ */
+function markdownSerie(titulo: string, serie: unknown, metricas?: MetricaRelacao[]): string[] {
   if (!Array.isArray(serie) || !serie.length) return [];
   const dias = serie.filter((d) => d && typeof d === "object" && diaTeveEntrega(d as Record<string, unknown>)) as Record<string, unknown>[];
   if (!dias.length) return [];
+  const pedidas = (metricas ?? []).filter((m) => m !== "custo_por_resultado");
+  const cols = pedidas.length ? pedidas : SERIE_PADRAO;
   const linhas = [
     `#### ${titulo}`,
-    "| Dia | Gasto | Impressões | Conversas |",
-    "|---|---:|---:|---:|",
+    `| Dia | ${cols.map((m) => COLUNA_METRICA[m].rotulo).join(" | ")} |`,
+    `|---|${cols.map(() => "---:").join("|")}|`,
   ];
   for (const o of dias) {
     const marca = o.dia_parcial === true ? " (em aberto)" : "";
-    linhas.push(`| ${o.dia ?? "—"}${marca} | ${o.gasto ?? "—"} | ${o.impressoes ?? "—"} | ${o.conversas ?? "—"} |`);
+    linhas.push(`| ${o.dia ?? "—"}${marca} | ${cols.map((m) => txtCelula(o[m])).join(" | ")} |`);
+  }
+  if (dias.length >= 2) {
+    const soma = (m: MetricaRelacao) =>
+      dias.reduce((n, o) => n + ((m === "gasto" ? reaisDeTexto(o[m]) : Number(o[m] ?? 0)) || 0), 0);
+    const total = cols.map((m) => `**${m === "gasto" ? brl(soma(m)) : String(soma(m))}**`);
+    linhas.push(`| **Total** | ${total.join(" | ")} |`);
   }
   linhas.push("");
   return linhas;
@@ -570,8 +683,10 @@ export function markdownRelacaoPorConjunto(args: {
   anuncios: Record<string, unknown>[];
   soAtivos?: boolean;
   comSerie?: boolean;
+  metricas?: MetricaRelacao[];
 }): string {
-  const linhasConj = markdownLinhasConjuntos(args.conjuntos);
+  const linhasConj = markdownLinhasConjuntos(args.conjuntos, args.metricas);
+  const cols = colunasDe(args.metricas);
   const seriePorConj = new Map<string, unknown>();
   for (const c of args.conjuntos) {
     seriePorConj.set(String(c.nome ?? c.conjunto ?? ""), c.serie_diaria);
@@ -587,21 +702,19 @@ export function markdownRelacaoPorConjunto(args: {
   const blocosAds: string[] = [];
   for (const [nome, ads] of porConj) {
     blocosAds.push(`### ${nome}`);
-    blocosAds.push("| Anúncio | Status | Gasto | Impressões | Conversas | Preço/conversa | Destino |");
-    blocosAds.push("|---|---|---:|---:|---:|---:|---|");
+    blocosAds.push(`| Anúncio | Status | ${cols.map((c) => c.rotulo).join(" | ")} | Destino |`);
+    blocosAds.push(`|---|---|${cols.map(() => "---:").join("|")}|---|`);
     for (const a of ads) {
-      const tot = a.totais_janela && typeof a.totais_janela === "object"
-        ? a.totais_janela as Record<string, unknown>
-        : null;
+      const tot = totaisDoItem(a);
       blocosAds.push(
-        `| ${a.nome ?? a.ad_id ?? "—"} | ${a.status ?? "—"} | ${tot?.gasto ?? "—"} | ${tot?.impressoes ?? "—"} | ${tot?.conversas ?? tot?.resultados_na_base ?? "—"} | ${tot?.custo_por_resultado ?? "—"} | ${a.destino ?? a.destination_type ?? "—"} |`,
+        `| ${txtCelula(a.nome ?? a.ad_id)} | ${txtCelula(a.status)} | ${cols.map((col) => txtCelula(col.valor(tot, {}))).join(" | ")} | ${txtCelula(a.destino ?? a.destination_type)} |`,
       );
     }
     blocosAds.push("");
     if (args.comSerie) {
-      blocosAds.push(...markdownSerie("Série diária do conjunto", seriePorConj.get(nome)));
+      blocosAds.push(...markdownSerie("Série diária do conjunto", seriePorConj.get(nome), args.metricas));
       for (const a of ads) {
-        blocosAds.push(...markdownSerie(`Série diária — ${a.nome ?? a.ad_id ?? "anúncio"}`, a.serie_diaria));
+        blocosAds.push(...markdownSerie(`Série diária — ${a.nome ?? a.ad_id ?? "anúncio"}`, a.serie_diaria, args.metricas));
       }
     }
   }
@@ -680,7 +793,7 @@ export function markdownRelacaoGeo(args: {
     const geo = textoGeoDoCompacto(c);
     const pub = textoPublicoDoCompacto(c);
     linhas.push(
-      `| ${c.conjunto ?? "—"} | ${c.status ?? "—"} | ${geo} | ${pub} | ${c.destination_type ?? "—"} |`,
+      `| ${txtCelula(c.conjunto)} | ${txtCelula(c.status)} | ${txtCelula(geo)} | ${txtCelula(pub)} | ${txtCelula(c.destination_type)} |`,
     );
     detalhes.push(
       `### ${c.conjunto ?? "conjunto"}`,
