@@ -586,3 +586,303 @@ export function cortarClaimEmitidoSemCard(texto: string): string {
   t = t.replace(/\b(os\s+)?(dois\s+)?(primeiros\s+)?cards?\s+(foram\s+)?(re)?emitid[^\n.]*/gi, "");
   return t.replace(/\n{3,}/g, "\n\n").trim();
 }
+
+const semAcento = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+
+/** Claim de EMISSAO NESTA rodada — nao casa "pendente/aguardando" de card JA na fila. */
+// "Cards 1 e 2 Emitidos" (CONJ.3, 01/09/2026) passava batido: entre "Cards" e "Emitidos"
+// vinha a numeracao, e nenhuma alternativa cobria isso.
+export const RE_CLAIM_CARD_EMITIDO =
+  /##\s*cards?\s+(re)?emitid|\bcards?\s+(foram\s+)?(re)?emitid|\bcards?\s+\d+(\s*(e|,|a|-|ate|até)\s*\d+)*\s+(foram\s+)?(re)?emitid|\bos\s+dois\s+(primeiros\s+)?cards?\s+foram\s+emitid|\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)\b|\bpedido\s+de\s+aprova[cç][aã]o\s+(foi\s+)?(emitido|registrado)\b/i;
+
+/**
+ * v28.40: HARD STOP — se a prosa afirma "card emitido" sem approval_id real em
+ * actionCards, reescreve. Doutrina sozinha nao bastou (incidente IMPULSAO 20/08).
+ *
+ * Mora aqui (e nao no traffic-chat) para a prova rodar a guarda inteira sobre o texto real
+ * do incidente; o chat so injeta a consulta ao banco em `buscarApprovalIds`.
+ */
+export async function sanitizarClaimDeCardSemLastro(
+  reply: string,
+  cards: Array<{ approval_id?: unknown }>,
+  toolResults: Array<{ tool?: string; retorno?: any; erro?: string }>,
+  opts?: {
+    perguntaLeitura?: boolean;
+    soComentario?: boolean;
+    pedidoAto?: boolean;
+    cardsDoTurno?: Array<{ approval_id?: unknown }> | null;
+    companyId?: string;
+    buscarApprovalIds?: (ids: string[]) => Promise<Array<{ id?: unknown }> | null>;
+  },
+): Promise<{ reply: string; reescreveu: boolean }> {
+  const raw = String(reply ?? "").trim();
+  if (!raw) return { reply: raw, reescreveu: false };
+
+  // v28.88: UUID inventado e verificado SEMPRE, inclusive com card real na rodada — a
+  // mistura de verdadeiro com inventado (CONJ.3, 01/09/2026) escapava no `cards.length > 0`
+  // logo abaixo, e a tabela publicada mandava o gestor esperar anuncio que ninguem pediu.
+  // v28.89: quem nao veio de tool nesta rodada e so CANDIDATO; o banco da o veredito.
+  const candidatos = approvalIdsInventados(raw, {
+    cardsDaRodada: cards,
+    cardsDoTurno: opts?.cardsDoTurno ?? null,
+    retornosDeFerramenta: toolResults,
+  });
+  const inventados = candidatos.length && opts?.companyId && opts?.buscarApprovalIds
+    ? await approvalIdsInexistentes(candidatos, {
+      companyId: opts.companyId,
+      buscar: opts.buscarApprovalIds,
+    })
+    : [];
+  if (inventados.length) {
+    const aviso = avisoDeCardInventado(
+      inventados,
+      cards.map((c) => String(c.approval_id ?? "")).filter(Boolean),
+    );
+    // Tira as LINHAS que carregam o id inventado (linha de tabela, item de lista) em vez de
+    // apagar a resposta: o que veio de ferramenta na mesma resposta continua valendo.
+    let semInventado = raw
+      .split("\n")
+      .filter((l) => !inventados.some((u) => l.toLowerCase().includes(u)))
+      .join("\n")
+      .trim();
+    if (!cards.length) {
+      semInventado = cortarClaimEmitidoSemCard(semInventado);
+      // O aviso acima diz "Nenhum card foi emitido"; "cada linha e um card pendente" que sobrar
+      // o desmentiria na mesma mensagem.
+      if (cardPendenteSemLastro(semInventado, { cardsDoTurno: opts?.cardsDoTurno, retornosDeFerramenta: toolResults })) {
+        semInventado = trocarClaimCardPendente(semInventado);
+      }
+      // Nao apaga o resto so porque ainda casa RE_CLAIM: a selecao/legendas do CONJ.4
+      // precisam ficar. So descarta sobra curta (titulo oco depois do corte).
+      if (semInventado.length < 80) semInventado = "";
+    }
+    return { reply: semInventado ? `${aviso}\n\n${semInventado}` : aviso, reescreveu: true };
+  }
+
+  if (cards.length > 0) return { reply: raw, reescreveu: false };
+  if (opts?.perguntaLeitura || opts?.pedidoAto === false) return { reply: raw, reescreveu: false };
+  const leuFila = toolResults.some((t) => String(t.tool ?? "") === "get_aprovacoes");
+  const tentouPropose = toolResults.some((t) => String(t.tool ?? "") === "propose_action");
+  const prosaAfirmaEmissao = semAcento(raw.toLowerCase())
+    .replace(/\bnao\s+(emiti|emitimos|foi emitido|foram emitidos)[^\n.]*/g, "")
+    .replace(/\bnenhum (pedido de aprovacao|card)[^\n.]*/g, "")
+    .replace(/\bsem (ato|essa ordem|verbo de emitir)[^\n.]*/g, "");
+  const afirmaEmitido = !(leuFila && !tentouPropose) && RE_CLAIM_CARD_EMITIDO.test(prosaAfirmaEmissao);
+  // "Card pendente" tem os proprios lastros (bloco anterior, fila lida, approval_id citado):
+  // o portao `leuFila && !tentouPropose` acima e do verbo emitir e nao vale para o adjetivo.
+  const afirmaPendente = cardPendenteSemLastro(raw, {
+    cardsDoTurno: opts?.cardsDoTurno ?? null,
+    retornosDeFerramenta: toolResults,
+  });
+  if (!afirmaEmitido && !afirmaPendente) return { reply: raw, reescreveu: false };
+
+  const proposes = toolResults.filter((t) => String(t.tool ?? "") === "propose_action");
+  const errosPropose = proposes
+    .map((t) => {
+      if (t.erro) return String(t.erro);
+      const r = t.retorno;
+      if (r && typeof r === "object" && (r as any).erro) return String((r as any).erro);
+      return null;
+    })
+    .filter(Boolean) as string[];
+  const deadlineSkip = proposes.some((t) =>
+    /deadline|nao foi lido|consulta_nao_realizada/i.test(String(t.erro ?? "")));
+
+  // "nao devolveu approval_id" quando a ferramenta nem foi chamada (o caso de 14/10/2026)
+  // sugeria uma tentativa que nao houve.
+  let motivo = proposes.length
+    ? "propose_action nao devolveu approval_id nesta rodada"
+    : "propose_action não foi chamado nesta rodada";
+  if (deadlineSkip) {
+    motivo = "o orcamento de tempo esgotou antes de concluir propose_action — o card NAO existe";
+  } else if (errosPropose.length) {
+    motivo = `propose_action recusou: ${errosPropose[0]}`;
+  }
+
+  const aviso = opts?.soComentario
+    ? `**Nenhum pedido de aprovação foi emitido nesta rodada.** Desativar comentário não é ato de anúncio — ` +
+      `não há card. O interruptor fica no Instagram/Business Suite. Pausar boost não fecha comentário. ` +
+      `O sistema NÃO retoma propose_action.`
+    : `**Nenhum pedido de aprovação foi emitido nesta rodada.** ${motivo}. ` +
+      (afirmaEmitido
+        ? `Afirmar "card emitido" sem o identificador devolvido pela ferramenta é fabricar um ato — `
+        : `Apresentar como esperando aprovação um card que nenhuma ferramenta registrou é fabricar um ato — `) +
+      `não há card na fila. O sistema retoma propose_action no próximo bloco — não peça de novo.`;
+
+  // Remove a secao "## Card emitido…" (ate o proximo ## ou fim) e o claim solto.
+  let limpo = cortarClaimEmitidoSemCard(raw)
+    .replace(/##\s*card\s+emitido[^\n]*\n[\s\S]*?(?=\n##\s|\n---\s*\n|$)/gi, "")
+    .replace(/\bcard\s+emitido[^\n.]*/gi, "")
+    .replace(/\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)[^\n.]*/gi, "")
+    .trim();
+  // A tabela de ids fica; so a coluna/frase de "pendente" sai. Zerar o texto (o que acontecia
+  // com o claim de emissao) jogaria fora a leitura da Meta que o card de verdade vai usar.
+  if (afirmaPendente) limpo = trocarClaimCardPendente(limpo);
+  if (
+    limpo.length < 80 || RE_CLAIM_CARD_EMITIDO.test(limpo) ||
+    (afirmaPendente && afirmaCardPendente(limpo))
+  ) {
+    limpo = "";
+  }
+  const novo = limpo ? `${aviso}\n\n${limpo}` : aviso;
+  return { reply: novo, reescreveu: true };
+}
+
+// ===== Card "pendente de aprovacao" que nao existe =====
+// 14/10/2026, conversa 0da3ccb4 ("desative os anuncios"): nenhuma propose_action, zero linhas
+// em approval_requests, e a resposta disse "cada linha e um card pendente de aprovacao", pos
+// "pendente" na coluna Card de 21 linhas e fechou com "Aprovacao dos 21 cards executa a pausa".
+// RE_CLAIM_CARD_EMITIDO so conhece o verbo "emitir"; esta e a mesma mentira no adjetivo.
+//
+// Tudo aqui roda sobre texto minusculo e sem acento.
+
+/** Card de aprovacao. "CARD-04"/"IMG_CARD-04" sao nomes de peca: o \b e o lookahead os tiram. */
+const CARD_DE_APROVACAO = String.raw`(?:\bcards?\b(?![-_]?\d)|\bpedidos?\s+de\s+aprovacao\b)`;
+const ESPERA_APROVACAO =
+  String.raw`(?:\bpendentes?\b|\baguarda(?:m|ndo)?\s+(?:a\s+)?(?:sua\s+)?aprovacao\b|\besperando\s+(?:a\s+)?(?:sua\s+)?aprovacao\b|\bna\s+fila\b)`;
+/** "cada linha e um card pendente", "os 21 cards aguardam sua aprovacao", "Card 3: pendente". */
+const RE_CARD_ESPERANDO = new RegExp(`${CARD_DE_APROVACAO}[^.!?\\n]{0,60}?${ESPERA_APROVACAO}`);
+/** "aprovacao dos 21 cards executa a pausa", "aprove os 7 cards abaixo". */
+const RE_APROVAR_CARDS = new RegExp(
+  String.raw`\baprov(?:acao|ar|e|em|ando)\s+(?:d?[oa]s?\s+|esses\s+|estes\s+|cada\s+)?(?:\d+\s+)?` +
+    CARD_DE_APROVACAO,
+);
+/** Negacao da existencia: "nenhum card pendente", "nao ha cards pendentes", "sem card pendente". */
+const RE_NEGA_CARD =
+  /\b(?:nenhum|nenhuma|zero)\b|\b0\s+cards?\b|\bnao\s+(?:ha|existe|existem|tem|temos|ficou|ficaram|resta|restam|sobrou|sobraram|foi|foram|houve|esta|estao|emiti|emitimos|criei|gerei|saiu|sairam)\b|\bsem\s+(?:nenhum\s+)?(?:cards?|pedidos?\s+de\s+aprovacao)\b|\bnada\s+(?:ficou\s+|esta\s+)?pendente\b|\bainda\s+nao\b/;
+/**
+ * Card que AINDA vai sair nao e afirmacao de existencia: "emito um card... ficarao pendentes",
+ * "faltam 3 cards pendentes de emissao". "Pendente" tambem quer dizer "por fazer".
+ */
+const RE_CARD_POR_VIR =
+  /\b(?:vou|vamos|irei|iremos|vai|vao)\s+(?:\w+\s+)?(?:emitir|criar|gerar|registrar|montar|aguardar|ficar)\b|\b(?:emitirei|emitiremos|emito|emitiria|criarei|crio)\b|\b(?:ficara|ficarao|ficaria|ficariam|estara|estarao|seria|seriam|sera|serao|aguardara|aguardarao)\b|\b(?:assim\s+que|quando|depois\s+que|depois\s+de|apos|ao)\s+(?:eu\s+)?(?:emitir|emitidos?|criar|criados?|gerar|gerados?|registrar)\b|\b(?:forem|for)\s+(?:emitidos?|criados?|gerados?)\b|\b(?:a|por|para)\s+emitir\b|\bpendentes?\s+de\s+(?:emissao|emitir|criacao|envio|serem)\b|\bfaltam?\b|\bproximo\s+bloco\b/;
+/** Coluna de tabela que diz o estado do card: "Card", "Status do card", "Aprovacao". */
+const RE_COLUNA_DO_CARD = /^(?:(?:status|situacao|estado)\s+(?:do\s+)?)?(?:cards?|aprovacao)$/;
+const RE_CELULA_CARD_EXISTE = /\b(?:pendentes?|aguardando|esperando|na\s+fila|emitidos?|criados?|registrados?)\b/;
+
+const ehLinhaDeTabela = (l: string) => /^\s*\|.*\|\s*$/.test(l);
+const ehSeparadorDeTabela = (l: string) => /^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{0,}:?\s*\|?\s*$/.test(l);
+const celulasDe = (l: string) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
+const normCelula = (c: string) => semAcento(c.toLowerCase()).replace(/[*_`]/g, "").trim();
+
+/** Clausula (pedaco entre ":" e ";") que, sozinha, afirma card esperando aprovacao. */
+function clausulaAfirma(c: string): boolean {
+  if (RE_NEGA_CARD.test(c) || RE_CARD_POR_VIR.test(c)) return false;
+  return RE_CARD_ESPERANDO.test(c) || RE_APROVAR_CARDS.test(c);
+}
+
+/**
+ * A frase afirma card esperando aprovacao. Olha cada clausula ("Nada foi publicado: cada linha
+ * e um card pendente" — a primeira nao anula a segunda) e a frase inteira ("Card 3: pendente"
+ * so fecha juntando os dois lados), mas a frase inteira so conta se nenhuma clausula nega ou
+ * poe o card no futuro.
+ */
+function fraseAfirma(frase: string): boolean {
+  const f = semAcento(frase.toLowerCase());
+  const clausulas = f.split(/[:;]/);
+  if (clausulas.some(clausulaAfirma)) return true;
+  if (clausulas.some((c) => RE_NEGA_CARD.test(c) || RE_CARD_POR_VIR.test(c))) return false;
+  return RE_CARD_ESPERANDO.test(f) || RE_APROVAR_CARDS.test(f);
+}
+
+const frasesDe = (linha: string) => linha.split(/(?<=[.!?])\s+/);
+
+/**
+ * Percorre o texto separando tabela de prosa e devolve, por tabela, o indice da coluna do card
+ * e, por linha de prosa, as frases. Os dois consumidores (detectar e reescrever) andam igual.
+ */
+function mapearCardPendente(texto: string): Array<
+  | { tipo: "prosa"; linha: string; frases: { frase: string; afirma: boolean }[] }
+  | { tipo: "tabela"; linha: string; coluna: number; afirma: boolean }
+> {
+  const linhas = String(texto ?? "").split("\n");
+  const out: ReturnType<typeof mapearCardPendente> = [];
+  let coluna = -1;
+  for (let i = 0; i < linhas.length; i++) {
+    const l = linhas[i];
+    if (!ehLinhaDeTabela(l)) {
+      coluna = -1;
+      out.push({
+        tipo: "prosa",
+        linha: l,
+        frases: frasesDe(l).map((frase) => ({ frase, afirma: fraseAfirma(frase) })),
+      });
+      continue;
+    }
+    // Cabecalho = linha de tabela seguida do separador "|---|".
+    if (coluna === -1 && i + 1 < linhas.length && ehSeparadorDeTabela(linhas[i + 1])) {
+      coluna = celulasDe(l).map(normCelula).findIndex((c) => RE_COLUNA_DO_CARD.test(c));
+      out.push({ tipo: "tabela", linha: l, coluna: -1, afirma: false });
+      continue;
+    }
+    const cel = coluna >= 0 ? normCelula(celulasDe(l)[coluna] ?? "") : "";
+    const afirma = coluna >= 0 && RE_CELULA_CARD_EXISTE.test(cel) && !RE_NEGA_CARD.test(cel) &&
+      !/\bnao\b/.test(cel);
+    out.push({ tipo: "tabela", linha: l, coluna: afirma ? coluna : -1, afirma });
+  }
+  return out;
+}
+
+/** O texto afirma que EXISTE card esperando aprovacao (frase ou coluna de tabela). */
+export function afirmaCardPendente(texto: string): boolean {
+  return mapearCardPendente(texto).some((p) =>
+    p.tipo === "tabela" ? p.afirma : p.frases.some((f) => f.afirma)
+  );
+}
+
+/**
+ * Tira a afirmacao e MANTEM o resto: a tabela de ids do incidente veio da leitura da Meta e e
+ * o insumo do card de verdade no proximo bloco. Celula "pendente" na coluna do card vira
+ * "não emitido"; frase que afirma card esperando aprovacao sai inteira.
+ */
+export function trocarClaimCardPendente(texto: string): string {
+  const linhas: string[] = [];
+  for (const p of mapearCardPendente(texto)) {
+    if (p.tipo === "tabela") {
+      if (!p.afirma) {
+        linhas.push(p.linha);
+        continue;
+      }
+      const partes = p.linha.split("|");
+      // A linha comeca com "|", entao a celula N mora em partes[N + 1].
+      const alvo = p.coluna + (p.linha.trim().startsWith("|") ? 1 : 0);
+      partes[alvo] = " não emitido ";
+      linhas.push(partes.join("|"));
+      continue;
+    }
+    if (!p.frases.some((f) => f.afirma)) {
+      linhas.push(p.linha);
+      continue;
+    }
+    const resto = p.frases.filter((f) => !f.afirma).map((f) => f.frase).join(" ").trim();
+    if (resto) linhas.push(resto);
+  }
+  return linhas.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/**
+ * A afirmacao de card pendente tem lastro neste turno? Tres lastros, cada um um falso positivo
+ * que esta guarda nao pode produzir:
+ *  (a) turno de varios blocos: turnCheckpoint.cards traz card real de bloco anterior;
+ *  (b) get_aprovacoes leu a fila e ela tinha pedido (ou nao da para saber: erro, retorno
+ *      cortado) — citar card pendente lido dali e fato. Fila lida e VAZIA nao e lastro: ela
+ *      prova o contrario;
+ *  (c) o texto cita approval_id — a checagem de UUID acima ja o conferiu no banco.
+ * Negacao ("nenhum card pendente") nao chega aqui: `afirmaCardPendente` ja a descarta.
+ */
+export function cardPendenteSemLastro(
+  texto: string,
+  ctx: {
+    cardsDoTurno?: Array<{ approval_id?: unknown }> | null;
+    retornosDeFerramenta: Array<{ tool?: string; retorno?: unknown }>;
+  },
+): boolean {
+  if ((ctx.cardsDoTurno ?? []).some((c) => String(c?.approval_id ?? "").trim())) return false;
+  const leituras = ctx.retornosDeFerramenta.filter((t) => String(t?.tool ?? "") === "get_aprovacoes");
+  const filaVazia = (r: unknown) =>
+    !!r && typeof r === "object" && Array.isArray((r as { pedidos?: unknown }).pedidos) &&
+    (r as { pedidos: unknown[] }).pedidos.length === 0;
+  if (leituras.some((t) => !filaVazia(t.retorno))) return false;
+  if (new RegExp(RE_UUID_CARD.source, "i").test(String(texto ?? ""))) return false;
+  return afirmaCardPendente(texto);
+}

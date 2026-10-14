@@ -98,7 +98,8 @@ for (
     "replyLoteComLegendas",
     "LOTE + EMISSAO",
     "precisaProposeAto",
-    "cortarClaimEmitidoSemCard",
+    // A guarda de claim sem card mudou para _shared/aprovacoes.ts; o chat continua a chama-la.
+    "sanitizarClaimDeCardSemLastro",
     "ato_sem_propose_sem_sintese_cega",
   ]
 ) {

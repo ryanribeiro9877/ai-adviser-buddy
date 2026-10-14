@@ -785,13 +785,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
-import {
-  approvalIdsInexistentes,
-  approvalIdsInventados,
-  avisoDeCardInventado,
-  cortarClaimEmitidoSemCard,
-  situacaoDoCard,
-} from "../_shared/aprovacoes.ts";
+import { sanitizarClaimDeCardSemLastro, situacaoDoCard } from "../_shared/aprovacoes.ts";
 import {
   linhaDeVerificacao,
   verificarAntesDeResponder,
@@ -1051,7 +1045,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.20";
+const VERSAO = "chat-v29.21";
 const REPLY_MODELO_FALHOU =
   "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
   "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
@@ -7108,12 +7102,6 @@ const ROTA_CHARS_MIN = 1500;
 const RE_CONTINUACAO = /^sua resposta anterior foi cortada|^\[continuacao automatica do sistema|^montando os pedidos de aprovacao — continuando|^continuando automaticamente a partir/;
 /** Placeholders que o modelo usa no lugar de omitir target_name em criar_campanha. */
 const RE_TARGET_PLACEHOLDER = /^(composto|nome[_\s-]?composto|novo[_\s-]?nome|campanha(\s+nova)?|nova|n\/a|na|—|-|\.|\*)$/i;
-/** Claim de EMISSAO NESTA rodada — nao casa "pendente/aguardando" de card JA na fila. */
-// "Cards 1 e 2 Emitidos" (CONJ.3, 01/09/2026) passava batido: entre "Cards" e "Emitidos"
-// vinha a numeracao, e nenhuma alternativa cobria isso.
-const RE_CLAIM_CARD_EMITIDO =
-  /##\s*cards?\s+(re)?emitid|\bcards?\s+(foram\s+)?(re)?emitid|\bcards?\s+\d+(\s*(e|,|a|-|ate|até)\s*\d+)*\s+(foram\s+)?(re)?emitid|\bos\s+dois\s+(primeiros\s+)?cards?\s+foram\s+emitid|\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)\b|\bpedido\s+de\s+aprova[cç][aã]o\s+(foi\s+)?(emitido|registrado)\b/i;
-
 type TurnCheckpoint = {
   v: 1;
   segmento: number;
@@ -7257,10 +7245,11 @@ function toolsIncluemPropose(tools: { tool?: string }[]): boolean {
 }
 
 /**
- * v28.40: HARD STOP — se a prosa afirma "card emitido" sem approval_id real em
- * actionCards, reescreve. Doutrina sozinha nao bastou (incidente IMPULSAO 20/08).
+ * v28.40: HARD STOP — claim de card sem approval_id real e reescrito. A regra mora em
+ * _shared/aprovacoes.ts (provada em _shared/_prova_card_pendente_sem_card.ts); aqui so entra
+ * a consulta a approval_requests desta empresa.
  */
-async function sanitizarClaimEmitSemCard(
+function sanitizarClaimEmitSemCard(
   reply: string,
   cards: CardInfo[],
   toolResults: { tool?: string; retorno?: any; erro?: string }[],
@@ -7272,103 +7261,20 @@ async function sanitizarClaimEmitSemCard(
     companyId?: string;
   },
 ): Promise<{ reply: string; reescreveu: boolean }> {
-  const raw = String(reply ?? "").trim();
-  if (!raw) return { reply: raw, reescreveu: false };
-
-  // v28.88: UUID inventado e verificado SEMPRE, inclusive com card real na rodada — a
-  // mistura de verdadeiro com inventado (CONJ.3, 01/09/2026) escapava no `cards.length > 0`
-  // logo abaixo, e a tabela publicada mandava o gestor esperar anuncio que ninguem pediu.
-  // v28.89: quem nao veio de tool nesta rodada e so CANDIDATO; o banco da o veredito.
-  const candidatos = approvalIdsInventados(raw, {
-    cardsDaRodada: cards,
-    cardsDoTurno: opts?.cardsDoTurno ?? null,
-    retornosDeFerramenta: toolResults,
+  return sanitizarClaimDeCardSemLastro(reply, cards, toolResults, {
+    ...opts,
+    buscarApprovalIds: async (ids) => {
+      const { data, error } = await supa
+        .from("approval_requests")
+        .select("id")
+        .eq("company_id", opts?.companyId as string)
+        .in("id", ids);
+      if (error) throw new Error(error.message);
+      return data ?? [];
+    },
   });
-  const inventados = candidatos.length && opts?.companyId
-    ? await approvalIdsInexistentes(candidatos, {
-      companyId: opts.companyId,
-      buscar: async (ids) => {
-        const { data, error } = await supa
-          .from("approval_requests")
-          .select("id")
-          .eq("company_id", opts.companyId as string)
-          .in("id", ids);
-        if (error) throw new Error(error.message);
-        return data ?? [];
-      },
-    })
-    : [];
-  if (inventados.length) {
-    const aviso = avisoDeCardInventado(
-      inventados,
-      cards.map((c) => String(c.approval_id ?? "")).filter(Boolean),
-    );
-    // Tira as LINHAS que carregam o id inventado (linha de tabela, item de lista) em vez de
-    // apagar a resposta: o que veio de ferramenta na mesma resposta continua valendo.
-    let semInventado = raw
-      .split("\n")
-      .filter((l) => !inventados.some((u) => l.toLowerCase().includes(u)))
-      .join("\n")
-      .trim();
-    if (!cards.length) {
-      semInventado = cortarClaimEmitidoSemCard(semInventado);
-      // Nao apaga o resto so porque ainda casa RE_CLAIM: a selecao/legendas do CONJ.4
-      // precisam ficar. So descarta sobra curta (titulo oco depois do corte).
-      if (semInventado.length < 80) semInventado = "";
-    }
-    return { reply: semInventado ? `${aviso}\n\n${semInventado}` : aviso, reescreveu: true };
-  }
-
-  if (cards.length > 0) return { reply: raw, reescreveu: false };
-  if (opts?.perguntaLeitura || opts?.pedidoAto === false) return { reply: raw, reescreveu: false };
-  const leuFila = toolResults.some((t) => String(t.tool ?? "") === "get_aprovacoes");
-  const tentouPropose = toolResults.some((t) => String(t.tool ?? "") === "propose_action");
-  if (leuFila && !tentouPropose) return { reply: raw, reescreveu: false };
-  const prosaAfirmaEmissao = deacc(raw.toLowerCase())
-    .replace(/\bnao\s+(emiti|emitimos|foi emitido|foram emitidos)[^\n.]*/g, "")
-    .replace(/\bnenhum (pedido de aprovacao|card)[^\n.]*/g, "")
-    .replace(/\bsem (ato|essa ordem|verbo de emitir)[^\n.]*/g, "");
-  if (!RE_CLAIM_CARD_EMITIDO.test(prosaAfirmaEmissao)) return { reply: raw, reescreveu: false };
-
-  const proposes = toolResults.filter((t) => String(t.tool ?? "") === "propose_action");
-  const errosPropose = proposes
-    .map((t) => {
-      if (t.erro) return String(t.erro);
-      const r = t.retorno;
-      if (r && typeof r === "object" && (r as any).erro) return String((r as any).erro);
-      return null;
-    })
-    .filter(Boolean) as string[];
-  const deadlineSkip = proposes.some((t) =>
-    /deadline|nao foi lido|consulta_nao_realizada/i.test(String(t.erro ?? "")));
-
-  let motivo = "propose_action nao devolveu approval_id nesta rodada";
-  if (deadlineSkip) {
-    motivo = "o orcamento de tempo esgotou antes de concluir propose_action — o card NAO existe";
-  } else if (errosPropose.length) {
-    motivo = `propose_action recusou: ${errosPropose[0]}`;
-  }
-
-  const aviso = opts?.soComentario
-    ? `**Nenhum pedido de aprovação foi emitido nesta rodada.** Desativar comentário não é ato de anúncio — ` +
-      `não há card. O interruptor fica no Instagram/Business Suite. Pausar boost não fecha comentário. ` +
-      `O sistema NÃO retoma propose_action.`
-    : `**Nenhum pedido de aprovação foi emitido nesta rodada.** ${motivo}. ` +
-      `Afirmar "card emitido" sem o identificador devolvido pela ferramenta é fabricar um ato — ` +
-      `não há card na fila. O sistema retoma propose_action no próximo bloco — não peça de novo.`;
-
-  // Remove a secao "## Card emitido…" (ate o proximo ## ou fim) e o claim solto.
-  let limpo = cortarClaimEmitidoSemCard(raw)
-    .replace(/##\s*card\s+emitido[^\n]*\n[\s\S]*?(?=\n##\s|\n---\s*\n|$)/gi, "")
-    .replace(/\bcard\s+emitido[^\n.]*/gi, "")
-    .replace(/\bemiti\s+(o\s+)?(pedido|card|os\s+cards?)[^\n.]*/gi, "")
-    .trim();
-  if (limpo.length < 80 || RE_CLAIM_CARD_EMITIDO.test(limpo)) {
-    limpo = "";
-  }
-  const novo = limpo ? `${aviso}\n\n${limpo}` : aviso;
-  return { reply: novo, reescreveu: true };
 }
+
 
 /** target_name livre/placeholder em criar_* — placeholder vazio; string real = nome livre. */
 function targetNameCriacaoUtil(raw: string): string {
