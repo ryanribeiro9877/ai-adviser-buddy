@@ -30,4 +30,31 @@ ok(
   "pergunta de gasto virou lote",
 );
 
+// 15/10/2026, conversa bf4a8869 (18:55 UTC). "conjunto 2" sozinho bastava para as DUAS metades
+// da regra e o turno virava lote criativo: prazo de coleta 90s em vez de 55s. O card 2 comecou
+// aos 72s, o compliance nao voltou e o gateway cortou o turno em 150s sem resposta gravada.
+// O objetivo do turno e o composto de objetivoDoFio com as duas falas anteriores.
+ok(!pedidoLoteCriativo("desative o conjunto 2 por favor"), "pausar o conjunto 2 virou lote criativo");
+ok(
+  !pedidoLoteCriativo(
+    "crie um novo conjunto com o nome CONJ.4 MELHORES_CRIATIVOS e coloque as mesmas configurações que estão dentro dos conjuntos que já existem para público.\npara valores defina o 23,00\n" +
+      "utilize esse número 71 9108-8073 da campanha pausada, continue com as mesmas configurações do conjunto 2 (bairros selecionados, público, idade) e emita o card com o nome do qual informei antes\n" +
+      "agora atribua a esse conjunto os criativos:\n\nAD_C2_CARTAO_ARMADILHA\nAD_C3_VALOR_INCORRETO\nAD_C1_JUROS_ALTO",
+  ),
+  "objetivo do turno de 18:55 (tres anuncios ja existentes) virou lote criativo",
+);
+// O que "conjunto 2-4" ainda sinaliza quando vem com legenda ou com pedido de mais pecas.
+ok(pedidoLoteCriativo("gere as legendas do conjunto 3"), "legendas do conjunto 3 deixou de ser lote");
+ok(pedidoLoteCriativo("separe mais criativos para o conjunto 3"), "separe mais para o conjunto 3 deixou de ser lote");
+ok(
+  pedidoLoteCriativo(
+    "separe mais 6 criativos diferentes, tanto um do outro (conjunto 2 e 3) quanto do conjunto inicial, e gere as legendas",
+  ),
+  "pedido original dos conjuntos 2 e 3 deixou de ser lote",
+);
+ok(
+  pedidoLoteCriativo("escolha 6 diferentes do conjunto que está ativo e diferentes um do outro"),
+  "6 diferentes sem legenda deixou de ser lote",
+);
+
 console.log("ok: _prova_lote_criativo");

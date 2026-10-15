@@ -787,7 +787,15 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { sanitizarClaimDeCardSemLastro, situacaoDoCard } from "../_shared/aprovacoes.ts";
 import { podeLerAposPrazoDeColeta } from "../_shared/leitura_do_ato.ts";
-import { prosaFalhaDoModelo } from "../_shared/falha_do_modelo.ts";
+import { prosaFalhaDoModelo, recusaPorSaldo } from "../_shared/falha_do_modelo.ts";
+import {
+  buscarComPrazo,
+  complianceSemPrazo,
+  ERRO_CARD_SEM_TEMPO_DE_COMPLIANCE,
+  ERRO_COMPLIANCE_SEM_PRAZO,
+  prazoDoCompliance,
+  recusaPorPrazoDoCompliance,
+} from "../_shared/prazo_do_compliance.ts";
 import {
   linhaDeVerificacao,
   verificarAntesDeResponder,
@@ -1048,7 +1056,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.24";
+const VERSAO = "chat-v29.25";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_LEITURA = 6;
@@ -3668,6 +3676,7 @@ async function t_propose_criacao(
   cards: CardInfo[],
   mcpKey: string,
   complianceCache?: Map<string, any>,
+  prazoEm?: number | null,
 ) {
   const action = String(args?.action_type ?? "");
   const nomeAlvo = String(args?.target_name ?? "").trim();
@@ -5380,7 +5389,9 @@ async function t_propose_criacao(
     const FRASE_MARGEM_FIN01 = "Consulte sua margem disponivel";
     const ehCreditoEmit = empresaEhCredito(companyId);
     let legendaCompliance = legenda;
-    let comp: any = await t_check_compliance(companyId, legendaCompliance, [], mcpKey, complianceCache);
+    let comp: any = await t_check_compliance(companyId, legendaCompliance, [], mcpKey, complianceCache, prazoEm);
+    // Sem veredito por prazo nao e reprovacao: o card nao nasce e o turno continua no proximo bloco.
+    if (complianceSemPrazo(comp)) return recusaPorPrazoDoCompliance(comp);
     const verdAtual = () => String(comp?.veredito ?? "").toLowerCase();
     const temBloqueia = () =>
       (Array.isArray(comp?.violacoes) ? comp.violacoes : []).some(
@@ -5396,7 +5407,8 @@ async function t_propose_criacao(
       if (fin01Margem && !jaTemFrase) {
         legendaCompliance = `${legendaCompliance.trim()}\n\n${FRASE_MARGEM_FIN01}.`;
         legenda = legendaCompliance;
-        comp = await t_check_compliance(companyId, legendaCompliance, [], mcpKey, complianceCache);
+        comp = await t_check_compliance(companyId, legendaCompliance, [], mcpKey, complianceCache, prazoEm);
+        if (complianceSemPrazo(comp)) return recusaPorPrazoDoCompliance(comp);
         vereditoOk =
           !!comp && !comp.erro && verdAtual() !== "reprovado" && !temBloqueia() &&
           (verdAtual() === "aprovado" || verdAtual() === "atencao" || comp.aprovado === true);
@@ -5517,6 +5529,7 @@ async function t_check_compliance(
   imgAtts: { mime: string; b64: string }[],
   mcpKey: string,
   cache?: Map<string, any>,
+  prazoEm?: number | null,
 ) {
   const img = imgAtts[0];
   if (!legenda && !img) return { erro: "forneca a legenda e/ou anexe o criativo" };
@@ -5527,10 +5540,23 @@ async function t_check_compliance(
   const body: any = { company_id: companyId };
   if (legenda) body.legenda = legenda;
   if (img) { body.image_base64 = img.b64; body.mime = img.mime; }
-  const r = await fetch(`${SUPABASE_URL}/functions/v1/compliance-check`, { method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey }, body: JSON.stringify(body) });
-  const t = await r.text();
+  // 15/10/2026 (bf4a8869, 18:55): sem prazo, o compliance do card 2 segurou o HTTP do chat ate o
+  // 504 do gateway (150s) e a resposta nunca foi gravada. Ver _shared/prazo_do_compliance.ts.
+  const lido = await buscarComPrazo(
+    fetch,
+    `${SUPABASE_URL}/functions/v1/compliance-check`,
+    { method: "POST", headers: { "content-type": "application/json", "x-mcp-key": mcpKey }, body: JSON.stringify(body) },
+    prazoDoCompliance(Date.now(), prazoEm),
+  );
+  if (lido.estourou) {
+    return {
+      erro: ERRO_COMPLIANCE_SEM_PRAZO,
+      prazo_ms: lido.prazoMs,
+      detalhe: "A validacao de compliance nao respondeu dentro da janela desta resposta. Nao ha veredito: nao e aprovacao nem reprovacao.",
+    };
+  }
   let parsed: any;
-  try { parsed = JSON.parse(t); } catch { parsed = { erro: `compliance-check falhou (${r.status})` }; }
+  try { parsed = JSON.parse(lido.texto); } catch { parsed = { erro: `compliance-check falhou (${lido.status})` }; }
   if (cacheKey && cache && !parsed?.erro) cache.set(cacheKey, parsed);
   return parsed;
 }
@@ -6638,6 +6664,7 @@ async function runTool(name: string, args: any, ctx: any) {
         if (ACOES_CRIACAO.includes(at)) {
           return await t_propose_criacao(
             ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards, ctx.mcpKey, ctx.complianceCache,
+            ctx.prazoFerramentasEm,
           );
         }
         return await t_propose_action(ctx.companyId, ctx.convId, ctx.requestedBy, args, ctx.cards);
@@ -6672,6 +6699,7 @@ async function runTool(name: string, args: any, ctx: any) {
         if (cruzComp) return cruzComp;
         return await t_check_compliance(
           ctx.companyId, String(args?.legenda ?? "").trim(), ctx.imgAtts, ctx.mcpKey, ctx.complianceCache,
+          ctx.prazoFerramentasEm,
         );
       }
       case "gerar_legendas": {
@@ -7788,6 +7816,9 @@ Deno.serve(async (req) => {
     complianceCache: new Map<string, any>(),
     perguntaLeitura: ehPerguntaDeLeitura(objetivoOriginal),
     pedido: objetivoOriginal,
+    // Ate onde uma ferramenta pode esperar servico externo (hoje: o compliance do card) sem
+    // tirar do turno a reserva de gravacao. Mesmo relogio do laco (decorrido/HARD_LIMIT).
+    prazoFerramentasEm: tInicio + HARD_LIMIT_MS - RESERVA_GRAVACAO_MS,
   };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
   // 03/09/2026: ONDE o turno gasta a parede. Sem esta separacao, "o turno demora 110s" nao
@@ -8342,6 +8373,11 @@ Deno.serve(async (req) => {
           msFerramentas += gasto;
           msPorFerramenta[nomeTc] = (msPorFerramenta[nomeTc] ?? 0) + gasto;
         }
+        // O card esperou o compliance ate o prazo do turno: a janela acabou. O fim do turno le
+        // isso como falta de tempo e continua no proximo bloco (nao como recusa dura).
+        if ((result as { erro?: unknown } | null)?.erro === ERRO_CARD_SEM_TEMPO_DE_COMPLIANCE) {
+          deadlineTools = true;
+        }
         toolsUsed.push({ tool: tc.function?.name, args });
         // v28.11: um unico corte, usado nos dois destinos - o que o modelo le e o que fica
         // gravado sao literalmente a mesma string.
@@ -8540,7 +8576,8 @@ Deno.serve(async (req) => {
     break;
   }
 
-  if (!reply && !atalhoMetaDicas && !( /openrouter/.test(String(finishReason)) && toolsUsed.length === 0 )) {
+  // 402 e saldo: a sintese tambem bate na OpenRouter e so repetiria a recusa (15/10, 13:19).
+  if (!reply && !atalhoMetaDicas && !recusaPorSaldo(finishReason) && !( /openrouter/.test(String(finishReason)) && toolsUsed.length === 0 )) {
     // v28.96: sintese CEGA (sem tools) no pedido de emitir inventa approval_id — CONJ.4 02/09.
     // Nao peca prosa de ato sem propose_action; o turno continua com tools no proximo bloco.
     if (precisaProposeAto()) {
@@ -8712,7 +8749,10 @@ Deno.serve(async (req) => {
   // Timeout com ferramentas ja lidas nao e turno perdido: a janela seguinte
   // retoma do checkpoint. So bloqueia continuacao quando o modelo nao devolveu nada.
   const falhaModeloSemColeta = /openrouter/.test(String(finishReason)) && toolsUsed.length === 0;
-  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && !falhaModeloSemColeta && (
+  // 402 com coleta feita tambem nao continua: nao e falta de janela, e saldo, e o bloco seguinte
+  // leva a mesma recusa (15/10, 93df9658 -> a99f3fac). Fecha com a prosa de saldo.
+  const falhaSaldoOpenRouter = recusaPorSaldo(finishReason);
+  const turnoIncompletoPorTempo = !soFalhaDuraSemCard && !turnoJaFechado && !falhaModeloSemColeta && !falhaSaldoOpenRouter && (
     deadlineSemConteudo ||
     (pedidoLote && (replyLoteCriativoIncompleto(replyTrim) || loteFaltamLegendas)) ||
     uploadIncompleto ||
@@ -8829,7 +8869,7 @@ Deno.serve(async (req) => {
       // Ultimo segmento ou sem trabalho retomavel: ainda assim NAO use o texto antigo
       // de "Peça de novo…" em pedido de ato — diga o que falta com o que ja tem.
       if (/openrouter/.test(String(finishReason))) {
-        reply = prosaFalhaDoModelo(String(finishReason));
+        reply = prosaFalhaDoModelo(String(finishReason), { cardsEmitidos: cardsJaNoPedido });
         finishReason = String(finishReason) + "+prosa_modelo_falhou";
       } else if (pedidoUploadTurno) {
         const prosaUp = prosaContinuandoUpload(relUpload);
@@ -8852,6 +8892,12 @@ Deno.serve(async (req) => {
       }
       usouFallback = true;
     }
+  }
+  // 402 com prosa parcial (preambulo): o texto fica, e o gestor fica sabendo que parou por saldo.
+  if (falhaSaldoOpenRouter && replyTrim) {
+    reply = `${String(reply ?? "").trim()}\n\n${prosaFalhaDoModelo(String(finishReason), { cardsEmitidos: cardsJaNoPedido })}`;
+    finishReason = String(finishReason) + "+prosa_modelo_falhou";
+    usouFallback = true;
   }
 
   if (pedidoUploadTurno && (relUpload.teveAcervo || relUpload.linhas.length)) {

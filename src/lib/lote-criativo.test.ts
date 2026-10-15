@@ -17,6 +17,17 @@ describe("pedidoLoteCriativo", () => {
     expect(pedidoLoteCriativo("quanto gastamos ontem no conjunto 1?")).toBe(false);
   });
 
+  it("nao classifica ato sobre o conjunto 2 como lote (15/10, bf4a8869)", () => {
+    expect(pedidoLoteCriativo("desative o conjunto 2 por favor")).toBe(false);
+    expect(
+      pedidoLoteCriativo(
+        "continue com as mesmas configurações do conjunto 2 (bairros selecionados, público, idade) e emita o card\nagora atribua a esse conjunto os criativos:\n\nAD_C2_CARTAO_ARMADILHA\nAD_C3_VALOR_INCORRETO\nAD_C1_JUROS_ALTO",
+      ),
+    ).toBe(false);
+    expect(pedidoLoteCriativo("gere as legendas do conjunto 3")).toBe(true);
+    expect(pedidoLoteCriativo("separe mais criativos para o conjunto 3")).toBe(true);
+  });
+
   it("conta 16 criativos no pedido de setembro", () => {
     const fala =
       "separe 4 para cada um dos conjuntos, que totalizam 16 criativos. gere legendas para cada um deles. criativos diferentes";
