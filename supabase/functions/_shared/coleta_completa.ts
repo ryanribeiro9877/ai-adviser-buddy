@@ -226,12 +226,13 @@ export type MetricaRelacao =
   | "gasto"
   | "impressoes"
   | "cliques_no_link"
+  | "visitas_lp"
   | "formularios"
   | "conversas"
   | "custo_por_resultado";
 
 const ORDEM_METRICAS: MetricaRelacao[] = [
-  "gasto", "impressoes", "cliques_no_link", "formularios", "conversas", "custo_por_resultado",
+  "gasto", "impressoes", "cliques_no_link", "visitas_lp", "formularios", "conversas", "custo_por_resultado",
 ];
 
 /**
@@ -245,6 +246,9 @@ export function metricasDoPedido(pedido: string): MetricaRelacao[] {
     gasto: /\b(gastos?|gastou|gastando|investimento|investido)\b/.test(p),
     impressoes: /\bimpress(ao|oes)\b/.test(p),
     cliques_no_link: /\bcliques? (no|nos|de|em) links?\b/.test(p) || /\blink clicks?\b/.test(p),
+    // 15/10/2026: "as visitas ... no site destino" nao virava coluna; e o que a LP mede.
+    visitas_lp: /\bvisitas?\b/.test(p) || /\bvisualizac(ao|oes) (da|de|na) (lp|pagina|landing)\b/.test(p) ||
+      /\b(lpv|landing page views?)\b/.test(p),
     formularios: /\b(formularios?|leads?|cadastros?)\b/.test(p),
     conversas: /\bconversas?\b/.test(p),
     custo_por_resultado:
@@ -263,6 +267,7 @@ export function serieDiariaEnxuta(dias: unknown[]): Record<string, unknown>[] {
       gasto: o.gasto ?? null,
       impressoes: o.impressoes ?? o.impressions ?? null,
       cliques_no_link: o.cliques_no_link ?? o.link_clicks ?? null,
+      visitas_lp: o.visitas_lp ?? o.visualizacoes_lp ?? o.landing_page_views ?? null,
       conversas: o.conversas ?? o.messaging_started ?? null,
       formularios: o.formularios ?? o.form_leads ?? null,
     };
@@ -581,6 +586,7 @@ const COLUNA_METRICA: Record<MetricaRelacao, ColunaTotal> = {
   gasto: { rotulo: "Gasto", valor: (t, i) => t?.gasto ?? i.gasto },
   impressoes: { rotulo: "Impressões", valor: (t) => t?.impressoes },
   cliques_no_link: { rotulo: "Cliques no link", valor: (t) => t?.cliques_no_link },
+  visitas_lp: { rotulo: "Visitas na LP", valor: (t) => t?.visualizacoes_lp },
   formularios: { rotulo: "Formulários", valor: (t) => t?.formularios },
   conversas: { rotulo: "Conversas", valor: (t) => t?.conversas },
   custo_por_resultado: { rotulo: "Custo por resultado", valor: (t) => t?.custo_por_resultado },
@@ -590,6 +596,7 @@ const ROTULO_TOTAL_METRICA: Record<MetricaRelacao, string> = {
   gasto: "gasto",
   impressoes: "impressões",
   cliques_no_link: "cliques no link",
+  visitas_lp: "visitas na LP",
   formularios: "formulários",
   conversas: "conversas",
   custo_por_resultado: "custo por resultado",

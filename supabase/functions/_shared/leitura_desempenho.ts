@@ -169,6 +169,17 @@ function parseUltimosDias(p: string): number | null {
   return n != null && n >= 1 && n <= 90 ? n : null;
 }
 
+/**
+ * O pedido quer SO o dia corrente: "no dia de hoje", "de hoje", "hoje até o momento".
+ * "até hoje" / "até o dia de hoje" nao entra: e o FIM de uma janela, nao a janela.
+ */
+function pedeSoHoje(p: string): boolean {
+  if (/\b(ontem|semana|mes|meses|dias|periodo|desde)\b/.test(p)) return false;
+  return /\b(no|do|neste|nesse|deste|desse)\s+dia\s+de\s+hoje\b/.test(p) ||
+    /\b(de|para|so|apenas|somente|durante)\s+hoje\b/.test(p) ||
+    /\bhoje\s+ate\s+(o\s+)?(momento|agora)\b/.test(p);
+}
+
 export function resolverJanelaPedido(pedido: string, hojeIso?: string): {
   date_from?: string;
   date_to: string;
@@ -195,6 +206,11 @@ export function resolverJanelaPedido(pedido: string, hojeIso?: string): {
   const dateFrom = explicita.date_from ?? desdeDia.date_from;
   const desde = /\bdesde\b/.test(p) && /\b(criacao|criada|momento|dados reais|trouxe dados)\b/.test(p);
   const ontemFechado = /\bontem\b/.test(p) && /\bfechad/.test(p);
+  // 15/10/2026: "a performance dos criativos no dia de hoje ... até o momento" virou 02/10 → 15/10
+  // (14 dias padrao). Sem inicio, sem "ontem" e sem semana/mes, o dia de hoje E a janela.
+  if (!dateFrom && !explicita.date_to && !desde && pedeSoHoje(p)) {
+    return { date_from: hoje, date_to: hoje, desde_criacao: false, dia_aberto: hoje };
+  }
   let date_to = explicita.date_to ?? desdeDia.date_to;
   let dia_aberto: string | null = null;
   if (!date_to) {

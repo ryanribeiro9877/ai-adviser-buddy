@@ -449,10 +449,12 @@ export type LinhaProdutoCohapm = "juridico" | "la_felicita" | "sistema_ocular";
 export const ERRO_CRUZAMENTO_LINHA_PRODUTO = "cruzamento_linha_produto";
 export const ERRO_VOZ_LINHA_ERRADA = "voz_linha_errada";
 
+// 15/10/2026: `\bocular\b` deixava COHAPM_OCULAR_LEADS_SITE_* sem linha (o `_` e caractere de
+// palavra). Pedido de "sistema ocular" pegava so as VISTTA e a campanha de LP ficava de fora.
 function textoTemSistemaOcularLinha(n: string): boolean {
   return /vistta/.test(n) ||
     /sistema[\s_-]*ocular/.test(n) ||
-    /\bocular\b/.test(n) ||
+    /(^|[^a-z0-9])ocular([^a-z0-9]|$)/.test(n) ||
     /oftalm/.test(n) ||
     /oculos/.test(n);
 }

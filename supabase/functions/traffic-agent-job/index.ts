@@ -403,6 +403,14 @@ import {
   custosDaContaPorBase,
   NOTA_OVERVIEW,
 } from "../_shared/leitura_desempenho.ts";
+import {
+  destinoDaCampanha,
+  recortarCampanhasDaLeitura,
+  ROTULO_DESTINO,
+  type DestinoLeitura,
+  type SinalDeConjunto,
+} from "../_shared/recorte_linha_destino.ts";
+import { relatorioDeResgate, textoDeResgate } from "../_shared/resgate_de_coleta.ts";
 import { baseDoObjetivo } from "../_shared/metrica_canonica.ts";
 import { brl } from "../_shared/resposta_canonica.ts";
 import {
@@ -1877,9 +1885,124 @@ async function primeiroDiaComEntrega(companyId: string, campaignIds: string[]): 
   return d ? String(d).slice(0, 10) : null;
 }
 
+/** Destino de cada campanha (uuid) pelos conjuntos que ela tem no espelho. */
+async function sinaisDeDestinoPorCampanha(companyId: string): Promise<Map<string, SinalDeConjunto[]>> {
+  const { data } = await supa.from("ad_sets")
+    .select("campaign_id,destination_type,optimization_goal,status")
+    .eq("company_id", companyId);
+  const porCampanha = new Map<string, SinalDeConjunto[]>();
+  for (const s of (data ?? []) as Record<string, unknown>[]) {
+    if (!statusObjetoOperacional(s.status)) continue;
+    const k = String(s.campaign_id ?? "");
+    if (!k) continue;
+    const arr = porCampanha.get(k) ?? [];
+    arr.push({ destination_type: s.destination_type, optimization_goal: s.optimization_goal });
+    porCampanha.set(k, arr);
+  }
+  return porCampanha;
+}
+
+/** Campanhas (uuid) com gasto ou impressao na janela, pelo rollup diario. */
+async function campanhasComEntregaNaJanela(
+  companyId: string,
+  ids: string[],
+  from: string,
+  to: string,
+): Promise<Set<string> | null> {
+  if (!ids.length) return new Set();
+  const { data, error } = await supa.from("metric_snapshots")
+    .select("campaign_id")
+    .eq("company_id", companyId)
+    .in("campaign_id", ids)
+    .gte("snapshot_date", from)
+    .lte("snapshot_date", to)
+    .or("spend.gt.0,impressions.gt.0")
+    .limit(5000);
+  if (error) return null;
+  return new Set(((data ?? []) as { campaign_id?: string }[]).map((r) => String(r.campaign_id ?? "")));
+}
+
+/**
+ * "No dia de hoje, até o momento": o espelho so sincroniza as 06h, 13h e 19h (cron
+ * pipeboard-metrics-*). Em 15/10/2026 o pedido chegou as 18h43 e o dado de hoje era das 13h01.
+ * Aqui a coleta pede ao Pipeboard SO o dia de hoje e SO as campanhas do recorte, pela mesma edge
+ * do cron (mesmo mapeamento, mesmo resultado oficial de formulario). Teto curto: se o Pipeboard
+ * nao responder a tempo, a leitura segue com o espelho e diz de que horas ele e.
+ */
+const ATUALIZAR_HOJE_TETO_MS = 45_000;
+async function atualizarHojeNoEspelho(
+  companyId: string,
+  mcpKey: string,
+  campanhasMeta: string[],
+  hoje: string,
+): Promise<{ ok: boolean; ms: number; erro?: string; linhas?: number }> {
+  const t0 = Date.now();
+  if (!mcpKey) return { ok: false, ms: 0, erro: "sem_chave_para_chamar_a_coleta" };
+  if (!campanhasMeta.length) return { ok: false, ms: 0, erro: "sem_campanha" };
+  let contas: string[] = [];
+  try {
+    contas = await companyMetaAccounts(supa, companyId);
+  } catch (e) {
+    return { ok: false, ms: Date.now() - t0, erro: String((e as Error).message ?? e).slice(0, 120) };
+  }
+  if (!contas.length) return { ok: false, ms: Date.now() - t0, erro: "empresa_sem_conta_meta" };
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ATUALIZAR_HOJE_TETO_MS);
+  try {
+    const r = await fetch(`${SUPABASE_URL}/functions/v1/pipeboard-metrics-sync`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-mcp-key": mcpKey },
+      body: JSON.stringify({ date_from: hoje, date_to: hoje, account_ids: contas, campaign_ids: campanhasMeta }),
+      signal: ctrl.signal,
+    });
+    const j = await r.json().catch(() => ({})) as { ok?: boolean; total_upserted?: number; error?: string };
+    const ok = r.ok && j.ok !== false;
+    return {
+      ok,
+      ms: Date.now() - t0,
+      linhas: Number(j.total_upserted ?? 0),
+      ...(ok ? {} : { erro: String(j.error ?? `http_${r.status}`).slice(0, 120) }),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      ms: Date.now() - t0,
+      erro: ctrl.signal.aborted
+        ? `sem_resposta_em_${ATUALIZAR_HOJE_TETO_MS / 1000}s`
+        : String((e as Error).message ?? e).slice(0, 120),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Hora (Brasilia) da linha mais nova do dia no espelho, para as campanhas da leitura. */
+async function horaDoDadoDoDia(companyId: string, campanhasMeta: string[], dia: string): Promise<string | null> {
+  if (!campanhasMeta.length) return null;
+  const { data } = await supa.from("ad_metric_snapshots")
+    .select("atualizado_em")
+    .eq("company_id", companyId)
+    .in("campaign_external_id", campanhasMeta)
+    .eq("snapshot_date", dia)
+    .not("atualizado_em", "is", null)
+    .order("atualizado_em", { ascending: false })
+    .limit(1);
+  const v = (data as { atualizado_em?: string }[] | null)?.[0]?.atualizado_em;
+  if (!v) return null;
+  return new Date(v).toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo", hour: "2-digit", minute: "2-digit" });
+}
+
+const ROTULO_LINHA: Record<string, string> = {
+  la_felicita: "La Felicità",
+  juridico: "Jurídico",
+  sistema_ocular: "Sistema Ocular",
+};
+
 async function colherRelacaoNumerica(args: {
   companyId: string;
   pedido: string;
+  /** Chave para pedir ao Pipeboard o dia de hoje fresco. Sem ela, a leitura usa o espelho. */
+  mcpKey?: string;
 }): Promise<{ ok: boolean; markdown: string; leitura: string; cobertura: string; campanhas: number; fatos: FatosCampanha[] }> {
   const pedido = args.pedido;
   const hoje = today();
@@ -1901,8 +2024,11 @@ async function colherRelacaoNumerica(args: {
   let alvos: CampAlvo[] = [];
   let faltando: string[] = [];
   let pedidas: string[] = [];
-  const meio = inferirMeioDrive(pedido);
-  if (nomeados.length || citados.length) {
+  let linhas: string[] = [];
+  let destino: DestinoLeitura | null = null;
+  let foraDoDestino: { nome: string; destino: DestinoLeitura | null }[] = [];
+  const porLinha = !nomeados.length && !citados.length;
+  if (!porLinha) {
     const nNomeados = nomeados.map((c) => normLeitura(String(c.name ?? "")));
     const resto = citados.filter((c) => {
       const n = normLeitura(c);
@@ -1913,13 +2039,18 @@ async function colherRelacaoNumerica(args: {
     faltando = casa.faltando;
     pedidas = [...new Set([...nomeados.map((c) => String(c.name ?? "")), ...resto])];
   } else {
-    alvos = meio
-      ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
-      : [];
-    if (!alvos.length && meio) {
-      const needle = meio === "juridico" ? "juridico" : meio === "la_felicita" ? "felicita" : "ocular";
-      alvos = casarCampanhas(operacionais, needle);
-    }
+    // Todas as linhas citadas (15/10/2026: La Felicità + Sistema Ocular no mesmo pedido) e, se o
+    // pedido afirma o destino ("que derrama na LP, não a do WhatsApp"), so as daquele destino.
+    const sinais = await sinaisDeDestinoPorCampanha(args.companyId);
+    const rec = recortarCampanhasDaLeitura(
+      operacionais,
+      pedido,
+      (c) => destinoDaCampanha(c.name, sinais.get(String(c.id ?? "")) ?? []),
+    );
+    alvos = rec.alvos;
+    linhas = rec.linhas;
+    destino = rec.destino;
+    foraDoDestino = rec.fora_do_destino;
     if (soAtivosDoPedido(pedido)) {
       alvos = alvos.filter((c) => String(c.status ?? "").toUpperCase() === "ACTIVE");
     }
@@ -1927,7 +2058,9 @@ async function colherRelacaoNumerica(args: {
   if (!alvos.length) {
     const porque = pedidas.length
       ? `nenhuma das campanhas citadas no espelho (${faltando.join("; ")})`
-      : "nenhuma campanha da linha no recorte";
+      : destino && foraDoDestino.length
+        ? `nenhuma campanha da linha com destino ${ROTULO_DESTINO[destino]}`
+        : "nenhuma campanha da linha no recorte";
     return { ok: false, markdown: "", leitura: "", cobertura: porque, campanhas: 0, fatos: [] };
   }
   const toFetch = janela.dia_aberto ?? janela.date_to;
@@ -1938,6 +2071,40 @@ async function colherRelacaoNumerica(args: {
         ?? "2025-01-01";
     } else {
       from = janelaDetalhe(undefined, toFetch, 14).from;
+    }
+  }
+  // Hoje no pedido: o dado do dia vem do Pipeboard agora, nao da ultima rodada do cron.
+  let linhaDeHoje = "";
+  let atualizacaoHoje: Awaited<ReturnType<typeof atualizarHojeNoEspelho>> | null = null;
+  if (janela.dia_aberto === hoje) {
+    const metaIds = alvos.map((c) => String(c.external_id ?? "")).filter(Boolean);
+    atualizacaoHoje = await atualizarHojeNoEspelho(args.companyId, String(args.mcpKey ?? ""), metaIds, hoje);
+    const hora = await horaDoDadoDoDia(args.companyId, metaIds, hoje);
+    const dia = `${hoje.slice(8, 10)}/${hoje.slice(5, 7)}`;
+    linhaDeHoje = atualizacaoHoje.ok && hora
+      ? `Hoje (${dia}): números lidos na Meta via Pipeboard às ${hora}, nesta leitura. O dia segue em aberto.`
+      : hora
+        ? `Hoje (${dia}): última leitura da Meta às ${hora}; a atualização ao vivo não fechou (${atualizacaoHoje.erro ?? "sem detalhe"}). O que entrou depois disso não está aqui.`
+        : `Hoje (${dia}): nenhuma linha de hoje no espelho para estas campanhas (${atualizacaoHoje.erro ?? "a Meta não devolveu entrega"}). É ausência de leitura, não entrega zero.`;
+  }
+  // Recorte pela linha: pausada sem entrega na janela so ocupa espaço com zeros. Pausada que
+  // ENTREGOU fica — em 15/10/2026 a OCULAR V1 foi pausada no meio do dia com R$ 92,50 gastos.
+  const semEntrega: string[] = [];
+  if (porLinha && !soAtivosDoPedido(pedido) && alvos.length > 1) {
+    const comEntrega = await campanhasComEntregaNaJanela(
+      args.companyId,
+      alvos.map((c) => String(c.id ?? "")).filter(Boolean),
+      from,
+      toFetch,
+    );
+    if (comEntrega) {
+      const ficam = alvos.filter((c) =>
+        String(c.status ?? "").toUpperCase() === "ACTIVE" || comEntrega.has(String(c.id ?? ""))
+      );
+      if (ficam.length) {
+        for (const c of alvos) if (!ficam.includes(c)) semEntrega.push(String(c.name ?? ""));
+        alvos = ficam;
+      }
     }
   }
   const rotuloJanela = janela.dia_aberto && janela.dia_aberto !== janela.date_to
@@ -1995,17 +2162,27 @@ async function colherRelacaoNumerica(args: {
       if (f) fatos.push(f);
     }
   }
-  const rotuloLinha = meio === "la_felicita" ? "La Felicità" : meio === "juridico" ? "Jurídico" : meio === "sistema_ocular" ? "Sistema Ocular" : "";
+  const rotuloLinha = linhas.map((l) => ROTULO_LINHA[l] ?? l).join(" + ");
+  const rotuloDestino = destino ? `, destino ${ROTULO_DESTINO[destino]}` : "";
   const pedidoRotulo = pedidas.length
     ? pedidas.join(" · ")
     : rotuloLinha
-      ? `linha ${rotuloLinha} (o pedido não trouxe o nome completo da campanha)`
-      : "(nenhuma nomeada; recorte pela linha do pedido)";
+      ? `${linhas.length > 1 ? "linhas" : "linha"} ${rotuloLinha}${rotuloDestino} (o pedido não trouxe o nome completo da campanha)`
+      : destino
+        ? `campanhas com destino ${ROTULO_DESTINO[destino]}`
+        : "(nenhuma nomeada; recorte pela linha do pedido)";
+  const foraTxt = foraDoDestino.map((f) =>
+    `${f.nome} (${f.destino ? ROTULO_DESTINO[f.destino] : "destino não identificado"})`
+  );
   const cabeca = [
     `Campanhas pedidas: ${pedidoRotulo}.`,
     `Entraram (${nomesEntraram.length}): ${nomesEntraram.join(" · ") || "0"}.`,
     faltando.length ? `Não encontradas no espelho: ${faltando.join(" · ")}.` : "",
+    destino && foraTxt.length ? `Fora do recorte ${ROTULO_DESTINO[destino]}: ${foraTxt.join(" · ")}.` : "",
+    semEntrega.length ? `Pausadas e sem entrega na janela (ficaram fora): ${semEntrega.join(" · ")}.` : "",
+    falhas.length ? `Não entraram: ${falhas.join(" · ")}.` : "",
     `Janela: ${rotuloJanela}.`,
+    linhaDeHoje,
   ].filter(Boolean).join("\n");
   const markdown = [cabeca, ...blocos].filter(Boolean).join("\n\n");
   const leitura = [cabeca, ...blocosLeitura].filter(Boolean).join("\n\n");
@@ -2013,7 +2190,10 @@ async function colherRelacaoNumerica(args: {
     ok: blocos.length > 0,
     markdown,
     leitura,
-    cobertura: `${blocos.length} campanha(s); faltando=${faltando.length}; falhas=${falhas.length}; janela ${from}→${toFetch}`,
+    cobertura: `${blocos.length} campanha(s); faltando=${faltando.length}; falhas=${falhas.length}; janela ${from}→${toFetch}` +
+      (atualizacaoHoje
+        ? `; hoje_ao_vivo=${atualizacaoHoje.ok ? "ok" : atualizacaoHoje.erro} (${Math.round(atualizacaoHoje.ms / 1000)}s)`
+        : ""),
     campanhas: blocos.length,
     fatos,
   };
@@ -2115,17 +2295,17 @@ async function colherRelacaoGeo(args: {
   }
   const operacionais = ((camps ?? []) as Array<{ id?: string; name?: string; status?: unknown; external_id?: string }>)
     .filter((c) => statusObjetoOperacional(c.status));
-  const meio = inferirMeioDrive(pedido);
   // Campanha citada pelo nome completo manda no recorte (mesmo defeito da relacao numerica).
   const nomeados = campanhasNomeadasNoPedido(operacionais, pedido);
-  let alvos = nomeados.length
-    ? nomeados
-    : meio
-    ? operacionais.filter((c) => classificarLinhaProdutoCohapm(String(c.name ?? "")) === meio)
-    : [];
-  if (!alvos.length && meio) {
-    const needle = meio === "juridico" ? "juridico" : meio === "la_felicita" ? "felicita" : "ocular";
-    alvos = casarCampanhas(operacionais, needle);
+  let alvos = nomeados;
+  if (!alvos.length) {
+    // Todas as linhas citadas e o destino afirmado, como na relacao numerica.
+    const sinais = await sinaisDeDestinoPorCampanha(args.companyId);
+    alvos = recortarCampanhasDaLeitura(
+      operacionais,
+      pedido,
+      (c) => destinoDaCampanha(c.name, sinais.get(String(c.id ?? "")) ?? []),
+    ).alvos;
   }
   if (!alvos.length) alvos = operacionais;
   const p = deacc(pedido.toLowerCase());
@@ -3232,6 +3412,8 @@ REGRAS: todo numero vem de ferramenta CHAMADA AGORA; distinga zero / nao existe 
 Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, terminando com 'LACUNAS:' (ou 'nenhuma').`;
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
+  // O que as ferramentas devolveram, em texto literal. So e usado se o especialista nao escrever.
+  const colhidos: string[] = [];
   // Cortes declarados pelas ferramentas deste especialista. Sobe no retorno para virar `tel.cortes`.
   const cortes: EnvelopeDeCobertura[] = [];
   let tin = 0, tout = 0, reas = 0, relatorio = "", finish = "";
@@ -3340,6 +3522,8 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
         const args: any = argsParsed.args;
         const result = await runTool(nomeTc, args, ctx);
         usadas.push(nomeTc);
+        const resgatavel = textoDeResgate(nomeTc, result);
+        if (resgatavel) colhidos.push(resgatavel);
         /**
          * CAPTURA DO CORTE — aqui e o unico lugar do job em que um retorno de ferramenta existe
          * como OBJETO. Uma linha abaixo ele vira string dentro de `messages`, e a partir dali o
@@ -3461,10 +3645,28 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
   const houveRelatorioReal = !!relatorio && !erroLlm;
   const relatorioCompleto = houveRelatorioReal && !finish.startsWith("length");
   if (!houveRelatorioReal) partes = 0;
+  /**
+   * 15/10/2026: LEU E NAO ESCREVEU NAO E "NAO LEU". O especialista do job cb099406 chamou 17
+   * ferramentas e morreu no timeout; a sintese recebeu so o rotulo de falha e disse "nao coletado"
+   * para numeros que estavam aqui. Sem relatorio real, o que as ferramentas devolveram vira o
+   * relatorio, literal. `erro` fica nulo porque o dado EXISTE (a fidelidade passa a cobrar a
+   * sintese por ele); a causa vai em `resgate`, para a auditoria e para o rotulo da sintese.
+   */
+  let resgate: string | null = null;
+  if (!houveRelatorioReal) {
+    const motivo = String(erroLlm ?? motivoSaida ?? "sem relatorio").slice(0, 200);
+    const literal = relatorioDeResgate(motivo, colhidos);
+    if (literal) {
+      relatorio = literal;
+      resgate = motivo;
+      erroLlm = null;
+    }
+  }
   if (!relatorio) relatorio = `(subagente ${nome}: sem relatorio - registre como lacuna do job)`;
   return {
     nome, relatorio, completo: relatorioCompleto, partes, tools: usadas, cortes,
     tokens_in: tin, tokens_out: tout, reasoning_tokens: reas, finish, erro: erroLlm,
+    ...(resgate ? { resgate } : {}),
     // Fatos de ORCAMENTO da coleta. Sao o que permite responder "qual recurso apertou" sem
     // reinterpretar strings: motivo de saida limpo, quantas iteracoes de 6 foram usadas, quanto do
     // teto de consultas foi gasto, quantas chamadas a reserva RECUSOU (o piso nao existe mais) e
@@ -3501,7 +3703,10 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
  * a frase que autoriza a sintese a tratar ausencia como dado inexistente. Os dois erros produzem a
  * mesma coisa no fim: cobertura fingida.
  */
-function rotuloRelatorio(r: { completo: boolean; erro?: string | null }): string {
+function rotuloRelatorio(r: { completo: boolean; erro?: string | null; resgate?: string | null }): string {
+  if (r.resgate) {
+    return `RESGATE (${r.resgate}) - o especialista LEU e nao escreveu; o relatorio sao os numeros literais das ferramentas. USE estes numeros: PROIBIDO dizer 'nao coletado' para o que esta aqui. So o que nao aparece abaixo e lacuna`;
+  }
   const erro = String(r.erro ?? "");
   if (erro.startsWith("orcamento_insuficiente_para_escrita")) {
     return `SEM RELATORIO (${erro}) - a coleta parou por falta de orcamento e o relatorio dele NAO foi escrito. Nada do dominio dele chegou aqui: declare a lacuna e NAO afirme que o dado nao existe nem que e zero`;
@@ -4602,7 +4807,7 @@ async function executarLote(
   lote: { nome: string; foco: string }[], pergunta: string,
   ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number, tel: any,
   reservaColetaMs: number,
-): Promise<{ nome: string; relatorio: string; completo: boolean; erro?: string | null }[]> {
+): Promise<{ nome: string; relatorio: string; completo: boolean; erro?: string | null; resgate?: string | null }[]> {
   const runUm = (p: { nome: string; foco: string }) =>
     p.nome === "analise_visual_drive"
       ? rodarAnaliseVisual(p.foco, ctx, prazo, tel)
@@ -4628,11 +4833,16 @@ async function executarLote(
       return acc;
     })()
     : await Promise.allSettled(lote.map(runUm));
-  const saida: { nome: string; relatorio: string; completo: boolean; erro?: string | null }[] = [];
+  const saida: { nome: string; relatorio: string; completo: boolean; erro?: string | null; resgate?: string | null }[] = [];
   for (let i = 0; i < resultados.length; i++) {
     const res = resultados[i];
     if (res.status === "fulfilled") {
-      saida.push({ nome: res.value.nome, relatorio: res.value.relatorio, completo: res.value.completo, erro: (res.value as { erro?: string | null }).erro ?? null });
+      const resgate = (res.value as { resgate?: string | null }).resgate ?? null;
+      saida.push({
+        nome: res.value.nome, relatorio: res.value.relatorio, completo: res.value.completo,
+        erro: (res.value as { erro?: string | null }).erro ?? null,
+        ...(resgate ? { resgate } : {}),
+      });
       // rodarAnaliseVisual devolve so { nome, relatorio, completo }; rodarSubagente
       // devolve tambem tools/tokens/finish/partes. Acessar os campos de token no
       // primeiro caso gravava undefined em silencio na telemetria - agora a ausencia
@@ -4658,6 +4868,7 @@ async function executarLote(
         // O erro do especialista precisa aparecer na telemetria: sem ele, uma coleta que morreu
         // no timeout e uma que fechou sozinha ficam indistinguiveis na auditoria.
         ...(t.erro ? { erro: t.erro } : {}),
+        ...(resgate ? { resgate } : {}),
         ...(t.tools !== undefined ? { tools: t.tools } : {}),
         ...(t.tokens_in !== undefined ? { tokens_in: t.tokens_in } : {}),
         ...(t.tokens_out !== undefined ? { tokens_out: t.tokens_out } : {}),
@@ -4891,7 +5102,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.33";
+  tel.versao = "job-v4.34";
   {
     const base = await precarregarDoutrina();
     const origens = [...base.values()].map((v) => v.origem);
@@ -5070,7 +5281,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       }
     } else if (ehPedidoRelacaoNumerica(pergunta)) {
       await pushProgresso(jobId, "subagentes", "colheita deterministica da relacao (conjunto + criativo)");
-      colheitaRelacao = await colherRelacaoNumerica({ companyId, pedido: pergunta });
+      colheitaRelacao = await colherRelacaoNumerica({ companyId, pedido: pergunta, mcpKey });
       tel.colheita_relacao = { ok: colheitaRelacao.ok, cobertura: colheitaRelacao.cobertura, tipo: "numerica" };
       if (colheitaRelacao.ok) {
         plano = [{ nome: "base_coletada", foco: "relacao por conjunto e por criativo" }];

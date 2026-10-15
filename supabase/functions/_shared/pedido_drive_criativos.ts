@@ -36,10 +36,14 @@ export function normalizarMeioWaba(raw: unknown): MeioWaba | null {
   return null;
 }
 
-/** Pasta/marca VISTTA = empreendimento Sistema Ocular (nao e Juridico nem La Felicita). */
+/**
+ * Pasta/marca VISTTA = empreendimento Sistema Ocular (nao e Juridico nem La Felicita).
+ * `\bocular\b` nao casava `COHAPM_OCULAR_LEADS_SITE...`: o underscore e caractere de palavra.
+ */
 export function textoTemSistemaOcular(p: string): boolean {
   const n = deaccPedido(p);
-  return /vistta/.test(n) || /sistema[\s_-]*ocular/.test(n) || /\bocular\b/.test(n) || /oftalm/.test(n);
+  return /vistta/.test(n) || /sistema[\s_-]*ocular/.test(n) || /(^|[^a-z0-9])ocular([^a-z0-9]|$)/.test(n) ||
+    /oftalm/.test(n);
 }
 
 export type RecorteDrive = {
@@ -87,6 +91,17 @@ export function pedidoExigeInventarioDrive(pedido: string): boolean {
 }
 
 export function inferirMeioDrive(pedido: string): MeioDrive | null {
+  const hits = inferirMeiosDoPedido(pedido);
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * TODAS as linhas que o pedido cita. `inferirMeioDrive` devolve null quando ha duas, e e o certo
+ * para Drive/slate (nao adivinha). Para LEITURA nao e: em 15/10/2026 "La Felicità que derrama na
+ * LP e do sistema ocular" ficou sem campanha nenhuma na colheita, caiu no especialista e voltou
+ * vazio depois de 7 minutos.
+ */
+export function inferirMeiosDoPedido(pedido: string): MeioDrive[] {
   // Underscore e caractere de palavra: `\bjuridico` nao casa `COHAPM_JURIDICO`.
   // Sem isto, um pedido com VISTTA + LAFELICITA + JURIDICO caia so em ocular.
   const p = deaccPedido(pedido).replace(/_/g, " ");
@@ -99,8 +114,7 @@ export function inferirMeioDrive(pedido: string): MeioDrive | null {
   if (oc) hits.push("sistema_ocular");
   if (lf) hits.push("la_felicita");
   if (jur) hits.push("juridico");
-  if (hits.length === 1) return hits[0];
-  return null;
+  return hits;
 }
 
 export function pedidoSoReelsVideos(pedido: string): boolean {
