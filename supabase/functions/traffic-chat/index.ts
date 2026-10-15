@@ -786,6 +786,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { sanitizarClaimDeCardSemLastro, situacaoDoCard } from "../_shared/aprovacoes.ts";
+import { podeLerAposPrazoDeColeta } from "../_shared/leitura_do_ato.ts";
+import { prosaFalhaDoModelo } from "../_shared/falha_do_modelo.ts";
 import {
   linhaDeVerificacao,
   verificarAntesDeResponder,
@@ -1045,10 +1047,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.21";
-const REPLY_MODELO_FALHOU =
-  "Não concluí este turno: o modelo não respondeu a tempo (falha temporária). " +
-  "Sua pergunta já está nesta conversa — use Reenviar pergunta para eu retomar sem você redigitar.";
+const VERSAO = "chat-v29.22";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_LEITURA = 6;
@@ -8207,7 +8206,13 @@ Deno.serve(async (req) => {
             (pedidoSoLegendasSemEmissao(objetivoOriginal) || pedidoLoteTurno) &&
             restanteAgora > 24_000 &&
             !flushUpload;
-          if (!executarProposeAposColeta && !executarLegendaAposColeta) {
+          // 15/10/2026 (CONJ.4): o laco seguia pedindo o card e recusava a leitura que o card exige.
+          const executarLeituraDoAto = !flushUpload && podeLerAposPrazoDeColeta({
+            ferramenta: nomeSkip,
+            precisaCard: precisaProposeAto(),
+            restanteMs: restanteAgora,
+          });
+          if (!executarProposeAposColeta && !executarLegendaAposColeta && !executarLeituraDoAto) {
             deadlineTools = true;
             const argsSkipParsed = parseArgumentosDeFerramenta(tc.function?.arguments);
             const argsSkip = argsSkipParsed.ok ? argsSkipParsed.args : {};
@@ -8810,7 +8815,7 @@ Deno.serve(async (req) => {
       // Ultimo segmento ou sem trabalho retomavel: ainda assim NAO use o texto antigo
       // de "Peça de novo…" em pedido de ato — diga o que falta com o que ja tem.
       if (/openrouter/.test(String(finishReason))) {
-        reply = REPLY_MODELO_FALHOU;
+        reply = prosaFalhaDoModelo(String(finishReason));
         finishReason = String(finishReason) + "+prosa_modelo_falhou";
       } else if (pedidoUploadTurno) {
         const prosaUp = prosaContinuandoUpload(relUpload);
