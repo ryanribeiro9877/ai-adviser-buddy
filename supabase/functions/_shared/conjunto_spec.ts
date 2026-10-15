@@ -7,6 +7,7 @@ export type ConjuntoMontado = {
   ok: true;
   corpo: Record<string, string>;
   targeting: Record<string, unknown>;
+  promoted: Record<string, unknown>;
   reais: number;
   resumo: string;
 };
@@ -137,9 +138,27 @@ export function validarSpecConjunto(p: Record<string, unknown> | null | undefine
       detalhe: "optimization_goal, billing_event, bid_strategy e destination_type sao obrigatorios. bid_strategy faltando a Meta recusa na primeira tentativa.",
     };
   }
-  const promoted = objeto(pedido.promoted_object);
+  // Texto JSON entra como objeto: o card ate 15/10/2026 gravava o corpo ja serializado e a
+  // executora recusava como ausente um promoted_object que estava la.
+  let promotedBruto = pedido.promoted_object;
+  if (typeof promotedBruto === "string" && promotedBruto.trim()) {
+    try {
+      promotedBruto = JSON.parse(promotedBruto);
+    } catch {
+      return {
+        ok: false,
+        erro: "promoted_object_invalido",
+        detalhe: "promoted_object veio em texto que nao e JSON. Passe o objeto, ex.: {page_id, whatsapp_phone_number}.",
+      };
+    }
+  }
+  const promoted = objeto(promotedBruto);
   if (!promoted || !Object.keys(promoted).length) {
-    return { ok: false, erro: "promoted_object_obrigatorio", detalhe: "promoted_object completo (page_id e, em WhatsApp, o numero)." };
+    return {
+      ok: false,
+      erro: "promoted_object_obrigatorio",
+      detalhe: "Conjunto sem promoted_object. Em WhatsApp: {page_id, whatsapp_phone_number em digitos}; em site: {pixel_id, custom_event_type}.",
+    };
   }
 
   let targeting = pedido.targeting;
@@ -191,7 +210,22 @@ export function validarSpecConjunto(p: Record<string, unknown> | null | undefine
     ok: true,
     corpo,
     targeting: t,
+    promoted,
     reais,
     resumo: resumoLegivelDoConjunto({ nome, reais, targeting: t }),
+  };
+}
+
+/** O que o card grava para a executora remontar o conjunto. Objetos ficam objetos: o corpo da
+ *  Meta tem promoted_object e targeting em texto, e texto no jsonb do card nao volta objeto. */
+export function payloadDoCardConjunto(spec: ConjuntoMontado): Record<string, unknown> {
+  return {
+    ...spec.corpo,
+    promoted_object: spec.promoted,
+    targeting: spec.targeting,
+    orcamento_diario_reais: spec.reais,
+    nome_novo: spec.corpo.name,
+    campanha_destino_external_id: spec.corpo.campaign_id,
+    status_inicial: "PAUSED",
   };
 }

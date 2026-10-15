@@ -947,7 +947,8 @@ import {
   paramsGeoComAliasCidades,
 } from "../_shared/geo_targeting.ts";
 import { montarCriativoCarrossel, montarCriativoDeClique } from "../_shared/criativo_whatsapp.ts";
-import { validarSpecConjunto } from "../_shared/conjunto_spec.ts";
+import { payloadDoCardConjunto, validarSpecConjunto } from "../_shared/conjunto_spec.ts";
+import { conferirReexecucaoDoCard } from "../_shared/reexecucao_card.ts";
 import { validarTrocaCriativo } from "../_shared/troca_criativo.ts";
 import {
   buscarInteressesMeta,
@@ -1047,7 +1048,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.22";
+const VERSAO = "chat-v29.23";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_LEITURA = 6;
@@ -3748,21 +3749,19 @@ async function t_propose_criacao(
         return { erro: "prevoo_recusado", detalhe: pre.recusa, corpo: pre.corpo };
       }
     }
-    return await gravarCard(companyId, convId, requestedBy, action, "adset", campRow.id, spec.resumo, {
-      ...spec.corpo,
-      targeting: spec.targeting,
-      orcamento_diario_reais: spec.reais,
-      nome_novo: spec.corpo.name,
-      campanha_destino_external_id: spec.corpo.campaign_id,
+    const payloadConjunto = {
+      ...payloadDoCardConjunto(spec),
       campanha_destino_nome: campRow.name,
-      status_inicial: "PAUSED",
       conta_destino: contaDaEmpresa,
       justificativa,
       reversa,
       metrica_sucesso: sucesso,
       resumo_legivel: spec.resumo,
       ...(pre.ok ? carimboDeValidacao(pre.validado_em) : { validacao: "nao_testado", prevoo_nota: pre.recusa }),
-    }, cards);
+    };
+    const idaEVolta = conferirReexecucaoDoCard(action, payloadConjunto, spec.corpo);
+    if (!idaEVolta.ok) return { erro: idaEVolta.erro, detalhe: idaEVolta.detalhe };
+    return await gravarCard(companyId, convId, requestedBy, action, "adset", campRow.id, spec.resumo, payloadConjunto, cards);
   }
 
   if (action === "criar_criativo" || action === "criar_criativo_carrossel") {
@@ -3787,7 +3786,7 @@ async function t_propose_criacao(
         return { erro: "prevoo_recusado", detalhe: pre.recusa, corpo: pre.corpo };
       }
     }
-    return await gravarCard(companyId, convId, requestedBy, action, "creative", null, criativo.resumo, {
+    const payloadCriativo = {
       ...criativo.body,
       ...(params as Record<string, unknown>),
       nome_novo: criativo.body.name,
@@ -3800,7 +3799,10 @@ async function t_propose_criacao(
       metrica_sucesso: sucesso,
       resumo_legivel: criativo.resumo,
       ...(pre.ok ? carimboDeValidacao(pre.validado_em) : { validacao: "nao_testado", prevoo_nota: pre.recusa }),
-    }, cards);
+    };
+    const idaEVolta = conferirReexecucaoDoCard(action, payloadCriativo, criativo.body);
+    if (!idaEVolta.ok) return { erro: idaEVolta.erro, detalhe: idaEVolta.detalhe };
+    return await gravarCard(companyId, convId, requestedBy, action, "creative", null, criativo.resumo, payloadCriativo, cards);
   }
 
   // -------- criar_campanha: NOME LIVRE (target_name / params.nome / nome_novo) --------

@@ -1,4 +1,8 @@
-// supabase/functions/meta-actions/index.ts (v5.68)
+// supabase/functions/meta-actions/index.ts (v5.69)
+// v5.69 (15/10/2026) - PROMOTED_OBJECT EM TEXTO. Dois criar_conjunto aprovados
+//   (CONJ.4 MELHORES_CRIATIVOS) morreram em promoted_object_obrigatorio sem chegar
+//   a Meta: o card gravou o corpo ja serializado e validarSpecConjunto so aceitava
+//   objeto. O validador passa a ler texto JSON; os cards gravados antes reexecutam.
 // v5.68 (03/10/2026) - RELEITURA DE ANUNCIO. O POST manda creative.creative_id e a
 //   Graph devolve creative.id. A conferencia tratava isso como divergencia, fechava
 //   ok=false e o card dizia escrita parcial com o anuncio ja criado. O alias so vale
