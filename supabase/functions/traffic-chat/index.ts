@@ -1048,7 +1048,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.23";
+const VERSAO = "chat-v29.24";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_LEITURA = 6;
@@ -3863,7 +3863,7 @@ async function t_propose_criacao(
         ? (params.special_ad_categories as unknown[]).map((x) => String(x)).filter(Boolean)
         : []);
     const summary = summaryPreviaCriacao({ campanha: nomeFinal });
-    return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, {
+    const payloadCampanha = {
       nome_novo: nomeFinal,
       nome_origem: resolvidoNome.origem,
       ...(resolvidoNome.partes ? { nome_partes: resolvidoNome.partes } : {}),
@@ -3881,7 +3881,10 @@ async function t_propose_criacao(
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
       odax_aceitos: [...ODAX_OBJETIVOS],
-    }, cards);
+    };
+    const idaEVolta = conferirReexecucaoDoCard(action, payloadCampanha, null);
+    if (!idaEVolta.ok) return { erro: idaEVolta.erro, detalhe: idaEVolta.detalhe };
+    return await gravarCard(companyId, convId, requestedBy, action, "campaign", null, summary, payloadCampanha, cards);
   }
 
   // -------- criar_conjunto_a_partir_de --------
@@ -4199,7 +4202,7 @@ async function t_propose_criacao(
       }
     }
     const summary = summaryPreviaCriacao({ campanha: dest.name, conjunto: nomeNovo });
-    const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde!.id, summary, {
+    const payloadConjMolde = {
       nome_novo: nomeNovo,
       nome_origem: resolvidoConj.origem,
       ...(resolvidoConj.partes ? { nome_partes: resolvidoConj.partes } : {}),
@@ -4266,7 +4269,10 @@ async function t_propose_criacao(
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
-    }, cards);
+    };
+    const idaEVoltaConj = conferirReexecucaoDoCard(action, payloadConjMolde, null);
+    if (!idaEVoltaConj.ok) return { erro: idaEVoltaConj.erro, detalhe: idaEVoltaConj.detalhe };
+    const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde!.id, summary, payloadConjMolde, cards);
     // Devolve o aviso na resposta da tool tambem: o agente precisa repassar ao gestor ANTES de ele
     // decidir, e o texto vem inteiro da RPC - sem frase composta aqui, o dono do texto e um so.
     const avisosCard: Record<string, unknown> = {};
@@ -4414,7 +4420,7 @@ async function t_propose_criacao(
       || `${molde.name} [ESC+20 ${orcamento}]`.slice(0, 180);
     const summary = summaryPreviaCriacao({ campanha: camp.name, conjunto: nomeNovo });
 
-    const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, {
+    const payloadEscala = {
       nome_novo: nomeNovo,
       molde_external_id: molde.external_id,
       molde_nome: molde.name,
@@ -4439,7 +4445,10 @@ async function t_propose_criacao(
       metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
-    }, cards);
+    };
+    const idaEVoltaEsc = conferirReexecucaoDoCard(action, payloadEscala, null);
+    if (!idaEVoltaEsc.ok) return { erro: idaEVoltaEsc.erro, detalhe: idaEVoltaEsc.detalhe };
+    const card = await gravarCard(companyId, convId, requestedBy, action, "adset", molde.id, summary, payloadEscala, cards);
     return avisoOrcamento && card && typeof card === "object" && !(card as any).erro
       ? { ...(card as any), aviso_orcamento: avisoOrcamento, avaliacao_escala: aval, aviso_papel: avisoPapel }
       : { ...(typeof card === "object" ? card as any : { ok: true }), avaliacao_escala: aval, aviso_papel: avisoPapel };
@@ -5428,7 +5437,7 @@ async function t_propose_criacao(
       conjunto: dest.name,
       criativo: nomeNovo,
     });
-    return await gravarCard(companyId, convId, requestedBy, action, "ad", molde?.id ?? dest.id, summary, {
+    const payloadAnuncio = {
       nome_novo: nomeNovo,
       nome_origem: resolvidoAd.origem,
       ...(resolvidoAd.partes ? { nome_partes: resolvidoAd.partes } : {}),
@@ -5473,7 +5482,10 @@ async function t_propose_criacao(
       justificativa, reversa, metrica_sucesso: sucesso,
       janela_leitura: String(args?.janela_leitura ?? "").trim() || null,
       risco: String(args?.risco ?? "").trim() || null,
-    }, cards);
+    };
+    const idaEVoltaAd = conferirReexecucaoDoCard(action, payloadAnuncio, null);
+    if (!idaEVoltaAd.ok) return { erro: idaEVoltaAd.erro, detalhe: idaEVoltaAd.detalhe };
+    return await gravarCard(companyId, convId, requestedBy, action, "ad", molde?.id ?? dest.id, summary, payloadAnuncio, cards);
   }
 
   return { erro: `acao de criacao desconhecida: ${action}` };

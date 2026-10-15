@@ -21,6 +21,10 @@ const uploadMidia = await Deno.readTextFile(
 const empCredito = await Deno.readTextFile(
   new URL("./empresa_credito.ts", import.meta.url),
 );
+// v5.70: as recusas que saem so do payload moram aqui e a meta-actions chama no inicio do ramo.
+const precondicoes = await Deno.readTextFile(
+  new URL("./precondicoes_criacao.ts", import.meta.url),
+);
 
 function assert(condition: unknown, message: string) {
   if (!condition) throw new Error(message);
@@ -201,7 +205,9 @@ assert(
 );
 assert(
   metaActions.includes("instagram_nao_vinculado") &&
-    metaActions.includes("nome_fora_do_escopo_trafego") &&
+    (metaActions.includes("nome_fora_do_escopo_trafego") ||
+      (metaActions.includes("recusaDoPayloadDeCriacao(acao, p)") &&
+        precondicoes.includes("nome_fora_do_escopo_trafego"))) &&
     metaActions.includes("recusarSemIdentidadeNasPlataformas"),
   "meta-actions v5.46: fail-closed Instagram + nao sobrescreve nome de trafego",
 );

@@ -1,4 +1,11 @@
-// supabase/functions/meta-actions/index.ts (v5.69)
+// supabase/functions/meta-actions/index.ts (v5.70)
+// v5.70 (15/10/2026) - RECUSAS DO PAYLOAD COM DONO UNICO. criar_campanha,
+//   criar_conjunto_a_partir_de, escalar_duplicar e criar_anuncio_a_partir_de
+//   passam a julgar o que sai so do payload em _shared/precondicoes_criacao.ts
+//   (nome, regime ABO, objetivo, molde/sem_molde, orcamento em reais, plataformas,
+//   geo, idade, familia x destino x WhatsApp, formatos, asset por posicionamento,
+//   legenda). O traffic-chat roda a mesma funcao antes de gravar o card: 21-22/08
+//   quatro conjuntos aprovados morreram aqui com o payload ja dizendo isso.
 // v5.69 (15/10/2026) - PROMOTED_OBJECT EM TEXTO. Dois criar_conjunto aprovados
 //   (CONJ.4 MELHORES_CRIATIVOS) morreram em promoted_object_obrigatorio sem chegar
 //   a Meta: o card gravou o corpo ja serializado e validarSpecConjunto so aceitava
@@ -454,7 +461,6 @@ import {
   ehFlagSemMolde,
   ehNomeCompostoEstruturado,
   ehSentinelaSemMolde,
-  nomeCompostoForaDeEscopoTrafego,
   recusarConjuntoErrado,
   recusarCruzamentoLinhaProduto,
 } from "../_shared/memoria_conjunto.ts";
@@ -523,12 +529,15 @@ import {
   ehFamiliaSocialTopo,
   ehPedidoMensagens,
   ehPedidoTrafegoWebsite,
-  defaultsConjuntoSocialTopo,
-  defaultsConjuntoMensagens,
-  defaultsConjuntoTrafegoWebsite,
   targetingPadraoSocialTopo,
   mensagemObjetivoNaoSuportado,
 } from "../_shared/objetivo_odax.ts";
+import {
+  campoPresente,
+  defaultsDoConjuntoPorFamilia,
+  familiaDoConjuntoPeloPayload,
+  recusaDoPayloadDeCriacao,
+} from "../_shared/precondicoes_criacao.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import {
   acaoDeAuditoriaDaReconciliacao,
@@ -1552,18 +1561,9 @@ const actId = (v: string) => {
   return s.startsWith("act_") ? s : `act_${s}`;
 };
 
-// v5.1: espelho EXATO de public.campo_presente_no_pedido(jsonb, text). Os dois lados do portao
-// (contrato/verificacao no banco e executor aqui) precisam recusar o MESMO conjunto de pedidos:
-// se um considerar "" ou [] presente e o outro nao, volta a existir completo=true com o executor
-// recusando - o padrao que a PO-17 v2 proibe. Vazio nao e pedido: string em branco, array vazio
-// e objeto vazio contam como ausentes nos dois lugares.
-export function campoPresente(v: unknown): boolean {
-  if (v === null || v === undefined) return false;
-  if (Array.isArray(v)) return v.length > 0;
-  if (typeof v === "string") return v.trim() !== "";
-  if (typeof v === "object") return Object.keys(v as Record<string, unknown>).length > 0;
-  return true;
-}
+// v5.1: campoPresente e o espelho de public.campo_presente_no_pedido(jsonb, text). Mora em
+// _shared/precondicoes_criacao.ts desde a v5.70; o export segue para quem importava daqui.
+export { campoPresente };
 
 /** Carrossel Meta: 2–10 child_attachments com image_hash (+ link opcional no card). */
 export function normalizarChildAttachments(
@@ -1750,29 +1750,16 @@ export async function montarCriacao(
   companyId: string | null = null,
 ) {
   if (acao === "criar_campanha") {
+    // v5.70: nome, regime ABO e objetivo sao julgados em precondicoes_criacao, a mesma funcao que
+    // o traffic-chat roda sobre o payload antes de emitir o card.
+    const recusa = recusaDoPayloadDeCriacao(acao, p);
+    if (recusa) return recusa;
     const nome = String(p?.nome_novo ?? p?.nome ?? p?.name ?? "").trim();
-    if (!nome) return { erro: "payload sem nome_novo (nome livre obrigatorio)" };
 
     // Nome livre e a fonte da verdade. nome_partes e metadado opcional (nao bloqueia).
     const partes = (p?.nome_partes ?? null) as Record<string, unknown> | null;
     const nomePartesGravar =
       partes && typeof partes === "object" ? partes : null;
-
-    // ============ v5.5: REGIME DE ORCAMENTO DECLARADO; ABO REAL PELO PIPEBOARD ============
-    // O gestor decide o regime no pedido (regime_orcamento). Hoje o UNICO regime suportado e ABO -
-    // orcamento vive em cada CONJUNTO, a campanha fica SEM orcamento -, que e o desenho de todo o
-    // sistema: o gate campanha_usa_orcamento_proprio_cbo existe justamente para manter conjunto
-    // fora de campanha CBO. Ausente = 'abo' (o default historico e a decisao do gestor). Valor
-    // diferente de 'abo' RECUSA por nome; o contrato (contrato_de_execucao.valores_aceitos=['abo'])
-    // recusa o MESMO conjunto no validador, para nunca haver validador=aceita com executor=recusa.
-    const regime = (String(p?.regime_orcamento ?? "").trim().toLowerCase() || "abo");
-    if (regime !== "abo") {
-      return {
-        erro: "regime_orcamento_nao_suportado",
-        detalhe:
-          `O pedido declara regime_orcamento="${regime}", e este sistema so cria campanha em ABO (orcamento no conjunto, campanha sem orcamento). CBO — orcamento na campanha — nao e suportado: o conjunto so entra em campanha sem orcamento proprio (e o que o gate campanha_usa_orcamento_proprio_cbo garante), entao criar a campanha ja com orcamento fecharia o caminho do conjunto. Peca a campanha em ABO (ou omita o regime, que ja assume ABO).`,
-      };
-    }
 
     // ABO de verdade: use_adset_level_budgets=true e a chave. Sem ele, o Pipeboard injeta
     // daily_budget=1000 (provado por teste descartavel controlado em 07/08/2026). Nenhum orcamento
@@ -1863,6 +1850,10 @@ export async function montarCriacao(
   }
 
   if (acao === "criar_conjunto_a_partir_de" || acao === "escalar_duplicar") {
+    // v5.70: campos obrigatorios, molde/sem_molde, orcamento em reais, plataformas, geo, idade e
+    // familia x destino sao julgados em precondicoes_criacao (mesma funcao da proposta do card).
+    const recusa = recusaDoPayloadDeCriacao(acao, p);
+    if (recusa) return recusa;
     const moldeRaw = String(p?.molde_external_id ?? "").trim();
     const semMoldeConj =
       acao === "criar_conjunto_a_partir_de" &&
@@ -1870,11 +1861,7 @@ export async function montarCriacao(
     const molde = semMoldeConj ? "" : moldeRaw;
     const campanha = String(p?.campanha_destino_external_id ?? "");
     const nome = String(p?.nome_novo ?? "").trim();
-    let reais = Number(p?.orcamento_diario_reais ?? 0);
-    if (!campanha || !nome)
-      return {
-        erro: "payload incompleto (campanha_destino_external_id, nome_novo)",
-      };
+    const reais = Number(p?.orcamento_diario_reais ?? 0);
     if (companyId && companyId === COMPANY_COHAPM) {
       const espelho = await nomesDestinoEspelhoCohapm({
         companyId,
@@ -1886,19 +1873,6 @@ export async function montarCriacao(
       });
       if (!cruz.ok) return { erro: cruz.erro, detalhe: cruz.detalhe };
     }
-    if (!semMoldeConj && !molde)
-      return {
-        erro: "payload incompleto (molde_external_id, campanha_destino_external_id, nome_novo)",
-        detalhe:
-          "Informe o conjunto molde (empresta targeting) OU sem_molde=true / molde_external_id=sem_molde para criar do zero.",
-      };
-    if (!(reais > 0)) return { erro: "orcamento_diario_reais ausente ou invalido" };
-    const checkOrc = conferirOrcamentoReais({
-      reais,
-      confirmadoReais: ehFlagOrcamentoConfirmadoReais(p?.orcamento_confirmado_reais),
-    });
-    if (!checkOrc.ok) return { erro: checkOrc.erro, detalhe: checkOrc.detalhe };
-    reais = checkOrc.reais;
 
     // Nome livre e a fonte da verdade. nome_partes e metadado opcional.
     let nomeFinal = nome;
@@ -2022,32 +1996,11 @@ export async function montarCriacao(
 
     // Resolve familia cedo (payload → tag → objective da campanha).
     // v5.35: mensagens (CTWA) distinta de engajamento social.
-    let familiaPayload = String(p?.familia_objetivo ?? "").trim().toLowerCase();
-    const tagPartes = String((p?.nome_partes as any)?.objetivo_tag ?? p?.objetivo_tag ?? "").trim();
-    const pedidoTrafegoWeb = ehPedidoTrafegoWebsite({
-      optimization_goal: p?.optimization_goal,
-      destination_type: p?.destination_type,
-      familia_objetivo: p?.familia_objetivo,
-      objetivo: p?.objetivo,
-    });
-    const pedidoMensagensExec = ehPedidoMensagens({
-      optimization_goal: p?.optimization_goal,
-      destination_type: p?.destination_type,
-      familia_objetivo: p?.familia_objetivo,
-      objetivo_tag: tagPartes,
-      objetivo: p?.objetivo,
-      nome: `${p?.campanha_destino_nome ?? ""} ${p?.nome_novo ?? ""} ${nomeFinal}`,
-    });
-    if (pedidoTrafegoWeb) {
-      familiaPayload = "trafego";
-    } else if (pedidoMensagensExec) {
-      familiaPayload = "mensagens";
-    } else if (!familiaPayload || familiaPayload === "conversao") {
-      if (ehFamiliaSocialTopo(tagPartes) || ehFamiliaSocialTopo(p?.objetivo)) {
-        familiaPayload = familiaDeObjetivo(p?.objetivo ?? tagPartes);
-      }
-    }
-    if ((!familiaPayload || familiaPayload === "conversao") && !pedidoMensagensExec) {
+    // v5.70: a parte que sai do payload e familiaDoConjuntoPeloPayload (a mesma da proposta).
+    const famPayload = familiaDoConjuntoPeloPayload(p ?? {}, nomeFinal);
+    let familiaPayload = famPayload.familia;
+    const tagPartes = famPayload.tag;
+    if (famPayload.precisaLerCampanha) {
       const campObj = await g(`/${campanha}?fields=objective,name`);
       if (campObj.status === 200) {
         const objCamp = String((campObj.body as any)?.objective ?? "");
@@ -2233,23 +2186,7 @@ export async function montarCriacao(
           .maybeSingle();
         pageId = String((cfgPage as any)?.page_id ?? "").trim();
       }
-      const defs = trafegoTopo
-        ? defaultsConjuntoTrafegoWebsite({
-          destination_type: p?.destination_type,
-          optimization_goal: p?.optimization_goal,
-        })
-        : mensagensTopo
-        ? defaultsConjuntoMensagens(pageId, {
-          whatsapp_phone_number: p?.whatsapp_phone_number,
-          whats_app_business_phone_number_id: p?.whats_app_business_phone_number_id,
-          destination_type: p?.destination_type,
-          optimization_goal: p?.optimization_goal,
-        })
-        : defaultsConjuntoSocialTopo(
-          familiaPayload as "engajamento" | "reconhecimento",
-          pageId,
-          p?.optimization_goal,
-        );
+      const defs = defaultsDoConjuntoPorFamilia(familiaPayload, pageId, p ?? {});
       if ("erro" in defs) {
         return { erro: defs.erro, detalhe: defs.detalhe };
       }
@@ -2507,6 +2444,11 @@ export async function montarCriacao(
   }
 
   if (acao === "criar_anuncio_a_partir_de") {
+    // v5.70: campos obrigatorios, peca ou molde, nome fora do escopo de trafego, formatos
+    // conflitantes, asset por posicionamento e legenda de peca nova sao julgados em
+    // precondicoes_criacao (mesma funcao da proposta do card).
+    const recusa = recusaDoPayloadDeCriacao(acao, p);
+    if (recusa) return recusa;
     const creativeMolde = String(p?.creative_id ?? "").trim();
     const adset = String(p?.conjunto_destino_external_id ?? "");
     let nome = String(p?.nome_novo ?? "").trim();
@@ -2519,8 +2461,6 @@ export async function montarCriacao(
     // ESP-35: peca nova (video|imagem|carrossel) pode nascer SEM creative_id quando page/CTA/URL
     // vierem no payload ou na config da empresa. Replicacao pura continua exigindo molde.
     const pecaNovaSemMolde = !creativeMolde && !!(videoNovo || imagemNova || temPedidoCarrossel);
-    if (!adset || !nome)
-      return { erro: "payload incompleto (conjunto_destino_external_id, nome_novo)" };
     if (companyId && companyId === COMPANY_COHAPM) {
       const espelhoAd = await nomesDestinoEspelhoCohapm({
         companyId,
@@ -2546,25 +2486,9 @@ export async function montarCriacao(
       });
       if (!cruzNum.ok) return { erro: cruzNum.erro, detalhe: cruzNum.detalhe };
     }
-    if (!creativeMolde && !pecaNovaSemMolde)
-      return { erro: "payload incompleto (creative_id, conjunto_destino_external_id, nome_novo)" };
 
     // v5.46: nome_novo do payload e a fonte da verdade — nunca sobrescrever por composto.
     nome = String(p?.nome_novo ?? p?.nome ?? p?.name ?? nome).trim();
-    const casoDestino = String((p as any)?.destino_do_anuncio?.caso ?? "");
-    const ehTrafegoExec =
-      casoDestino === "trafego_website" ||
-      /TRAFFIC|WEBSITE|LANDING_PAGE/i.test(
-        `${p?.objetivo_campanha_destino ?? ""} ${p?.destination_type ?? ""} ${p?.optimization_goal ?? ""}`,
-      );
-    if (ehTrafegoExec && nomeCompostoForaDeEscopoTrafego(nome)) {
-      return {
-        erro: "nome_fora_do_escopo_trafego",
-        detalhe:
-          `O payload pede '${nome}', mas o conjunto/campanha e trafego WEBSITE/LPV. ` +
-          "Nao gravo [WA][LEADS] nesse objeto. Use o nome livre do contrato.",
-      };
-    }
     if (ehNomeCompostoEstruturado(nome) && String(p?.nome_contrato ?? "").trim()) {
       nome = String(p.nome_contrato).trim();
     }
@@ -2572,49 +2496,8 @@ export async function montarCriacao(
     // Nome livre e a fonte da verdade. nome_partes e metadado opcional (nao bloqueia).
     // Usa o nome_novo do payload sem exigir alinhamento ao composto.
 
-    // ============ v5.24: FORMATOS ============
-    // Carrossel HABILITADO (child_attachments). Video/imagem/carrossel sao mutuamente exclusivos.
-    if (videoNovo && (imagemNova || temPedidoCarrossel)) {
-      return {
-        erro: "formatos_de_midia_conflitantes",
-        detalhe:
-          "O pedido mistura video com imagem/carrossel. Um anuncio avulso e de UM formato: video, imagem unica ou carrossel. Remova os campos conflitantes.",
-      };
-    }
-    if (imagemNova && temPedidoCarrossel) {
-      return {
-        erro: "formatos_de_midia_conflitantes",
-        detalhe:
-          "O pedido traz meta_image_hash E child_attachments. Use so child_attachments para carrossel (varios slides) OU so meta_image_hash para imagem unica.",
-      };
-    }
-    if (videoNovo && imagemNova) {
-      return {
-        erro: "formatos_de_midia_conflitantes",
-        detalhe:
-          "O pedido traz meta_video_id E meta_image_hash. Um anuncio avulso e de UM formato: video (video_data) ou imagem (link_data). Remova um dos dois campos.",
-      };
-    }
-    // ============ v5.8: PERSONALIZACAO POR POSICIONAMENTO NAO E SUPORTADA ============
-    // A Coluna da direita do Facebook NAO veicula video (exige imagem, de qualquer proporcao) -
-    // trocar o video por um menor nunca resolve o aviso. A unica forma de veicular la e trocar a
-    // MIDIA daquele posicionamento por imagem (placement asset customization: asset_feed_spec com
-    // regras por posicionamento). Esta executora monta um object_story_spec com UM video_data
-    // unico; nao monta asset por posicionamento. Entao, no mesmo espirito de carrossel/foto, o
-    // pedido que pede asset por posicionamento RECUSA por nome em vez de publicar so o video e o
-    // gestor descobrir na previa que a Coluna da direita ficou de fora.
-    if (
-      campoPresente(p?.assets_por_posicionamento) ||
-      campoPresente(p?.placement_asset_customization) ||
-      campoPresente(p?.imagem_coluna_direita) ||
-      campoPresente(p?.asset_customization_rules)
-    ) {
-      return {
-        erro: "personalizacao_por_posicionamento_nao_suportada",
-        detalhe:
-          "O pedido pede midia diferente por posicionamento (ex.: imagem so na Coluna da direita do Facebook, que nao aceita video). Isso e placement asset customization - asset_feed_spec com regras por posicionamento - e esta executora NAO monta isso: ela monta um object_story_spec com um unico video_data. O padrao do sistema para anuncio de video e ACEITAR que a Coluna da direita nao veicule (e avisar isso no card antes da aprovacao). Se precisar veicular imagem nesse posicionamento, monte no Gerenciador ou peca o suporte a personalizacao por posicionamento como trabalho declarado.",
-      };
-    }
+    // v5.24 (formatos exclusivos) e v5.8 (sem asset por posicionamento) moram em
+    // precondicoes_criacao desde a v5.70, junto com o motivo de cada recusa.
 
     // ============ v5.2: ESTADO DO DESTINO, ANTES DO ADCREATIVE ============
     // is_dynamic_creative nao e campo do pedido: e estado do conjunto na Graph. Por isso nao cabe
@@ -2732,12 +2615,6 @@ export async function montarCriacao(
           erro: "destino_url_ausente_sem_molde",
           detalhe:
             "Peca nova sem molde nao tem URL para herdar. Informe destino_url no pedido (LP, Page/IG ou wa.me no CTWA) ou emita com destino_do_anuncio resolvido.",
-        };
-      }
-      if (!legendaNova) {
-        return {
-          erro: "legenda_obrigatoria_peca_nova",
-          detalhe: "Peca nova (com ou sem molde) exige legenda no payload — nao ha texto a herdar de lugar nenhum.",
         };
       }
 
@@ -3123,12 +3000,6 @@ export async function montarCriacao(
         return {
           erro: "destino_url_ausente_carrossel",
           detalhe: "Carrossel exige link de destino (pedido ou molde com link_data).",
-        };
-      }
-      if (!legendaNova) {
-        return {
-          erro: "legenda_obrigatoria_peca_nova",
-          detalhe: "Carrossel exige legenda no payload.",
         };
       }
       const ctaTipoCarr =

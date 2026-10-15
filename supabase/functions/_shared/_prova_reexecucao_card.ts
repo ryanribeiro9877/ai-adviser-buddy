@@ -103,7 +103,10 @@ if (carrossel.ok) {
   assert(r.ok, `card de carrossel reexecuta: ${JSON.stringify(r)}`);
 }
 
-// Acoes sem montagem compartilhada passam direto.
-assert(conferirReexecucaoDoCard("criar_campanha", {}, {}).ok, "acao fora da prova nao e barrada aqui");
+// Acoes de criacao com leitura ao vivo passam pelas precondicoes do payload.
+const campanhaVazia = conferirReexecucaoDoCard("criar_campanha", {}, null);
+assert(!campanhaVazia.ok && campanhaVazia.erro === "payload sem nome_novo (nome livre obrigatorio)", "campanha sem nome nao vira card");
+// Acao que nao e de criacao passa direto.
+assert(conferirReexecucaoDoCard("pausar_conjunto", {}, null).ok, "acao fora da prova nao e barrada aqui");
 
 console.log("OK reexecucao_card");
