@@ -167,4 +167,45 @@ const idDoAnuncio = compararEnviadoComGravado({
 });
 assert(campo(idDoAnuncio, "creative_id")?.veredito === "divergente", "id do anuncio nao substitui creative_id na raiz");
 
+// 15/10/2026, card 66b6c22b (CONJ.4 MELHORES_CRIATIVOS): 122 bairros enviados so com key, os
+// 122 gravados com nome/regiao/pais. A releitura marcou divergente e o card fechou como "nao e
+// execucao limpa" com o conjunto certo na Meta.
+const bairros = compararEnviadoComGravado({
+  enviado: {
+    targeting: JSON.stringify({
+      geo_locations: { neighborhoods: [{ key: "242652" }, { key: "262694", name: "Paripe" }] },
+    }),
+  },
+  gravado: {
+    targeting: {
+      geo_locations: {
+        neighborhoods: [
+          { key: "262694", name: "Paripe", region: "Bahia", country: "BR", region_id: "442" },
+          { key: "242652", name: "Areia Branca", region: "Bahia", country: "BR", region_id: "442" },
+        ],
+      },
+    },
+  },
+});
+assert(campo(bairros, "neighborhoods")?.veredito === "igual", `bairro enriquecido pela Meta devia ser igual, veio ${campo(bairros, "neighborhoods")?.veredito}`);
+assert(carimboDaReleitura(bairros, true) === "conferido", "bairro enriquecido nao alarma");
+
+const bairroFaltando = compararEnviadoComGravado({
+  enviado: { targeting: { geo_locations: { neighborhoods: [{ key: "242652" }, { key: "262694" }] } } },
+  gravado: { targeting: { geo_locations: { neighborhoods: [{ key: "242652", name: "Areia Branca", region: "Bahia" }] } } },
+});
+assert(campo(bairroFaltando, "neighborhoods")?.veredito === "divergente", "bairro que sumiu continua divergente");
+
+const raioTrocado = compararEnviadoComGravado({
+  enviado: { targeting: { geo_locations: { cities: [{ key: "267730", radius: 10, distance_unit: "kilometer" }] } } },
+  gravado: { targeting: { geo_locations: { cities: [{ key: "267730", name: "Salvador", region: "Bahia", radius: 25, distance_unit: "kilometer" }] } } },
+});
+assert(campo(raioTrocado, "cities")?.veredito === "divergente", "raio de cidade diferente continua divergente");
+
+const nomeDiferente = compararEnviadoComGravado({
+  enviado: { targeting: { geo_locations: { cities: [{ key: "267730", name: "Salvador" }] } } },
+  gravado: { targeting: { geo_locations: { cities: [{ key: "267730", name: "Salvador, Bahia", region: "Bahia", country: "BR" }] } } },
+});
+assert(campo(nomeDiferente, "cities")?.veredito === "igual", "rotulo de cidade e descritivo: a key decide");
+
 console.log("OK releitura_pos_escrita");

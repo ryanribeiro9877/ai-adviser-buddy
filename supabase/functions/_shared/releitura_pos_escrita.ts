@@ -52,11 +52,30 @@ function numeroDe(v: unknown): number | null {
   return null;
 }
 
+// Item de geo da Meta e identificado pela key. Na leitura a Meta devolve o item enriquecido
+// (nome, regiao, pais); isso e rotulo, nao alvo. Raio e unidade continuam na comparacao.
+// Medido 15/10/2026: 122 bairros enviados so com key voltaram com rotulo e o card fechou
+// como "gravado diferente" com o conjunto certo.
+const ROTULOS_DE_GEO = new Set([
+  "name",
+  "region",
+  "region_id",
+  "country",
+  "country_code",
+  "country_name",
+  "primary_city",
+  "primary_city_id",
+  "supports_region",
+  "supports_city",
+  "type",
+]);
+
 function assinatura(item: unknown): string {
   if (item && typeof item === "object" && !Array.isArray(item)) {
     const o = item as Record<string, unknown>;
     if (o.id != null && String(o.id).trim()) return `id:${String(o.id)}`;
-    const chaves = Object.keys(o).sort();
+    const ehGeo = typeof o.key === "string" || typeof o.key === "number";
+    const chaves = Object.keys(o).filter((k) => !(ehGeo && ROTULOS_DE_GEO.has(k))).sort();
     return JSON.stringify(chaves.map((k) => [k, assinatura(o[k])]));
   }
   if (Array.isArray(item)) return JSON.stringify([...item].map(assinatura).sort());

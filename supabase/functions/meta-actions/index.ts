@@ -1,4 +1,8 @@
-// supabase/functions/meta-actions/index.ts (v5.70)
+// supabase/functions/meta-actions/index.ts (v5.71)
+// v5.71 (15/10/2026) - RELEITURA DE GEO PELA KEY. CONJ.4 MELHORES_CRIATIVOS nasceu certo
+//   (122 bairros pedidos = 122 gravados), mas a releitura comparou o item inteiro: enviado
+//   {key}, gravado {key, name, region, country, region_id}. O card fechou "gravado diferente".
+//   Item de geo com key ignora rotulo (nome/regiao/pais); raio e unidade seguem comparados.
 // v5.70 (15/10/2026) - RECUSAS DO PAYLOAD COM DONO UNICO. criar_campanha,
 //   criar_conjunto_a_partir_de, escalar_duplicar e criar_anuncio_a_partir_de
 //   passam a julgar o que sai so do payload em _shared/precondicoes_criacao.ts
