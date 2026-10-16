@@ -121,6 +121,62 @@ describe("Relatórios", () => {
     expect(await screen.findByText(/Nenhuma agenda nesta empresa/i)).toBeInTheDocument();
   });
 
+  it("agenda fixa mostra a campanha que lê e avisa quando ela está pausada", async () => {
+    // 16/10/2026: "1 campanha(s)" escondia que a agenda Ocular LP lia a campanha pausada,
+    // e não a _V2 que estava no ar.
+    const agenda = {
+      id: "a1",
+      nome: "Relatório diário Ocular LP",
+      ativo: true,
+      frequencia: "diaria",
+      hora_local: "07:45:00",
+      dia_semana: null,
+      intervalo_horas: null,
+      recorte_campanhas: "ids_fixos",
+      campaign_ids: ["120250379199290182"],
+      janela_analise: "ontem",
+      secoes: ["resumo_executivo"],
+      proxima_execucao_em: null,
+      ultima_execucao_em: null,
+    };
+    fromMock.mockImplementation((tabela: string) => {
+      if (tabela === "relatorio_agendamentos") return encadear([agenda]);
+      return encadear([]);
+    });
+    rpcMock.mockResolvedValue({
+      data: [
+        {
+          external_id: "120250379199290182",
+          nome: "COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10",
+          status: "PAUSED",
+          objetivo: null,
+          tipo: null,
+          gasto: 0,
+          last_synced_at: null,
+        },
+        {
+          external_id: "120250509426200182",
+          nome: "COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10_V2",
+          status: "ACTIVE",
+          objetivo: null,
+          tipo: null,
+          gasto: 0,
+          last_synced_at: null,
+        },
+      ],
+      error: null,
+    });
+    montar();
+    await userEvent.click(await screen.findByRole("tab", { name: "Agendamentos" }));
+    expect(
+      await screen.findByText("COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Pausada/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/também lê COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10_V2/),
+    ).toBeInTheDocument();
+  });
+
   it("mostra falha de geração em vez de silêncio", async () => {
     montar();
     expect(await screen.findByText("timeout na síntese")).toBeInTheDocument();

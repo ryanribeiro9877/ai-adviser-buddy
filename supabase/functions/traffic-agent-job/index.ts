@@ -303,6 +303,7 @@ import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { emitirPlanoDeCusto, rodarPasseCorrecaoCusto } from "../_shared/correcao_custo_passe.ts";
 import {
   addDaysYmd,
+  avisoContinuacaoRecorte,
   especialistasPorSecoes,
   extrairJsonRelatorio,
   filtrarCampanhasAtivasDoRecorte,
@@ -323,6 +324,7 @@ import {
   recortarAlertasDoRecorte,
   recortarOverviewDoRecorte,
   removerSecaoDoMarkdownRelatorio,
+  seguirContinuacoesDoRecorte,
   titulosDasSecoes,
   type BaseResultadoDiaADia,
   type CampanhaAoVivoBruta,
@@ -5843,6 +5845,7 @@ async function resolverCampanhasDoRelatorio(row: {
   fonte: "ao_vivo" | "espelho";
   cobertura: string;
   campanhas: CampanhaRelatorio[];
+  avisoMd: string;
 }> {
   const { data: espelhoRows } = await supa
     .from("campaigns")
@@ -5865,13 +5868,21 @@ async function resolverCampanhasDoRelatorio(row: {
   const fonte = vivo.erro && !vivo.itens.length ? "espelho" : merge.fonte;
   let escolhidas = merge.campanhas;
   let cascas = 0;
+  let fixas = 0;
+  let aviso = { markdown: "", cobertura: "" };
   if (row.recorte_campanhas === "todas_ativas") {
     const recorte = filtrarCampanhasAtivasDoRecorte(escolhidas);
     escolhidas = recorte.escolhidas;
     cascas = recorte.cascas;
   } else {
     const pedidas = new Set((row.campaign_ids ?? []).map((x) => String(x)));
-    escolhidas = escolhidas.filter((c) => pedidas.has(c.external_id));
+    const lidas = escolhidas.filter((c) => pedidas.has(c.external_id));
+    fixas = lidas.length;
+    // Fixa que saiu do ar puxa a ativa de mesmo nome e avisa (16/10/2026: Ocular LP leu a
+    // original pausada e calou a _V2 que estava no ar).
+    const seguidas = seguirContinuacoesDoRecorte(lidas, merge.campanhas);
+    escolhidas = seguidas.campanhas;
+    aviso = avisoContinuacaoRecorte(seguidas);
   }
   const cobertura = [
     vivo.erro && fonte === "espelho"
@@ -5885,14 +5896,16 @@ async function resolverCampanhasDoRelatorio(row: {
           ? `, sem ${cascas} casca(s) padrão da Meta (Traffic/Sales/MM_LITE) que o Pipeboard ainda lista como ativas.`
           : "."
       }`
-      : `Recorte: ${escolhidas.length} campanha(s) fixa(s).`,
-  ].join(" ");
+      : `Recorte: ${fixas} campanha(s) fixa(s).`,
+    aviso.cobertura,
+  ].filter(Boolean).join(" ");
   return {
     ids: escolhidas.map((c) => c.external_id),
     nomes: escolhidas.map((c) => c.nome),
     fonte,
     cobertura,
     campanhas: escolhidas,
+    avisoMd: aviso.markdown,
   };
 }
 
@@ -6676,6 +6689,8 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
     if (temDiaADia) {
       corpo = removerSecaoDoMarkdownRelatorio({ md: corpo, titulo: "Quebra por campanha" });
     }
+    // Depois das injeções: recorte fixo fora do ar abre o relatório, não some na cobertura.
+    if (resolvidas.avisoMd) corpo = `${resolvidas.avisoMd}\n\n${corpo}`;
     await supa.from("relatorio_gerados").update({
       status: "done",
       fonte_campanhas: resolvidas.fonte,

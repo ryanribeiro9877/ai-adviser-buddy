@@ -324,7 +324,108 @@ export function rotuloStatusCampanha(status: string): string {
   if (k === "active" || k === "ativa") return "Ativa";
   if (k === "paused" || k === "pausada" || k === "campaign_paused") return "Pausada";
   if (k === "archived" || k === "arquivada") return "Arquivada";
+  if (k === "deleted" || k === "excluida" || k === "excluída") return "Excluída";
   return status || "—";
+}
+
+/**
+ * Continuação de campanha fixa (16/10/2026).
+ *
+ * POR QUE: a agenda "Ocular LP" fixava o ID da COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10. O time
+ * duplicou para a _V2 e pausou a original; o relatório de 15/10 leu só a pausada e a V2
+ * (R$ 114,67 e 1 formulário no dia) ficou de fora sem uma linha de aviso. Aqui a campanha fixa
+ * que não está ativa puxa a ativa de mesmo nome-base (_V2, " - Cópia", "(2)" ou nome idêntico),
+ * e a que não achar continuação vira aviso. Mês, leva e data no nome NÃO saem: SET26 e
+ * SET26- SETEMBRO seguem objetos diferentes.
+ */
+export function nomeBaseCampanha(nome: string): string {
+  const sufixo =
+    /(?:[\s_–-]+(?:v\d{1,2}|c[oó]pia(?:\s*\d{1,2})?|copy(?:\s*\d{1,2})?)|\s*\(\d{1,2}\))$/i;
+  let n = String(nome ?? "")
+    .trim()
+    .toLowerCase();
+  for (let i = 0; i < 4 && sufixo.test(n); i++) n = n.replace(sufixo, "").trim();
+  return n;
+}
+
+type RefCampanhaRecorte = { external_id: string; nome: string; status: string };
+
+export type ContinuacaoRecorte = {
+  origem: RefCampanhaRecorte;
+  seguidas: { external_id: string; nome: string }[];
+};
+
+export function seguirContinuacoesDoRecorte(
+  fixas: CampanhaRelatorio[],
+  todas: CampanhaRelatorio[],
+): {
+  campanhas: CampanhaRelatorio[];
+  continuacoes: ContinuacaoRecorte[];
+  paradas: RefCampanhaRecorte[];
+} {
+  const lista = Array.isArray(fixas) ? fixas : [];
+  const universo = Array.isArray(todas) ? todas : [];
+  const usados = new Set(lista.map((c) => c.external_id));
+  const ativaDeMesmaBase = (c: CampanhaRelatorio, base: string) =>
+    campanhaEstaAtiva(String(c?.status ?? "")) &&
+    !campanhaEhCascaMeta(String(c?.nome ?? "")) &&
+    nomeBaseCampanha(String(c?.nome ?? "")) === base;
+  const campanhas: CampanhaRelatorio[] = [];
+  const continuacoes: ContinuacaoRecorte[] = [];
+  const paradas: RefCampanhaRecorte[] = [];
+  for (const c of lista) {
+    campanhas.push(c);
+    if (campanhaEstaAtiva(String(c?.status ?? ""))) continue;
+    const base = nomeBaseCampanha(c.nome);
+    // A ativa de mesmo nome já fixada junto: o gestor escolheu as duas, nada a avisar.
+    if (base && lista.some((o) => o.external_id !== c.external_id && ativaDeMesmaBase(o, base)))
+      continue;
+    const origem = { external_id: c.external_id, nome: c.nome, status: c.status };
+    const seguidas = base
+      ? universo.filter((v) => !usados.has(v.external_id) && ativaDeMesmaBase(v, base))
+      : [];
+    if (!seguidas.length) {
+      paradas.push(origem);
+      continue;
+    }
+    for (const v of seguidas) {
+      usados.add(v.external_id);
+      campanhas.push(v);
+    }
+    continuacoes.push({
+      origem,
+      seguidas: seguidas.map((v) => ({ external_id: v.external_id, nome: v.nome })),
+    });
+  }
+  return { campanhas, continuacoes, paradas };
+}
+
+/** Abre o relatório (markdown) e entra na cobertura quando o recorte fixo não está mais no ar. */
+export function avisoContinuacaoRecorte(r: {
+  continuacoes: ContinuacaoRecorte[];
+  paradas: RefCampanhaRecorte[];
+}): { markdown: string; cobertura: string } {
+  const statusAgora = (s: string) => rotuloStatusCampanha(s).toLowerCase();
+  const md: string[] = [];
+  const cob: string[] = [];
+  for (const c of r?.continuacoes ?? []) {
+    const novas = c.seguidas.map((s) => `${s.nome} (${s.external_id})`).join(", ");
+    md.push(
+      `> **Recorte fixo desatualizado.** A agenda aponta para ${c.origem.nome} (${c.origem.external_id}), que está ${statusAgora(c.origem.status)} agora na Meta. A campanha ativa de mesmo nome ${novas} entrou neste relatório para não ficar de fora. Para fixar a troca, edite a agenda e marque a campanha nova.`,
+    );
+    cob.push(
+      `Recorte fixo seguiu a continuação: ${c.origem.nome} (${c.origem.external_id}, ${statusAgora(c.origem.status)}) → ${novas}.`,
+    );
+  }
+  for (const p of r?.paradas ?? []) {
+    md.push(
+      `> **Campanha fixa fora do ar.** ${p.nome} (${p.external_id}) está ${statusAgora(p.status)} agora na Meta e não há nenhuma campanha ativa de mesmo nome nesta empresa. Os números abaixo são só dela; se ela foi trocada por outra, edite a agenda.`,
+    );
+    cob.push(
+      `Campanha fixa ${p.nome} (${p.external_id}) está ${statusAgora(p.status)} agora; nenhuma ativa de mesmo nome.`,
+    );
+  }
+  return { markdown: md.join("\n>\n"), cobertura: cob.join(" ") };
 }
 
 function idDaCampanhaViva(v: CampanhaAoVivoBruta): string {
@@ -970,11 +1071,12 @@ export function rankingCampanhasRelatorio(fonte: unknown): {
   if (!linhas.length) {
     return { linhas, total: 0, markdown: "Nenhuma campanha no recorte desta janela." };
   }
-  const header = "| # | Campanha | Status | Gasto | Impressões | Cliques no link | Formulários | Conversas |";
+  const header =
+    "| # | Campanha | Status agora | Gasto | Impressões | Cliques no link | Formulários | Conversas |";
   const sep = "|---|---|---|---|---|---|---|---|";
   const rows = linhas.map(
     (l) =>
-      `| ${l.posicao} | ${l.nome} | ${l.status || "—"} | ${fmtReaisRelatorio(l.gasto)} | ${l.impressoes} | ${l.cliques_link} | ${l.formularios} | ${l.conversas} |`,
+      `| ${l.posicao} | ${l.nome} | ${rotuloStatusCampanha(l.status)} | ${fmtReaisRelatorio(l.gasto)} | ${l.impressoes} | ${l.cliques_link} | ${l.formularios} | ${l.conversas} |`,
   );
   return {
     linhas,

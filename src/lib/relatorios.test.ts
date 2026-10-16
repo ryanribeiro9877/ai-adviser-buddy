@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  avisoContinuacaoRecorte,
   campanhaEstaAtiva,
   campanhaEhCascaMeta,
+  nomeBaseCampanha,
+  seguirContinuacoesDoRecorte,
   filtrarCampanhasAtivasDoRecorte,
   CHAVES_SECAO_RELATORIO,
   especialistasPorSecoes,
@@ -218,6 +221,13 @@ describe("recorte todas_ativas ignora cascas Meta", () => {
     expect(r.total).toBe(2);
     expect(r.linhas[0].nome).toBe("Post B");
     expect(r.markdown).toContain("Todas as 2 campanha(s)");
+    // O status é o de quando o relatório rodou, não o da janela: a coluna diz isso.
+    expect(r.markdown).toContain("| Status agora |");
+    expect(r.markdown).toContain("| Post B | Ativa |");
+    expect(
+      rankingCampanhasRelatorio([{ campaign_id: "3", nome: "Parada", status: "PAUSED", gasto: 1 }])
+        .markdown,
+    ).toContain("| Parada | Pausada |");
     const md = injetarRankingCampanhasNoMarkdown({
       md: "## Resumo executivo\nok\n\n## Quebra por campanha\nso quatro\n\n## Fadiga\nx",
       tabela: r.markdown,
@@ -336,6 +346,117 @@ describe("mergeCampanhasRelatorio", () => {
     const soEspelho = r.campanhas.find((c) => c.external_id === "222");
     expect(soEspelho?.fonte).toBe("espelho");
     expect(soEspelho?.nome).toBe("Só espelho");
+  });
+});
+
+// 16/10/2026: a agenda "Ocular LP" fixava a COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10. O time
+// duplicou para a _V2 e pausou a original; o relatório de 15/10 leu só a pausada e a V2
+// (R$ 114,67 e 1 formulário no dia) sumiu sem aviso. Campanha fixa parada não pode calar.
+describe("seguirContinuacoesDoRecorte", () => {
+  const camp = (over: Partial<CampanhaRelatorio>): CampanhaRelatorio => ({
+    external_id: "x",
+    nome: "x",
+    status: "ACTIVE",
+    objective: "OUTCOME_LEADS",
+    tipo: "leadgen",
+    gasto: 0,
+    last_synced_at: null,
+    fonte: "ao_vivo",
+    ...over,
+  });
+  const original = camp({
+    external_id: "120250379199290182",
+    nome: "COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10",
+    status: "PAUSED",
+  });
+  const v2 = camp({
+    external_id: "120250509426200182",
+    nome: "COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10_V2",
+  });
+  const vistta = camp({
+    external_id: "120250378044230182",
+    nome: "COHAPM_VISTTA_TRAFEGO_LP_OUT26",
+  });
+
+  it("nome-base tira _V2, cópia e (2), e não come mês nem leva", () => {
+    expect(nomeBaseCampanha("COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10_V2")).toBe(
+      nomeBaseCampanha("COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10"),
+    );
+    expect(nomeBaseCampanha("Campanha X - Cópia")).toBe("campanha x");
+    expect(nomeBaseCampanha("Campanha X – Copy 2")).toBe("campanha x");
+    expect(nomeBaseCampanha("Campanha X (2)")).toBe("campanha x");
+    expect(nomeBaseCampanha("COHAPM_JURIDICO_CONV_LEVA01")).toBe("cohapm_juridico_conv_leva01");
+    expect(nomeBaseCampanha("COHAPM_VISTTA_CONV_WA_SET26- SETEMBRO")).not.toBe(
+      nomeBaseCampanha("COHAPM_VISTTA_CONV_WA_SET26"),
+    );
+  });
+
+  it("fixa pausada puxa a ativa de mesmo nome-base, logo depois dela", () => {
+    const r = seguirContinuacoesDoRecorte([original], [original, vistta, v2]);
+    expect(r.campanhas.map((c) => c.external_id)).toEqual([original.external_id, v2.external_id]);
+    expect(r.continuacoes).toEqual([
+      {
+        origem: { external_id: original.external_id, nome: original.nome, status: "PAUSED" },
+        seguidas: [{ external_id: v2.external_id, nome: v2.nome }],
+      },
+    ]);
+    expect(r.paradas).toEqual([]);
+  });
+
+  it("mesmo nome exato também é continuação (Jurídico tem duas iguais)", () => {
+    const parada = camp({
+      external_id: "120250394928030182",
+      nome: "COHAPM_JURIDICO_CONV_WA_2026-10",
+      status: "PAUSED",
+    });
+    const ativa = camp({
+      external_id: "120250394932500182",
+      nome: "COHAPM_JURIDICO_CONV_WA_2026-10",
+    });
+    const r = seguirContinuacoesDoRecorte([parada], [ativa, parada]);
+    expect(r.campanhas.map((c) => c.external_id)).toEqual([parada.external_id, ativa.external_id]);
+  });
+
+  it("fixa ativa fica como está; casca e nome parecido não entram", () => {
+    expect(seguirContinuacoesDoRecorte([v2], [original, v2]).campanhas).toEqual([v2]);
+    const set = camp({ external_id: "1", nome: "COHAPM_VISTTA_CONV_WA_SET26", status: "PAUSED" });
+    const r = seguirContinuacoesDoRecorte(
+      [set],
+      [
+        set,
+        camp({ external_id: "2", nome: "COHAPM_VISTTA_CONV_WA_SET26- SETEMBRO" }),
+        camp({ external_id: "3", nome: "Traffic Campaign" }),
+      ],
+    );
+    expect(r.campanhas.map((c) => c.external_id)).toEqual(["1"]);
+    expect(r.paradas).toEqual([{ external_id: "1", nome: set.nome, status: "PAUSED" }]);
+  });
+
+  it("se a ativa já está fixa junto, não duplica nem avisa", () => {
+    const r = seguirContinuacoesDoRecorte([original, v2], [original, v2]);
+    expect(r.campanhas.map((c) => c.external_id)).toEqual([original.external_id, v2.external_id]);
+    expect(r.continuacoes).toEqual([]);
+    expect(r.paradas).toEqual([]);
+  });
+
+  it("aviso abre o relatório com as duas campanhas e o status de agora", () => {
+    const comV2 = avisoContinuacaoRecorte(seguirContinuacoesDoRecorte([original], [original, v2]));
+    expect(comV2.markdown).toContain(original.nome);
+    expect(comV2.markdown).toContain(v2.nome);
+    expect(comV2.markdown).toContain("pausada agora na Meta");
+    expect(comV2.markdown).toContain("edite a agenda");
+    expect(comV2.cobertura).toContain(v2.external_id);
+
+    const sem = avisoContinuacaoRecorte(
+      seguirContinuacoesDoRecorte([original], [original, vistta]),
+    );
+    expect(sem.markdown).toContain("nenhuma campanha ativa de mesmo nome");
+    expect(sem.markdown).not.toContain(vistta.nome);
+
+    expect(avisoContinuacaoRecorte(seguirContinuacoesDoRecorte([v2], [v2]))).toEqual({
+      markdown: "",
+      cobertura: "",
+    });
   });
 });
 

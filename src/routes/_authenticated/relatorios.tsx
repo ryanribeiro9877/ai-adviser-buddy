@@ -31,8 +31,11 @@ import {
   type RelatorioGerado,
 } from "@/components/relatorios/detalhe-relatorio";
 import {
+  campanhaEstaAtiva,
   mergeCampanhasRelatorio,
   flattenCampanhasPipeboard,
+  rotuloStatusCampanha,
+  seguirContinuacoesDoRecorte,
   type CampanhaRelatorio,
   type FrequenciaRelatorio,
   type JanelaAnalise,
@@ -120,6 +123,52 @@ function quando(iso: string | null) {
   return new Date(iso).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
 }
 
+// 16/10/2026: o card dizia só "1 campanha(s)" e escondia que a agenda Ocular LP lia a original
+// pausada, não a _V2 no ar. Mesma regra de continuação que o job aplica na hora de rodar.
+function CampanhasDaAgenda({ ids, campanhas }: { ids: string[]; campanhas: CampanhaRelatorio[] }) {
+  const porId = new Map(campanhas.map((c) => [c.external_id, c]));
+  const fixas = ids.flatMap((id) => (porId.has(id) ? [porId.get(id)!] : []));
+  const continuacaoDe = new Map(
+    seguirContinuacoesDoRecorte(fixas, campanhas).continuacoes.map((c) => [
+      c.origem.external_id,
+      c.seguidas,
+    ]),
+  );
+  return (
+    <ul className="space-y-0.5 text-xs">
+      {ids.map((id) => {
+        const c = porId.get(id);
+        if (!c) {
+          return (
+            <li key={id} className="text-muted-foreground">
+              {id} · não está na lista de campanhas desta empresa
+            </li>
+          );
+        }
+        const ativa = campanhaEstaAtiva(c.status);
+        const novas = continuacaoDe.get(id) ?? [];
+        const alerta = "text-amber-600 dark:text-amber-400";
+        return (
+          <li key={id}>
+            <span className="text-foreground">{c.nome}</span>
+            <span className={ativa ? "text-muted-foreground" : alerta}>
+              {" "}
+              · {rotuloStatusCampanha(c.status)}
+            </span>
+            {!ativa && (
+              <span className={`block ${alerta}`}>
+                {novas.length
+                  ? `O relatório também lê ${novas.map((n) => n.nome).join(", ")} (ativa, mesmo nome). Edite a agenda para fixar a troca.`
+                  : "Nenhuma campanha ativa de mesmo nome. Se ela foi trocada por outra, edite a agenda."}
+              </span>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 function Relatorios() {
   const { selectedCompany, selectedCompanyId, isAdmin, user } = useApp();
   const qc = useQueryClient();
@@ -147,20 +196,34 @@ function Relatorios() {
   const nomesCampanhaQ = useQuery({
     queryKey: ["relatorio-nomes-campanha", companyId],
     enabled: !!companyId,
-    queryFn: async (): Promise<Map<string, string>> => {
+    queryFn: async (): Promise<CampanhaRelatorio[]> => {
       const { data, error } = await supabase.rpc("listar_campanhas_para_relatorio", {
         p_company_id: companyId!,
       });
       if (error) throw error;
-      const mapa = new Map<string, string>();
-      for (const c of data ?? []) {
+      return (data ?? []).flatMap((c) => {
         const id = String(c.external_id ?? "").trim();
         const nome = String(c.nome ?? "").trim();
-        if (id && nome) mapa.set(id, nome);
-      }
-      return mapa;
+        if (!id || !nome) return [];
+        return [
+          {
+            external_id: id,
+            nome,
+            status: String(c.status ?? ""),
+            objective: c.objetivo,
+            tipo: c.tipo,
+            gasto: Number(c.gasto ?? 0),
+            last_synced_at: c.last_synced_at,
+            fonte: "espelho" as const,
+          },
+        ];
+      });
     },
   });
+  const nomesPorId = useMemo(
+    () => new Map((nomesCampanhaQ.data ?? []).map((c) => [c.external_id, c.nome])),
+    [nomesCampanhaQ.data],
+  );
 
   const geradosQ = useQuery({
     queryKey: ["relatorio-gerados", companyId],
@@ -386,6 +449,9 @@ function Relatorios() {
                 <p className="text-sm text-muted-foreground">
                   {rotuloFreq(a)} · {a.recorte_campanhas === "todas_ativas" ? "todas as ativas" : `${a.campaign_ids.length} campanha(s)`} · {a.secoes.length} seções
                 </p>
+                {a.recorte_campanhas !== "todas_ativas" && (
+                  <CampanhasDaAgenda ids={a.campaign_ids} campanhas={nomesCampanhaQ.data ?? []} />
+                )}
                 <p className="text-xs text-muted-foreground">
                   Próxima: {quando(a.proxima_execucao_em)} · Última: {quando(a.ultima_execucao_em)}
                 </p>
@@ -460,7 +526,7 @@ function Relatorios() {
               </Card>
             )}
             {(geradosQ.data ?? []).map((r) => {
-              const nomes = nomesDoRelatorio(r, nomesCampanhaQ.data);
+              const nomes = nomesDoRelatorio(r, nomesPorId);
               return (
                 <button
                   key={r.id}
@@ -489,7 +555,7 @@ function Relatorios() {
               <DetalheRelatorio
                 key={detalhe.id}
                 relatorio={detalhe}
-                nomesCampanha={nomesDoRelatorio(detalhe, nomesCampanhaQ.data)}
+                nomesCampanha={nomesDoRelatorio(detalhe, nomesPorId)}
               />
             ) : (
               <Card className="p-8 text-center text-sm text-muted-foreground">

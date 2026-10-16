@@ -193,6 +193,31 @@ const OUTROS: unknown[] = [
   { "1": 20.44, "2": 0 },
   [{ campaign_id: "1", nome: "Post A", gasto: 17, impressoes: 900, cliques_link: 50, formularios: 0, conversas: 0 }],
   [{ id: "111", name: "Ao vivo", effective_status: "ACTIVE" }],
+  // Recorte fixo fora do ar (avisoContinuacaoRecorte): a original pausada e a _V2 no ar.
+  {
+    continuacoes: [
+      {
+        origem: {
+          external_id: "120250379199290182",
+          nome: "COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10",
+          status: "PAUSED",
+        },
+        seguidas: [
+          {
+            external_id: "120250509426200182",
+            nome: "COHAPM_OCULAR_LEADS_SITE_CAMACARI_2026-10_V2",
+          },
+        ],
+      },
+    ],
+    paradas: [
+      {
+        external_id: "120250312323360182",
+        nome: "COHAPM_LAFELICITA_ENGAJ_TOFU_2026-10",
+        status: "PAUSED",
+      },
+    ],
+  },
   "## resumo_executivo\ntexto",
   "## custo_vs_teto",
   [{ date: "2026-09-01", spend: 100 }, { date: "2026-09-02", spend: 0 }, { date: "2026-09-03", spend: 50 }],
