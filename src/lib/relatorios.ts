@@ -1516,9 +1516,9 @@ export function injetarDiaADiaNoMarkdown(args: unknown): string {
 
 /**
  * Tira uma secao inteira do markdown: o titulo e tudo ate o proximo titulo do mesmo nivel ou
- * acima (subtitulos dela saem junto). Usada para a Quebra por campanha quando o dia a dia ja
- * traz a campanha, cada conjunto e cada criativo com o total da janela — a quebra so repetia
- * esses numeros.
+ * acima (subtitulos dela saem junto). Usada para a Quebra por campanha e o Ranking de
+ * conjuntos quando o dia a dia ja traz a campanha, cada conjunto e cada criativo com o total da
+ * janela — as duas tabelas so repetiam esses numeros.
  */
 export function removerSecaoDoMarkdownRelatorio(args: unknown): string {
   if (args == null || typeof args !== "object" || Array.isArray(args)) {

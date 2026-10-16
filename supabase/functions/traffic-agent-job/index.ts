@@ -6661,9 +6661,10 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
     const querQuebraCampanha = secoes.includes("por_campanha")
       || secoes.includes("resumo_executivo")
       || secoes.includes("funil_midia");
-    // Com o dia a dia lido, a Quebra por campanha sai (16/10/2026): o dia a dia ja traz a
-    // campanha, cada conjunto e cada criativo com o total da janela, e a quebra so repetia esses
-    // numeros. Ela volta como reserva quando a serie do dia a dia nao foi lida.
+    // Com o dia a dia lido, a Quebra por campanha e o Ranking de conjuntos saem (16/10/2026): o
+    // dia a dia ja traz a campanha, cada conjunto e cada criativo com o total da janela, e as
+    // duas tabelas so repetiam esses numeros. Elas voltam como reserva quando a serie do dia a
+    // dia nao foi lida.
     const temDiaADia = querDiaADia && colheita.markdownDiaADia.trim() !== "";
     let corpo = humanizarMarkdownRelatorio(extraido.corpo_md);
     if (querQuebraCampanha && !temDiaADia) {
@@ -6672,7 +6673,7 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
         tabela: colheita.markdownCampanhas,
       });
     }
-    if (querRankingConjuntos) {
+    if (querRankingConjuntos && !temDiaADia) {
       corpo = injetarRankingConjuntosNoMarkdown({
         md: corpo,
         tabela: colheita.markdownConjuntos,
@@ -6688,6 +6689,7 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
     }
     if (temDiaADia) {
       corpo = removerSecaoDoMarkdownRelatorio({ md: corpo, titulo: "Quebra por campanha" });
+      corpo = removerSecaoDoMarkdownRelatorio({ md: corpo, titulo: "Ranking de conjuntos" });
     }
     // Depois das injeções: recorte fixo fora do ar abre o relatório, não some na cobertura.
     if (resolvidas.avisoMd) corpo = `${resolvidas.avisoMd}\n\n${corpo}`;
