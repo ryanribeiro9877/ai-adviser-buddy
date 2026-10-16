@@ -11,6 +11,7 @@ import {
   filtrarConjuntosDoRecorte,
   injetarDiaADiaNoMarkdown,
   injetarRankingCampanhasNoMarkdown,
+  removerSecaoDoMarkdownRelatorio,
   injetarRankingConjuntosNoMarkdown,
   quadroDiaADiaRelatorio,
   janelaAnteriorDoPeriodo,
@@ -632,6 +633,9 @@ describe("quadroDiaADiaRelatorio", () => {
     const { markdown } = quadroDiaADiaRelatorio(entradaLp);
     expect(markdown).toMatch(/Resultado contado: formulários enviados/);
     expect(markdown).toMatch(/— = sem entrega registrada no dia/);
+    // Sem a frase de abertura que apontava para a Quebra por campanha, que saiu do relatório.
+    expect(markdown.startsWith("### COHAPM_LAFELICITA_LEADS_LP_2026-10")).toBe(true);
+    expect(markdown).not.toContain("Quebra por campanha");
   });
 
   it("campanha sem nenhuma linha na janela diz isso, sem tabela de zeros", () => {
@@ -684,15 +688,19 @@ describe("quadroDiaADiaRelatorio", () => {
 describe("injetarDiaADiaNoMarkdown", () => {
   const tabela = "### Campanha X (1)\n\n| Dia | Gasto |\n|---|---|\n| 06 ter | R$ 1,00 |";
 
-  it("mantém a leitura escrita e anexa as tabelas no fim da seção", () => {
+  // 16/10/2026: a leitura corrida da IA repetia, frase a frase, os números das tabelas logo
+  // abaixo. A seção fica só com as tabelas.
+  it("troca tudo o que a IA escreveu na seção pelas tabelas", () => {
     const md = injetarDiaADiaNoMarkdown({
-      md: "## Quebra por campanha\ntab\n\n## Dia a dia por campanha, conjunto e criativo\nO melhor dia foi 12/10.\n| colada | pela IA |\n\n## Fadiga de criativo\nok",
+      md: "## Quebra por campanha\ntab\n\n## Dia a dia por campanha, conjunto e criativo\nO melhor dia foi 12/10.\n| colada | pela IA |\n### Campanha Y\nmais prosa\n\n## Fadiga de criativo\nok",
       tabela,
     });
-    expect(md).toContain("O melhor dia foi 12/10.");
+    expect(md).not.toContain("O melhor dia foi 12/10.");
     expect(md).not.toContain("| colada | pela IA |");
-    expect(md.indexOf("O melhor dia foi 12/10.")).toBeLessThan(md.indexOf("### Campanha X (1)"));
+    expect(md).not.toContain("mais prosa");
+    expect(md).toContain("## Dia a dia por campanha, conjunto e criativo\n\n### Campanha X (1)");
     expect(md.indexOf("### Campanha X (1)")).toBeLessThan(md.indexOf("## Fadiga de criativo"));
+    expect(md).toContain("## Fadiga de criativo\nok");
   });
 
   it("sem a seção, entra logo depois da Quebra por campanha", () => {
@@ -709,5 +717,25 @@ describe("injetarDiaADiaNoMarkdown", () => {
     expect(injetarDiaADiaNoMarkdown({ md: "## Resumo executivo\nx", tabela: "" })).toBe(
       "## Resumo executivo\nx",
     );
+  });
+});
+
+describe("removerSecaoDoMarkdownRelatorio", () => {
+  it("tira a Quebra por campanha inteira e deixa o dia a dia, com os subtítulos dele", () => {
+    const md = removerSecaoDoMarkdownRelatorio({
+      md: "## Funil de mídia\nf\n\n## Quebra por campanha\n\nTodas as 1 campanha(s)\n| # | Campanha |\n|---|---|\n| 1 | X |\n## Dia a dia por campanha, conjunto e criativo\n\n### X (1)\n\n#### Por conjunto\n| a |\n\n## Conjuntos e estrutura\nc",
+      titulo: "Quebra por campanha",
+    });
+    expect(md).not.toContain("Quebra por campanha");
+    expect(md).not.toContain("Todas as 1 campanha(s)");
+    expect(md).toBe(
+      "## Funil de mídia\nf\n\n## Dia a dia por campanha, conjunto e criativo\n\n### X (1)\n\n#### Por conjunto\n| a |\n\n## Conjuntos e estrutura\nc",
+    );
+  });
+
+  it("sem a seção ou sem título, devolve o texto como veio", () => {
+    const md = "## Resumo executivo\nx\n";
+    expect(removerSecaoDoMarkdownRelatorio({ md, titulo: "Quebra por campanha" })).toBe(md);
+    expect(removerSecaoDoMarkdownRelatorio({ md: "## A\nx", titulo: "" })).toBe("## A\nx");
   });
 });

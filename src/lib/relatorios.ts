@@ -1363,19 +1363,18 @@ export function quadroDiaADiaRelatorio(entrada: unknown): {
     blocos.push(partes.join("\n"));
   }
 
-  const cabeca =
-    "Métrica por anúncio e por dia da Meta, somada para conjunto e campanha; os totais batem com a Quebra por campanha.";
   return {
-    markdown: [cabeca, ...blocos].join("\n\n"),
+    markdown: blocos.join("\n\n"),
     campanhas: campanhas.length,
     com_entrega: comEntrega,
   };
 }
 
 /**
- * Coloca as tabelas do dia a dia na secao propria. A leitura que a IA escreveu na secao fica e
- * as tabelas entram no fim dela; tabela que a IA tenha colado sai (o numero autoritativo e o
- * daqui). Sem a secao, ela nasce logo depois da Quebra por campanha.
+ * Coloca as tabelas do dia a dia na secao propria, no lugar de tudo o que a IA tenha escrito
+ * nela (16/10/2026): a leitura corrida repetia, frase a frase, os numeros das tabelas de
+ * campanha, conjunto e criativo logo abaixo e so poluia o relatorio. Sem a secao, ela nasce
+ * logo depois da Quebra por campanha.
  */
 export function injetarDiaADiaNoMarkdown(args: unknown): string {
   if (args == null || typeof args !== "object" || Array.isArray(args)) {
@@ -1400,28 +1399,58 @@ export function injetarDiaADiaNoMarkdown(args: unknown): string {
   };
   const limpar = (s: string) => s.replace(/\n{3,}/g, "\n\n");
   const start = lines.findIndex((l) => /^#{1,4}[ \t]+Dia a dia\b/i.test(l));
+  const bloco = `## ${titulo}\n\n${tabela}`;
   if (start >= 0) {
     const end = fimDaSecao(start);
-    const leitura = lines.slice(start + 1, end).filter((l) => !/^\s*\|/.test(l));
-    return limpar(
-      [
-        ...lines.slice(0, start),
-        `## ${titulo}`,
-        ...leitura,
-        "",
-        tabela,
-        "",
-        ...lines.slice(end),
-      ].join("\n"),
-    );
+    return limpar([...lines.slice(0, start), bloco, "", ...lines.slice(end)].join("\n"));
   }
-  const bloco = `## ${titulo}\n\n${tabela}`;
   const q = lines.findIndex((l) => /^#{1,4}[ \t]+Quebra por campanha\b/i.test(l));
   if (q >= 0) {
     const end = fimDaSecao(q);
     return limpar([...lines.slice(0, end), "", bloco, "", ...lines.slice(end)].join("\n"));
   }
   return texto ? `${texto.replace(/\s*$/, "")}\n\n${bloco}\n` : `${bloco}\n`;
+}
+
+/**
+ * Tira uma secao inteira do markdown: o titulo e tudo ate o proximo titulo do mesmo nivel ou
+ * acima (subtitulos dela saem junto). Usada para a Quebra por campanha quando o dia a dia ja
+ * traz a campanha, cada conjunto e cada criativo com o total da janela — a quebra so repetia
+ * esses numeros.
+ */
+export function removerSecaoDoMarkdownRelatorio(args: unknown): string {
+  if (args == null || typeof args !== "object" || Array.isArray(args)) {
+    return String(args ?? "");
+  }
+  const o = args as { md?: unknown; titulo?: unknown; corpo_md?: unknown };
+  const texto = String(o.md ?? o.corpo_md ?? "");
+  const titulo = String(o.titulo ?? "").trim();
+  if (!titulo) return texto;
+  const escapar = titulo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tituloRe = new RegExp(`^(#{1,4})[ \\t]+${escapar}\\b`, "i");
+  let lines = texto.split(/\r?\n/);
+  let mexeu = false;
+  for (;;) {
+    const start = lines.findIndex((l) => tituloRe.test(l));
+    if (start < 0) break;
+    const nivel = tituloRe.exec(lines[start])![1].length;
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      const m = /^(#{1,6})[ \t]+\S/.exec(lines[i]);
+      if (m && m[1].length <= nivel) {
+        end = i;
+        break;
+      }
+    }
+    lines = [...lines.slice(0, start), ...lines.slice(end)];
+    mexeu = true;
+  }
+  return mexeu
+    ? lines
+        .join("\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim()
+    : texto;
 }
 
 export type AchadoRelatorio = {

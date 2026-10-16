@@ -322,6 +322,7 @@ import {
   rankingConjuntosRelatorio,
   recortarAlertasDoRecorte,
   recortarOverviewDoRecorte,
+  removerSecaoDoMarkdownRelatorio,
   titulosDasSecoes,
   type BaseResultadoDiaADia,
   type CampanhaAoVivoBruta,
@@ -6458,7 +6459,7 @@ LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: no
 
 NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio. Peca marcada [ok] na BASE foi lida: nao diga que nao foi coletada. Campanha se identifica pelo ID da Meta do recorte. Nome igual, prefixo compartilhado ou o mesmo mes no nome (SETEMBRO, SET26, AGOSTO) e OUTRA campanha: nao cite, nao some, nao compare.
 
-corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Dia a dia por campanha, conjunto e criativo; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista (exceto Dia a dia, que pode ser maior). Dia a dia por campanha, conjunto e criativo: NAO cole tabela — o sistema injeta as tabelas completas logo abaixo do seu texto. Escreva a leitura UM A UM, nesta ordem e separada por entidade: a campanha (como gasto, resultado e custo andaram do primeiro ao ultimo dia; melhor dia, pior dia e dias sem resultado, com o numero de cada um), depois CADA conjunto com a mesma leitura, depois, dentro de cada conjunto, os criativos que carregaram o gasto ou o resultado (dia em que aconteceu e numero). Numeros SO da peca serie_dia_a_dia da BASE; o resultado de cada celula ja esta na base da campanha declarada na legenda. "—" e sem entrega registrada no dia, nao zero. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Quebra por campanha: NAO cole a tabela — so o titulo ## Quebra por campanha; o sistema injeta as linhas da base (todas as ativas do recorte). Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
+corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Dia a dia por campanha, conjunto e criativo; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Dia a dia por campanha, conjunto e criativo: NAO escreva texto nem cole tabela — so o titulo ## Dia a dia por campanha, conjunto e criativo; o sistema injeta as tabelas da campanha, de cada conjunto e dos criativos de cada conjunto, e qualquer texto seu nessa secao e descartado. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Quebra por campanha: NAO cole a tabela — so o titulo ## Quebra por campanha; o sistema injeta as linhas da base (todas as ativas do recorte). Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
 
 Responda APENAS um JSON valido, sem cerca markdown, NESTA ORDEM de chaves:
 {"cobertura":"o que nao foi medido, em portugues","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"corpo_md":"narrativa em markdown para o gestor"}
@@ -6647,8 +6648,12 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
     const querQuebraCampanha = secoes.includes("por_campanha")
       || secoes.includes("resumo_executivo")
       || secoes.includes("funil_midia");
+    // Com o dia a dia lido, a Quebra por campanha sai (16/10/2026): o dia a dia ja traz a
+    // campanha, cada conjunto e cada criativo com o total da janela, e a quebra so repetia esses
+    // numeros. Ela volta como reserva quando a serie do dia a dia nao foi lida.
+    const temDiaADia = querDiaADia && colheita.markdownDiaADia.trim() !== "";
     let corpo = humanizarMarkdownRelatorio(extraido.corpo_md);
-    if (querQuebraCampanha) {
+    if (querQuebraCampanha && !temDiaADia) {
       corpo = injetarRankingCampanhasNoMarkdown({
         md: corpo,
         tabela: colheita.markdownCampanhas,
@@ -6665,8 +6670,11 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
     if (querDiaADia) {
       corpo = injetarDiaADiaNoMarkdown({
         md: corpo,
-        tabela: colheita.markdownDiaADia,
+        tabela: colheita.markdownDiaADia || "A série dia a dia desta janela não foi lida nesta rodada.",
       });
+    }
+    if (temDiaADia) {
+      corpo = removerSecaoDoMarkdownRelatorio({ md: corpo, titulo: "Quebra por campanha" });
     }
     await supa.from("relatorio_gerados").update({
       status: "done",
