@@ -505,19 +505,28 @@ const DOW: Record<string, number> = {
   Sat: 6,
 };
 
+/** Um formatter só, criado na primeira chamada: um novo a cada chamada era ~75% do custo de instanteBrasilia. */
+let fmtBrasilia: Intl.DateTimeFormat | null = null;
+
+function formatterBrasilia(): Intl.DateTimeFormat {
+  if (!fmtBrasilia) {
+    fmtBrasilia = new Intl.DateTimeFormat("en-US", {
+      timeZone: TZ_BRASIL,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      weekday: "short",
+    });
+  }
+  return fmtBrasilia;
+}
+
 export function partesEmBrasilia(d: Date): PartesBrasilia {
-  const fmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: TZ_BRASIL,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-    weekday: "short",
-  });
   const bag: Record<string, string> = {};
-  for (const p of fmt.formatToParts(d)) {
+  for (const p of formatterBrasilia().formatToParts(d)) {
     if (p.type !== "literal") bag[p.type] = p.value;
   }
   return {
