@@ -786,6 +786,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { bearerDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { sanitizarClaimDeCardSemLastro, situacaoDoCard } from "../_shared/aprovacoes.ts";
+import { cardRepetidoDoAnuncio, ehRecusaDeCardRepetido, recusaDeCardRepetido } from "../_shared/card_repetido.ts";
 import { podeLerAposPrazoDeColeta } from "../_shared/leitura_do_ato.ts";
 import { prosaFalhaDoModelo, recusaPorSaldo } from "../_shared/falha_do_modelo.ts";
 import {
@@ -1056,7 +1057,7 @@ const REASONING_LOOP = { max_tokens: 6000 };
 // gastando os tokens, o que anularia o conserto. 'enabled: false' e o que desliga.
 // Anthropic exige budget >= 1024 quando o raciocinio esta ligado, por isso o loop usa 2000.
 const REASONING_SINTESE = { enabled: false };
-const VERSAO = "chat-v29.25";
+const VERSAO = "chat-v29.26";
 // Continuacao automatica do turno sincrono (espelho do checkpoint do job).
 const MAX_TURN_SEGMENTS = 4;
 const MAX_TURN_SEGMENTS_LEITURA = 6;
@@ -4923,6 +4924,63 @@ async function t_propose_criacao(
       utmCampaign = String(resolvidoAd.partes?.rotulo || resolvidoAd.partes?.periodo || nomeNovo).trim();
     }
 
+    // v29.26: mesma peca no mesmo conjunto com card pendente, em execucao ou executado e repetido.
+    // 15/10/2026 (bf4a8869): a continuacao escreveu "Nao ha card novo a emitir", chamou propose_action
+    // e o AD_C1_JUROS_ALTO virou dois anuncios ACTIVE no CONJ.4. A prosa nao e portao; aqui, antes
+    // do compliance (~30s), e.
+    if (convId && dest.external_id) {
+      const { data: cardsDoConjunto, error: errCardsConj } = await supa
+        .from("approval_requests")
+        .select("id, status, created_at, executed_at, execution_result, ultima_falha, payload")
+        .eq("company_id", companyId)
+        .eq("conversation_id", convId)
+        .eq("action", "criar_anuncio_a_partir_de")
+        .in("status", ["pending", "approved"])
+        .eq("payload->>conjunto_destino_external_id", String(dest.external_id))
+        .order("created_at", { ascending: false })
+        .limit(40);
+      if (errCardsConj) {
+        return {
+          erro: "verificacao_de_card_repetido_indisponivel",
+          detalhe:
+            `Nao consegui ler os cards desta conversa para o conjunto '${dest.name}' (${errCardsConj.message}). ` +
+            `Sem essa leitura o card pode repetir anuncio ja criado — NAO emiti.`,
+        };
+      }
+      const pedidoRepetido = {
+        conjuntoDestinoExternalId: String(dest.external_id),
+        moldeExternalId: molde?.external_id ?? null,
+        moldeNome: molde?.name ?? null,
+        moldeCreativeId: molde?.creative_id ?? null,
+        driveFileId,
+        metaVideoId: metaVideoIdEarly,
+        metaImageHash: metaImageHashEarly,
+        nomeNovo,
+        legenda: String(params?.legenda ?? "").trim(),
+      };
+      let repetido = cardRepetidoDoAnuncio(cardsDoConjunto ?? [], pedidoRepetido);
+      if (repetido?.id_criado_na_meta) {
+        // Anuncio ja apagado na Meta (espelho DELETED/ARCHIVED) nao segura a recriacao.
+        const idsCriados = (cardsDoConjunto ?? [])
+          .map((r: any) => String(r?.execution_result?.id_criado ?? "").trim())
+          .filter(Boolean);
+        const { data: adsCriados } = await supa
+          .from("ads")
+          .select("external_id,status")
+          .eq("company_id", companyId)
+          .in("external_id", idsCriados);
+        const removidos = (adsCriados ?? [])
+          .filter((a: any) => !statusObjetoOperacional(a.status))
+          .map((a: any) => String(a.external_id));
+        if (removidos.length) {
+          repetido = cardRepetidoDoAnuncio(cardsDoConjunto ?? [], pedidoRepetido, { anunciosRemovidos: removidos });
+        }
+      }
+      if (repetido) {
+        return recusaDeCardRepetido(repetido, { conjuntoNome: dest.name, peca: molde?.name ?? nomeNovo });
+      }
+    }
+
     const cruzAd = recusaCruzamentoCohapm(
       companyId,
       [nomeCampanhaDest, dest.name, campanhaHint, conjuntoDestinoParam],
@@ -8705,6 +8763,7 @@ Deno.serve(async (req) => {
     if (r && typeof r === "object" && (r as any).erro) {
       const e = String((r as any).erro);
       if (/conjunto molde ['"]?sem_molde/i.test(e)) return false;
+      if (ehRecusaDeCardRepetido(e)) return true;
       return /peca_nova_sem_molde|compliance_bloqueou|pedido_incompleto|verificacao_do_pedido|molde_|legenda_|destino_|pergunta_nao_e_ato|comentario_do_post_nao_e_ato|orcamento_parece_centavos|orcamento_diferente_do_contrato/i.test(e);
     }
     return false;
