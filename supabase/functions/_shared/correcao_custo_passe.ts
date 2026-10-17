@@ -4,6 +4,7 @@
 import { bodyOpenRouter, resolverChamadaLlm } from "./llm_roteador.ts";
 import { type BaseDoutrina, baseEmbutida, blocoDoutrina, carregarBaseDoutrina } from "./doutrina_agentes.ts";
 import { recusarCruzamentoLinhaProduto } from "./memoria_conjunto.ts";
+import { consultarMemoria } from "./aprendizados.ts";
 import {
   escolherEscada,
   validarPlanoDeCorrecao,
@@ -378,6 +379,8 @@ async function redigir(
   colheita: Awaited<ReturnType<typeof colher>>,
   escada: { alavanca: string | null; atos: string[]; motivo: string | null },
   base: BaseDoutrina = baseEmbutida(),
+  // Bloco da memoria aprendida (papel correcao_custo), consultado pelo chamador. Vazio = sem bloco.
+  memoria = "",
 ): Promise<Record<string, unknown> | null> {
   if (!chave || !escada.alavanca) return null;
   const rota = resolverChamadaLlm({
@@ -386,6 +389,9 @@ async function redigir(
     tier: "standard",
     especialista: "vigia-de-regua",
   });
+  // A memoria aprendida entra depois de tudo e em bloco proprio (um item por linha): o cabecalho
+  // dela diz que dado fresco, conformidade e memoria curada vencem. Ela nao reabre a alavanca, que
+  // ja veio escolhida pela escada e e conferida de novo pelo chamador (corpo.alavanca).
   const sys = [
     "Voce redige UM plano de correcao de custo por conversa.",
     "Devolva so JSON, sem markdown.",
@@ -397,7 +403,7 @@ async function redigir(
     // Doutrina do papel: decomposicao do custo e aprendizado — o mecanismo do plano tem de
     // dizer qual fator do custo a alavanca move, sem reabrir a escolha da alavanca.
     blocoDoutrina(base, "vigia"),
-  ].join(" ");
+  ].join(" ") + (memoria ? `\n\n${memoria}` : "");
   const user = JSON.stringify({
     estouro: {
       alvo: est.alvo_nome,
@@ -603,7 +609,24 @@ export async function rodarPasseCorrecaoCusto(opts: {
       if (escada.alavanca === "ajustar_posicionamentos_do_conjunto" && !txt(est.formato_midia)) {
         escada = { alavanca: null, atos: [], motivo: "formato_de_midia_nao_medido" };
       }
-      let corpo = await redigir(opts.openRouterKey, est, colheita, escada, await carregarBaseDoutrina(opts.supa));
+      // Memoria aprendida (spec 7.5), so quando o redator vai de fato rodar: sem chave ou sem
+      // alavanca, redigir sai antes do modelo, e consultar ai marcaria uso de itens que nao
+      // entraram em prompt nenhum. A linha e a marca do estouro (classificada pelo nome da
+      // campanha no SQL). Nunca rejeita: falha vira o aviso de "indisponivel" no texto.
+      const mem = opts.openRouterKey && escada.alavanca
+        ? await consultarMemoria({
+          supa: opts.supa,
+          companyId: txt(est.company_id),
+          tarefa: `custo por conversa acima da regua em ${txt(est.alvo_nome)} (${txt(est.nivel)}), campanha ${txt(est.campanha_nome)}, conjunto ${txt(est.conjunto_nome)}; alavanca ${escada.alavanca}`,
+          papel: "correcao_custo",
+          linhaFixa: txt(est.marca) || null,
+        })
+        : null;
+      if (mem) {
+        ((detalhe.aprendizados ??= []) as unknown[]).push({ alvo: est.alvo_external_id ?? null, ...mem.telemetria });
+      }
+      const memoria = mem?.texto ?? "";
+      let corpo = await redigir(opts.openRouterKey, est, colheita, escada, await carregarBaseDoutrina(opts.supa), memoria);
       if (corpo && escada.alavanca && txt(corpo.alavanca) !== escada.alavanca) corpo = null;
       let montado = corpo ?? planoDeterministico(est, escada, colheita, corpo ? null : "llm_sem_json");
       const contextoBase = {

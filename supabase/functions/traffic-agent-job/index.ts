@@ -345,6 +345,14 @@ import { classificarLinhaProdutoCohapm, recusarConjuntoErrado, recusarCruzamento
 import { carregarMemoriaInstitucional, type FatoMemoria } from "../_shared/agent_memory.ts";
 import { selecionarMemoria } from "../_shared/memoria_relevante.ts";
 import {
+  consultarMemoria,
+  corrigirAprendizado,
+  registrarAprendizado,
+  type ResultadoRegistro,
+  type TelemetriaConsulta,
+} from "../_shared/aprendizados.ts";
+import type { TurnoAprendizado } from "../_shared/aprendizados_regras.ts";
+import {
   fidelidadeDaColeta,
   janelaLivre,
   type MotivoSaida,
@@ -2257,13 +2265,18 @@ async function interpretarColheita(args: {
   escopo?: EscopoPedido;
   timeoutMs: number;
   metodo?: string;
+  /** Bloco da memoria aprendida, consultado uma vez pelo chamador (a leitura pode ter 2 idas). */
+  aprendizados?: string;
 }): Promise<{ texto: string; erro?: string; tin: number; tout: number; finish: string }> {
   const metodo = String(args.metodo ?? "").trim();
   const fatos = String(args.fatos ?? "").trim();
+  // Esta leitura E a resposta ao gestor quando a colheita deterministica cobre o pedido: e sintese,
+  // so que sem doutrina generica (o metodo vem proprio). Por isso recebe a memoria aprendida, por
+  // ultimo, como as outras sinteses.
   const sys = `${montarSysSintese(args.companyName, "", "", args.escopo, args.companyId, true)}
 
 ${instrucaoDaLeitura(args.pergunta)}
-${metodo ? `\nMETODO DA SKILL gestor-trafego-meta E DA BASE (aplique na leitura como criterio de julgamento; nao recite o texto):\n${metodo}` : ""}`;
+${metodo ? `\nMETODO DA SKILL gestor-trafego-meta E DA BASE (aplique na leitura como criterio de julgamento; nao recite o texto):\n${metodo}` : ""}${args.aprendizados ? `\n\n${args.aprendizados}` : ""}`;
   // Fatos primeiro: e onde esta a serie (tendencia) e a conta dos criterios. A coleta crua
   // vem depois, como conferencia, e e a primeira a ser aparada se o pacote crescer.
   const coleta = args.leitura.slice(0, fatos ? 24_000 : 48_000);
@@ -2502,7 +2515,76 @@ async function t_waba_template_insights(companyId: string, days = 30) {
   }, "templates");
 }
 
-async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey: string; pedido?: string }) {
+// ============================================================================
+// MEMORIA APRENDIDA NO JOB (spec 7.2, 7.5, 7.9)
+// ============================================================================
+// As duas ferramentas de escrita da memoria aprendida. No laco do subagente elas tem tratamento
+// proprio: bater no teto delas nao e "dado nao lido" (nao vai para LACUNAS), o retorno delas e
+// recibo de escrita e nao dado da conta (fica fora do resgate e da evidencia), e a chamada passa
+// pela fila do job.
+const FERRAMENTAS_APRENDIZADO = new Set(["registrar_aprendizado", "corrigir_aprendizado"]);
+
+// Sem turno de memoria (relatorio autonomo, Ritmo) nao ha pedido do gestor nem retornos para
+// conferir a evidencia: o subagente nem recebe as ferramentas, e o despacho recusa por garantia.
+const MOTIVO_SEM_TURNO_APRENDIZADO =
+  "memoria aprendida nao grava neste modo do job: o registro NAO foi feito";
+
+// Linha de tel.aprendizados.registro (spec 7.9): o veredito de cada chamada, sem o fato.
+type RegistroDeAprendizado = { ferramenta: string; resultado: ResultadoRegistro["resultado"]; motivo?: string; id_curto?: string };
+function linhaDeRegistro(ferramenta: string, r: unknown): RegistroDeAprendizado {
+  // runTool devolve { erro } quando algo lanca fora do handler; isso tambem e recusa.
+  const o = (r && typeof r === "object" ? r : {}) as Partial<ResultadoRegistro> & { erro?: unknown };
+  const motivo = o.motivo ?? (o.erro != null ? String(o.erro) : undefined);
+  return {
+    ferramenta,
+    resultado: o.resultado ?? "recusado",
+    ...(motivo ? { motivo } : {}),
+    ...(o.id_curto ? { id_curto: o.id_curto } : {}),
+  };
+}
+
+/**
+ * Uma escrita de memoria por vez no job inteiro. Os subagentes rodam em paralelo e o teto de 3
+ * registros vale para o job: registrarAprendizado le o contador, espera o banco e so entao soma,
+ * entao dois subagentes no meio desse caminho passariam juntos pelo teto. A fila fecha a corrida.
+ *
+ * Cada vez na fila leva uma copia rasa do turno do job com o agente do subagente (a autoria do
+ * registro) e devolve o contador ao turno do job no fim, gravando ou nao. A copia e rasa de
+ * proposito: falasDoGestor e retornos continuam sendo as listas do job, entao a evidencia confere
+ * contra o que qualquer subagente leu ate ali.
+ */
+const filaDeAprendizado = new WeakMap<TurnoAprendizado, Promise<unknown>>();
+function naFilaDoAprendizado<T>(
+  turnoJob: TurnoAprendizado,
+  agente: string,
+  escrever: (turno: TurnoAprendizado) => Promise<T>,
+): Promise<T> {
+  const anterior = filaDeAprendizado.get(turnoJob) ?? Promise.resolve();
+  const vez = anterior.then(async () => {
+    const copia: TurnoAprendizado = { ...turnoJob, agente };
+    try {
+      return await escrever(copia);
+    } finally {
+      turnoJob.registrosNoTurno = copia.registrosNoTurno;
+    }
+  });
+  filaDeAprendizado.set(turnoJob, vez.catch(() => undefined));
+  return vez;
+}
+
+// tel.aprendizados.consulta e a consulta do prompt que fala com o gestor (sintese, leitura,
+// relatorio, Ritmo), no mesmo formato do chat. A de cada subagente fica no registro dele em
+// tel.subagentes, para nao somar nove consultas numa linha so.
+function anotarConsultaDeMemoria(tel: Record<string, any>, t: TelemetriaConsulta): void {
+  (tel.aprendizados ??= {}).consulta = t;
+}
+
+function anotarRegistrosDeMemoria(tel: Record<string, any>, unidade: string, registros: RegistroDeAprendizado[]): void {
+  if (!registros.length) return;
+  ((tel.aprendizados ??= {}).registro ??= []).push(...registros.map((r) => ({ unidade, ...r })));
+}
+
+async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey: string; pedido?: string; aprendizado?: TurnoAprendizado }) {
   try {
     switch (name) {
       case "get_overview": return await t_overview(ctx.companyId);
@@ -2769,6 +2851,17 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
           aviso: "Card pendente. Nada foi escrito na Meta. Validado nao e garantido.",
         };
       }
+      // Memoria aprendida (spec 7.2, 7.3). O turno chega do laco do subagente ja na fila do job e
+      // com o agente dele. O handler confere a evidencia contra o pedido do gestor e os retornos
+      // do job, grava sempre com a empresa do turno e nunca lanca.
+      case "registrar_aprendizado":
+        return ctx.aprendizado
+          ? await registrarAprendizado(supa, args, ctx.aprendizado)
+          : { resultado: "recusado", motivo: MOTIVO_SEM_TURNO_APRENDIZADO };
+      case "corrigir_aprendizado":
+        return ctx.aprendizado
+          ? await corrigirAprendizado(supa, args, ctx.aprendizado)
+          : { resultado: "recusado", motivo: MOTIVO_SEM_TURNO_APRENDIZADO };
       default: return { erro: `tool desconhecida: ${name}` };
     }
   } catch (e) { return { erro: String((e as any)?.message ?? e) }; }
@@ -2782,15 +2875,21 @@ async function runTool(name: string, args: any, ctx: { companyId: string; mcpKey
 // Whitelist de subagentes: UM POR CAPACIDADE IMPLEMENTADA, escopo estrito (decisao do Ryan
 // 28/07: tarefa de criativo vai pro de criativo, tarefa de insight vai pro de desempenho -
 // especialista nao atende fora do proprio dominio, recusa e registra em LACUNAS).
+//
+// Memoria aprendida (spec 7.2): registrar_aprendizado e corrigir_aprendizado entram em todo
+// subagente com laco de ferramentas, com teto 1 cada e UMA vaga a mais no maxToolsTotal, para a
+// escrita nao comer o orcamento de leitura. Ficam de fora o compliance (portao de conformidade
+// nao le nem grava memoria aprendida, spec 7.0) e o analise_visual_drive, que e pipeline
+// codificado sem laco de ferramenta.
 const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, number>; maxToolsTotal: number; missao: string }> = {
   desempenho_campanhas: {
-    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "origem_drive_dos_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "get_seguidores_instagram_ads", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, origem_drive_dos_anuncios: 2, get_ads_ranking: 4, get_estrutura_conjuntos: 2, casar_criativo_performance: 6, computar_perfil_vencedor: 1, get_seguidores_instagram_ads: 2, get_conhecimento: 2, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 17,
+    tools: ["get_overview", "get_funnel", "get_ads_ranking", "get_campaign_detail", "get_detalhe_anuncios", "origem_drive_dos_anuncios", "get_estrutura_conjuntos", "teto_vigente", "panorama_utm_anuncios", "diagnosticar_custo", "avaliar_fadiga", "casar_criativo_performance", "computar_perfil_vencedor", "ler_perfil_vencedor", "pode_pausar_por_custo", "decidir_sobre_conjunto", "avaliar_escala", "avaliar_pacing", "get_seguidores_instagram_ads", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard", "registrar_aprendizado", "corrigir_aprendizado"],
+    maxPorTool: { get_campaign_detail: 4, get_detalhe_anuncios: 6, origem_drive_dos_anuncios: 2, get_ads_ranking: 4, get_estrutura_conjuntos: 2, casar_criativo_performance: 6, computar_perfil_vencedor: 1, get_seguidores_instagram_ads: 2, get_conhecimento: 2, ler_pipeboard: 3, listar_ferramentas_pipeboard: 1, registrar_aprendizado: 1, corrigir_aprendizado: 1 }, maxToolsTotal: 18,
     missao: "NUMEROS E DECISAO DE MIDIA das campanhas Meta: gasto, entrega, custo vs teto vigente, detalhe por anuncio e serie diaria, origem Drive das pecas no ar, seguidores de Instagram atribuidos a anuncio (get_seguidores_instagram_ads, nao o funil), diagnostico de custo e fadiga, maturacao para pausa, decisao com guarda do unico conjunto, escala e pacing. Preferir o banco; leitura ao vivo so se faltar numero critico. Em analise, tendencia ou teto de custo, chame get_conhecimento (doutrina_diagnostico e metricas_bases) antes de fechar o veredito. Relatorio denso.",
   },
   criativos: {
-    tools: ["get_criativos_conteudo", "get_ads_ranking", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard"],
-    maxPorTool: { get_criativos_conteudo: 3, get_ads_ranking: 3, get_conhecimento: 2, validar_pedido_contra_contrato: 1, ler_pipeboard: 2, listar_ferramentas_pipeboard: 1 }, maxToolsTotal: 8,
+    tools: ["get_criativos_conteudo", "get_ads_ranking", "get_conhecimento", "validar_pedido_contra_contrato", "listar_ferramentas_pipeboard", "ler_pipeboard", "registrar_aprendizado", "corrigir_aprendizado"],
+    maxPorTool: { get_criativos_conteudo: 3, get_ads_ranking: 3, get_conhecimento: 2, validar_pedido_contra_contrato: 1, ler_pipeboard: 2, listar_ferramentas_pipeboard: 1, registrar_aprendizado: 1, corrigir_aprendizado: 1 }, maxToolsTotal: 9,
     missao: "CONTEUDO REAL DAS PECAS no ar (legenda, titulo, CTA, destino) e ranking de criativo. Preferir o banco; leitura ao vivo so se faltar detalhe. NAO faz auditoria de compliance nem metrica agregada de campanha.",
   },
   compliance: {
@@ -2799,18 +2898,18 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "AUDITORIA DE COMPLIANCE: amostre as legendas de maior gasto ate o teto de ferramentas e valide o PAR legenda+peca quando houver drive_file_id. Declare cobertura e lacunas — nao tente auditar o universo inteiro numa rodada.",
   },
   estrutura_conta: {
-    tools: ["get_estrutura_conjuntos", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard", "ler_objeto", "conferir_contra_plano", "buscar_segmentacao", "propose_action"],
-    maxPorTool: { get_estrutura_conjuntos: 4, get_conhecimento: 1, ler_pipeboard: 8, listar_ferramentas_pipeboard: 1, ler_objeto: 8, conferir_contra_plano: 4, buscar_segmentacao: 8, propose_action: 4 }, maxToolsTotal: 16,
+    tools: ["get_estrutura_conjuntos", "get_conhecimento", "listar_ferramentas_pipeboard", "ler_pipeboard", "ler_objeto", "conferir_contra_plano", "buscar_segmentacao", "propose_action", "registrar_aprendizado", "corrigir_aprendizado"],
+    maxPorTool: { get_estrutura_conjuntos: 4, get_conhecimento: 1, ler_pipeboard: 8, listar_ferramentas_pipeboard: 1, ler_objeto: 8, conferir_contra_plano: 4, buscar_segmentacao: 8, propose_action: 4, registrar_aprendizado: 1, corrigir_aprendizado: 1 }, maxToolsTotal: 17,
     missao: "ESTRUTURA da conta: CBO vs ABO, orcamento por conjunto, estrategia de lance, targeting, pegada e destino. Relatorio curto, com os riscos visiveis.",
   },
   whatsapp_waba: {
-    tools: ["get_waba_status", "get_whatsapp_da_pagina", "get_waba_template_insights", "get_conhecimento"],
-    maxPorTool: { get_waba_status: 2, get_whatsapp_da_pagina: 2, get_waba_template_insights: 2, get_conhecimento: 1 }, maxToolsTotal: 6,
+    tools: ["get_waba_status", "get_whatsapp_da_pagina", "get_waba_template_insights", "get_conhecimento", "registrar_aprendizado", "corrigir_aprendizado"],
+    maxPorTool: { get_waba_status: 2, get_whatsapp_da_pagina: 2, get_waba_template_insights: 2, get_conhecimento: 1, registrar_aprendizado: 1, corrigir_aprendizado: 1 }, maxToolsTotal: 7,
     missao: "CANAL WHATSAPP: inventario de numeros, estado de pe e destino Click-to-WhatsApp. Em pedido de conjunto CTWA leia o inventario WABA E o numero da pagina, nesta rodada. Insight de template so se o foco pedir.",
   },
   alertas_recomendacoes: {
-    tools: ["get_alerts", "get_recommendations", "get_meta_dicas", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest"],
-    maxPorTool: { get_alerts: 1, get_recommendations: 1, get_meta_dicas: 1, saude_das_integracoes: 1, custo_llm_periodo: 1, score_de_prontidao: 1, saude_dos_tokens: 1, ler_entregas_digest: 1 }, maxToolsTotal: 6,
+    tools: ["get_alerts", "get_recommendations", "get_meta_dicas", "saude_das_integracoes", "custo_llm_periodo", "score_de_prontidao", "saude_dos_tokens", "ler_entregas_digest", "registrar_aprendizado", "corrigir_aprendizado"],
+    maxPorTool: { get_alerts: 1, get_recommendations: 1, get_meta_dicas: 1, saude_das_integracoes: 1, custo_llm_periodo: 1, score_de_prontidao: 1, saude_dos_tokens: 1, ler_entregas_digest: 1, registrar_aprendizado: 1, corrigir_aprendizado: 1 }, maxToolsTotal: 7,
     missao: "PENDENCIAS E OBSERVABILIDADE: alertas, recomendacao interna e dica da Meta, sempre com julgamento acionavel. Saude, score e tokens so se o foco pedir — nao inventarie tudo por default.",
   },
   analise_visual_drive: {
@@ -2818,13 +2917,13 @@ const SUBAGENTES: Record<string, { tools: string[]; maxPorTool: Record<string, n
     missao: "ANALISE VISUAL arquivo a arquivo das midias do Drive, pelos pixels da miniatura em alta resolucao: produto detectado, texto visivel, risco de compliance visivel e veredito por peca, persistido em banco. Use quando o pedido for CLASSIFICAR o conteudo das pecas, nao apenas inventariar. Limite declarado: de video se ve UM FRAME.",
   },
   criativos_drive: {
-    tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "origem_drive_dos_anuncios", "ler_brand_identity", "get_conhecimento"],
-    maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 8, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 6, origem_drive_dos_anuncios: 2, ler_brand_identity: 1, get_conhecimento: 2 }, maxToolsTotal: 10,
+    tools: ["get_acervo_para_anuncio", "upload_midia", "get_drive_criativos", "get_analise_visual_drive", "nota_visual_da_peca", "casar_criativo_performance", "origem_drive_dos_anuncios", "ler_brand_identity", "get_conhecimento", "registrar_aprendizado", "corrigir_aprendizado"],
+    maxPorTool: { get_acervo_para_anuncio: 2, upload_midia: 8, get_drive_criativos: 2, get_analise_visual_drive: 1, nota_visual_da_peca: 8, casar_criativo_performance: 6, origem_drive_dos_anuncios: 2, ler_brand_identity: 1, get_conhecimento: 2, registrar_aprendizado: 1, corrigir_aprendizado: 1 }, maxToolsTotal: 11,
     missao: "CRIATIVOS NOVOS NO DRIVE: leitura NESTA rodada — historico nao substitui inventario. COHAPM: isole meio=juridico | la_felicita | sistema_ocular (VISTTA). Cite nome + pasta + drive_file_id e nunca invente arquivo. Se o foco pedir a origem dos anuncios JA NO AR, isso e leitura de origem, nao inventario de peca nova.",
   },
   conhecimento: {
-    tools: ["get_conhecimento"],
-    maxPorTool: { get_conhecimento: 5 }, maxToolsTotal: 5,
+    tools: ["get_conhecimento", "registrar_aprendizado", "corrigir_aprendizado"],
+    maxPorTool: { get_conhecimento: 5, registrar_aprendizado: 1, corrigir_aprendizado: 1 }, maxToolsTotal: 6,
     missao: "FUNDAMENTO TECNICO puro. Pedido de metodo: comece por get_conhecimento(tema=gestor_trafego_meta) e siga o mapa de temas. Politica da Meta, definicao de metrica, otimizacao, boa pratica de criativo — cite o tema consultado e declare [VENCIDO] quando for o caso. So e acionado quando a pergunta exige conceito alem do que os outros especialistas ja fundamentam.",
   },
 };
@@ -3371,7 +3470,7 @@ Use o codigo (AG-02) ou o nome (Analista). Para overview amplo, 3 agentes bastam
 // ============================================================================
 async function rodarSubagente(
   nome: string, foco: string, pergunta: string,
-  ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string },
+  ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string; aprendizado?: TurnoAprendizado },
   prazo: () => number,
   /**
    * Quanto tem de ficar de pe para a resposta ser escrita, ja com o item (b) aplicado pelo
@@ -3383,10 +3482,23 @@ async function rodarSubagente(
   reservaColetaMs: number,
 ) {
   const cfg = SUBAGENTES[nome];
+  // Memoria aprendida (spec 7.5), na mesma largada dos catalogos: corre junto com eles e so e
+  // esperada na montagem do prompt. O compliance fica de fora (spec 7.0): portao de conformidade
+  // nao le memoria aprendida, para um aprendizado nunca afrouxar uma trava. Nunca rejeita.
+  const promessaMemoria = nome === "compliance"
+    ? Promise.resolve(null)
+    : consultarMemoria({ supa, companyId: ctx.companyId, tarefa: `${pergunta}\n\n${foco}`, papel: "subagente" });
+  // Sem turno de memoria (relatorio autonomo, Ritmo: nao ha fala do gestor para conferir) as
+  // ferramentas de escrita nem sao oferecidas, em vez de oferecidas para sempre recusarem.
+  const toolsDoSub = ctx.aprendizado ? cfg.tools : cfg.tools.filter((t) => !FERRAMENTAS_APRENDIZADO.has(t));
+  // A vaga extra do maxToolsTotal e da escrita de memoria. Onde a escrita nao e oferecida, ela sai
+  // de novo: sem isto o relatorio e o Ritmo ganhariam uma leitura a mais por especialista, e o
+  // orcamento de coleta deles mudaria por tabela.
+  const tetoTotal = cfg.maxToolsTotal - (toolsDoSub.length < cfg.tools.length ? 1 : 0);
   // cfg.tools serve como recorte E como ordem: array de ferramenta estavel entre rodadas e o
   // que permite ao provider reaproveitar o prefixo da requisicao.
   const catFerr = await catalogoFerramentas();
-  const tools = montarFerramentas(catFerr, "job", new Set(cfg.tools), cfg.tools);
+  const tools = montarFerramentas(catFerr, "job", new Set(toolsDoSub), toolsDoSub);
   const isLegal = norm(ctx.companyName).includes("legal");
   const perfil = isLegal
     ? "empresa de credito consignado; aplique categoria especial somente quando o objeto lido confirmar esse produto"
@@ -3399,6 +3511,9 @@ async function rodarSubagente(
     ? `Voce e o ${ag.codigo} ${ag.nome}, especialista em ${ag.setor}, atuando pela unidade '${nome}'`
     : `Voce e o subagente '${nome}'`;
   const persona = ag?.papel ? `\n${ag.papel}` : "";
+  // Autoria do que este subagente gravar: o agente dono da unidade, ou a propria unidade quando o
+  // registro de agentes nao a cobre. A empresa nunca vem daqui: vem do turno do job.
+  const agenteMemoria = ag?.codigo ?? nome;
   // Doutrina do papel direto no prompt: antes o especialista so a via se gastasse uma das suas
   // 1-2 chamadas em get_conhecimento, e na pratica gastava em leitura de conta.
   await precarregarDoutrina();
@@ -3406,6 +3521,9 @@ async function rodarSubagente(
   const doutrinaSub = papelDoutrina
     ? doutrina(papelDoutrina, empresaEhCredito(ctx.companyId) || isLegal)
     : "";
+  // O bloco aprendido vai por ultimo no prompt, como no chat: ele muda com a pergunta e com o que
+  // os agentes gravam, e o cabecalho dele ja diz que dado fresco, conformidade e curada vencem.
+  const memSub = await promessaMemoria;
   const sys = `${identidade} do Gestor de Trafego IA da ${ctx.companyName} (${perfil}).${persona}
 MISSAO: ${cfg.missao}
 ${doutrinaSub}${cfg.tools.includes("get_conhecimento") ? `BASE TECNICA: ${doutrinaSub ? "a doutrina do seu papel ja esta acima — nao gaste chamada para reler. " : ""}Se o foco pedir metodo alem dela, get_conhecimento: diagnostico e custo = tema doutrina_diagnostico; meta de volume com teto = metas_conjuntas; metrica = metricas_bases; algoritmo/aprendizado = mecanica_meta; ato/card = contrato_card; WhatsApp = whatsapp_ativos; mapa geral = gestor_trafego_meta; criativo = criativo_hooks. No maximo duas chamadas. Validade vencida entra no relatorio como nao confirmada.\n` : ""}FOCO DESTE JOB: ${foco || "cobrir a parte da pergunta pertinente a sua especialidade"}
@@ -3414,9 +3532,11 @@ ESCOPO ESTRITO: voce so atende o que a sua MISSAO cobre. Se o foco recebido pedi
 VELOCIDADE: teto ~5 min. Cobriu o FOCO, ESCREVA.
 PROIBIDO dizer 'nao disponivel' ou 'nao coletado a tempo' para um dado que voce NAO tentou ler: chame a ferramenta. Se ela falhar, relate a falha.
 REGRAS: todo numero vem de ferramenta CHAMADA AGORA; distinga zero / nao existe / nao coletado; incorpore 'nota' e 'aviso' do retorno; nao misture janelas.\nPAGINACAO: se restantes > 0 E o foco exigir cobertura total, peca a proxima pagina ate o teto; senao declare o corte em LACUNAS.
-Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, terminando com 'LACUNAS:' (ou 'nenhuma').`;
+Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, terminando com 'LACUNAS:' (ou 'nenhuma').` + (memSub?.texto ? `\n\n${memSub.texto}` : "");
   const messages: any[] = [{ role: "system", content: sys }, { role: "user", content: `Pergunta original do gestor (para contexto):\n${pergunta.slice(0, 8000)}` }];
   const usadas: string[] = [];
+  // O veredito de cada chamada de memoria deste subagente; sobe para tel.aprendizados.registro.
+  const registros: RegistroDeAprendizado[] = [];
   // O que as ferramentas devolveram, em texto literal. So e usado se o especialista nao escrever.
   const colhidos: string[] = [];
   // Cortes declarados pelas ferramentas deste especialista. Sobe no retorno para virar `tel.cortes`.
@@ -3505,7 +3625,25 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
         const jaUsou = usadas.filter((t) => t === nomeTc).length;
         const leituraAoVivo = nomeTc === "ler_objeto" || nomeTc === "ler_pipeboard" || nomeTc === "buscar_segmentacao" || nomeTc === "buscar_interesses" || nomeTc === "buscar_comportamentos" || nomeTc === "conferir_contra_plano";
         const limite = cfg.maxPorTool[nomeTc] ?? (leituraAoVivo ? 8 : 2);
-        if (usadas.length >= cfg.maxToolsTotal || jaUsou >= limite || !cfg.tools.includes(nomeTc)) {
+        const ehAprendizado = FERRAMENTAS_APRENDIZADO.has(nomeTc);
+        if (usadas.length >= tetoTotal || jaUsou >= limite || !toolsDoSub.includes(nomeTc)) {
+          // Memoria aprendida e ESCRITA: bater no teto dela nao deixa dado sem ler. O aviso
+          // generico de baixo (dado nao lido, declare em LACUNAS) faria o relatorio declarar uma
+          // lacuna de coleta que nao existe, e a coordenacao poderia devolver o especialista por
+          // ela. A recusa daqui diz so que o registro nao foi feito.
+          if (ehAprendizado) {
+            const foraDoEscopo = !toolsDoSub.includes(nomeTc);
+            messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
+              resultado: "recusado",
+              motivo: (foraDoEscopo
+                ? `${nomeTc} nao esta disponivel para este especialista neste job: o registro NAO foi feito. `
+                : `limite de chamadas deste especialista atingido (${nomeTc}): o registro NAO foi feito. `) +
+                "Nao chame de novo. Isto nao e dado faltando: nao entra em LACUNAS; se o gestor pediu para guardar isso, diga no relatorio que nao ficou registrado.",
+            }) });
+            registros.push({ ferramenta: nomeTc, resultado: "recusado",
+              motivo: foraDoEscopo ? "fora deste especialista - registro nao feito" : "limite de chamadas no especialista - registro nao feito" });
+            continue;
+          }
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
             erro: "consulta_nao_realizada",
             aviso: "Teto de consultas deste especialista atingido ou ferramenta fora do seu escopo. O dado NAO foi lido - nao trate como zero. Feche o relatorio com o que tem e registre em LACUNAS." }) });
@@ -3525,24 +3663,37 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
           continue;
         }
         const args: any = argsParsed.args;
-        const result = await runTool(nomeTc, args, ctx);
+        // A escrita de memoria passa pela fila do job (teto de 3 para o job inteiro, com os
+        // subagentes em paralelo) levando o agente deste subagente como autor.
+        const result = ehAprendizado && ctx.aprendizado
+          ? await naFilaDoAprendizado(ctx.aprendizado, agenteMemoria, (turno) => runTool(nomeTc, args, { ...ctx, aprendizado: turno }))
+          : await runTool(nomeTc, args, ctx);
         usadas.push(nomeTc);
-        const resgatavel = textoDeResgate(nomeTc, result);
-        if (resgatavel) colhidos.push(resgatavel);
-        /**
-         * CAPTURA DO CORTE — aqui e o unico lugar do job em que um retorno de ferramenta existe
-         * como OBJETO. Uma linha abaixo ele vira string dentro de `messages`, e a partir dali o
-         * `restantes: 12` que a ferramenta declarou so poderia ser recuperado por regex em prosa.
-         *
-         * Por isso a captura e aqui e nao perto da escrita: no ponto de escrita nao ha mais o que
-         * capturar. E por isso ela usa `envelopesDosRetornos`, e nao um teste proprio de
-         * `restantes > 0`: "o que conta como corte" precisa ter UMA definicao, a mesma que o chat
-         * usa. Um segundo teste aqui divergiria do primeiro na primeira ferramenta nova.
-         *
-         * Guardamos so o envelope, nunca o retorno inteiro: ele viaja em `tel` ate a escrita e,
-         * no tier profundo, dentro do checkpoint do segmento 2.
-         */
-        for (const env of envelopesDosRetornos([{ tool: nomeTc, retorno: result }])) cortes.push(env);
+        if (ehAprendizado) registros.push(linhaDeRegistro(nomeTc, result));
+        // Recibo de escrita nao e dado da conta: fora da evidencia (um registro nao pode provar o
+        // proximo), fora do resgate (viraria "numero lido" no relatorio de quem morreu) e fora do
+        // envelope de corte (nao pagina).
+        if (!ehAprendizado) {
+          // O que a evidencia `retorno_de_ferramenta` dos proximos registros confere: o retorno
+          // inteiro, de qualquer subagente do job (a lista e a do turno do job).
+          ctx.aprendizado?.retornos.push({ tool: nomeTc, retorno: result });
+          const resgatavel = textoDeResgate(nomeTc, result);
+          if (resgatavel) colhidos.push(resgatavel);
+          /**
+           * CAPTURA DO CORTE — aqui e o unico lugar do job em que um retorno de ferramenta existe
+           * como OBJETO. Uma linha abaixo ele vira string dentro de `messages`, e a partir dali o
+           * `restantes: 12` que a ferramenta declarou so poderia ser recuperado por regex em prosa.
+           *
+           * Por isso a captura e aqui e nao perto da escrita: no ponto de escrita nao ha mais o que
+           * capturar. E por isso ela usa `envelopesDosRetornos`, e nao um teste proprio de
+           * `restantes > 0`: "o que conta como corte" precisa ter UMA definicao, a mesma que o chat
+           * usa. Um segundo teste aqui divergiria do primeiro na primeira ferramenta nova.
+           *
+           * Guardamos so o envelope, nunca o retorno inteiro: ele viaja em `tel` ate a escrita e,
+           * no tier profundo, dentro do checkpoint do segmento 2.
+           */
+          for (const env of envelopesDosRetornos([{ tool: nomeTc, retorno: result }])) cortes.push(env);
+        }
         // A doutrina de uso entra colada ao retorno, e so aqui: e o unico ponto do fluxo em
         // que a ferramenta comprovadamente rodou. Fora daqui ela seria contexto pago a toa.
         messages.push({ role: "tool", tool_call_id: tc.id,
@@ -3679,11 +3830,14 @@ Ao terminar, RELATORIO conciso em markdown com numeros + fonte + janela, termina
     motivo_saida: motivoSaida,
     iteracoes,
     iteracoes_teto: SUB_MAX_ITER,
-    tools_teto: cfg.maxToolsTotal,
+    tools_teto: tetoTotal,
     tetos_chamada: resumirTetos(tetos),
     reserva_coleta_ms: reservaColetaMs,
     ...(escritaSalvamento ? { escrita_salvamento: escritaSalvamento } : {}),
     prazo_ms_no_fim: prazo(),
+    // Memoria aprendida deste subagente: a consulta (ausente no compliance, que nao consulta) e o
+    // veredito de cada escrita. executarLote junta os registros em tel.aprendizados.registro.
+    aprendizados: { ...(memSub ? { consulta: memSub.telemetria } : {}), registro: registros },
   };
 }
 
@@ -3801,6 +3955,10 @@ const PAPEL_DO_SUBAGENTE: Record<string, PapelDoutrina> = {
   compliance: "compliance",
 };
 
+// `aprendizados` e o bloco da memoria aprendida ja consultado (so `sintetizar` o preenche, ao
+// delegar para a versao segmentada).
+type OpcoesSintese = { timeoutMs?: number; escopo?: EscopoPedido; companyId?: string; aprendizados?: string };
+
 function montarSysSintese(companyName: string, estilo: string, memoria: string, escopo?: EscopoPedido, companyId?: string, semDoutrina = false): string {
   const isLegal = empresaEhCredito(companyId) || norm(companyName).includes("legal");
   const perfil = isLegal
@@ -3856,9 +4014,11 @@ async function sintetizarSegmentada(
   memoria: string,
   prazo: () => number,
   tel: any,
-  opts?: { timeoutMs?: number; escopo?: EscopoPedido; companyId?: string },
+  opts?: OpcoesSintese,
 ): Promise<string> {
-  const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo, opts?.companyId);
+  // O bloco aprendido chega pronto de `sintetizar`, que e quem chama esta versao: consultar de
+  // novo aqui marcaria uso duas vezes para o mesmo prompt.
+  const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo, opts?.companyId) + (opts?.aprendizados ? `\n\n${opts.aprendizados}` : "");
   const perCallTimeout = opts?.timeoutMs ?? OPENROUTER_TIMEOUT_MS;
   const hardDeadline = Date.now() + Math.min(SINT_FASE_HARD_MS, Math.max(prazo(), 8_000));
   const meio = Math.ceil(relatorios.length / 2);
@@ -3928,9 +4088,17 @@ async function sintetizar(
   memoria: string,
   prazo: () => number,
   tel: any,
-  opts?: { timeoutMs?: number; escopo?: EscopoPedido; companyId?: string },
+  opts?: OpcoesSintese,
 ) {
-  const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo, opts?.companyId);
+  // Memoria aprendida (spec 7.5) depois do sys da sintese, fora do bloco institucional: ela muda
+  // com a pergunta e com o que os subagentes gravaram neste mesmo job. Consulta uma vez aqui e
+  // repassa a versao segmentada. Nunca rejeita: falha vira o aviso de "indisponivel" no texto.
+  const memSintese = opts?.companyId
+    ? await consultarMemoria({ supa, companyId: opts.companyId, tarefa: pergunta, papel: "sintese" })
+    : null;
+  if (memSintese) anotarConsultaDeMemoria(tel, memSintese.telemetria);
+  const blocoAprendido = memSintese?.texto ?? "";
+  const sys = montarSysSintese(companyName, estilo, memoria, opts?.escopo, opts?.companyId) + (blocoAprendido ? `\n\n${blocoAprendido}` : "");
   const blocos = relatorios.map((r) => `=== RELATORIO ${r.nome} [${rotuloRelatorio(r)}] ===\n${r.relatorio}`).join("\n\n");
   /**
    * TAMANHO DA ENTRADA, MEDIDO ANTES DA CHAMADA — a medida que faltava para decidir o item (a).
@@ -3956,7 +4124,7 @@ async function sintetizar(
   };
   // v3.8: pacote enorme → sintese segmentada (menos 429 numa unica chamada monstro).
   if (relatorios.length >= 4 && blocos.length >= SINT_CHARS_SEGMENTAR && prazo() > 60_000) {
-    return await sintetizarSegmentada(companyName, pergunta, relatorios, estilo, memoria, prazo, tel, opts);
+    return await sintetizarSegmentada(companyName, pergunta, relatorios, estilo, memoria, prazo, tel, { ...opts, aprendizados: blocoAprendido });
   }
   const checklist = opts?.escopo?.perguntas_obrigatorias?.length
     ? `\n\nCHECKLIST OBRIGATORIO (marque cada item na resposta):\n${opts.escopo.perguntas_obrigatorias.map((q, i) => `${i + 1}. ${q}`).join("\n")}`
@@ -4810,7 +4978,7 @@ async function entregarResposta(args: {
 // v2: helpers de lote, checkpoint e reinvocacao ------------------------------
 async function executarLote(
   lote: { nome: string; foco: string }[], pergunta: string,
-  ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string }, prazo: () => number, tel: any,
+  ctx: { companyId: string; companyName: string; mcpKey: string; pedido?: string; aprendizado?: TurnoAprendizado }, prazo: () => number, tel: any,
   reservaColetaMs: number,
 ): Promise<{ nome: string; relatorio: string; completo: boolean; erro?: string | null; resgate?: string | null }[]> {
   const runUm = (p: { nome: string; foco: string }) =>
@@ -4858,7 +5026,11 @@ async function executarLote(
         motivo_saida: string | null; iteracoes: number; iteracoes_teto: number;
         tools_teto: number; tetos_chamada: unknown; prazo_ms_no_fim: number;
         cortes: EnvelopeDeCobertura[];
+        aprendizados: { consulta?: TelemetriaConsulta; registro: RegistroDeAprendizado[] };
       }>;
+      // Os registros de memoria sobem para `tel` pelo mesmo motivo dos cortes logo abaixo: o
+      // relatorio da devolucao substitui o anterior, mas o que a rodada 1 gravou continua gravado.
+      if (t.aprendizados) anotarRegistrosDeMemoria(tel, res.value.nome, t.aprendizados.registro);
       /**
        * Os cortes sobem para `tel`, e nao para `saida`, porque `saida` e reescrita a cada
        * devolucao (`relatorios[i] = novo`) — um corte declarado na rodada 1 sumiria quando a
@@ -4888,6 +5060,7 @@ async function executarLote(
         ...(t.tools_teto !== undefined ? { tools_teto: t.tools_teto } : {}),
         ...(t.tetos_chamada !== undefined ? { tetos_chamada: t.tetos_chamada } : {}),
         ...(t.prazo_ms_no_fim !== undefined ? { prazo_ms_no_fim: t.prazo_ms_no_fim } : {}),
+        ...(t.aprendizados !== undefined ? { aprendizados: t.aprendizados } : {}),
       });
     } else {
       saida.push({ nome: lote[i].nome, relatorio: `(especialista falhou: ${String(res.reason).slice(0, 200)} - trate como LACUNA)`, completo: false });
@@ -5064,6 +5237,23 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
   let escopo = await enriquecerEscopoComDatas(companyId, extrairEscopoPedido(pergunta));
   const tel: any = retomada?.tel_parcial ?? { versao: "job-v4.1", subagentes: [] };
   /**
+   * O turno da memoria aprendida (spec 7.2): UM por job, compartilhado por todos os subagentes,
+   * entao o teto de 3 registros vale para o job inteiro. Cada escrita entra pela fila do job com
+   * uma copia rasa e o agente do subagente (naFilaDoAprendizado). A fala do gestor e o pedido do
+   * job; os retornos sao os que os subagentes leem (rodarSubagente empurra cada um aqui).
+   * `agente` aqui e so o padrao: a copia de cada escrita troca pelo agente do subagente.
+   */
+  const aprendizadoDoJob: TurnoAprendizado = {
+    companyId,
+    agente: "AG-00",
+    superficie: "job",
+    conversationId: convId,
+    jobId,
+    falasDoGestor: [pergunta],
+    retornos: [],
+    registrosNoTurno: 0,
+  };
+  /**
    * A VERSAO TEM DE ANDAR QUANDO A MEDICAO ANDA.
    *
    * `job-v4.18` ficou parada por 16 commits, entre eles duas correcoes que mudaram o SIGNIFICADO
@@ -5181,7 +5371,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           retomada.devolver.map((d: any) => ({ nome: String(d.nome),
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${String(d.motivo)}\nCorrija exatamente isso.` })),
-          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs,
+          pergunta, { companyId, companyName, mcpKey, pedido: pergunta, aprendizado: aprendizadoDoJob }, prazoColeta, tel, reservaColetaMs,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -5202,7 +5392,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           await pushProgresso(jobId, "subagentes", `reexecutando: ${devolver2.map((d) => d.nome).join(", ")}`);
           const refeitos2 = await executarLote(
             devolver2.map((d) => ({ nome: d.nome, foco: `DEVOLUCAO DA COORDENACAO (rodada ${rodada}): ${d.motivo}. Corrija exatamente isso.` })),
-            pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs,
+            pergunta, { companyId, companyName, mcpKey, pedido: pergunta, aprendizado: aprendizadoDoJob }, prazoColeta, tel, reservaColetaMs,
           );
           for (const novo of refeitos2) {
             const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -5310,7 +5500,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       await pushProgresso(jobId, "subagentes", ehPedidoRelacaoNumerica(pergunta)
         ? `executando ${plano.length} em sequencia`
         : `executando ${plano.length} em paralelo`);
-      relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs);
+      relatorios = await executarLote(plano, pergunta, { companyId, companyName, mcpKey, pedido: pergunta, aprendizado: aprendizadoDoJob }, prazoColeta, tel, reservaColetaMs);
     }
     await pushProgresso(jobId, "subagentes", "relatorios prontos");
     /**
@@ -5368,7 +5558,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
         const refeitos = await executarLote(
           devolver.map((d) => ({ nome: d.nome,
             foco: `${plano.find((p) => p.nome === d.nome)?.foco ?? ""}\n\nDEVOLUCAO DA COORDENACAO (rodada ${rodada}): seu relatorio anterior foi recusado. Motivo: ${d.motivo}\nCorrija exatamente isso; o que ja estava certo nao precisa ser repetido do zero.` })),
-          pergunta, { companyId, companyName, mcpKey, pedido: pergunta }, prazoColeta, tel, reservaColetaMs,
+          pergunta, { companyId, companyName, mcpKey, pedido: pergunta, aprendizado: aprendizadoDoJob }, prazoColeta, tel, reservaColetaMs,
         );
         for (const novo of refeitos) {
           const i = relatorios.findIndex((r) => r.nome === novo.nome);
@@ -5428,7 +5618,12 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
       const criterios = extrairCriteriosDoPedido(pergunta);
       const fatos = colheitaRelacao.fatos ?? [];
       const blocoFatos = blocoFatosParaLeitura(fatos, criterios);
-      const metodo = await blocoMetodoDaLeitura(pergunta, companyId);
+      // A memoria aprendida da leitura corre junto com o metodo e vale para as duas idas abaixo.
+      const [metodo, memLeitura] = await Promise.all([
+        blocoMetodoDaLeitura(pergunta, companyId),
+        consultarMemoria({ supa, companyId, tarefa: pergunta, papel: "sintese" }),
+      ]);
+      anotarConsultaDeMemoria(tel, memLeitura.telemetria);
       const tentativas: { ms: number; erro?: string; chars: number; finish?: string }[] = [];
       let lido: { texto: string; erro?: string; tin: number; tout: number; finish: string } = {
         texto: "",
@@ -5454,6 +5649,7 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
           leitura: colheitaRelacao.leitura || colheitaRelacao.markdown,
           fatos: blocoFatos,
           escopo, timeoutMs: ms, metodo,
+          aprendizados: memLeitura.texto,
         });
         lido = {
           texto: parte.texto,
@@ -6472,10 +6668,14 @@ async function sintetizarRelatorioAutonomo(args: {
   relatorios: { nome: string; relatorio: string; completo: boolean }[];
   baseColetada: string;
   prazo: () => number;
+  /** Bloco da memoria aprendida (papel relatorio), consultado pelo chamador junto com a colheita. */
+  aprendizados?: string;
 }): Promise<string> {
   const blocos = args.relatorios
     .map((r) => `=== ${r.nome} [${r.completo ? "completo" : "incompleto"}] ===\n${r.relatorio}`)
     .join("\n\n");
+  // A memoria aprendida vai por ultimo, depois da doutrina: o cabecalho dela ja diz que a BASE
+  // COLETADA (dado fresco) e a doutrina curada vencem.
   const sys = `Voce e o gestor de trafego de ${args.companyName}. Relatorio AUTONOMO para o HUMANO que opera a conta: le, diagnostica, opina. NAO executa na Meta e NAO pede aprovacao.
 
 LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: nome de ferramenta/especialista (desempenho_campanhas, estrutura_conta, get_ads_ranking), codigo interno (openrouter_timeout), chave JSON (amostra_pequena=true, budget_remaining=0, effective_status). Traduza: "a leitura de desempenho desta campanha falhou por tempo esgotado"; "amostra pequena"; "orcamento restante da campanha zerado"; "status real". ID numerico da Meta so entre parenteses no fim do nome, se precisar.
@@ -6487,7 +6687,7 @@ corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante 
 Responda APENAS um JSON valido, sem cerca markdown, NESTA ORDEM de chaves:
 {"cobertura":"o que nao foi medido, em portugues","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"corpo_md":"narrativa em markdown para o gestor"}
 Escreva cobertura e achados ANTES de corpo_md. Array achados vazio so quando nao houver opiniao com as 5 partes; estouro de orcamento, custo versus teto e concentracao de resultado SAO achados.
-${(await precarregarDoutrina(), doutrina("relatorio"))}`;
+${(await precarregarDoutrina(), doutrina("relatorio"))}${args.aprendizados ? `\n\n${args.aprendizados}` : ""}`;
   const timeoutMs = Math.min(150_000, Math.max(args.prazo() - 8_000, 8_000));
   const r = await chamarLLM(
     [
@@ -6569,6 +6769,9 @@ Duas campanhas com o mesmo nome, ou uma cujo nome contem a outra (SET26 e SET26-
 Secoes obrigatorias (use estes titulos humanos no markdown): ${titulosDasSecoes(secoesDoTexto).join("; ")}.
 ${resolvidas.cobertura}
 Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contrato fora. Nao misture bases de resultado. Nao execute acao. Escreva para o gestor, nao para o log da ferramenta.`;
+    // Memoria aprendida do relatorio (spec 7.5): parte aqui, junto com a colheita e os
+    // especialistas, e so e esperada na escrita. Nunca rejeita.
+    const promessaMemoria = consultarMemoria({ supa, companyId, tarefa: pergunta, papel: "relatorio" });
 
     const colheita = await colherBaseRelatorio({
       companyId,
@@ -6644,6 +6847,10 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
     console.warn(`[relatorio] especialistas ${JSON.stringify((tel.subagentes as { nome?: string; erro?: string; relatorio_completo?: boolean }[]).map((s) => ({
       nome: s.nome, completo: s.relatorio_completo, erro: s.erro ?? null,
     })))} prazo_ms=${prazo()}`);
+    const memRelatorio = await promessaMemoria;
+    anotarConsultaDeMemoria(tel, memRelatorio.telemetria);
+    // tel do relatorio nao vai para o banco: o log e onde a consulta fica visivel.
+    console.warn(`[relatorio] aprendizados injetados=${memRelatorio.telemetria.injetados} falhou=${memRelatorio.telemetria.falhou} desligada=${memRelatorio.telemetria.desligada}`);
 
     let extraido: ReturnType<typeof extrairJsonRelatorio>;
     try {
@@ -6653,6 +6860,7 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
         relatorios,
         baseColetada: colheita.texto,
         prazo,
+        aprendizados: memRelatorio.texto,
       });
       extraido = extrairJsonRelatorio(texto);
     } catch (e) {
@@ -6964,6 +7172,10 @@ Devolva UM json com chaves: leitura, possibilidades {nada_muda, plano, maximo_en
 Cada ato: acao do catalogo Meta, alvo_external_id, quando imediato|apos_janela, evidencia, mecanismo, metrica_sucesso, janela_leitura, reversa.
 Horizontes 15 e 30 mesmo se o prazo for menor: rotule na premissa "se o ritmo novo se manter depois do prazo".
 Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal fingido.${replano ? `\n${RITMO_REPLANO_EXTRA}` : ""}`;
+    // Memoria aprendida do Ritmo (spec 7.5): a memoria INTEIRA, nao so a confirmada. O Ritmo decide
+    // os atos e precisa tambem do que os agentes observaram na conta; cada item ja sai rotulado
+    // como confirmada ou observada. Parte aqui, junto com a colheita, e so e esperada na escrita.
+    const promessaMemoria = consultarMemoria({ supa, companyId, tarefa: pergunta, papel: "ritmo" });
 
     const serieMetrica = snaps.map((s) => ({
       date: String(s.snapshot_date ?? "").slice(0, 10),
@@ -7050,6 +7262,12 @@ Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal 
     console.warn(`[${tag}] especialistas ${JSON.stringify((tel.subagentes as { nome?: string; erro?: string; relatorio_completo?: boolean }[]).map((s) => ({
       nome: s.nome, completo: s.relatorio_completo, erro: s.erro ?? null,
     })))} prazo_ms=${prazo()}`);
+    const memRitmo = await promessaMemoria;
+    anotarConsultaDeMemoria(tel, memRitmo.telemetria);
+    // tel do Ritmo nao vai para o banco: o log e onde a consulta fica visivel.
+    console.warn(`[${tag}] aprendizados injetados=${memRitmo.telemetria.injetados} falhou=${memRitmo.telemetria.falhou} desligada=${memRitmo.telemetria.desligada}`);
+    // O bloco entra pelo extraSys, depois do aviso do replano quando houver.
+    const extraSys = [replano ? RITMO_REPLANO_EXTRA : "", memRitmo.texto].filter(Boolean).join("\n\n") || undefined;
 
     let texto: string;
     try {
@@ -7059,7 +7277,7 @@ Nao invente media de mercado. Amostra pequena: null no horizonte, nunca decimal 
         relatorios,
         baseColetada: baseComSerie,
         prazo,
-        extraSys: replano ? RITMO_REPLANO_EXTRA : undefined,
+        extraSys,
       });
     } catch (e) {
       const motivo = String((e as Error)?.message ?? e).slice(0, 400);
