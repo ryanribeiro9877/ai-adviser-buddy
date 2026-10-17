@@ -7,6 +7,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
 import { type BaseDoutrina, blocoDoutrina, carregarBaseDoutrina } from "../_shared/doutrina_agentes.ts";
+import { consultarMemoria } from "../_shared/aprendizados.ts";
 
 /**
  * Teto de parede POR CHAMADA do redator.
@@ -137,6 +138,16 @@ async function redigirComLlm(c: Candidate): Promise<Redacao> {
       falha: "sem_chave_openrouter",
     };
   }
+  // Memoria aprendida (spec 7.5), so leitura: o card nunca grava aprendizado. Uma consulta por
+  // chamada ao modelo, depois do `sem_chave_openrouter` acima (sem chave nao ha prompt, e consultar
+  // marcaria uso de item que nao entrou em prompt nenhum). A empresa e a do candidato. Nunca lanca:
+  // chave desligada vira texto vazio e falha vira o aviso de "indisponivel".
+  const memAprendida = await consultarMemoria({
+    supa, companyId: c.company_id,
+    tarefa: `recomendacao de trafego (${c.family}, ${c.signal_key}) sobre ${c.entity_type} ${c.entity_name ?? c.entity_id}: ${c.title_draft}`,
+    papel: "reco",
+  });
+  const blocoAprendizados = memAprendida.texto;
   const sys = `Voce redige cards de recomendacao de trafego pago em portugues brasileiro.
 REGRAS INEGOCIAVEIS:
 1) Use SOMENTE os numeros presentes em evidence_json. Nunca invente metrica, percentual ou valor.
@@ -145,7 +156,7 @@ REGRAS INEGOCIAVEIS:
 4) Nao proponha execucao na Meta; proponha discussao/diagnostico.
 5) Responda JSON puro: {"title":"...","description":"..."} com title <= 120 chars.
 6) A description segue a estrutura da recomendacao da casa (evidencia, mecanismo, criterio de sucesso, prazo de leitura, reversa) com o que evidence_json sustenta; parte sem numero vira "a confirmar", nunca inventada.
-${blocoDoutrina(await doutrinaReco(), "reco")}`;
+${blocoDoutrina(await doutrinaReco(), "reco")}` + (blocoAprendizados ? `\n\n${blocoAprendizados}` : "");
 
   const user = JSON.stringify({
     signal_key: c.signal_key,

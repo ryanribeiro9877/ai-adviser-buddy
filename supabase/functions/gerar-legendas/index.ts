@@ -14,6 +14,7 @@ import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
 import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { blocoDoutrina, carregarBaseDoutrina } from "../_shared/doutrina_agentes.ts";
+import { consultarMemoria } from "../_shared/aprendizados.ts";
 import { inferirMeioDeProduto, inferirMeioDrive, parseMeioDriveArg, type MeioDrive } from "../_shared/pedido_drive_criativos.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -277,6 +278,19 @@ Deno.serve(async (req) => {
     ? blocoDoutrina(await carregarBaseDoutrina(supa), "legendas", { credito: true })
     : "";
 
+  // Memoria aprendida (spec 7.5), so leitura: o motor de legendas nunca grava aprendizado. Uma
+  // consulta, depois das recusas 400 acima (nao consulta para devolver erro de entrada) e antes do
+  // modelo; o retry de reasoning reusa o mesmo sys, entao nao consulta de novo. A marca escolhida
+  // (`meio`) e a linha fixa: legenda de La Felicita nao puxa aprendizado do Juridico. Sem `meio`,
+  // a linha sai do texto da tarefa. Nunca lanca: falha vira o aviso de "indisponivel".
+  const memAprendida = await consultarMemoria({
+    supa,
+    companyId,
+    tarefa: `${produto}: ${objetivo}`,
+    papel: "legendas",
+    linhaFixa: meio,
+  });
+  const blocoAprendizados = memAprendida.texto;
   const sys = `Voce e redator de legendas de Meta Ads para ${marcaNome}.${doutrinaCredito}
 Framework OBRIGATORIO (ESP-37), nesta ordem em CADA legenda:
 1) HOOK — primeira linha que para o scroll (use tatica de hook distinta em cada variante).
@@ -296,7 +310,7 @@ Produto: ${produto}
 ${brandBloco}
 ${listaPromessas ? `Substitutos seguros (promessas_proibidas):\n${listaPromessas}` : ""}
 ${referencias.length ? `Referencias de estilo (nao copie literal):\n${referencias.map((r, i) => `${i + 1}. ${r.slice(0, 280)}`).join("\n")}` : ""}
-${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.slice(0, 800)}` : ""}`;
+${notaPeca ? `Contexto da peca (Drive — informar, nao aprovar):\n${notaPeca.slice(0, 800)}` : ""}` + (blocoAprendizados ? `\n\n${blocoAprendizados}` : "");
 
   const userMsg = `Objetivo da legenda: ${objetivo}\nGere exatamente ${N} variantes.`;
 

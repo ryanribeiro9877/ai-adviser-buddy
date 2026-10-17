@@ -19,6 +19,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { chaveMcpDe, mcpKeyValida } from "../_shared/mcp_auth.ts";
 import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "../_shared/llm_roteador.ts";
+import { consultarMemoria } from "../_shared/aprendizados.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -185,13 +186,23 @@ Deno.serve(async (req) => {
   })();
 
   // REDATOR
+  // Memoria aprendida (spec 7.5), so leitura: o redator nunca grava aprendizado. Uma consulta,
+  // depois das recusas de entrada e do OPENROUTER_API_KEY ausente (sem prompt nao ha o que
+  // consultar). Fica antes do redator e NAO desce ao guardiao: portao de conformidade nao e
+  // influenciado por preferencia aprendida. Nunca lanca: falha vira o aviso de "indisponivel".
+  const memAprendida = await consultarMemoria({
+    supa, companyId: comp.id,
+    tarefa: `template de WhatsApp UTILITY ${nome}: ${objetivo}`,
+    papel: "waba_redator",
+  });
+  const blocoAprendizados = memAprendida.texto;
   const sys = `Você é redator de templates de WhatsApp Business para uma empresa de crédito consignado (Brasil).
 Escreva UM template da categoria UTILITY seguindo as regras da Meta À RISCA:
 - UTILITY = mensagem ligada a uma interação/solicitação JÁ EXISTENTE da pessoa (atualização de pedido, proposta, análise, agendamento, documento). NUNCA promocional: proibido desconto, oferta, urgência de venda, convite a comprar.
 - Use variáveis {{1}}, {{2}}... em sequência ({{1}} normalmente é o nome ou protocolo da pessoa).
 - Máx. 1024 caracteres, tom sóbrio, no máximo 1 emoji, português do Brasil.
 - Responda APENAS um JSON válido, sem markdown: {"body_text": "...", "exemplos": ["exemplo p/ {{1}}", "..."], "footer_text": "opcional, curto ou null"}
-${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"` : ""}`;
+${refBody ? `Referência de estilo aprovado da casa: "${refBody.slice(0, 300)}"` : ""}` + (blocoAprendizados ? `\n\n${blocoAprendizados}` : "");
   const rota = resolverChamadaLlm({ tipo: "waba" });
   const rl = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
