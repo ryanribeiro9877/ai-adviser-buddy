@@ -24,6 +24,7 @@ import type { AprendizadoLinha, TurnoAprendizado } from "./aprendizados_regras.t
 import {
   consultarMemoria,
   corrigirAprendizado,
+  extrairAprendizadosDoTurno,
   inicioDoDiaSaoPaulo,
   registrarAprendizado,
 } from "./aprendizados.ts";
@@ -864,5 +865,144 @@ const dbCorr = (rows: Linha[], extra: CfgDb = {}) => new DbFalso({ ...extra, tab
   assert(r.resultado === "recusado" && d.updates().length === 0 && d.linhasDe()[0].status === "vigente", "outra empresa nao aposenta o registro da COHAPM");
 }
 
+// =============================================================================================
+// 5) REDE DE SEGURANCA DO CHAT: extrairAprendizadosDoTurno (spec 7.4)
+// =============================================================================================
+// O modelo barato e um fetch falso. O que importa provar: cada item passa pelo MESMO handler do
+// registro (a parafrase cai em "cite a fala exata"), o teto do turno e o mesmo, e nada aqui lanca.
+type ChamadaModelo = { url: string; body: any };
+async function comModeloFalso<T>(
+  resposta: (corpo: any) => Response | Promise<Response>,
+  fn: (chamadas: ChamadaModelo[]) => Promise<T>,
+): Promise<T> {
+  const original = globalThis.fetch;
+  const chamadas: ChamadaModelo[] = [];
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body ?? "{}"));
+    chamadas.push({ url: String(url), body });
+    return await resposta(body);
+  }) as typeof fetch;
+  try { return await fn(chamadas); } finally { globalThis.fetch = original; }
+}
+const respostaDoModelo = (conteudo: string, status = 200) =>
+  new Response(JSON.stringify({ choices: [{ message: { content: conteudo } }] }), {
+    status, headers: { "content-type": "application/json" },
+  });
+const FALA_REDE = "Nao e assim. A partir de agora mostre sempre o custo por conversa antes do CPL nos relatorios";
+const RESPOSTA_REDE = "Entendido, vou trazer o custo por conversa primeiro nos proximos relatorios.";
+const itemLiteral = {
+  fato: "O gestor quer ver o custo por conversa antes do CPL nos relatorios",
+  contexto: "Corrigiu a ordem das metricas no relatorio",
+  categoria: "preferencia_do_gestor",
+  evidencia: { tipo: "fala_do_gestor", trecho: "mostre sempre o custo por conversa antes do CPL" },
+  confianca: "confirmada",
+};
+const itemParafrase = {
+  fato: "O gestor prefere que a conversa venha antes do custo por lead",
+  contexto: "Mesma correcao, dita com outras palavras",
+  categoria: "preferencia_do_gestor",
+  evidencia: { tipo: "fala_do_gestor", trecho: "o gestor prefere a conversa antes do custo por lead" },
+  confianca: "confirmada",
+};
+const turnoRede = (over: Partial<TurnoAprendizado> = {}) => novoTurno({ falasDoGestor: [FALA_REDE], ...over });
+
+{
+  // Dois itens: o literal grava, a parafrase e recusada pelo handler.
+  const db = dbReg();
+  const turno = turnoRede();
+  const r = await comModeloFalso(
+    () => respostaDoModelo(JSON.stringify({ aprendizados: [itemLiteral, itemParafrase] })),
+    async (chamadas) => {
+      const out = await extrairAprendizadosDoTurno({ supa: db, openRouterKey: "chave-falsa", msgGestor: FALA_REDE, resposta: RESPOSTA_REDE, turno });
+      assert(chamadas.length === 1 && chamadas[0].url.includes("openrouter.ai"), "rede: uma chamada ao modelo");
+      const corpo = chamadas[0].body;
+      assert(!!corpo.model && Array.isArray(corpo.messages), "rede: corpo montado pelo roteador (model + messages)");
+      const textoUser = JSON.stringify(corpo.messages);
+      assert(textoUser.includes("A partir de agora mostre sempre") && textoUser.includes("Entendido, vou trazer"), "rede: o modelo le a fala do gestor e a resposta");
+      assert(corpo.reasoning?.effort === "low", "rede: tipo mais barato do roteador (raciocinio no piso)");
+      return out;
+    },
+  );
+  assert(r.length === 2, "rede: um resultado por item");
+  assert(r[0]?.resultado === "gravado", "rede: trecho literal grava");
+  assert(r[1]?.resultado === "recusado" && !!r[1]?.motivo?.includes("cite a fala exata"), "rede: parafrase recusada pelo handler");
+  assert(db.inserts().length === 1 && db.ultimoInsert().fato === itemLiteral.fato, "rede: so o literal foi gravado");
+  assert(db.ultimoInsert().company_id === COMPANY_COHAPM && db.ultimoInsert().superficie === "chat" && db.ultimoInsert().conversation_id === CONVERSA, "rede: grava com o turno do chat");
+  assert(turno.registrosNoTurno === 1, "rede: conta no teto do mesmo turno");
+}
+
+{
+  // Fetch lancando: devolve [] sem lancar e sem tocar no banco.
+  const db = dbReg();
+  const r = await calado(() => comModeloFalso(
+    () => { throw new Error("rede caiu"); },
+    () => extrairAprendizadosDoTurno({ supa: db, openRouterKey: "chave-falsa", msgGestor: FALA_REDE, resposta: RESPOSTA_REDE, turno: turnoRede() }),
+  ));
+  assert(Array.isArray(r) && r.length === 0, "rede: fetch que lanca devolve []");
+  assert(db.inserts().length === 0, "rede: fetch que lanca nao grava");
+
+  // HTTP de erro, conteudo que nao e JSON e lista ausente: [] sem lancar.
+  for (const [nome, resp] of [
+    ["http 402", () => respostaDoModelo("{}", 402)],
+    ["conteudo nao e JSON", () => respostaDoModelo("nao sei responder isso")],
+    ["sem lista", () => respostaDoModelo(JSON.stringify({ outra: [] }))],
+    ["corpo invalido", () => new Response("<html>", { status: 200 })],
+  ] as [string, () => Response][]) {
+    const d = dbReg();
+    const rr = await calado(() => comModeloFalso(resp, () =>
+      extrairAprendizadosDoTurno({ supa: d, openRouterKey: "chave-falsa", msgGestor: FALA_REDE, resposta: RESPOSTA_REDE, turno: turnoRede() })));
+    assert(Array.isArray(rr) && rr.length === 0 && d.inserts().length === 0, `rede: ${nome} devolve [] sem gravar`);
+  }
+
+  // Sem chave: nem chama o modelo.
+  const dSem = dbReg();
+  const rSem = await comModeloFalso(() => respostaDoModelo("{}"), async (chamadas) => {
+    const out = await extrairAprendizadosDoTurno({ supa: dSem, openRouterKey: "", msgGestor: FALA_REDE, resposta: RESPOSTA_REDE, turno: turnoRede() });
+    assert(chamadas.length === 0, "rede: sem chave nao chama o modelo");
+    return out;
+  });
+  assert(rSem.length === 0, "rede: sem chave devolve []");
+}
+
+{
+  // No maximo 2 itens, JSON dentro de cerca de markdown, e a evidencia e sempre a fala do gestor.
+  const db = dbReg();
+  const deResposta = {
+    ...itemLiteral,
+    fato: "O agente vai trazer o custo por conversa primeiro nos relatorios",
+    evidencia: { tipo: "retorno_de_ferramenta", ferramenta: "get_funnel", trecho: "vou trazer o custo por conversa primeiro" },
+    confianca: "observada",
+  };
+  const terceiro = { ...itemLiteral, fato: "Um terceiro aprendizado que nao deveria nem ser lido aqui" };
+  const r = await comModeloFalso(
+    () => respostaDoModelo("```json\n" + JSON.stringify({ aprendizados: [deResposta, itemLiteral, terceiro] }) + "\n```"),
+    () => extrairAprendizadosDoTurno({
+      supa: db, openRouterKey: "chave-falsa", msgGestor: FALA_REDE, resposta: RESPOSTA_REDE,
+      // O retorno existe no turno: so a regra "a rede so cita a fala do gestor" recusa o item.
+      turno: turnoRede({ retornos: [{ tool: "get_funnel", retorno: { nota: "vou trazer o custo por conversa primeiro" } }] }),
+    }),
+  );
+  assert(r.length === 2, "rede: no maximo 2 itens");
+  assert(r[0]?.resultado === "recusado" && !!r[0]?.motivo?.includes("cite a fala exata"), "rede: trecho tirado da resposta do agente nao vira evidencia");
+  assert(r[1]?.resultado === "gravado", "rede: JSON em cerca de markdown e lido");
+  assert(db.inserts().length === 1 && db.ultimoInsert().evidencias[0].tipo === "fala_do_gestor", "rede: a evidencia gravada e fala do gestor");
+}
+
+{
+  // Mesmo teto do turno: com o turno cheio, a rede nao grava.
+  const db = dbReg();
+  const r = await comModeloFalso(
+    () => respostaDoModelo(JSON.stringify({ aprendizados: [itemLiteral] })),
+    () => extrairAprendizadosDoTurno({ supa: db, openRouterKey: "chave-falsa", msgGestor: FALA_REDE, resposta: RESPOSTA_REDE, turno: turnoRede({ registrosNoTurno: TETO_REGISTROS_TURNO }) }),
+  );
+  assert(r.length === 1 && r[0].resultado === "recusado" && !!r[0].motivo?.includes("turno") && db.inserts().length === 0, "rede: respeita o teto do turno");
+
+  // Lista vazia: nada a fazer.
+  const dv = dbReg();
+  const rv = await comModeloFalso(() => respostaDoModelo(JSON.stringify({ aprendizados: [] })), () =>
+    extrairAprendizadosDoTurno({ supa: dv, openRouterKey: "chave-falsa", msgGestor: FALA_REDE, resposta: RESPOSTA_REDE, turno: turnoRede() }));
+  assert(rv.length === 0 && dv.inserts().length === 0, "rede: lista vazia nao grava");
+}
+
 if (falhas) { console.error(`\n${falhas} falha(s)`); Deno.exit(1); }
-console.log("ok - aprendizados (consulta, registro, correcao)");
+console.log("ok - aprendizados (consulta, registro, correcao, rede)");

@@ -106,7 +106,19 @@ const DONO_DA_ESCRITA: Record<string, string> = {
   renomear_campanha: "AG-06",
   upload_midia: "AG-06",
   vincular_instagram_dos_anuncios: "AG-06",
+  // Memoria aprendida: dono pela spec (7.2), AG-00 e nao AG-08, para entrar em todo turno pelo
+  // NUCLEO_SEMPRE. A linha em agent_unidades entra junto com o registro (ver AGUARDANDO_REGISTRO).
+  registrar_aprendizado: "AG-00",
+  corrigir_aprendizado: "AG-00",
 };
+
+// Ferramentas que ja estao no snapshot (o codigo sabe executa-las) e AINDA NAO tem linha no
+// banco. A migration que as registra so entra DEPOIS do deploy da edge (memoria aprendida,
+// Tarefa 9 do plano de 17/10/2026): registrar antes faria o chat no ar oferecer ao modelo uma
+// ferramenta que ele nao sabe executar. A lista e nominal e so encolhe: quando a migration
+// existir, a chave sai daqui e o arquivo entra em MIGRATIONS. Chave pendente que ja aparece
+// classificada na migration ou viva na tabela reprova, para a excecao nao sobreviver ao motivo.
+const AGUARDANDO_REGISTRO = new Set(["registrar_aprendizado", "corrigir_aprendizado"]);
 
 /** Le os UPDATE de classificacao da migration e devolve chave -> {efeito, setor}. */
 function classificacaoDaMigration(sql: string): Map<string, { efeito: string; setor: string }> {
@@ -156,9 +168,17 @@ for (const [chave, base] of doSnapshot) {
   );
 }
 
-// 3) Snapshot e migration cobrem exatamente o mesmo conjunto de chaves.
+// 3) Snapshot e migration cobrem exatamente o mesmo conjunto de chaves (menos as nomeadas em
+//    AGUARDANDO_REGISTRO, que continuam sujeitas as regras 1, 2 e 5).
 for (const [chave] of doSnapshot) {
+  if (AGUARDANDO_REGISTRO.has(chave)) {
+    ok(!daMigration.has(chave), `${chave} ja e classificada na migration: tire-a de AGUARDANDO_REGISTRO`);
+    continue;
+  }
   ok(daMigration.has(chave), `${chave} esta no snapshot e nao recebe efeito na migration`);
+}
+for (const chave of AGUARDANDO_REGISTRO) {
+  ok(chave in FERRAMENTAS_BASE, `${chave} esta em AGUARDANDO_REGISTRO e nao existe no snapshot`);
 }
 for (const chave of daMigration.keys()) {
   ok(chave in FERRAMENTAS_BASE, `${chave} e classificada na migration e nao existe no snapshot`);
@@ -203,10 +223,10 @@ for (const chave of Object.keys(DONO_DA_ESCRITA)) {
 // 6) O total. 57 em 03/09/2026; 58 com alterar_geo; 59 com get_seguidores_instagram_ads;
 //    60 com alterar_orcamento; 62 com buscar_interesses + alterar_publico_do_conjunto;
 //    72: as 63 de 18/09, as 6 de leitura/plano de 02/10 e criar_conjunto, criar_criativo, trocar_criativo_do_anuncio.
-//    73: criar_criativo_carrossel.
+//    73: criar_criativo_carrossel. 75: registrar_aprendizado + corrigir_aprendizado (17/10/2026).
 ok(
-  doSnapshot.length === 73,
-  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 73 — classifique a nova e atualize este numero`,
+  doSnapshot.length === 75,
+  `o snapshot tem ${doSnapshot.length} ferramentas, esperava 75 — classifique a nova e atualize este numero`,
 );
 
 // ===== Tabela viva (opcional) =====
@@ -234,9 +254,14 @@ if (url && chaveServico) {
     const linhas = (await resp.json()) as Array<
       { chave: string; efeito: string | null; setor: string | null }
     >;
+    for (const l of linhas) {
+      ok(!AGUARDANDO_REGISTRO.has(l.chave), `${l.chave} ja esta na tabela: tire-a de AGUARDANDO_REGISTRO`);
+    }
+    const esperadas = doSnapshot.length - AGUARDANDO_REGISTRO.size;
     ok(
-      linhas.length === doSnapshot.length,
-      `a tabela tem ${linhas.length} ferramentas vigentes e o snapshot tem ${doSnapshot.length}`,
+      linhas.length === esperadas,
+      `a tabela tem ${linhas.length} ferramentas vigentes e o snapshot tem ${esperadas} registradas ` +
+        `(${doSnapshot.length} menos ${AGUARDANDO_REGISTRO.size} aguardando registro)`,
     );
     for (const l of linhas) {
       const base = FERRAMENTAS_BASE[l.chave];

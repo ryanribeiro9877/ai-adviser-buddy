@@ -1,14 +1,15 @@
 // supabase/functions/_shared/aprendizados.ts
 //
 // Camada de banco da memoria aprendida dos agentes: consultar (antes do prompt), registrar e
-// corrigir (ferramentas do modelo). As regras puras (volatil, isolamento, linha, evidencia, bloco)
-// moram em aprendizados_regras.ts; aqui so ha I/O e a ORDEM em que as regras rodam.
+// corrigir (ferramentas do modelo) e a rede de seguranca do chat (extracao barata depois da
+// resposta, que grava pelo mesmo registrar). As regras puras (volatil, isolamento, linha,
+// evidencia, bloco) moram em aprendizados_regras.ts; aqui so ha I/O e a ORDEM em que as regras rodam.
 // Tabela, trigger e RPCs: supabase/migrations/20261017150000_memoria_aprendida_dos_agentes.sql.
-// Spec: docs/superpowers/specs/2026-10-17-memoria-aprendida-dos-agentes-design.md (7.2, 7.3, 7.5, 7.10).
+// Spec: docs/superpowers/specs/2026-10-17-memoria-aprendida-dos-agentes-design.md (7.2, 7.3, 7.4, 7.5, 7.10).
 //
 // Tres garantias que o resto do sistema assume:
-//  1. consultarMemoria e registrarAprendizado/corrigirAprendizado NUNCA lancam. Memoria e acessorio:
-//     o turno do chat ou do job segue mesmo com o banco fora.
+//  1. consultarMemoria, registrarAprendizado, corrigirAprendizado e extrairAprendizadosDoTurno
+//     NUNCA lancam. Memoria e acessorio: o turno do chat ou do job segue mesmo com o banco fora.
 //  2. A empresa e SEMPRE a do turno. O que o modelo escreve no argumento nunca escolhe empresa.
 //  3. Sair de `vigente` grava `motivo_status` no MESMO UPDATE: o CHECK da tabela recusa um sem o outro.
 
@@ -38,6 +39,7 @@ import type {
   PedidoRegistro,
   TurnoAprendizado,
 } from "./aprendizados_regras.ts";
+import { bodyOpenRouter, resolverChamadaLlm, tetoDeSaida } from "./llm_roteador.ts";
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -567,5 +569,131 @@ export async function corrigirAprendizado(
   } catch (e) {
     console.error("[aprendizados] corrigir falhou:", msgErro(e));
     return recusar(msgErro(e));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rede de seguranca do chat (spec 7.4)
+// ---------------------------------------------------------------------------
+
+/** No maximo 2 aprendizados por extracao: a rede pega a correcao que escapou, nao varre o turno. */
+const MAX_ITENS_REDE = 2;
+/**
+ * A rede roda depois da resposta (EdgeRuntime.waitUntil), entao nao disputa o teto do turno, mas
+ * o worker morre no limite de parede da plataforma (~400s) e o turno ja pode ter gasto ~145s.
+ * Com raciocinio no piso a extracao leva segundos; 45s e folga, nao orcamento.
+ */
+const TIMEOUT_EXTRACAO_MS = 45_000;
+/** A fala e a resposta podem ser enormes (pedido colado, relatorio); a extracao so precisa do miolo. */
+const MAX_CHARS_FALA_REDE = 4000;
+const MAX_CHARS_RESPOSTA_REDE = 3000;
+
+const SYS_EXTRACAO = `Voce extrai MEMORIA DURAVEL de um turno de chat entre o gestor de trafego e o agente.
+Leia a FALA DO GESTOR e a RESPOSTA DO AGENTE. Extraia no maximo ${MAX_ITENS_REDE} aprendizados que continuam valendo depois desta conversa: correcao que o gestor fez, preferencia ou regra que ele declarou.
+NAO extraia: numero de desempenho de um periodo, palpite, pedido pontual desta conversa, nem o que o agente disse por conta propria.
+Cada item:
+- fato: uma frase autossuficiente de 20 a 600 caracteres, na terceira pessoa (ex.: "O gestor quer ...").
+- contexto: uma frase curta sobre a situacao em que isso foi dito.
+- categoria: preferencia_do_gestor | correcao | fato_da_conta | armadilha | processo.
+- evidencia: {"tipo":"fala_do_gestor","trecho":"<copia LITERAL de um pedaco da FALA DO GESTOR, com pelo menos 12 caracteres e palavras inteiras>"}. Parafrase e recusada.
+- confianca: "confirmada".
+Se nada valer como memoria duravel, devolva a lista vazia.
+Responda APENAS JSON valido, sem markdown: {"aprendizados":[{"fato":"...","contexto":"...","categoria":"...","evidencia":{"tipo":"fala_do_gestor","trecho":"..."},"confianca":"confirmada"}]}`;
+
+/** Lista `aprendizados` do texto do modelo, tolerante a cerca de markdown e a texto em volta. */
+function lerItensDoModelo(texto: string): unknown[] {
+  const limpo = String(texto ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const candidatos = [limpo];
+  const ini = limpo.indexOf("{");
+  const fim = limpo.lastIndexOf("}");
+  if (ini >= 0 && fim > ini) candidatos.push(limpo.slice(ini, fim + 1));
+  for (const c of candidatos) {
+    try {
+      const j = JSON.parse(c);
+      if (Array.isArray(j?.aprendizados)) return j.aprendizados;
+    } catch {
+      // tenta o proximo
+    }
+  }
+  return [];
+}
+
+/**
+ * A rede so le a fala do gestor e a resposta do agente, entao a unica evidencia que ela pode
+ * citar e a fala do gestor. Forcar o tipo faz o handler conferir o trecho contra as falas do
+ * turno: um trecho tirado da RESPOSTA do agente cai ali com "cite a fala exata", em vez de
+ * entrar como retorno de ferramenta. Item que nem e objeto segue como veio e o handler recusa.
+ */
+function comoFalaDoGestor(item: unknown): unknown {
+  if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+  const o = item as Record<string, unknown>;
+  const ev = o.evidencia && typeof o.evidencia === "object" && !Array.isArray(o.evidencia)
+    ? o.evidencia as Record<string, unknown>
+    : {};
+  return { ...o, evidencia: { tipo: "fala_do_gestor", trecho: ev.trecho } };
+}
+
+/**
+ * Rede de seguranca do chat: o gestor corrigiu ou declarou preferencia e o turno terminou sem
+ * registrar_aprendizado. Uma extracao curta le a fala e a resposta e cada item passa pelo MESMO
+ * handler do registro (registrarAprendizado): mesmas checagens, mesmo teto do turno (o `turno`
+ * e o objeto do chat, com registrosNoTurno ja contado). Nunca lanca: falha de rede, HTTP de erro
+ * ou resposta sem JSON devolvem [].
+ *
+ * MODELO: tipo "planner" e tier "lite", o mais barato que o roteador oferece. O padrao da casa e
+ * o mesmo em todo tipo; o que muda e o esforco, e "planner" cai na faixa de triagem (raciocinio
+ * no piso, `low`), que e o caso daqui: devolver um JSON curto para codigo, nao prosa ao gestor.
+ * O tier nao pesa na triagem (modoRaciocinio), mas fica declarado para nao subir por acidente.
+ */
+export async function extrairAprendizadosDoTurno(a: {
+  supa: Db;
+  openRouterKey: string;
+  msgGestor: string;
+  resposta: string;
+  turno: TurnoAprendizado;
+}): Promise<ResultadoRegistro[]> {
+  try {
+    const chave = String(a.openRouterKey ?? "").trim();
+    const fala = String(a.msgGestor ?? "").trim();
+    if (!chave || !fala) return [];
+
+    const rota = resolverChamadaLlm({ tipo: "planner", tier: "lite" });
+    const user = `FALA DO GESTOR:\n${fala.slice(0, MAX_CHARS_FALA_REDE)}\n\n` +
+      `RESPOSTA DO AGENTE:\n${String(a.resposta ?? "").slice(0, MAX_CHARS_RESPOSTA_REDE)}`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), TIMEOUT_EXTRACAO_MS);
+    let conteudo = "";
+    try {
+      const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${chave}` },
+        body: JSON.stringify(bodyOpenRouter(rota, {
+          // max_tokens conta raciocinio + texto e o raciocinio do padrao da casa e obrigatorio:
+          // o piso do roteador evita o JSON vazio por teto curto.
+          max_tokens: tetoDeSaida(),
+          messages: [{ role: "system", content: SYS_EXTRACAO }, { role: "user", content: user }],
+        })),
+        signal: ac.signal,
+      });
+      if (!resp.ok) {
+        console.error("[aprendizados] rede: modelo devolveu http", resp.status);
+        return [];
+      }
+      const j = await resp.json();
+      conteudo = String(j?.choices?.[0]?.message?.content ?? "");
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const itens = lerItensDoModelo(conteudo).slice(0, MAX_ITENS_REDE);
+    const out: ResultadoRegistro[] = [];
+    // Em serie, nao em paralelo: o teto do turno e o dedupe dependem do que o item anterior gravou.
+    for (const item of itens) {
+      out.push(await registrarAprendizado(a.supa, comoFalaDoGestor(item), a.turno));
+    }
+    return out;
+  } catch (e) {
+    console.error("[aprendizados] rede falhou:", msgErro(e));
+    return [];
   }
 }

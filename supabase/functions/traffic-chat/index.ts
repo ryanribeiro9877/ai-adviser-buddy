@@ -935,10 +935,19 @@ import { empresaEhCredito } from "../_shared/empresa_credito.ts";
 import { carregarMemoriaInstitucional } from "../_shared/agent_memory.ts";
 import { selecionarMemoria } from "../_shared/memoria_relevante.ts";
 import {
+  consultarMemoria,
+  corrigirAprendizado,
+  extrairAprendizadosDoTurno,
+  registrarAprendizado,
+  type ResultadoRegistro,
+} from "../_shared/aprendizados.ts";
+import { sinalDeCorrecao, type TurnoAprendizado } from "../_shared/aprendizados_regras.ts";
+import {
   blocoIdentidadeAgentes,
   carregarCatalogoAgentes,
   delegarAgentes,
   ferramentasDosAgentes,
+  NUCLEO_SEMPRE,
   reforcarPorIntencao,
 } from "../_shared/agentes.ts";
 import {
@@ -1036,6 +1045,11 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   get_acervo_para_anuncio: 3,
   nota_visual_da_peca: 6,
   upload_midia: 16,
+  // Memoria aprendida: 3 = TETO_REGISTROS_TURNO (o handler recusa o quarto de qualquer jeito, aqui
+  // a chamada nem sai). Corrigir e raro por turno ("esquece o #ab12cd"); 2 cobre aposentar um e
+  // substituir outro sem deixar o modelo varrer a memoria.
+  registrar_aprendizado: 3,
+  corrigir_aprendizado: 2,
 };
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
 // propose_action de criacao nao consome o teto global do turno (so o teto por ferramenta).
@@ -6247,6 +6261,8 @@ const ORDEM_TOOLS = [
   "registrar_legenda_da_conversa",
   "get_slate_da_conversa",
   "registrar_peca_da_conversa",
+  "registrar_aprendizado",
+  "corrigir_aprendizado",
   "check_compliance",
   "get_criativos_conteudo",
   "get_conhecimento",
@@ -6585,6 +6601,18 @@ async function t_drive_criativos(companyId: string, pedido = "", args: Record<st
   return compactarInventarioDriveParaAgente(out, recorteEfetivo);
 }
 
+// Linha de diagnostico.aprendizados.registro (spec 7.9): o veredito de cada chamada, sem o fato.
+// O fato fica na tabela; aqui basta saber se gravou, reforcou ou por que recusou.
+type RegistroDeAprendizado = { ferramenta: string; resultado: ResultadoRegistro["resultado"]; motivo?: string; id_curto?: string };
+function linhaDeRegistro(ferramenta: string, r: ResultadoRegistro): RegistroDeAprendizado {
+  return {
+    ferramenta,
+    resultado: r.resultado,
+    ...(r.motivo ? { motivo: r.motivo } : {}),
+    ...(r.id_curto ? { id_curto: r.id_curto } : {}),
+  };
+}
+
 async function runTool(name: string, args: any, ctx: any) {
   try {
     switch (name) {
@@ -6778,6 +6806,19 @@ async function runTool(name: string, args: any, ctx: any) {
       case "registrar_legenda_da_conversa": return await t_registrar_legenda_da_conversa(ctx.companyId, ctx.convId, args);
       case "get_slate_da_conversa": return await t_get_slate_da_conversa(ctx.companyId, ctx.convId, args);
       case "registrar_peca_da_conversa": return await t_registrar_peca_da_conversa(ctx.companyId, ctx.convId, args);
+      // Memoria aprendida (spec 7.2, 7.3). O handler confere a evidencia contra ctx.aprendizado
+      // (falas do gestor e retornos DESTE turno), grava sempre com a empresa do turno e nunca
+      // lanca: recusa volta como { resultado: "recusado", motivo } para o modelo corrigir.
+      case "registrar_aprendizado": {
+        const r = await registrarAprendizado(supa, args, ctx.aprendizado);
+        ctx.registrosDeAprendizado.push(linhaDeRegistro(name, r));
+        return r;
+      }
+      case "corrigir_aprendizado": {
+        const r = await corrigirAprendizado(supa, args, ctx.aprendizado);
+        ctx.registrosDeAprendizado.push(linhaDeRegistro(name, r));
+        return r;
+      }
       case "get_criativos_conteudo": {
         const buscaBruta = String(args?.busca_nome ?? "").trim();
         const conj = buscaBruta.match(/conj\.?\s*0*(\d+)/i);
@@ -7703,6 +7744,11 @@ Deno.serve(async (req) => {
   // viagem do modelo de triagem e com a montagem do historico, entao nao soma parede. Falha
   // aberta esta dentro de carregarFerramentas — esta promessa nao rejeita.
   const promessaFerramentas = carregarFerramentas(supa);
+  // Memoria aprendida (spec 7.5), na mesma largada do Roteador e do registro: a consulta corre
+  // junto com historico, slate e delegacao, e so e aguardada na montagem do prompt. A tarefa e o
+  // objetivo do fio (ja composto acima), para o recorte por linha valer tambem na continuacao.
+  // Nunca rejeita: falha vira o aviso de "indisponivel" no proprio texto do bloco.
+  const promessaAprendizados = consultarMemoria({ supa, companyId: company.id, tarefa: objetivoOriginal, papel: "chat" });
   // v28.11: REINJECAO DOS RETORNOS. Os 2 turnos de assistente mais recentes que tenham
   // tool_results voltam com um bloco de evidencia ANTES do proprio texto - antes, e nao
   // depois, porque o final da ultima resposta precisa continuar sendo a ultima coisa que o
@@ -7814,12 +7860,18 @@ Deno.serve(async (req) => {
   // v20: prompt caching. O bloco de agentes vai DEPOIS do bloco marcado, e nao dentro dele:
   // o prefixo cacheado precisa ser byte a byte o mesmo entre turnos, e a lista de agentes muda
   // a cada pergunta. Misturar os dois trocaria o desconto de 0,1x por nada.
+  // A memoria aprendida vai por ultimo, pelo mesmo motivo e com mais forca: ela muda com a
+  // pergunta (recorte por linha e busca textual) e com o que os agentes gravam entre turnos.
+  // Bloco vazio (chave desligada ou nada vigente) nao entra: o turno fica como antes dela.
   const { data: cfgGestor } = await supa.from("meta_execution_config").select("gestor_nome").eq("company_id", company.id).maybeSingle();
   const nomeGestor = String((cfgGestor as { gestor_nome?: string } | null)?.gestor_nome ?? "").trim() || "gestor";
+  const memAprendida = await promessaAprendizados;
+  const blocoAprendizados = memAprendida.texto;
   const cacheSystem = [
     { type: "text", text: systemPrompt(company.name, memoria, estilo, indiceConhecimento, company.id, nomeGestor),
       cache_control: { type: "ephemeral" } },
     ...(blocoAgentes ? [{ type: "text", text: blocoAgentes }] : []),
+    ...(blocoAprendizados ? [{ type: "text", text: blocoAprendizados }] : []),
   ];
   const ultimoAssistantTxt = ultimoAssistantIdx >= 0
     ? String((cronologico[ultimoAssistantIdx] as any)?.content ?? "")
@@ -7864,6 +7916,18 @@ Deno.serve(async (req) => {
   // v28.11: o que cada ferramenta DEVOLVEU, para gravar em chat_messages.tool_results.
   const toolResults: ToolResult[] = [];
   const actionCards: CardInfo[] = [];
+  // Memoria aprendida: o que o handler confere a evidencia contra (spec 7.2, passo 1).
+  // Falas do gestor = as mensagens `user` do fio, com o texto CRU (o `history` do modelo pode
+  // estar cortado), mais a mensagem atual, que ainda nao esta em `cronologico` (o select do
+  // historico roda antes do insert dela). Na retomada, msgText e o prompt de checkpoint escrito
+  // pelo sistema, nao fala do gestor: fica de fora, e a pergunta original ja esta no fio.
+  const falasDoGestor = [
+    ...cronologico.filter((m: { role?: string }) => m.role === "user").map((m: { content?: string }) => String(m.content ?? "")),
+    ...(ehRetomada ? [] : [msgText]),
+  ];
+  // Autoria do registro: o primeiro agente do turno fora do nucleo (o especialista que atendeu),
+  // ou o AG-00 quando o turno nao foi estreitado. A empresa nunca vem daqui: vem do turno.
+  const agenteDoAprendizado = agentesDoTurno.find((c) => !NUCLEO_SEMPRE.includes(c)) ?? "AG-00";
   const ctx = {
     companyId: company.id,
     convId: convId!,
@@ -7877,6 +7941,20 @@ Deno.serve(async (req) => {
     // Ate onde uma ferramenta pode esperar servico externo (hoje: o compliance do card) sem
     // tirar do turno a reserva de gravacao. Mesmo relogio do laco (decorrido/HARD_LIMIT).
     prazoFerramentasEm: tInicio + HARD_LIMIT_MS - RESERVA_GRAVACAO_MS,
+    // O turno da memoria aprendida. `retornos` e a PROPRIA lista que o laco enche: a evidencia de
+    // retorno de ferramenta e conferida contra o que rodou ate aquele ponto do turno.
+    // registrosNoTurno sobe dentro do handler e vale tambem para a rede de seguranca.
+    aprendizado: {
+      companyId: company.id,
+      agente: agenteDoAprendizado,
+      superficie: "chat",
+      conversationId: convId,
+      jobId: null,
+      falasDoGestor,
+      retornos: toolResults,
+      registrosNoTurno: 0,
+    } satisfies TurnoAprendizado,
+    registrosDeAprendizado: [] as RegistroDeAprendizado[],
   };
   let tokensIn = 0, tokensOut = 0, reply = "", iteracoes = 0, finishReason = "";
   // 03/09/2026: ONDE o turno gasta a parede. Sem esta separacao, "o turno demora 110s" nao
@@ -9050,6 +9128,16 @@ Deno.serve(async (req) => {
     await supa.from("chat_conversations").update({ turn_checkpoint: null }).eq("id", convId);
   }
 
+  // Rede de seguranca da memoria aprendida (spec 7.4). O modelo depende de lembrar de chamar
+  // registrar_aprendizado; se o gestor corrigiu ou declarou preferencia e o turno fechou sem a
+  // chamada, uma extracao curta roda DEPOIS da resposta. Decide-se aqui, antes do diagnostico,
+  // para `disparou` entrar nele. Sem EdgeRuntime.waitUntil (fora da edge) nao dispara: uma promessa
+  // solta morreria com o worker no meio da gravacao. Retomada fica de fora: msgText e o prompt de
+  // checkpoint do sistema, e a fala do gestor ja passou pela rede no segmento que a recebeu.
+  const edgeRuntime = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
+  const redeDisparou = !ehRetomada && typeof edgeRuntime?.waitUntil === "function" &&
+    sinalDeCorrecao(msgText) && !toolsUsed.some((t) => t.tool === "registrar_aprendizado");
+
   const diagnostico = { finish_reason: finishReason, iteracoes, ms_total: decorrido(),
     deadline_tools: deadlineTools, preambulos_detectados: preambulos.length,
     preambulos_recuperados: preambulosUsados, tools: toolsUsed.map((t) => t.tool),
@@ -9089,7 +9177,14 @@ Deno.serve(async (req) => {
     // remedindo a base por fora, com outra carga — que foi o que atrasou o diagnostico de
     // 03/09. As contagens vem SEPARADAS (conferidas / reprovadas / nao_conferidas): somar
     // `nao_conferida` a `conferida` num total unico e como o numerador desta camada morreria.
-    verificacao: linhaDeVerificacao(verif) };
+    verificacao: linhaDeVerificacao(verif),
+    // Memoria aprendida (spec 7.9). `registro` e o veredito de cada chamada do modelo neste turno.
+    // `rede.gravou` fica nulo: a rede termina depois deste insert, e o que ela gravou sai no log.
+    aprendizados: {
+      consulta: memAprendida.telemetria,
+      registro: ctx.registrosDeAprendizado,
+      rede: { disparou: redeDisparou, gravou: null },
+    } };
 
   const lastAsstHist = [...history].reverse().find((m: { role?: string }) => m.role === "assistant");
   const lastAsstText = String((lastAsstHist as { content?: string } | undefined)?.content ?? "").trim();
@@ -9105,6 +9200,18 @@ Deno.serve(async (req) => {
       tool_calls: toolsUsed.length ? toolsUsed : null, model: modeloRoteado, tokens_in: tokensIn, tokens_out: tokensOut,
       diagnostico, tool_results: toolResults.length ? toolResults : null,
       attachments: actionCards.length ? actionCards.map((c) => ({ tipo: "action_card", approval_id: c.approval_id, summary: c.summary, status: c.status })) : null });
+  }
+  // A rede parte depois do insert da resposta e sem await: o gestor nao espera por ela. Grava
+  // pelo mesmo handler e com o mesmo turno (mesmas checagens, mesmo teto de registros). Nunca
+  // rejeita; o resultado vai para o log porque o diagnostico desta mensagem ja foi gravado.
+  if (redeDisparou) {
+    edgeRuntime?.waitUntil?.(extrairAprendizadosDoTurno({
+      supa, openRouterKey: OPENROUTER_KEY, msgGestor: msgText, resposta: String(reply ?? ""), turno: ctx.aprendizado,
+    }).then((rs) => {
+      const gravados = rs.filter((r) => r.resultado === "gravado").length;
+      console.log(`[aprendizados] rede conversa=${convId} itens=${rs.length} gravados=${gravados} ` +
+        JSON.stringify(rs.map((r) => linhaDeRegistro("rede", r))));
+    }));
   }
   await supa.from("chat_conversations").update({ updated_at: new Date().toISOString() }).eq("id", convId);
 

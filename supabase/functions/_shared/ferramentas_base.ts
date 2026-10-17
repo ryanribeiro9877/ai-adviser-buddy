@@ -559,6 +559,27 @@ export const FERRAMENTAS_BASE: Record<string, FerramentaBase> = {
     efeito: "escrita",
     setor: "Recepcao, voz e entrega",
   },
+  // Memoria aprendida (spec 7.2 e 7.3). Dono AG-00, e nao AG-08: o AG-00 esta no NUCLEO_SEMPRE,
+  // entao as duas entram em todo turno, inclusive quando o gestor corrige uma analise do AG-02.
+  // `linha` vai sem enum de proposito: os codigos sao das linhas de UMA empresa e este schema e
+  // o mesmo para todas (_prova_prompt_sem_fato_volatil reprova nome de marca aqui). Quem restringe
+  // a linha as da empresa do turno e o servidor (resolverLinha), que tambem aceita o rotulo.
+  registrar_aprendizado: {
+    descricao:
+      "Grava um aprendizado duravel desta empresa. Registre quando o gestor corrigir voce ou declarar preferencia ou regra; quando um retorno de ferramenta revelar algo duradouro desta conta que nao esta na memoria; quando um ato falhar por motivo que vai se repetir. NAO registre numero do periodo, palpite, nem o que ja esta na memoria ou na base. evidencia.trecho = a fala exata (ou o trecho exato do retorno), com 12+ caracteres em palavras inteiras; parafrase e recusada. Gestor contradiz memoria curada: categoria=correcao e fato comecando com 'pedido de revisao de curadoria:'.",
+    parametros: {"type":"object","properties":{"fato":{"type":"string","description":"O aprendizado em uma frase autossuficiente, de 20 a 600 caracteres."},"contexto":{"type":"string","description":"Situacao em que foi aprendido e por que importa (ate 1500 caracteres)."},"categoria":{"type":"string","enum":["preferencia_do_gestor","correcao","fato_da_conta","armadilha","processo"]},"evidencia":{"type":"object","properties":{"tipo":{"type":"string","enum":["fala_do_gestor","retorno_de_ferramenta","resultado_de_ato"]},"trecho":{"type":"string","description":"Copia literal da fala do gestor ou do retorno, 12+ caracteres, palavras inteiras."},"ferramenta":{"type":"string","description":"Ferramenta que rodou neste turno. Obrigatoria quando tipo nao e fala_do_gestor."}},"required":["tipo","trecho"]},"confianca":{"type":"string","enum":["confirmada","observada"],"description":"confirmada so com fala_do_gestor; o resto e observada."},"linha":{"type":"string","description":"Linha de negocio a que o fato se restringe, com o codigo ou o rotulo que a memoria aprendida mostra. Vazio = vale para a empresa toda. O servidor aceita so as linhas desta empresa."},"valido_ate":{"type":"string","description":"AAAA-MM-DD, so para fato com prazo."}},"required":["fato","contexto","categoria","evidencia","confianca"]},
+    superficies: ["chat","job"],
+    efeito: "escrita",
+    setor: "Recepcao, voz e entrega",
+  },
+  corrigir_aprendizado: {
+    descricao:
+      "Aposenta ou substitui um aprendizado VIGENTE desta empresa pelo id curto que a memoria aprendida mostra (#ab12cd). Use quando o gestor disser que um aprendizado nao vale mais (esquece o #ab12cd) ou que mudou, ou quando dado fresco o contradisser. acao=aposentar so retira; acao=substituir grava novo_fato e guarda o historico. evidencia.trecho = a fala exata (ou o trecho exato do retorno), com 12+ caracteres em palavras inteiras.",
+    parametros: {"type":"object","properties":{"id":{"type":"string","description":"Id curto do aprendizado (6 hex, com ou sem #)."},"acao":{"type":"string","enum":["substituir","aposentar"]},"motivo":{"type":"string","description":"Por que o aprendizado deixa de valer."},"evidencia":{"type":"object","properties":{"tipo":{"type":"string","enum":["fala_do_gestor","retorno_de_ferramenta","resultado_de_ato"]},"trecho":{"type":"string","description":"Copia literal da fala do gestor ou do retorno, 12+ caracteres, palavras inteiras."},"ferramenta":{"type":"string","description":"Ferramenta que rodou neste turno. Obrigatoria quando tipo nao e fala_do_gestor."}},"required":["tipo","trecho"]},"novo_fato":{"type":"string","description":"So em substituir: o fato que passa a valer, de 20 a 600 caracteres."},"novo_contexto":{"type":"string","description":"So em substituir: situacao e por que importa."}},"required":["id","acao","motivo","evidencia"]},
+    superficies: ["chat","job"],
+    efeito: "escrita",
+    setor: "Recepcao, voz e entrega",
+  },
   registrar_veredito_peca_em_revisao: {
     descricao:
       "PROPOE veredito de compliance de uma peca em revisao emitindo um CARD DE APROVACAO. Valores: liberado_como_esta (se aprovado, desliga bloqueia_uso), ajustar_peca ou nao_usar (mantem o bloqueio).",
