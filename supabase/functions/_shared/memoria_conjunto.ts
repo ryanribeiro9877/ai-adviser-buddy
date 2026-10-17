@@ -459,7 +459,7 @@ function textoTemSistemaOcularLinha(n: string): boolean {
     /oculos/.test(n);
 }
 
-function linhasProdutoNoTexto(
+export function linhasProdutoNoTexto(
   ...sinais: Array<string | null | undefined>
 ): LinhaProdutoCohapm[] {
   const n = sinais
