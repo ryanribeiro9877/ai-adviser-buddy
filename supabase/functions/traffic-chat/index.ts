@@ -1045,13 +1045,18 @@ const MAX_POR_FERRAMENTA: Record<string, number> = {
   get_acervo_para_anuncio: 3,
   nota_visual_da_peca: 6,
   upload_midia: 16,
-  // Memoria aprendida: 3 = TETO_REGISTROS_TURNO (o handler recusa o quarto de qualquer jeito, aqui
-  // a chamada nem sai). Corrigir e raro por turno ("esquece o #ab12cd"); 2 cobre aposentar um e
-  // substituir outro sem deixar o modelo varrer a memoria.
-  registrar_aprendizado: 3,
-  corrigir_aprendizado: 2,
+  // Memoria aprendida: o teto por ferramenta fica ACIMA do TETO_REGISTROS_TURNO (3) de proposito.
+  // Quem recusa o quarto registro e o handler, com o motivo "teto do turno" que o modelo entende;
+  // aqui e so o freio de um modelo em laco (reforco e recusa nao contam no teto do handler).
+  // Corrigir e raro por turno ("esquece o #ab12cd"); 4 cobre algumas trocas sem varrer a memoria.
+  registrar_aprendizado: 5,
+  corrigir_aprendizado: 4,
 };
 const MAX_POR_FERRAMENTA_DEFAULT = 2;
+// As ferramentas de escrita da memoria aprendida. Elas tem tratamento proprio em dois pontos:
+// no teto do laco (bater no teto delas nao e "dado nao lido" e nao liga tetoTools) e na rede de
+// seguranca (o turno que ja mexeu na memoria nao dispara a extracao).
+const FERRAMENTAS_APRENDIZADO = new Set(["registrar_aprendizado", "corrigir_aprendizado"]);
 // propose_action de criacao nao consome o teto global do turno (so o teto por ferramenta).
 // Assim releituras opcionais nao "roubam" as vagas dos cards quando o slate ja esta no chat.
 const ACOES_CRIACAO_NO_TETO = ["criar_campanha", "criar_conjunto_a_partir_de", "criar_conjunto", "criar_criativo", "criar_criativo_carrossel", "criar_anuncio_a_partir_de", "escalar_duplicar"];
@@ -8483,6 +8488,20 @@ Deno.serve(async (req) => {
           const at = String((t.args as any)?.action_type ?? "");
           return !ACOES_CRIACAO_NO_TETO.includes(at);
         }).length >= MAX_TOOLS_TURNO;
+        // Memoria aprendida e ESCRITA: bater no teto dela nao deixa dado sem ler. Por isso nao liga
+        // tetoTools (em pergunta de leitura ele abre um segmento extra, que nasce com um
+        // ctx.aprendizado novo e zera o teto de registros do turno) e nao manda "o dado NAO foi
+        // lido / continua no proximo bloco", que faria o modelo esperar um registro que nao vem.
+        if (FERRAMENTAS_APRENDIZADO.has(nomeTc) && (tetoGlobal || jaUsou >= limiteDesta)) {
+          messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
+            resultado: "recusado",
+            motivo: `limite de chamadas de ${nomeTc} neste turno atingido: o registro NAO foi feito neste turno. ` +
+              "Nao chame de novo agora; se o gestor pediu para guardar isso, diga que nao ficou registrado.",
+          }) });
+          toolResults.push({ tool: nomeTc, args, chars: 0, cortado: false, retorno: null,
+            erro: "limite de chamadas da ferramenta no turno - registro nao feito" });
+          continue;
+        }
         if (tetoGlobal || jaUsou >= limiteDesta) {
           tetoTools = true;
           messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify({
@@ -9134,9 +9153,11 @@ Deno.serve(async (req) => {
   // para `disparou` entrar nele. Sem EdgeRuntime.waitUntil (fora da edge) nao dispara: uma promessa
   // solta morreria com o worker no meio da gravacao. Retomada fica de fora: msgText e o prompt de
   // checkpoint do sistema, e a fala do gestor ja passou pela rede no segmento que a recebeu.
+  // Turno que chamou corrigir_aprendizado tambem fica de fora: a extracao leria de novo o fato
+  // recem-substituido e poderia gravar uma segunda linha vigente quase igual a ele.
   const edgeRuntime = (globalThis as { EdgeRuntime?: { waitUntil?: (p: Promise<unknown>) => void } }).EdgeRuntime;
   const redeDisparou = !ehRetomada && typeof edgeRuntime?.waitUntil === "function" &&
-    sinalDeCorrecao(msgText) && !toolsUsed.some((t) => t.tool === "registrar_aprendizado");
+    sinalDeCorrecao(msgText) && !toolsUsed.some((t) => FERRAMENTAS_APRENDIZADO.has(t.tool));
 
   const diagnostico = { finish_reason: finishReason, iteracoes, ms_total: decorrido(),
     deadline_tools: deadlineTools, preambulos_detectados: preambulos.length,

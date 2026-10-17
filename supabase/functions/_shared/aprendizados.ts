@@ -68,6 +68,8 @@ export type TelemetriaConsulta = {
   chars: number;
   falhou: boolean;
   desligada: boolean;
+  /** A consulta passou do teto de tempo (falhou tambem fica true: o prompt leva o aviso). */
+  timeout: boolean;
 };
 
 export type ResultadoRegistro = {
@@ -93,6 +95,12 @@ const LIMIAR_PARECIDO = 0.8;
 const MAX_CHARS_TEXTO_CONSULTA = 2000;
 /** O id curto que o gestor cita tem 6 hex (idCurto); menos que isso nao identifica nada. */
 const MIN_HEX_ID = 6;
+/**
+ * Teto de tempo da consulta INTEIRA (chave + RPC), padrao de consultarMemoria. Memoria e acessorio
+ * (anti-objetivo 4 da spec): banco lento vira o aviso de "indisponivel", nunca um turno parado.
+ * No chat a consulta corre junto com o Roteador, entao 4s raramente aparece na parede.
+ */
+const TIMEOUT_CONSULTA_MS = 4000;
 
 const MOTIVO_GRAVACAO_DESLIGADA =
   "gravacao de aprendizados desligada neste momento; nao registre nem corrija agora";
@@ -188,23 +196,60 @@ function marcarUsoEmSegundoPlano(supa: Db, ids: string[]): void {
   }
 }
 
-/**
- * Bloco da memoria aprendida para o prompt, ja com cabecalho de precedencia e teto de caracteres.
- * - chave desligada: `texto` vazio (a edge se comporta como antes da funcionalidade);
- * - sem aprendizado vigente: `texto` vazio;
- * - falha de qualquer tipo: `texto` = AVISO_FALHA_APRENDIZADOS, para o modelo nao concluir que
- *   "nao ha aprendizado" quando na verdade nao conseguiu olhar.
- * `ids` sao so os itens que couberam no teto (os que entraram no prompt); sao eles que ganham uso.
- */
-export async function consultarMemoria(a: {
+type ParamsConsulta = {
   supa: Db;
   companyId: string;
   tarefa: string;
   papel: PapelConsulta;
   linhaFixa?: string | null;
   somenteConfirmadas?: boolean;
-}): Promise<{ texto: string; ids: string[]; telemetria: TelemetriaConsulta }> {
-  const telemetria: TelemetriaConsulta = { injetados: 0, ids: [], chars: 0, falhou: false, desligada: false };
+  /** Teto de tempo da consulta inteira (chave + RPC). Padrao TIMEOUT_CONSULTA_MS. */
+  timeoutMs?: number;
+};
+type ResultadoConsulta = { texto: string; ids: string[]; telemetria: TelemetriaConsulta };
+
+function telemetriaVazia(): TelemetriaConsulta {
+  return { injetados: 0, ids: [], chars: 0, falhou: false, desligada: false, timeout: false };
+}
+
+/**
+ * Bloco da memoria aprendida para o prompt, ja com cabecalho de precedencia e teto de caracteres.
+ * - chave desligada: `texto` vazio (a edge se comporta como antes da funcionalidade);
+ * - sem aprendizado vigente: `texto` vazio;
+ * - falha de qualquer tipo: `texto` = AVISO_FALHA_APRENDIZADOS, para o modelo nao concluir que
+ *   "nao ha aprendizado" quando na verdade nao conseguiu olhar;
+ * - passou de `timeoutMs` (padrao 4s, a consulta inteira): o mesmo aviso, com `timeout: true`.
+ * `ids` sao so os itens que couberam no teto (os que entraram no prompt); sao eles que ganham uso.
+ *
+ * O teto e uma corrida contra um timer, limpo no caminho normal para nao deixar timer pendurado
+ * no isolate. A consulta que perdeu a corrida continua ate o banco responder (o supabase-js nao
+ * e cancelado daqui), mas sem efeito: o turno ja levou o aviso, entao nada ganha uso.
+ */
+export async function consultarMemoria(a: ParamsConsulta): Promise<ResultadoConsulta> {
+  const prazo = Number.isFinite(a.timeoutMs) && Number(a.timeoutMs) > 0 ? Number(a.timeoutMs) : TIMEOUT_CONSULTA_MS;
+  let estourou = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const porTempo = new Promise<ResultadoConsulta>((resolver) => {
+    timer = setTimeout(() => {
+      estourou = true;
+      console.error(`[aprendizados] consulta passou de ${prazo} ms: segue sem o bloco`);
+      resolver({
+        texto: AVISO_FALHA_APRENDIZADOS,
+        ids: [],
+        telemetria: { ...telemetriaVazia(), chars: AVISO_FALHA_APRENDIZADOS.length, falhou: true, timeout: true },
+      });
+    }, prazo);
+  });
+  try {
+    return await Promise.race([consultarSemTeto(a, () => !estourou), porTempo]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** O corpo da consulta. `aindaVale` cai para false quando o teto de tempo ja respondeu ao turno. */
+async function consultarSemTeto(a: ParamsConsulta, aindaVale: () => boolean): Promise<ResultadoConsulta> {
+  const telemetria = telemetriaVazia();
   try {
     const cfg = await lerConfig(a.supa);
     if (!cfg.consultaAtiva) {
@@ -231,7 +276,8 @@ export async function consultarMemoria(a: {
     // formatarBlocoAprendizados corta item inteiro e poe um item por linha (cabecalho + N itens).
     const injetados = texto ? texto.split("\n").length - 1 : 0;
     const ids = rows.slice(0, injetados).map((r) => String(r.id));
-    if (ids.length) marcarUsoEmSegundoPlano(a.supa, ids);
+    // Resposta que chegou depois do teto nao entrou em prompt nenhum: nao ganha uso.
+    if (ids.length && aindaVale()) marcarUsoEmSegundoPlano(a.supa, ids);
 
     return { texto, ids, telemetria: { ...telemetria, injetados, ids, chars: texto.length } };
   } catch (e) {

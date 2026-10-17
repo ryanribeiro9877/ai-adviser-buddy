@@ -60,11 +60,28 @@ for (const chave of ["registrar_aprendizado", "corrigir_aprendizado"]) {
 }
 
 // --- teto por ferramenta e ordem estavel ---
-assert(/MAX_POR_FERRAMENTA[^=]*=\s*\{[\s\S]*?registrar_aprendizado:\s*3,[\s\S]*?\};/.test(chat), "teto de registrar_aprendizado = 3");
-assert(/MAX_POR_FERRAMENTA[^=]*=\s*\{[\s\S]*?corrigir_aprendizado:\s*2,[\s\S]*?\};/.test(chat), "teto de corrigir_aprendizado = 2");
+// Acima do TETO_REGISTROS_TURNO (3): normalmente quem recusa e o handler, com "teto do turno".
+assert(/MAX_POR_FERRAMENTA[^=]*=\s*\{[\s\S]*?registrar_aprendizado:\s*5,[\s\S]*?\};/.test(chat), "teto de registrar_aprendizado = 5");
+assert(/MAX_POR_FERRAMENTA[^=]*=\s*\{[\s\S]*?corrigir_aprendizado:\s*4,[\s\S]*?\};/.test(chat), "teto de corrigir_aprendizado = 4");
 {
   const ordem = chat.match(/const ORDEM_TOOLS = \[([\s\S]*?)\];/)?.[1] ?? "";
   assert(ordem.includes(`"registrar_aprendizado"`) && ordem.includes(`"corrigir_aprendizado"`), "as duas em ORDEM_TOOLS");
+}
+
+// --- teto do laco: escrita da memoria fica FORA do caminho que liga tetoTools ---
+{
+  const conjunto = chat.match(/const FERRAMENTAS_APRENDIZADO = new Set\(\[([^\]]*)\]\)/)?.[1] ?? "";
+  assert(conjunto.includes(`"registrar_aprendizado"`) && conjunto.includes(`"corrigir_aprendizado"`), "FERRAMENTAS_APRENDIZADO tem as duas chaves");
+  // O ramo das duas vem ANTES do ramo generico, cobre o teto global e o por ferramenta, e sai com
+  // `continue` sem tocar em tetoTools e sem a frase de leitura ("dado NAO foi lido", "proximo bloco").
+  const m = chat.match(
+    /if \(FERRAMENTAS_APRENDIZADO\.has\(nomeTc\) && \(tetoGlobal \|\| jaUsou >= limiteDesta\)\) \{([\s\S]*?)\n\s*continue;\s*\}\s*if \(tetoGlobal \|\| jaUsou >= limiteDesta\) \{\s*tetoTools = true;/,
+  );
+  assert(!!m, "ramo proprio da memoria antes do ramo que liga tetoTools");
+  const ramo = m?.[1] ?? "";
+  assert(!/tetoTools/.test(ramo), "o ramo da memoria nao liga tetoTools");
+  assert(!/NAO foi lido|proximo bloco/i.test(ramo) && /registro NAO foi feito neste turno/.test(ramo), "o ramo da memoria diz que o registro nao foi feito, sem a frase de leitura");
+  assert((chat.match(/tetoTools = true/g) ?? []).length === 1, "tetoTools so e ligado no ramo generico");
 }
 
 // --- consulta: papel chat, tarefa do fio, em paralelo com o Roteador ---
@@ -106,7 +123,9 @@ assert(/MAX_POR_FERRAMENTA[^=]*=\s*\{[\s\S]*?corrigir_aprendizado:\s*2,[\s\S]*?\
   assert(iInsert > 0 && iRede > iInsert, "a rede roda depois do insert da resposta");
   assert(/waitUntil[\s\S]{0,40}\(\s*extrairAprendizadosDoTurno\(/.test(chat), "a extracao vai para o waitUntil, sem segurar o turno");
   assert(/sinalDeCorrecao\(msgText\)/.test(chat), "o sinal e lido na mensagem atual do gestor");
-  assert(/!toolsUsed\.some\(\([^)]*\)\s*=>\s*[^)]*"registrar_aprendizado"\)/.test(chat), "so dispara se o turno nao chamou registrar_aprendizado");
+  // Nem registrar nem corrigir: o turno que ja mexeu na memoria nao dispara a extracao.
+  const condRede = chat.match(/const redeDisparou\s*=([\s\S]{0,300}?);/)?.[1] ?? "";
+  assert(/!toolsUsed\.some\(\(t\)\s*=>\s*FERRAMENTAS_APRENDIZADO\.has\(t\.tool\)\)/.test(condRede), "so dispara se o turno nao chamou registrar_aprendizado nem corrigir_aprendizado");
   assert(/redeDisparou\s*=[\s\S]{0,200}waitUntil/.test(chat), "sem EdgeRuntime.waitUntil a rede nao dispara");
   assert(/turno:\s*ctx\.aprendizado/.test(chat), "a rede usa o mesmo turno (mesmas checagens e mesmo teto)");
 }

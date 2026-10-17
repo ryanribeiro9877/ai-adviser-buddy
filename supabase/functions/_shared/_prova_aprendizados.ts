@@ -403,6 +403,67 @@ const dbConsulta = (rows: AprendizadoLinha[], extra: CfgDb = {}) =>
   assert(segurou === 1, "uso marcado entregue ao EdgeRuntime.waitUntil quando ele existe");
 }
 
+{
+  // Teto de tempo da consulta INTEIRA (anti-objetivo 4: a memoria nao derruba nem atrasa o turno).
+  const nunca = { then: () => {} }; // thenable que nunca resolve: banco pendurado
+  const dbRpcPendurada = { from: (t: string) => new DbFalso().from(t), rpc: () => nunca };
+  const t0 = Date.now();
+  const r = await calado(() => consultarMemoria({ supa: dbRpcPendurada, companyId: COMPANY_COHAPM, tarefa: "x", papel: "chat", timeoutMs: 50 }));
+  const ms = Date.now() - t0;
+  assert(r.texto === AVISO_FALHA_APRENDIZADOS && r.ids.length === 0, "rpc pendurada: devolve o aviso, sem ids");
+  assert(r.telemetria.falhou === true && r.telemetria.timeout === true, "rpc pendurada: telemetria falhou e timeout");
+  assert(r.telemetria.chars === AVISO_FALHA_APRENDIZADOS.length, "rpc pendurada: chars = tamanho do aviso");
+  assert(ms < 1000, `rpc pendurada: devolve em menos de 1 s (levou ${ms} ms)`);
+
+  // A leitura da chave tambem esta dentro do teto: config pendurada nao segura o turno.
+  const dbConfigPendurada = { from: () => ({ select: () => ({ limit: () => nunca }) }), rpc: () => nunca };
+  const t1 = Date.now();
+  const rc = await calado(() => consultarMemoria({ supa: dbConfigPendurada, companyId: COMPANY_COHAPM, tarefa: "x", papel: "chat", timeoutMs: 50 }));
+  assert(rc.texto === AVISO_FALHA_APRENDIZADOS && rc.telemetria.timeout === true && Date.now() - t1 < 1000, "config pendurada: o teto cobre a consulta inteira");
+
+  // RPC que responde DEPOIS do teto: o turno ja recebeu o aviso, entao nada ganha uso.
+  const base = dbConsulta([linhaRpc(1)]);
+  const tardia = {
+    then: (ok: any, ko: any) =>
+      new Promise((pronto) => setTimeout(pronto, 120)).then(() => ({ data: [linhaRpc(1)], error: null })).then(ok, ko),
+  };
+  const dbTardio = {
+    from: (t: string) => base.from(t),
+    rpc: (n: string, a: Record<string, unknown>) => (n === "consultar_aprendizados" ? tardia : base.rpc(n, a)),
+  };
+  const rt = await calado(() => consultarMemoria({ supa: dbTardio, companyId: COMPANY_COHAPM, tarefa: "x", papel: "chat", timeoutMs: 50 }));
+  await new Promise((ok) => setTimeout(ok, 250));
+  assert(rt.texto === AVISO_FALHA_APRENDIZADOS && rt.telemetria.timeout === true, "rpc tardia: o turno recebe o aviso");
+  assert(!base.chamou("marcar_uso_aprendizados"), "rpc tardia: nao marca uso do que nao entrou no prompt");
+
+  // Caminho normal: timeout false e o timer do teto e limpo (nada pendurado no isolate).
+  const PRAZO_MARCADO = 7777;
+  const setOrig = globalThis.setTimeout, clearOrig = globalThis.clearTimeout;
+  const vivos = new Set<unknown>();
+  (globalThis as any).setTimeout = (fn: any, prazo?: number, ...resto: any[]) => {
+    const id = (setOrig as any)(fn, prazo, ...resto);
+    if (prazo === PRAZO_MARCADO) vivos.add(id);
+    return id;
+  };
+  (globalThis as any).clearTimeout = (id: any) => { vivos.delete(id); clearOrig(id); };
+  let rn;
+  try {
+    rn = await consultarMemoria({ supa: dbConsulta([linhaRpc(1)]), companyId: COMPANY_COHAPM, tarefa: "x", papel: "chat", timeoutMs: PRAZO_MARCADO });
+  } finally {
+    globalThis.setTimeout = setOrig;
+    globalThis.clearTimeout = clearOrig;
+  }
+  assert(rn.texto.startsWith(CABECALHO_APRENDIZADOS) && rn.telemetria.timeout === false && !rn.telemetria.falhou, "caminho normal: bloco, sem timeout");
+  assert(vivos.size === 0, "caminho normal: o timer do teto e limpo");
+
+  // Sem a opcao, vale o padrao: a consulta normal passa e a telemetria diz timeout false.
+  const rp = await consultarMemoria({ supa: dbConsulta([]), companyId: COMPANY_COHAPM, tarefa: "x", papel: "chat" });
+  assert(rp.texto === "" && rp.telemetria.timeout === false, "sem timeoutMs: padrao, sem timeout");
+  // Falha comum (nao de tempo) continua com timeout false.
+  const rf = await calado(() => consultarMemoria({ supa: new DbFalso({ rpcs: { consultar_aprendizados: () => ({ data: null, error: { message: "boom" } }) } }), companyId: COMPANY_COHAPM, tarefa: "x", papel: "chat" }));
+  assert(rf.telemetria.falhou === true && rf.telemetria.timeout === false, "falha de banco nao e timeout");
+}
+
 // =============================================================================================
 // 2) inicioDoDiaSaoPaulo (teto do dia)
 // =============================================================================================
