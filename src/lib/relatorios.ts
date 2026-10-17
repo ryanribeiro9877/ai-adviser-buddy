@@ -1555,6 +1555,294 @@ export function removerSecaoDoMarkdownRelatorio(args: unknown): string {
     : texto;
 }
 
+/**
+ * Ranking de criativos (17/10/2026).
+ *
+ * POR QUE: a IA montava a tabela à mão e o prompt cortava nas 12 peças de maior gasto. Em 16/10
+ * a Lafelicità LP teve 17 criativos com entrega e 5 ficaram fora do relatório; e o
+ * VID_VENHA-CONFERIR_M4_V1, que roda em dois conjuntos, aparecia uma vez sem dizer de qual. Aqui
+ * entram TODOS os criativos que entregaram na janela, de todos os conjuntos, por menor que seja o
+ * gasto, com o conjunto ao lado do nome. Os ativos que não entregaram ficam no fim, sem posição.
+ * Mesma métrica por anúncio do dia a dia, então os números das duas seções batem.
+ */
+export type LinhaRankingCriativo = {
+  posicao: number | null;
+  ad_id: string;
+  nome: string;
+  conjunto: string;
+  campaign_id: string;
+  campanha: string;
+  gasto: number;
+  impressoes: number;
+  cliques_link: number;
+  resultados: number;
+  base: BaseResultadoDiaADia;
+  entregou: boolean;
+};
+
+function fmtPctRelatorio(parte: number, todo: number): string {
+  if (!(todo > 0)) return "—";
+  return `${((parte / todo) * 100).toFixed(2).replace(".", ",")}%`;
+}
+
+export function rankingCriativosRelatorio(entrada: unknown): {
+  linhas: LinhaRankingCriativo[];
+  markdown: string;
+  total: number;
+  sem_entrega: number;
+} {
+  const vazio = { linhas: [] as LinhaRankingCriativo[], markdown: "", total: 0, sem_entrega: 0 };
+  if (!entrada || typeof entrada !== "object" || Array.isArray(entrada)) return vazio;
+  const o = entrada as Record<string, unknown>;
+  const per =
+    o.periodo && typeof o.periodo === "object" ? (o.periodo as Record<string, unknown>) : {};
+  const inicio = ymdDoRelatorio(per.inicio);
+  const fim = ymdDoRelatorio(per.fim);
+  if (!inicio || !fim || inicio > fim) return vazio;
+  const campanhas = Array.isArray(o.campanhas)
+    ? (o.campanhas as unknown[]).filter(
+        (c): c is Record<string, unknown> =>
+          !!c &&
+          typeof c === "object" &&
+          !Array.isArray(c) &&
+          String((c as Record<string, unknown>).campaign_id ?? "").trim() !== "",
+      )
+    : [];
+  if (!campanhas.length) return vazio;
+  const metricas = Array.isArray(o.linhas)
+    ? (o.linhas as unknown[]).filter(
+        (l): l is Record<string, unknown> => !!l && typeof l === "object",
+      )
+    : [];
+  const dm = (ymd: string) => `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`;
+  const janelaTxt = inicio === fim ? `em ${dm(inicio)}` : `de ${dm(inicio)} a ${dm(fim)}`;
+
+  type Criativo = Omit<LinhaRankingCriativo, "posicao" | "resultados" | "entregou"> & {
+    conjunto_id: string;
+    soma: SomaDiaADia;
+  };
+  const porChave = new Map<string, Criativo>();
+  const ativosSemEntrega: Criativo[] = [];
+  const nomeDaBase = new Map<string, { campanha: string; base: BaseResultadoDiaADia }>();
+  for (const c of campanhas) {
+    const id = String(c.campaign_id).trim();
+    const campanha = String(c.nome ?? "").trim() || id;
+    const base = baseDiaADia(c.base);
+    nomeDaBase.set(id, { campanha, base });
+    const nomeConjunto = new Map<string, string>();
+    for (const s of Array.isArray(c.conjuntos) ? (c.conjuntos as Record<string, unknown>[]) : []) {
+      const sid = String(s?.conjunto_id ?? "").trim();
+      if (sid) nomeConjunto.set(sid, String(s?.nome ?? "").trim() || sid);
+    }
+    const rotuloConjunto = (sid: string) =>
+      nomeConjunto.get(sid) ??
+      (sid === "sem_conjunto" ? "(conjunto não identificado)" : `conjunto ${sid}`);
+    const anuncioPorId = new Map<string, { nome: string; conjunto: string; ativo: boolean }>();
+    for (const a of Array.isArray(c.anuncios) ? (c.anuncios as Record<string, unknown>[]) : []) {
+      const aid = String(a?.ad_id ?? "").trim();
+      if (aid) {
+        anuncioPorId.set(aid, {
+          nome: String(a?.nome ?? "").trim() || `anúncio ${aid}`,
+          conjunto: String(a?.conjunto_id ?? "").trim(),
+          ativo: a?.ativo === true,
+        });
+      }
+    }
+    const novo = (aid: string, sid: string, nome: string): Criativo => ({
+      ad_id: aid,
+      nome,
+      conjunto_id: sid,
+      conjunto: rotuloConjunto(sid),
+      campaign_id: id,
+      campanha,
+      gasto: 0,
+      impressoes: 0,
+      cliques_link: 0,
+      base,
+      soma: somaDiaADiaVazia(),
+    });
+    for (const l of metricas) {
+      if (String(l.campaign_id ?? "").trim() !== id) continue;
+      const dia = ymdDoRelatorio(l.dia);
+      if (!dia || dia < inicio || dia > fim) continue;
+      const aid = String(l.ad_id ?? "").trim();
+      const ad = anuncioPorId.get(aid);
+      const sid = String(l.conjunto_id ?? "").trim() || ad?.conjunto || "sem_conjunto";
+      const chave = `${id}|${sid}|${aid}`;
+      const cri =
+        porChave.get(chave) ??
+        novo(aid, sid, ad?.nome ?? (aid ? `anúncio ${aid}` : "(anúncio não identificado)"));
+      acumularDiaADia(cri.soma, l);
+      porChave.set(chave, cri);
+    }
+    const entregaram = new Set(
+      [...porChave.values()]
+        .filter((x) => x.campaign_id === id && !semEntregaDiaADia(x.soma))
+        .map((x) => x.ad_id),
+    );
+    for (const [aid, ad] of anuncioPorId) {
+      if (!ad.ativo || entregaram.has(aid)) continue;
+      ativosSemEntrega.push(novo(aid, ad.conjunto || "sem_conjunto", ad.nome));
+    }
+  }
+
+  const entregues = [...porChave.values()].filter((x) => !semEntregaDiaADia(x.soma));
+  // Mesmo nome duas vezes no mesmo conjunto são anúncios diferentes: o fim do ID desempata.
+  const chaveNome = (x: Criativo) => `${x.campaign_id}|${x.conjunto_id}|${x.nome}`;
+  const contagem = new Map<string, number>();
+  for (const x of [...entregues, ...ativosSemEntrega]) {
+    contagem.set(chaveNome(x), (contagem.get(chaveNome(x)) ?? 0) + 1);
+  }
+  const nomeFinal = (x: Criativo) =>
+    (contagem.get(chaveNome(x)) ?? 0) > 1 && x.ad_id ? `${x.nome} (…${x.ad_id.slice(-4)})` : x.nome;
+  const linha = (x: Criativo, entregou: boolean): Omit<LinhaRankingCriativo, "posicao"> => ({
+    ad_id: x.ad_id,
+    nome: nomeFinal(x),
+    conjunto: x.conjunto,
+    campaign_id: x.campaign_id,
+    campanha: x.campanha,
+    gasto: x.soma.gasto,
+    impressoes: x.soma.impressoes,
+    cliques_link: x.soma.cliques_link,
+    resultados: resultadoNaBaseDiaADia(x.soma, x.base),
+    base: x.base,
+    entregou,
+  });
+  const ranqueadas: LinhaRankingCriativo[] = entregues
+    .map((x) => linha(x, true))
+    .sort(
+      (a, b) =>
+        b.gasto - a.gasto ||
+        a.nome.localeCompare(b.nome, "pt-BR") ||
+        a.conjunto.localeCompare(b.conjunto, "pt-BR"),
+    )
+    .map((l, i) => ({ ...l, posicao: i + 1 }));
+  const paradas: LinhaRankingCriativo[] = ativosSemEntrega
+    .map((x) => ({ ...linha(x, false), posicao: null }))
+    .sort(
+      (a, b) =>
+        a.conjunto.localeCompare(b.conjunto, "pt-BR") || a.nome.localeCompare(b.nome, "pt-BR"),
+    );
+  const linhas = [...ranqueadas, ...paradas];
+  const nenhum = `Nenhum criativo com entrega registrada ${janelaTxt}.`;
+  if (!linhas.length) return { ...vazio, markdown: nenhum };
+
+  const idsCampanha = [...new Set(linhas.map((l) => l.campaign_id))];
+  const bases = new Set(linhas.map((l) => l.base));
+  const baseUnica = bases.size === 1 ? [...bases][0] : null;
+  const rot = ROTULO_BASE_DIA_A_DIA[baseUnica ?? "formularios_e_conversas"];
+  const comResultado = baseUnica !== "cliques_no_link";
+  const comCampanha = idsCampanha.length > 1;
+  const header = [
+    "#",
+    "Criativo",
+    "Conjunto",
+    ...(comCampanha ? ["Campanha"] : []),
+    "Gasto",
+    "Impressões",
+    "Cliques no link",
+    "CTR",
+    ...(comResultado ? [rot.coluna] : []),
+    rot.custo,
+  ];
+  const colunasDeMetrica = header.length - (comCampanha ? 4 : 3);
+  const valores = (l: LinhaRankingCriativo): string[] => {
+    if (!l.entregou) {
+      return [...Array(colunasDeMetrica - 1).fill("—"), "ativo, sem entrega na janela"];
+    }
+    return [
+      fmtReaisRelatorio(l.gasto),
+      fmtInteiroRelatorio(l.impressoes),
+      fmtInteiroRelatorio(l.cliques_link),
+      fmtPctRelatorio(l.cliques_link, l.impressoes),
+      ...(comResultado ? [fmtInteiroRelatorio(l.resultados)] : []),
+      l.resultados > 0 ? fmtReaisRelatorio(l.gasto / l.resultados) : "sem resultado",
+    ];
+  };
+  const rows = linhas.map((l) =>
+    [
+      l.posicao == null ? "—" : String(l.posicao),
+      celulaMdRelatorio(l.nome),
+      celulaMdRelatorio(l.conjunto),
+      ...(comCampanha ? [celulaMdRelatorio(l.campanha)] : []),
+      ...valores(l),
+    ].join(" | "),
+  );
+  const contado = baseUnica
+    ? `Resultado contado: ${rot.contado}.`
+    : `Resultado contado na base de cada campanha: ${[...nomeDaBase.keys()]
+        .filter((id) => idsCampanha.includes(id))
+        .map((id) => {
+          const c = nomeDaBase.get(id)!;
+          return `${c.campanha}: ${ROTULO_BASE_DIA_A_DIA[c.base].contado}`;
+        })
+        .join("; ")}.`;
+  const abertura = ranqueadas.length
+    ? `Todos os ${ranqueadas.length} criativo(s) que entregaram ${janelaTxt}, de todos os conjuntos, do maior para o menor gasto. ${contado}`
+    : nenhum;
+  const fimTxt = paradas.length
+    ? ` Os ${paradas.length} criativo(s) ativo(s) sem entrega na janela ficam no fim, sem posição.`
+    : "";
+  return {
+    linhas,
+    total: ranqueadas.length,
+    sem_entrega: paradas.length,
+    markdown: [
+      `${abertura}${fimTxt}`,
+      "",
+      `| ${header.join(" | ")} |`,
+      `|${header.map(() => "---").join("|")}|`,
+      ...rows.map((r) => `| ${r} |`),
+    ].join("\n"),
+  };
+}
+
+/**
+ * Põe a tabela completa na seção Ranking de criativos. A tabela que a IA tenha colado sai (era
+ * cortada em 12 peças e sem o conjunto); a leitura dela, em texto, fica embaixo da tabela. Sem a
+ * seção, ela nasce antes da próxima seção do catálogo que estiver no texto.
+ */
+export function injetarRankingCriativosNoMarkdown(args: unknown): string {
+  if (args == null || typeof args !== "object" || Array.isArray(args)) {
+    return String(args ?? "");
+  }
+  const o = args as { md?: unknown; tabela?: unknown; corpo_md?: unknown };
+  const texto = String(o.md ?? o.corpo_md ?? "");
+  const tabela = String(o.tabela ?? "").trim();
+  if (!tabela) return texto;
+  const titulo = tituloDaSecaoRelatorio("criativos_ranking");
+  const lines = texto.split(/\r?\n/);
+  const limpar = (s: string) => s.replace(/\n{3,}/g, "\n\n");
+  const start = lines.findIndex((l) => /^#{1,4}[ \t]+Ranking de criativos\b/i.test(l));
+  if (start >= 0) {
+    let end = lines.length;
+    for (let i = start + 1; i < lines.length; i++) {
+      if (/^#{1,6}[ \t]+\S/.test(lines[i])) {
+        end = i;
+        break;
+      }
+    }
+    const leitura = lines
+      .slice(start + 1, end)
+      .filter((l) => !/^\s*\|/.test(l))
+      .join("\n")
+      .trim();
+    const bloco = [`## ${titulo}`, "", tabela, ...(leitura ? ["", leitura] : []), ""];
+    return limpar([...lines.slice(0, start), ...bloco, ...lines.slice(end)].join("\n"));
+  }
+  const bloco = `## ${titulo}\n\n${tabela}`;
+  const posicao = SECOES_RELATORIO.findIndex((s) => s.chave === "criativos_ranking");
+  const seguintes = new Set(SECOES_RELATORIO.slice(posicao + 1).map((s) => s.titulo.toLowerCase()));
+  const prox = lines.findIndex((l) => {
+    const m = /^#{1,2}[ \t]+(.+?)\s*$/.exec(l);
+    return !!m && seguintes.has(m[1].toLowerCase());
+  });
+  if (prox >= 0) {
+    return limpar([...lines.slice(0, prox), bloco, "", ...lines.slice(prox)].join("\n"));
+  }
+  return texto ? `${texto.replace(/\s*$/, "")}\n\n${bloco}\n` : `${bloco}\n`;
+}
+
 export type AchadoRelatorio = {
   tipo: TipoAchado;
   nivel: "conta" | "campanha" | "conjunto" | "anuncio";

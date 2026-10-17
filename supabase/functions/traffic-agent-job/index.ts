@@ -314,6 +314,7 @@ import {
   injetarDiaADiaNoMarkdown,
   injetarRankingCampanhasNoMarkdown,
   injetarRankingConjuntosNoMarkdown,
+  injetarRankingCriativosNoMarkdown,
   janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   ordenarCampanhasRelatorioPorGasto,
@@ -321,6 +322,7 @@ import {
   quadroDiaADiaRelatorio,
   rankingCampanhasRelatorio,
   rankingConjuntosRelatorio,
+  rankingCriativosRelatorio,
   recortarAlertasDoRecorte,
   recortarOverviewDoRecorte,
   removerSecaoDoMarkdownRelatorio,
@@ -5734,7 +5736,7 @@ async function entradaDiaADiaDoRecorte(
       ? supa.from("ad_sets").select("external_id,name,optimization_goal,campaign_id").eq("company_id", companyId).in("campaign_id", uuids)
       : Promise.resolve({ data: [], error: null }),
     uuids.length
-      ? supa.from("ads").select("external_id,name,adset_external_id,campaign_id").eq("company_id", companyId).in("campaign_id", uuids)
+      ? supa.from("ads").select("external_id,name,adset_external_id,campaign_id,status,effective_status").eq("company_id", companyId).in("campaign_id", uuids)
       : Promise.resolve({ data: [], error: null }),
   ]);
   if (setsRes.error) return vazia(`conjuntos: ${setsRes.error.message}`);
@@ -5803,6 +5805,9 @@ async function entradaDiaADiaDoRecorte(
           ad_id: String(a.external_id ?? ""),
           nome: String(a.name ?? ""),
           conjunto_id: a.adset_external_id != null ? String(a.adset_external_id) : null,
+          // Status real (conjunto pausado deixa o anuncio ADSET_PAUSED): so o ACTIVE sem entrega
+          // entra no fim do Ranking de criativos.
+          ativo: String(a.effective_status ?? a.status ?? "").toUpperCase() === "ACTIVE",
         })),
     };
   });
@@ -6224,6 +6229,7 @@ async function colherBaseRelatorio(args: {
   markdownConjuntos: string;
   markdownCampanhas: string;
   markdownDiaADia: string;
+  markdownCriativos: string;
   ms: number;
 }> {
   const t0 = Date.now();
@@ -6426,6 +6432,9 @@ async function colherBaseRelatorio(args: {
       }
       : { erro: diaADia.erro },
   );
+  // Mesma metrica por anuncio do dia a dia; nao vira peca da base (o dia a dia ja leva cada
+  // criativo com o conjunto para a IA, e outra copia so disputaria o teto da colheita).
+  const rankingCriativos = diaADia.erro ? null : rankingCriativosRelatorio(diaADia.entrada);
 
   const falhas = pecas.filter((p) => !p.ok).map((p) => p.nome);
   const ok = pecas.filter((p) => p.ok).length;
@@ -6452,6 +6461,7 @@ async function colherBaseRelatorio(args: {
     markdownConjuntos: rankingConjuntos.markdown,
     markdownCampanhas: rankingCampanhas.markdown,
     markdownDiaADia: quadroDiaADia?.markdown ?? "",
+    markdownCriativos: rankingCriativos?.markdown ?? "",
     ms: Date.now() - t0,
   };
 }
@@ -6472,7 +6482,7 @@ LEITOR: gestor de midia, nao engenheiro. Proibido na narrativa e nos achados: no
 
 NUMEROS: a BASE COLETADA e a fonte autoritativa. Especialista incompleto NAO apaga numero que ja esta na base. Sem numero, nao invente. Distinga zero / nao existe / nao coletado. Status de entrega e o real (lista ao vivo), nao so o espelho. Avalie no nivel certo (CBO=campanha; varios anuncios=conjunto). Opiniao sem as 5 partes (evidencia, mecanismo, metrica de sucesso, janela de leitura, reversa) NAO entra em achados. Overview de 7 dias da conta NAO e a janela fechada do relatorio. Peca marcada [ok] na BASE foi lida: nao diga que nao foi coletada. Campanha se identifica pelo ID da Meta do recorte. Nome igual, prefixo compartilhado ou o mesmo mes no nome (SETEMBRO, SET26, AGOSTO) e OUTRA campanha: nao cite, nao some, nao compare.
 
-corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Dia a dia por campanha, conjunto e criativo; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Dia a dia por campanha, conjunto e criativo: NAO escreva texto nem cole tabela — so o titulo ## Dia a dia por campanha, conjunto e criativo; o sistema injeta as tabelas da campanha, de cada conjunto e dos criativos de cada conjunto, e qualquer texto seu nessa secao e descartado. Ranking de criativos: no maximo 12 pecas de maior gasto (Peca | Gasto | Impressoes | Resultado | Custo). Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Quebra por campanha: NAO cole a tabela — so o titulo ## Quebra por campanha; o sistema injeta as linhas da base (todas as ativas do recorte). Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
+corpo_md: markdown com titulos HUMANOS exatamente assim, sem repetir o restante do titulo: Resumo executivo; Status real e entrega; Investimento e pacing; Custo versus teto vigente; Funil de mídia; Quebra por campanha; Dia a dia por campanha, conjunto e criativo; Conjuntos e estrutura; Ranking de criativos; Ranking de conjuntos; Fadiga de criativo; Diagnóstico de custo; Escala; Alertas ativos; Recomendações e dicas Meta; Compliance; Comparativo com a janela anterior; WhatsApp / WABA; Cobertura e lacunas; Opiniões com evidência e reversa. NUNCA use a chave snake_case como titulo. Cada secao: 2 a 8 frases ou lista. Dia a dia por campanha, conjunto e criativo: NAO escreva texto nem cole tabela — so o titulo ## Dia a dia por campanha, conjunto e criativo; o sistema injeta as tabelas da campanha, de cada conjunto e dos criativos de cada conjunto, e qualquer texto seu nessa secao e descartado. Ranking de criativos: NAO cole tabela — so o titulo ## Ranking de criativos e 1 a 3 frases de leitura (qual peca carrega o resultado, onde a amostra e pequena); o sistema injeta TODOS os criativos de todos os conjuntos, com o conjunto de cada um ao lado. Criativo citado em qualquer secao vai com o conjunto dele (NOME_DO_CRIATIVO, do conjunto NOME_DO_CONJUNTO): o mesmo nome roda em mais de um conjunto. Ranking de conjuntos: NAO cole a tabela — so o titulo ## Ranking de conjuntos; o sistema injeta as linhas da base. Quebra por campanha: NAO cole a tabela — so o titulo ## Quebra por campanha; o sistema injeta as linhas da base (todas as ativas do recorte). Nao despeje o relatorio interno: sintetize. NAO escreva "ver bloco achados no JSON": preencha o array. Feche o JSON.
 
 Responda APENAS um JSON valido, sem cerca markdown, NESTA ORDEM de chaves:
 {"cobertura":"o que nao foi medido, em portugues","achados":[{"tipo":"teto|custo_elevado|monitoramento_reforcado|fadiga|escala|pausa_com_guarda|hipotese","nivel":"conta|campanha|conjunto|anuncio","alvo_id":"id Meta ou null","alvo_nome":"...","severidade":"info|atencao|urgente","evidencia":"numero+janela em portugues","mecanismo":"...","acao":"...","metrica_sucesso":"...","janela_leitura":"...","reversa":"..."}],"corpo_md":"narrativa em markdown para o gestor"}
@@ -6677,6 +6687,14 @@ Contrato: so estas campanhas, so esta janela, so midia paga. CRM/proposta/contra
       corpo = injetarRankingConjuntosNoMarkdown({
         md: corpo,
         tabela: colheita.markdownConjuntos,
+      });
+    }
+    // Todos os criativos de todos os conjuntos, com o conjunto ao lado (17/10/2026): a tabela da
+    // IA parava nas 12 de maior gasto e nao dizia de qual conjunto era a peca.
+    if (secoes.includes("criativos_ranking")) {
+      corpo = injetarRankingCriativosNoMarkdown({
+        md: corpo,
+        tabela: colheita.markdownCriativos,
       });
     }
     // Por ultimo: as tabelas do dia a dia tem subtitulos (### campanha, #### conjunto) e as

@@ -14,9 +14,11 @@ import {
   filtrarConjuntosDoRecorte,
   injetarDiaADiaNoMarkdown,
   injetarRankingCampanhasNoMarkdown,
+  injetarRankingCriativosNoMarkdown,
   removerSecaoDoMarkdownRelatorio,
   injetarRankingConjuntosNoMarkdown,
   quadroDiaADiaRelatorio,
+  rankingCriativosRelatorio,
   janelaAnteriorDoPeriodo,
   mergeCampanhasRelatorio,
   normalizarAchados,
@@ -858,5 +860,245 @@ describe("removerSecaoDoMarkdownRelatorio", () => {
     const md = "## Resumo executivo\nx\n";
     expect(removerSecaoDoMarkdownRelatorio({ md, titulo: "Quebra por campanha" })).toBe(md);
     expect(removerSecaoDoMarkdownRelatorio({ md: "## A\nx", titulo: "" })).toBe("## A\nx");
+  });
+});
+
+// Lafelicità LP, 16/10/2026: 17 criativos entregaram e o relatório mostrou 12 (o prompt cortava
+// nas 12 de maior gasto); o VID_VENHA-CONFERIR_M4_V1 roda em dois conjuntos e aparecia sem dizer
+// de qual. Os números abaixo são os da Meta naquele dia.
+describe("rankingCriativosRelatorio", () => {
+  const CAMP = "120250380225140182";
+  const PROF = "TOFU_PROFISSOES-ALTA-RENDA_SETORES_8CIDADES";
+  const ALTO = "TOFU_ALTO-PADRAO_SEGUNDA-CASA-VIAGEM_SSA-LF-CAM-FSA";
+  const POLO = "TOFU_POLO-CAMACARI_PINOS-1500M_40-65";
+  const linha = (p: Partial<Record<string, unknown>>) => ({
+    dia: "2026-10-16",
+    campaign_id: CAMP,
+    conjunto_id: "s-prof",
+    ad_id: "c35",
+    gasto: 0,
+    impressoes: 0,
+    cliques_link: 0,
+    visitas: 0,
+    formularios: 0,
+    conversas: 0,
+    ...p,
+  });
+  const entradaLp = {
+    periodo: { inicio: "2026-10-16", fim: "2026-10-16" },
+    campanhas: [
+      {
+        campaign_id: CAMP,
+        nome: "COHAPM_LAFELICITA_LEADS_LP_2026-10",
+        base: "formularios",
+        conjuntos: [
+          { conjunto_id: "s-prof", nome: PROF },
+          { conjunto_id: "s-alto", nome: ALTO },
+          { conjunto_id: "s-polo", nome: POLO },
+        ],
+        anuncios: [
+          { ad_id: "c35", nome: "LF_LP_CAR_35_ADS0910", conjunto_id: "s-prof", ativo: true },
+          { ad_id: "v4a", nome: "VID_VENHA-CONFERIR_M4_V1", conjunto_id: "s-alto", ativo: true },
+          { ad_id: "v4p", nome: "VID_VENHA-CONFERIR_M4_V1", conjunto_id: "s-prof", ativo: true },
+          { ad_id: "c04", nome: "LF_LP_CAR_04_ADS0910", conjunto_id: "s-polo", ativo: true },
+          { ad_id: "c12", nome: "LF_LP_CAR_12_ADS0910", conjunto_id: "s-prof", ativo: true },
+          { ad_id: "m2", nome: "LF_LP_FLEX-IMG_M2_ADS0910", conjunto_id: "s-prof", ativo: true },
+          { ad_id: "v6", nome: "VID_VENHA-CONFERIR_M6_V1", conjunto_id: "s-prof", ativo: false },
+          { ad_id: "o4", nome: "IMG_CARD-OFERTA_M4_V1", conjunto_id: "s-alto", ativo: false },
+        ],
+      },
+    ],
+    linhas: [
+      linha({ ad_id: "c35", gasto: 174.59, impressoes: 7208, cliques_link: 211, formularios: 21 }),
+      linha({
+        ad_id: "v4a",
+        conjunto_id: "s-alto",
+        gasto: 86.32,
+        impressoes: 1562,
+        cliques_link: 34,
+        formularios: 2,
+      }),
+      linha({ ad_id: "c04", conjunto_id: "s-polo", gasto: 1.18, impressoes: 11, cliques_link: 1 }),
+      linha({ ad_id: "c12", gasto: 0.56, impressoes: 10, cliques_link: 1 }),
+      linha({ ad_id: "v4p", gasto: 0.04, impressoes: 2 }),
+      // Pausado com linha zerada: não entregou, não entra.
+      linha({ ad_id: "v6" }),
+      // Fora da janela: não soma.
+      linha({ dia: "2026-10-15", ad_id: "c35", gasto: 185.48, impressoes: 6730, formularios: 26 }),
+    ],
+  };
+
+  it("todos os criativos que entregaram, por menor que seja o gasto, com o conjunto ao lado", () => {
+    const { markdown, total } = rankingCriativosRelatorio(entradaLp);
+    expect(total).toBe(5);
+    expect(markdown).toContain(
+      "| # | Criativo | Conjunto | Gasto | Impressões | Cliques no link | CTR | Formulários | Custo por formulário |",
+    );
+    expect(markdown).toContain(
+      `| 1 | LF_LP_CAR_35_ADS0910 | ${PROF} | R$ 174,59 | 7.208 | 211 | 2,93% | 21 | R$ 8,31 |`,
+    );
+    expect(markdown).toContain(
+      `| 2 | VID_VENHA-CONFERIR_M4_V1 | ${ALTO} | R$ 86,32 | 1.562 | 34 | 2,18% | 2 | R$ 43,16 |`,
+    );
+    expect(markdown).toContain(
+      `| 3 | LF_LP_CAR_04_ADS0910 | ${POLO} | R$ 1,18 | 11 | 1 | 9,09% | 0 | sem resultado |`,
+    );
+    expect(markdown).toContain(
+      `| 4 | LF_LP_CAR_12_ADS0910 | ${PROF} | R$ 0,56 | 10 | 1 | 10,00% | 0 | sem resultado |`,
+    );
+    // O mesmo nome no outro conjunto é outra linha, e o conjunto diz qual é qual.
+    expect(markdown).toContain(
+      `| 5 | VID_VENHA-CONFERIR_M4_V1 | ${PROF} | R$ 0,04 | 2 | 0 | 0,00% | 0 | sem resultado |`,
+    );
+    expect(markdown).toMatch(/Resultado contado: formulários enviados/);
+    // Uma campanha só: sem coluna de campanha repetindo o mesmo nome em toda linha.
+    expect(markdown).not.toContain("| Campanha |");
+  });
+
+  it("ativo sem entrega fica no fim, sem posição; pausado sem entrega não entra", () => {
+    const { markdown, sem_entrega, linhas } = rankingCriativosRelatorio(entradaLp);
+    expect(sem_entrega).toBe(1);
+    expect(markdown).toContain(
+      `| — | LF_LP_FLEX-IMG_M2_ADS0910 | ${PROF} | — | — | — | — | — | ativo, sem entrega na janela |`,
+    );
+    expect(linhas[linhas.length - 1].nome).toBe("LF_LP_FLEX-IMG_M2_ADS0910");
+    expect(markdown).not.toContain("VID_VENHA-CONFERIR_M6_V1");
+    expect(markdown).not.toContain("IMG_CARD-OFERTA_M4_V1");
+    expect(markdown).toMatch(/1 criativo\(s\) ativo\(s\) sem entrega/);
+  });
+
+  it("não corta a lista: 20 criativos com entrega viram 20 linhas", () => {
+    const anuncios = Array.from({ length: 20 }, (_, i) => ({
+      ad_id: `ad${i}`,
+      nome: `PECA_${String(i).padStart(2, "0")}`,
+      conjunto_id: "s-prof",
+      ativo: true,
+    }));
+    const { total, markdown } = rankingCriativosRelatorio({
+      ...entradaLp,
+      campanhas: [{ ...entradaLp.campanhas[0], anuncios }],
+      linhas: anuncios.map((a, i) => linha({ ad_id: a.ad_id, gasto: i + 0.01, impressoes: 5 })),
+    });
+    expect(total).toBe(20);
+    expect(markdown).toContain("| 20 | PECA_00 |");
+    expect(markdown.indexOf("PECA_19")).toBeLessThan(markdown.indexOf("PECA_00"));
+  });
+
+  it("mesmo nome duas vezes no mesmo conjunto: o fim do ID desempata", () => {
+    const { markdown } = rankingCriativosRelatorio({
+      ...entradaLp,
+      campanhas: [
+        {
+          ...entradaLp.campanhas[0],
+          anuncios: [
+            { ad_id: "1111", nome: "PECA", conjunto_id: "s-prof", ativo: true },
+            { ad_id: "2222", nome: "PECA", conjunto_id: "s-prof", ativo: true },
+          ],
+        },
+      ],
+      linhas: [linha({ ad_id: "1111", gasto: 2 }), linha({ ad_id: "2222", gasto: 1 })],
+    });
+    expect(markdown).toContain("| 1 | PECA (…1111) |");
+    expect(markdown).toContain("| 2 | PECA (…2222) |");
+  });
+
+  it("duas campanhas de bases diferentes: coluna de campanha e a base de cada uma", () => {
+    const { markdown } = rankingCriativosRelatorio({
+      periodo: { inicio: "2026-10-12", fim: "2026-10-13" },
+      campanhas: [
+        {
+          campaign_id: "111",
+          nome: "LP_FORM",
+          base: "formularios",
+          conjuntos: [{ conjunto_id: "f1", nome: "CONJ_F" }],
+          anuncios: [{ ad_id: "fa", nome: "AD_F", conjunto_id: "f1", ativo: true }],
+        },
+        {
+          campaign_id: "222",
+          nome: "WA_CONV",
+          base: "conversas",
+          conjuntos: [{ conjunto_id: "w1", nome: "[LF | CONV] W1" }],
+          anuncios: [{ ad_id: "wa", nome: "AD_W", conjunto_id: "w1", ativo: true }],
+        },
+      ],
+      linhas: [
+        linha({
+          dia: "2026-10-12",
+          campaign_id: "111",
+          conjunto_id: "f1",
+          ad_id: "fa",
+          gasto: 30,
+          impressoes: 600,
+          cliques_link: 6,
+          formularios: 3,
+        }),
+        linha({
+          dia: "2026-10-13",
+          campaign_id: "222",
+          conjunto_id: "w1",
+          ad_id: "wa",
+          gasto: 40,
+          impressoes: 900,
+          cliques_link: 12,
+          conversas: 5,
+        }),
+      ],
+    });
+    expect(markdown).toContain(
+      "| # | Criativo | Conjunto | Campanha | Gasto | Impressões | Cliques no link | CTR | Resultados | Custo por resultado |",
+    );
+    expect(markdown).toContain(
+      "| 1 | AD_W | [LF \\| CONV] W1 | WA_CONV | R$ 40,00 | 900 | 12 | 1,33% | 5 | R$ 8,00 |",
+    );
+    expect(markdown).toContain(
+      "| 2 | AD_F | CONJ_F | LP_FORM | R$ 30,00 | 600 | 6 | 1,00% | 3 | R$ 10,00 |",
+    );
+    expect(markdown).toMatch(/LP_FORM: formulários enviados; WA_CONV: conversas iniciadas/);
+    expect(markdown).toMatch(/de 12\/10 a 13\/10/);
+  });
+
+  it("sem nenhuma entrega na janela diz isso; entrada inválida não gera nada", () => {
+    const { markdown, total } = rankingCriativosRelatorio({
+      ...entradaLp,
+      campanhas: [{ ...entradaLp.campanhas[0], anuncios: [] }],
+      linhas: [],
+    });
+    expect(total).toBe(0);
+    expect(markdown).toBe("Nenhum criativo com entrega registrada em 16/10.");
+    expect(rankingCriativosRelatorio(null).markdown).toBe("");
+    expect(rankingCriativosRelatorio({ periodo: { inicio: "x", fim: "y" } }).markdown).toBe("");
+  });
+});
+
+describe("injetarRankingCriativosNoMarkdown", () => {
+  const tabela =
+    "Todos os 2 criativo(s).\n\n| # | Criativo | Conjunto |\n|---|---|---|\n| 1 | A | C1 |";
+
+  it("troca a tabela da IA pela completa e mantém a leitura dela embaixo", () => {
+    const md = injetarRankingCriativosNoMarkdown({
+      md: "## Conjuntos e estrutura\nx\n\n## Ranking de criativos\n\n| Peça | Gasto |\n|---|---|\n| A | R$ 1 |\nSó A tem amostra que não é pequena.\n\n## Ranking de conjuntos\ny",
+      tabela,
+    });
+    expect(md).not.toContain("| Peça | Gasto |");
+    expect(md).toContain(
+      `## Ranking de criativos\n\n${tabela}\n\nSó A tem amostra que não é pequena.`,
+    );
+    expect(md.indexOf("Só A tem amostra")).toBeLessThan(md.indexOf("## Ranking de conjuntos"));
+    expect(md).toContain("## Conjuntos e estrutura\nx");
+  });
+
+  it("sem a seção, entra antes da próxima do catálogo", () => {
+    const md = injetarRankingCriativosNoMarkdown({
+      md: "## Conjuntos e estrutura\nx\n\n## Fadiga de criativo\nf",
+      tabela,
+    });
+    expect(md.indexOf("## Ranking de criativos")).toBeGreaterThan(md.indexOf("x"));
+    expect(md.indexOf("## Ranking de criativos")).toBeLessThan(md.indexOf("## Fadiga de criativo"));
+  });
+
+  it("tabela vazia não mexe no texto", () => {
+    expect(injetarRankingCriativosNoMarkdown({ md: "## Resumo executivo\nx", tabela: "" })).toBe(
+      "## Resumo executivo\nx",
+    );
   });
 });
