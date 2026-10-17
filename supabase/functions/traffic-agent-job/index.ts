@@ -5297,7 +5297,16 @@ async function processarJob(jobId: string, convId: string, companyId: string, pe
    * nenhuma delas — e foi exatamente esse tipo de mistura que fez a cauda mentir duas vezes.
    * Quem for medir sintese daqui para frente: filtre a versao E confira `tel.orcamento`.
    */
-  tel.versao = "job-v4.34";
+  /**
+   * v4.35 (17/10/2026) = MEMORIA APRENDIDA NO JOB.
+   *
+   * Tres numeros mudaram de regime sem mudar de nome: `tools_teto` de cada subagente do job
+   * interativo ganhou +1 (a vaga da escrita de memoria; relatorio e Ritmo ficam como antes);
+   * `sintese.ms` passou a incluir a consulta da memoria, que roda dentro do cronometro `tSintese`
+   * (ate 4s no teto); e `sintese_entrada.chars_instrucao` cresce com o bloco aprendido. Comparar
+   * coleta ou duracao de sintese com v4.34 sem filtrar a versao mistura os dois regimes.
+   */
+  tel.versao = "job-v4.35";
   {
     const base = await precarregarDoutrina();
     const origens = [...base.values()].map((v) => v.origem);
