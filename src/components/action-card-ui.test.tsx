@@ -327,8 +327,9 @@ describe("estado da execução", () => {
   });
 
   it("executado com sucesso informa quando", () => {
+    // O texto vem de textoDaExecucao; o "quando" e o executed_at no fuso do setup.
     montar({ status: "approved", executed_at: "2026-08-13T14:00:00Z" });
-    expect(screen.getByText(/Executado em/)).toBeInTheDocument();
+    expect(screen.getByText("Executado. 13/08/2026, 11:00")).toBeInTheDocument();
   });
 
   it("execucao com ok:false avisa de ESCRITA PARCIAL", () => {
@@ -340,7 +341,9 @@ describe("estado da execução", () => {
       execution_result: { ok: false },
     });
     expect(screen.getByText(/escrita parcial/)).toBeInTheDocument();
-    expect(screen.getByText(/confira no Gerenciador antes de tentar de novo/)).toBeInTheDocument();
+    expect(screen.getByText(/Confira no Gerenciador antes de tentar de novo/)).toBeInTheDocument();
+    // E nunca o "Executado." limpo ao lado: seria dizer que deu certo.
+    expect(screen.queryByText(/^Executado\./)).not.toBeInTheDocument();
   });
 
   it("rejeitado mostra o motivo registrado", () => {

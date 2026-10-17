@@ -25,6 +25,11 @@ let leituraFresh: { data: unknown; error: unknown } = { data: null, error: null 
 /** Erro da LISTAGEM. Sem isto nao havia como provar que falha ≠ lista vazia. */
 let erroDaListagem: unknown = null;
 let erroDoUpdate: unknown = null;
+/**
+ * Linhas que o UPDATE devolve via .select("id"). A RLS que barra o nao-admin
+ * devolve [] com error null — por isso o componente confere as linhas.
+ */
+let linhasDoUpdate: { id: string }[] | null = [{ id: "t1" }];
 const updateMock = vi.fn();
 const logAuditMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -68,7 +73,9 @@ vi.mock("@/integrations/supabase/client", () => ({
       update: (patch: unknown) => ({
         eq: (c: string, v: unknown) => {
           updateMock(patch, c, v);
-          return Promise.resolve({ error: erroDoUpdate });
+          return {
+            select: () => Promise.resolve({ error: erroDoUpdate, data: linhasDoUpdate }),
+          };
         },
       }),
     }),
@@ -122,6 +129,7 @@ beforeEach(() => {
   leituraFresh = { data: { valor: 20, memoria: {} }, error: null };
   erroDaListagem = null;
   erroDoUpdate = null;
+  linhasDoUpdate = [{ id: "t1" }];
   updateMock.mockReset();
   logAuditMock.mockReset().mockResolvedValue(undefined);
   toastErrorMock.mockReset();
@@ -315,6 +323,20 @@ describe("gravação", () => {
     // A RLS e quem barra o nao-admin de verdade; a mensagem traduz isso. Auditar
     // uma edicao que nao aconteceu seria registrar mentira.
     erroDoUpdate = { message: "new row violates row-level security policy" };
+    montar();
+    await editar("25");
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "Sem permissão para editar metas (apenas administradores).",
+      ),
+    );
+    expect(logAuditMock).not.toHaveBeenCalled();
+    expect(toastSuccessMock).not.toHaveBeenCalled();
+  });
+
+  it("UPDATE sem linha gravada (RLS) tambem explica permissao, e NAO audita", async () => {
+    // A RLS costuma barrar o UPDATE com error null e 0 linhas; "salvo" ali seria mentira.
+    linhasDoUpdate = [];
     montar();
     await editar("25");
     await waitFor(() =>

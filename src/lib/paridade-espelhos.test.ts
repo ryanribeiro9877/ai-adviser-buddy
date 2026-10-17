@@ -119,10 +119,16 @@ const FALAS = [
   // Pedido de legenda SEM verbo de ato (`emit*`/`card`/`suba` fazem a função recusar de saída).
   "cria as legendas do conjunto 2",
   "gera as legendas das 6 pecas",
+  // nLegendasPedidas: "N criativos" com N != 6 (6 e o padrao, nao prova nada).
+  "gera as legendas dos 8 criativos do conjunto 1",
   // Recusa falsa de molde: exige recusa E (pedido de molde OU desvio para engajamento).
   "nao consigo emitir sem o molde de trafego",
   "nao posso criar: crie em engajamento social e altere manualmente no gerenciador",
   "nao consigo emitir: bloqueio tecnico, sem dado obrigatorio",
+  // Recusa falsa por classificacao: exige recusa E metrica que as tools ja tinham.
+  "nenhum card foi emitido: sem o custo por conversa de cada conjunto nao ha como separar vermelho e amarelo",
+  // Ato de orcamento por cor (pedidoAtoPrecisaMetrica): verbo de alterar + cor ou conjunto/valor.
+  "altere o orcamento dos conjuntos vermelhos para 30,00",
   // Slate como ele chega de verdade: cabeçalho de conjunto + TABELA markdown.
   [
     "## CONJ.2",
@@ -324,10 +330,10 @@ const CORPUS2: unknown[] = [
   "2026-09-03",
   "2026-09-06",
   "ontem",
-  1,
+  // 1 e 2 ja estao no topo. Repetir um item nao acrescenta chamada nova e multiplica o
+  // produto de aridade 3 (relatorios passou de 50s de 60s com o 1 e o 2 em dobro).
   50,
   51,
-  2,
   [
     { date: "2026-09-01", spend: 100 },
     { date: "2026-09-02", spend: 0 },
@@ -421,6 +427,23 @@ const CHAMADAS_ALT: Partial<Record<number, unknown[][]>> = {
       },
     ],
   ],
+  // replyOmitiuValoresDosConjuntos(texto, pedido): o pedido tem de ser de relacao numerica.
+  // Fica aqui, e nao no CORPUS2, porque cada item do CORPUS2 multiplica as chamadas de aridade 3.
+  2: [
+    [
+      "Nenhum card foi emitido.",
+      "gera uma relação mostrando os gastos, conversas geradas, impressões e orçamento por conjuntos e por criativos",
+    ],
+    [
+      [
+        "| Conjunto | Gasto | Conversas |",
+        "|---|---|---|",
+        "| CONJ.1 | R$ 10,00 | 3 |",
+        "| CONJ.2 | R$ 20,00 | 5 |",
+      ].join("\n"),
+      "gera uma relação mostrando os gastos, conversas geradas, impressões e orçamento por conjuntos e por criativos",
+    ],
+  ],
   5: [
     [
       "conversas",
@@ -512,8 +535,9 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
       const soNoLib = Object.keys(b)
         .filter((k) => !(k in a))
         .sort();
-      // `memoria_conjunto` tem cinco ajudantes que só a edge usa (desempate de card, conjunto
-      // vivo para destino, recusa de alvo não operacional). Assimetria conhecida é aceitável;
+      // `memoria_conjunto` tem seis ajudantes que só a edge usa (desempates de card e de conjunto
+      // ambíguo no fio do traffic-chat, conjunto vivo para destino, recusa de alvo não
+      // operacional). Assimetria conhecida é aceitável;
       // assimetria NOVA é alguém que acrescentou num lado e esqueceu do outro — o defeito que
       // este arquivo existe para pegar.
       expect({ soNoDeno, soNoLib }).toEqual({
@@ -521,6 +545,7 @@ describe("paridade dos espelhos src/lib <-> _shared", () => {
           base(deno) === "memoria_conjunto"
             ? [
                 "conjuntoVivoParaDestino",
+                "desempateConjuntoAmbiguo",
                 "desempateDeAlvoDoCard",
                 "desempateDeConjunto",
                 "pareceApprovalIdEmVezDeDrive",

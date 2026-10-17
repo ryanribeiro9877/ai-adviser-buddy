@@ -16,6 +16,9 @@ let ctx = {
 };
 let linhas: Record<string, unknown>[] = [];
 let erroDoUpdate: unknown = null;
+// Linhas que o UPDATE devolve via .select("id"). A RLS que barra o UPDATE devolve
+// [] com error null; por isso a tela confere as linhas, nao so o erro.
+let linhasDoUpdate: { id: string }[] | null = [{ id: "p1" }];
 const updateMock = vi.fn();
 const logAuditMock = vi.fn();
 const toastErrorMock = vi.fn();
@@ -50,7 +53,9 @@ vi.mock("@/integrations/supabase/client", () => ({
       update: (patch: unknown) => ({
         eq: (c: string, v: unknown) => {
           updateMock(patch, c, v);
-          return Promise.resolve({ error: erroDoUpdate });
+          return {
+            select: () => Promise.resolve({ error: erroDoUpdate, data: linhasDoUpdate }),
+          };
         },
       }),
     }),
@@ -88,6 +93,7 @@ beforeEach(() => {
   ctx = { selectedCompany: { id: "c1", name: "JCR2" }, isAdmin: true, user: { id: "u1" } };
   linhas = [];
   erroDoUpdate = null;
+  linhasDoUpdate = [{ id: "p1" }];
   updateMock.mockReset();
   rpcMock.mockReset().mockResolvedValue({ error: null });
   logAuditMock.mockReset().mockResolvedValue(undefined);
@@ -268,6 +274,21 @@ describe("decidir", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Aprovar/ }));
     await waitFor(() =>
       expect(toastErrorMock).toHaveBeenCalledWith("permission denied for table approval_requests"),
+    );
+    expect(logAuditMock).not.toHaveBeenCalled();
+    expect(toastSuccessMock).not.toHaveBeenCalled();
+  });
+
+  it("UPDATE sem linha gravada (RLS) avisa e NAO audita", async () => {
+    // error null com 0 linhas e o jeito da RLS dizer nao; "Aprovado" ali seria mentira.
+    linhasDoUpdate = [];
+    linhas = [pedido()];
+    montar();
+    await userEvent.click(await screen.findByRole("button", { name: /Aprovar/ }));
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "nenhuma linha foi gravada (permissao ou registro inexistente)",
+      ),
     );
     expect(logAuditMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).not.toHaveBeenCalled();

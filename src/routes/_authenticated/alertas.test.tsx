@@ -15,10 +15,14 @@ let ctx = {
 };
 let busca: { item?: string } = {};
 let linhas: Record<string, unknown>[] = [];
+// Linhas que o UPDATE devolve via .select("id"). A RLS que barra o UPDATE devolve
+// [] com error null; por isso a tela confere as linhas, nao so o erro.
+let linhasDoUpdate: { id: string }[] | null = [{ id: "a1" }];
 const updateEqMock = vi.fn();
 const recarregarMock = vi.fn();
 const logAuditMock = vi.fn();
 const toastSuccessMock = vi.fn();
+const toastErrorMock = vi.fn();
 
 vi.mock("@tanstack/react-router", () => ({
   createFileRoute: () => (opts: Record<string, unknown>) => ({ options: opts }),
@@ -38,7 +42,12 @@ vi.mock("@/components/metric-card", () => ({
   EmptyCompany: () => <div data-testid="empty-company" />,
 }));
 
-vi.mock("sonner", () => ({ toast: { success: (...a: unknown[]) => toastSuccessMock(...a) } }));
+vi.mock("sonner", () => ({
+  toast: {
+    success: (...a: unknown[]) => toastSuccessMock(...a),
+    error: (...a: unknown[]) => toastErrorMock(...a),
+  },
+}));
 
 vi.mock("@/integrations/supabase/client", () => ({
   supabase: {
@@ -49,7 +58,9 @@ vi.mock("@/integrations/supabase/client", () => ({
       update: (patch: unknown) => ({
         eq: (col: string, val: unknown) => {
           updateEqMock(patch, col, val);
-          return Promise.resolve({ error: null });
+          return {
+            select: () => Promise.resolve({ error: null, data: linhasDoUpdate }),
+          };
         },
       }),
     }),
@@ -84,10 +95,12 @@ beforeEach(() => {
   ctx = { selectedCompany: { id: "c1", name: "JCR2" }, isAdmin: true };
   busca = {};
   linhas = [];
+  linhasDoUpdate = [{ id: "a1" }];
   updateEqMock.mockReset();
   recarregarMock.mockReset();
   logAuditMock.mockReset().mockResolvedValue(undefined);
   toastSuccessMock.mockReset();
+  toastErrorMock.mockReset();
   // jsdom nao implementa scrollIntoView, e o efeito de destaque o chama.
   Element.prototype.scrollIntoView = vi.fn();
 });
@@ -256,6 +269,22 @@ describe("resolver", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Resolver/ }));
     await waitFor(() => expect(recarregarMock).toHaveBeenCalled());
     expect(toastSuccessMock).toHaveBeenCalledWith("Alerta resolvido");
+  });
+
+  it("UPDATE sem linha gravada (RLS) avisa e NAO audita nem recarrega", async () => {
+    // error null com 0 linhas e o jeito da RLS dizer nao; "resolvido" ali seria mentira.
+    linhasDoUpdate = [];
+    linhas = [alerta()];
+    montar();
+    await userEvent.click(await screen.findByRole("button", { name: /Resolver/ }));
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "nenhuma linha foi gravada (permissao ou registro inexistente)",
+      ),
+    );
+    expect(logAuditMock).not.toHaveBeenCalled();
+    expect(recarregarMock).not.toHaveBeenCalled();
+    expect(toastSuccessMock).not.toHaveBeenCalled();
   });
 });
 

@@ -27,6 +27,9 @@ let notif: {
   pedidoDeAbrir: number;
 };
 let erroDoUpdate: unknown = null;
+// Linhas que o UPDATE devolve via .select("id"). A RLS que barra o UPDATE devolve
+// [] com error null; por isso o componente confere as linhas, nao so o erro.
+let linhasDoUpdate: { id: string }[] | null = [{ id: "al1" }];
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children, to }: { children: ReactNode; to: string }) => <a href={to}>{children}</a>,
@@ -58,7 +61,9 @@ vi.mock("@/integrations/supabase/client", () => ({
       update: (patch: unknown) => ({
         eq: (c: string, v: unknown) => {
           updateEqMock(patch, c, v);
-          return Promise.resolve({ error: erroDoUpdate });
+          return {
+            select: () => Promise.resolve({ error: erroDoUpdate, data: linhasDoUpdate }),
+          };
         },
       }),
     }),
@@ -104,6 +109,7 @@ beforeEach(() => {
   toastSuccessMock.mockReset();
   updateEqMock.mockReset();
   erroDoUpdate = null;
+  linhasDoUpdate = [{ id: "al1" }];
   ctx = { selectedCompany: { id: "c1", name: "JCR2" }, isAdmin: true };
   notif = { dados: dados([]), carregando: false, erro: null, pedidoDeAbrir: 0 };
 });
@@ -332,6 +338,22 @@ describe("ação rápida de resolver", () => {
     await userEvent.click(await screen.findByText(/Resolver CPL acima do teto/));
     await waitFor(() =>
       expect(toastErrorMock).toHaveBeenCalledWith("Não foi possível resolver: permission denied"),
+    );
+    expect(logAuditMock).not.toHaveBeenCalled();
+    expect(recarregarMock).not.toHaveBeenCalled();
+  });
+
+  it("UPDATE sem linha gravada (RLS) avisa e NAO audita nem recarrega", async () => {
+    // error null com 0 linhas e o jeito da RLS dizer nao; tratar como sucesso mentiria.
+    linhasDoUpdate = [];
+    notif.dados = dados([alerta]);
+    render(<NotificationBell />);
+    await abrir();
+    await userEvent.click(await screen.findByText(/Resolver CPL acima do teto/));
+    await waitFor(() =>
+      expect(toastErrorMock).toHaveBeenCalledWith(
+        "Não foi possível resolver: nenhuma linha foi gravada",
+      ),
     );
     expect(logAuditMock).not.toHaveBeenCalled();
     expect(recarregarMock).not.toHaveBeenCalled();
