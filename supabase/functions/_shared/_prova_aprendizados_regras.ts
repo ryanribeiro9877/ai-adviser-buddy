@@ -29,6 +29,7 @@ import {
   TETO_CHARS_OUTROS,
   TETO_REGISTROS_DIA,
   TETO_REGISTROS_TURNO,
+  TRECHO_MINIMO_CHARS,
   validarPedidoRegistro,
 } from "./aprendizados_regras.ts";
 import type { AprendizadoLinha, TurnoAprendizado } from "./aprendizados_regras.ts";
@@ -170,21 +171,76 @@ assert(
 );
 assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "  " }, "confirmada", turno).ok, "trecho vazio recusado");
 assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "?!" }, "confirmada", turno).ok, "trecho so de pontuacao recusado");
-assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "me mostre" }, "confirmada", { ...turno, falasDoGestor: [] }).ok, "sem fala nenhuma recusa");
-assert(conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "conversas", ferramenta: "get_funnel" }, "observada", turno).ok, "retorno que rodou aceito");
-assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "conversas", ferramenta: "get_overview" }, "observada", turno).ok, "ferramenta que nao rodou recusada");
-assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "leads", ferramenta: "get_funnel" }, "observada", turno).ok, "trecho que nao esta no retorno recusado");
-assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "conversas" }, "observada", turno).ok, "retorno sem nome da ferramenta recusado");
-assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "conversas", ferramenta: "get_funnel" }, "confirmada", turno).ok, "confirmada exige fala do gestor");
+assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "me mostre custo por conversa" }, "confirmada", { ...turno, falasDoGestor: [] }).ok, "sem fala nenhuma recusa");
+assert(conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "base conversas", ferramenta: "get_funnel" }, "observada", turno).ok, "retorno que rodou aceito");
+assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "base conversas", ferramenta: "get_overview" }, "observada", turno).ok, "ferramenta que nao rodou recusada");
+assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "total de leads", ferramenta: "get_funnel" }, "observada", turno).ok, "trecho que nao esta no retorno recusado");
+assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "base conversas" }, "observada", turno).ok, "retorno sem nome da ferramenta recusado");
+assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "base conversas", ferramenta: "get_funnel" }, "confirmada", turno).ok, "confirmada exige fala do gestor");
 assert(conferirEvidencia({ tipo: "resultado_de_ato", trecho: "por formulario", ferramenta: "get_funnel" }, "observada", turno).ok, "resultado de ato confere no retorno da ferramenta");
 assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "me mostre custo" }, "certa", turno).ok, "confianca invalida recusada");
 assert(
-  !conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "ok", ferramenta: "x" }, "observada", {
+  !conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "retorno vazio aqui", ferramenta: "x" }, "observada", {
     ...turno,
     retornos: [{ tool: "x", retorno: undefined }],
   }).ok,
   "retorno nao serializavel nao serve de evidencia",
 );
+
+// Trecho trivial nao pode ser evidencia: "a" esta em qualquer fala e "ver" esta dentro de "diversos".
+// Sem isso qualquer fato inventado vira "confirmada" (anti-objetivo 2 da spec).
+const turnoTrivial: TurnoAprendizado = {
+  ...turno,
+  falasDoGestor: ["Como esta o custo hoje? Vamos ver diversos conjuntos."],
+  retornos: [{ tool: "get_funnel", retorno: { base: "conversas", por_formulario: 12, descricao: "conversas iniciadas" } }],
+};
+assert(TRECHO_MINIMO_CHARS === 12, "trecho minimo = 12 chars");
+assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "a" }, "confirmada", turnoTrivial).ok, "trecho a recusado");
+assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "ver" }, "confirmada", turnoTrivial).ok, "trecho ver recusado");
+assert(!conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "e", ferramenta: "get_funnel" }, "observada", turnoTrivial).ok, "trecho e no retorno recusado");
+assert(
+  eq(
+    conferirEvidencia({ tipo: "fala_do_gestor", trecho: "ver" }, "confirmada", turnoTrivial),
+    { ok: false, motivo: "cite um trecho maior da fala ou do retorno, com pelo menos 12 caracteres" },
+  ),
+  "motivo do trecho curto",
+);
+// Fronteira de palavra, isolada do tamanho: 21 chars, presentes como substring ("ver diversos conjunto"
+// esta dentro de "ver diversos conjuntos"), mas terminam no meio de uma palavra.
+assert(
+  !conferirEvidencia({ tipo: "fala_do_gestor", trecho: "ver diversos conjunto" }, "confirmada", turnoTrivial).ok,
+  "fala: trecho que termina no meio da palavra recusado",
+);
+assert(
+  conferirEvidencia({ tipo: "fala_do_gestor", trecho: "ver diversos conjuntos" }, "confirmada", {
+    ...turnoTrivial,
+    falasDoGestor: ["Vamos ver diversos conjuntos"],
+  }).ok,
+  "fala: trecho de palavras inteiras aceito",
+);
+assert(
+  !conferirEvidencia({ tipo: "fala_do_gestor", trecho: "amos ver diversos" }, "confirmada", {
+    ...turnoTrivial,
+    falasDoGestor: ["Vamos ver diversos conjuntos"],
+  }).ok,
+  "fala: trecho que comeca no meio da palavra recusado",
+);
+assert(
+  !conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "conversas inicia", ferramenta: "get_funnel" }, "observada", turnoTrivial).ok,
+  "retorno: trecho que termina no meio da palavra recusado",
+);
+assert(
+  conferirEvidencia({ tipo: "retorno_de_ferramenta", trecho: "conversas iniciadas", ferramenta: "get_funnel" }, "observada", turnoTrivial).ok,
+  "retorno: palavras inteiras aceitas",
+);
+assert(conferirEvidencia({ tipo: "fala_do_gestor", trecho: "me mostre custo por conversa" }, "confirmada", turno).ok, "literal continua aceito");
+// 11 recusa, 12 aceita (ambos presentes na fala, com fronteira de palavra).
+const turnoBorda: TurnoAprendizado = { ...turno, falasDoGestor: ["Quero o custo total e o custo diario sempre"] };
+assert(normalizarTexto("custo total").length === 11 && normalizarTexto("custo diario").length === 12, "borda: 11 e 12 chars");
+assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "custo total" }, "confirmada", turnoBorda).ok, "trecho de 11 chars recusado");
+assert(conferirEvidencia({ tipo: "fala_do_gestor", trecho: "custo diario" }, "confirmada", turnoBorda).ok, "trecho de 12 chars aceito");
+assert(conferirEvidencia({ tipo: "fala_do_gestor", trecho: "Custo, DIARIO!" }, "confirmada", turnoBorda).ok, "o tamanho conta depois de normalizar");
+assert(!conferirEvidencia({ tipo: "fala_do_gestor", trecho: "custo, total!!!" }, "confirmada", turnoBorda).ok, "pontuacao nao enche o minimo");
 
 // --- 9) Sinal de correcao -----------------------------------------------------------------------
 assert(sinalDeCorrecao("o custo subiu? e a partir de agora me mostre custo por conversa"), "sinal no meio da leitura");
@@ -214,6 +270,19 @@ assert(!validarPedidoRegistro({ ...pedidoOk, categoria: "opiniao" }).ok, "catego
 assert(!validarPedidoRegistro({ ...pedidoOk, confianca: "certeza" }).ok, "confianca invalida");
 assert(!validarPedidoRegistro({ ...pedidoOk, evidencia: { tipo: "palpite", trecho: "x" } }).ok, "tipo de evidencia invalido");
 assert(!validarPedidoRegistro({ ...pedidoOk, evidencia: { tipo: "fala_do_gestor", trecho: "   " } }).ok, "trecho vazio");
+const vCurto = validarPedidoRegistro({ ...pedidoOk, evidencia: { tipo: "fala_do_gestor", trecho: "custo total" } });
+assert(
+  !vCurto.ok && vCurto.motivo === "cite um trecho maior da fala ou do retorno, com pelo menos 12 caracteres",
+  "trecho de 11 chars normalizados recusado com motivo legivel",
+);
+assert(
+  !validarPedidoRegistro({ ...pedidoOk, evidencia: { tipo: "retorno_de_ferramenta", trecho: "custo, total!!!", ferramenta: "get_funnel" } }).ok,
+  "pontuacao nao enche o minimo do trecho",
+);
+assert(
+  validarPedidoRegistro({ ...pedidoOk, evidencia: { tipo: "retorno_de_ferramenta", trecho: "custo diario", ferramenta: "get_funnel" } }).ok,
+  "trecho de 12 chars normalizados aceito na forma",
+);
 assert(!validarPedidoRegistro({ ...pedidoOk, evidencia: undefined }).ok, "sem evidencia");
 assert(!validarPedidoRegistro(null).ok && !validarPedidoRegistro("texto").ok && !validarPedidoRegistro([]).ok, "entrada que nao e objeto");
 assert(!validarPedidoRegistro({ ...pedidoOk, valido_ate: "dezembro" }).ok, "valido_ate fora do formato");

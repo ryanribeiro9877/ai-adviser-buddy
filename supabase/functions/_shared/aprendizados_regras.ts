@@ -91,6 +91,14 @@ export const TETO_CHARS_CHAT = 4000;
 export const TETO_CHARS_OUTROS = 2500;
 export const MAX_PREFERENCIAS = 5;
 
+/**
+ * Menor trecho de evidencia aceito, em caracteres DEPOIS de normalizar. Sem piso, "a" ou "ver"
+ * estao em qualquer fala e qualquer fato inventado virava "confirmada" (anti-objetivo 2 da spec).
+ */
+export const TRECHO_MINIMO_CHARS = 12;
+const MOTIVO_TRECHO_CURTO =
+  `cite um trecho maior da fala ou do retorno, com pelo menos ${TRECHO_MINIMO_CHARS} caracteres`;
+
 const CATEGORIAS: readonly CategoriaAprendizado[] = [
   "preferencia_do_gestor",
   "correcao",
@@ -327,7 +335,17 @@ function serializarRetorno(retorno: unknown): string {
 }
 
 /**
- * Spec 7.2, passo 1. O trecho normalizado precisa estar CONTIDO no texto real:
+ * Trecho (ja normalizado) contido no texto (ainda cru) respeitando fronteira de palavra: com
+ * espaco nas duas pontas de ambos, "ver" nao casa dentro de "diversos" nem "conversa" dentro de
+ * "conversas". normalizarTexto so deixa espaco simples entre tokens, entao o espaco serve de fronteira.
+ */
+function contemComFronteira(texto: string, trechoNormalizado: string): boolean {
+  return ` ${normalizarTexto(texto)} `.includes(` ${trechoNormalizado} `);
+}
+
+/**
+ * Spec 7.2, passo 1. O trecho normalizado precisa estar CONTIDO no texto real, por palavras
+ * inteiras e com pelo menos TRECHO_MINIMO_CHARS caracteres:
  * - fala_do_gestor: em alguma fala do gestor neste turno (no job, o pedido). Parafrase recusa.
  * - retorno_de_ferramenta / resultado_de_ato: a ferramenta precisa ter rodado neste turno e o
  *   trecho precisa estar no retorno dela.
@@ -341,12 +359,14 @@ export function conferirEvidencia(
   if (confianca !== "confirmada" && confianca !== "observada") {
     return { ok: false, motivo: "confianca invalida: use confirmada ou observada" };
   }
-  // Trecho vazio depois de normalizar (so pontuacao, so espaco) estaria "contido" em qualquer texto.
+  // Trecho vazio ou curto demais estaria "contido" em qualquer texto: a prova tem de ser longa
+  // o bastante para identificar a fala ou o retorno de onde veio.
   const trecho = normalizarTexto(String(ev?.trecho ?? ""));
   if (!trecho) return { ok: false, motivo: "evidencia sem trecho" };
+  if (trecho.length < TRECHO_MINIMO_CHARS) return { ok: false, motivo: MOTIVO_TRECHO_CURTO };
 
   if (ev.tipo === "fala_do_gestor") {
-    const achou = (turno.falasDoGestor ?? []).some((fala) => normalizarTexto(fala).includes(trecho));
+    const achou = (turno.falasDoGestor ?? []).some((fala) => contemComFronteira(fala, trecho));
     return achou ? { ok: true } : { ok: false, motivo: "cite a fala exata" };
   }
 
@@ -360,7 +380,7 @@ export function conferirEvidencia(
     if (!rodadas.length) {
       return { ok: false, motivo: `a ferramenta ${ferramenta} nao rodou neste turno` };
     }
-    const achou = rodadas.some((r) => normalizarTexto(serializarRetorno(r.retorno)).includes(trecho));
+    const achou = rodadas.some((r) => contemComFronteira(serializarRetorno(r.retorno), trecho));
     return achou
       ? { ok: true }
       : { ok: false, motivo: `o trecho nao aparece no retorno de ${ferramenta}` };
@@ -426,6 +446,10 @@ export function validarPedidoRegistro(
   }
   const trecho = typeof e.trecho === "string" ? e.trecho.trim() : "";
   if (!trecho) return { ok: false, motivo: "evidencia sem trecho" };
+  // Mesmo piso do conferirEvidencia, para o modelo saber cedo e nao gastar a chamada.
+  if (normalizarTexto(trecho).length < TRECHO_MINIMO_CHARS) {
+    return { ok: false, motivo: MOTIVO_TRECHO_CURTO };
+  }
   const ferramenta = typeof e.ferramenta === "string" ? e.ferramenta.trim() : "";
   const evidencia: Evidencia = ferramenta ? { tipo, trecho, ferramenta } : { tipo, trecho };
 
