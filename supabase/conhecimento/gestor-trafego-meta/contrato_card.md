@@ -33,6 +33,10 @@ Todo ato na Meta passa por um card (`propose_action`). Sem card gravado, não ho
 
 Não existe ato de exclusão.
 
+## Comentário do post não é ato
+
+Desligar comentário é interruptor do **conteúdo** (post no Instagram ou no Meta Business Suite), não de campanha, conjunto ou anúncio. O impulsionamento herda o post: pausar para o gasto e **não** fecha comentário. Não existe card para comentário (verificado 10/09/2026): não invente card nem pause no lugar do interruptor. Se o gestor pedir para parar a entrega, aí sim é pausa.
+
 ## Ciclo de vida
 
 Pedido → validação contra o contrato → card gravado com prazo → aprovar | recusar | expirar → executor fala com a Meta → resultado volta ao card (executado | falhou, com motivo legível e se é reexecutável) → auditoria.

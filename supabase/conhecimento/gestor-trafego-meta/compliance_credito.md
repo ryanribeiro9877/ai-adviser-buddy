@@ -26,7 +26,7 @@ A validação cobre copy e peça JUNTAS.
 
 ## Fair Lending
 
-Em crédito, emprego e habitação a Meta restringe segmentação por idade, gênero e CEP e exige categoria especial no conjunto.
+Com a categoria especial declarada (crédito, emprego, habitação), a Meta trava a segmentação: idade 18 a 65+, sem gênero, sem CEP nem bairro, sem lookalike e interesse só da lista aprovada. A casa segue a mesma régua em crédito mesmo onde a Meta não obriga.
 - Achado demográfico vira sinal criativo, entregue a público amplo.
 - Geo por cidade/região, não CEP estreito.
 - Público personalizado e lookalike só com consentimento documentado.
@@ -34,8 +34,8 @@ Em crédito, emprego e habitação a Meta restringe segmentação por idade, gê
 
 ## Categoria especial
 
-Se o sistema não confirma a categoria especial, a proposta de publicar declara que ela depende de conferência no Gerenciador. Campanha financeira no ar sem categoria declarada é achado crítico. Alterar categoria é ato sensível (card).
+A categoria vive na CAMPANHA (`FINANCIAL_PRODUCTS_SERVICES`, que substituiu `CREDIT` em jan/2025); conjuntos e anúncios herdam. A Meta só obriga anunciante dos EUA ou com público nos EUA, Canadá ou partes da Europa — o Brasil não está na lista (verificado 17/10/2026). Regra da casa (17/10/2026): campanha de empresa de crédito declara a categoria mesmo com público só no Brasil, e campanha financeira no ar sem ela é achado crítico — diga que é regra da casa, não exigência da Meta. Se o sistema não confirma a categoria, a proposta de publicar declara que ela depende de conferência no Gerenciador. Alterar categoria é ato sensível (card). Política da Meta em detalhe: tema `compliance`.
 
 ## Checklist antes do card de criação
 
-Categoria da empresa confirmada · categoria especial no conjunto (ou pendência declarada) · copy sem regra violada · peça com transcrição e sem regra violada · sem segmentação estreita · público com consentimento · destino da linha certa · resultado do portão registrado no card.
+Categoria da empresa confirmada · categoria especial na campanha (ou pendência declarada) · copy sem regra violada · peça com transcrição e sem regra violada · sem segmentação estreita · público com consentimento · destino da linha certa · resultado do portão registrado no card.

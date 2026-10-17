@@ -4,6 +4,8 @@
 //      reserva da injecao direta quando a leitura do banco falha.
 // Rodar: deno run --allow-read --allow-write scripts/gerar_skill_gestor_trafego.ts
 // Os .md sao a fonte. Editou um .md → rode de novo e aplique a migracao.
+// A migracao abaixo ja foi aplicada (05/10/2026). Revisao posterior de .md: rode com --so-ts
+// (regera so o .gen.ts) e grave os temas mudados numa migracao propria, com espelho.
 
 const raiz = new URL("../supabase/", import.meta.url);
 const dir = new URL("conhecimento/gestor-trafego-meta/", raiz);
@@ -83,14 +85,17 @@ sql.push(
   `);`,
   "",
 );
-const corpoSql = sql.join("\n");
-await Deno.writeTextFile(new URL(`migrations/${MIGRACAO}`, raiz), corpoSql);
-await Deno.writeTextFile(new URL(`espelhos/${MIGRACAO}`, raiz), corpoSql);
+const soTs = Deno.args.includes("--so-ts");
+if (!soTs) {
+  const corpoSql = sql.join("\n");
+  await Deno.writeTextFile(new URL(`migrations/${MIGRACAO}`, raiz), corpoSql);
+  await Deno.writeTextFile(new URL(`espelhos/${MIGRACAO}`, raiz), corpoSql);
+}
 
 const ts = [
   "// GERADO por scripts/gerar_skill_gestor_trafego.ts — nao edite a mao.",
   "// Fonte: supabase/conhecimento/gestor-trafego-meta/*.md (mesmo texto da migracao",
-  `// ${MIGRACAO}). Reserva da injecao de doutrina quando a leitura do banco falha.`,
+  `// ${MIGRACAO} e das revisoes posteriores). Reserva da injecao de doutrina quando a leitura do banco falha.`,
   "",
   `export const DOUTRINA_VERIFICADA_EM = "${VERIFICADO_EM}";`,
   "",
@@ -100,4 +105,4 @@ const ts = [
   "",
 ].join("\n");
 await Deno.writeTextFile(new URL("functions/_shared/doutrina_conteudo.gen.ts", raiz), ts);
-console.log(`ok: ${temas.length} temas → migrations/${MIGRACAO} + _shared/doutrina_conteudo.gen.ts`);
+console.log(`ok: ${temas.length} temas → ${soTs ? "" : `migrations/${MIGRACAO} + `}_shared/doutrina_conteudo.gen.ts`);

@@ -6,7 +6,7 @@ Pacote `gestor-trafego-meta` revisado e importado em 05/10/2026. Isto é MÉTODO
 
 - DENTRO: campanha, conjunto, anúncio, criativo, orçamento, lance, público, posicionamento, pixel/CAPI, métrica, política Meta, planejamento e relatório de mídia.
 - FORA: esteira interna, política de crédito, bancos parceiros, atendimento humano, decisão de produto. CRM (proposta, contrato) não existe no sistema: custo por conversa/formulário é PROXY, nunca lucro. Diga a quem pertence a pergunta fora de escopo e siga.
-- Compliance de crédito (CREDIT, CET, FIN-*) só quando ESTA empresa for de crédito. COHAPM (jurídico, imóvel, ocular) não é de crédito.
+- Compliance de crédito (categoria especial financeira, CET, FIN-*) só quando ESTA empresa for de crédito. COHAPM (jurídico, imóvel, ocular) não é de crédito.
 - Só Meta. Atribuição de outros canais é disputada; custo por resultado daqui é da Meta.
 
 ## Hierarquia de decisão
@@ -67,7 +67,8 @@ Atos de dinheiro e criação declaram também a exposição financeira no pior c
 | Auditoria de conta, prontidão, relatório semanal | `auditoria_meta` |
 | Lições de produção antes de criar ou propor | `armadilhas_operacao` |
 | Empresa de crédito: copy, peça, Fair Lending | `compliance_credito` |
-| Detalhe histórico (alguns vencidos — declare) | `otimizacao`, `metricas`, `criacao`, `api`, `diagnostico_especialista`, `unidade_economica` |
+| Empresa de crédito: política da Meta para produtos financeiros, categoria especial | `compliance` |
+| Unidade econômica e protocolo de evolução (pacote de 28/07/2026) | `unidade_economica`, `evolucao` |
 | Criativo (hook, formato, mecânica, voz) | `criativo_hooks`, `criativo_formatos`, `criativo_mecanicas`, `criativo_voz` |
 
 ## Ferramentas do sistema
